@@ -1,0 +1,25 @@
+# AI-native Runtime Console Overlay
+
+{{PROJECT_NAME}}/
+├── apps/
+│   └── console/
+│       ├── src/routes/agent-runs.tsx       # run list, replay, prompt playground
+│       ├── src/components/agent/           # assistant-ui adapters and panels
+│       ├── src/components/trace/           # timeline, tool calls, approvals
+│       ├── src/stores/run-store.ts         # bounded Zustand run/session store
+│       └── src/state/console-atoms.ts      # Jotai-only local panel state
+├── services/
+│   └── agent-gateway/
+│       ├── src/routes/agent-run.ts         # Bun/Hono /api/agent/run stream endpoint
+│       ├── src/ag-ui/                      # AG-UI event adapters
+│       ├── src/tools/                      # MCP or narrow HTTP tool adapters
+│       └── src/otel/                       # model, tool, approval, sidecar spans
+├── packages/
+│   └── contracts/
+│       ├── src/runs.ts                     # run/thread schemas
+│       ├── src/events.ts                   # app-domain events over AG-UI
+│       ├── src/tools.ts                    # tool call/result schemas
+│       ├── src/approvals.ts                # human approval contracts
+│       └── src/artifacts.ts                # artifact metadata contracts
+└── workers/
+    └── python-agent/                       # optional model/eval sidecar

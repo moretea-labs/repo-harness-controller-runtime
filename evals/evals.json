@@ -1,0 +1,1373 @@
+{
+  "skill_name": "repo-harness",
+  "evals": [
+    {
+      "id": 1,
+      "slug": "initialize-new-project",
+      "prompt": "Initialize a new B2B internal tool with Vite, TanStack Router, docs/spec.md, harness workflow files, and concise CLAUDE.md/AGENTS.md for both Claude and Codex.",
+      "expected_output": "A new-project plan or implementation path that selects the Vite/TanStack stack, generates repo-local harness contracts, and keeps CLAUDE.md/AGENTS.md concise with routed reference docs.",
+      "files": [
+        "evals/fixtures/new-project-empty"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "tasks/todo\\.md"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "tasks/lessons\\.md"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "tasks/research\\.md"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "docs/spec\\.md"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "tasks/reviews/"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "\\.ai/harness"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "AGENTS\\.md"
+          }
+        ]
+      },
+      "anti_graders": {
+        "files_not_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "docs/PROGRESS\\.md.*active execution log"
+          }
+        ]
+      },
+      "expectations": [
+        "Chooses a plausible core plan and explains the stack choice.",
+        "Includes docs/spec.md, tasks/todos.md, tasks/lessons.md, docs/researches/, tasks/contracts/, tasks/reviews/, and .ai/harness/ in the generated workflow.",
+        "Treats docs/PROGRESS.md as milestone-only instead of the active execution log."
+      ]
+    },
+    {
+      "id": 2,
+      "slug": "repair-agents-task-sync",
+      "prompt": "This repo already exists. Fix AGENTS.md so Codex is required to sync tasks/todos.md and tasks/lessons.md, and make the final response mention which task files were updated.",
+      "expected_output": "An audit or implementation plan that strengthens AGENTS.md, aligns CLAUDE.md if needed, and updates any supporting protocol docs or tests to enforce the tasks-first contract.",
+      "files": [
+        "evals/fixtures/fix-agents"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "tasks/todo\\.md"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "tasks/lessons\\.md"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "plans/"
+          }
+        ]
+      },
+      "anti_graders": {
+        "files_not_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "hooks as the only source of enforcement"
+          }
+        ]
+      },
+      "expectations": [
+        "Calls out repo-local task sync as the primary enforcement mechanism.",
+        "Treats plans/ as the plan catalog and the host-neutral active marker as the active selector instead of relying on docs/plan.md.",
+        "Updates the final response contract to mention changed tasks files.",
+        "Avoids treating hooks as the only source of enforcement."
+      ]
+    },
+    {
+      "id": 3,
+      "slug": "migrate-legacy-repo",
+      "prompt": "Migrate this older Claude Code repo to the current 3.0 harness contract. It still uses docs/TODO.md and writes active session notes into docs/PROGRESS.md.",
+      "expected_output": "A migration plan or implementation path that removes docs/TODO.md, installs the harness workflow files and helper scripts, and moves PROGRESS.md to milestone-only usage.",
+      "files": [
+        "evals/fixtures/migrate-legacy"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "tasks/todo\\.md"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "docs/TODO\\.md"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "scripts/check-task-sync\\.sh"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "docs/spec\\.md"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "tasks/reviews/"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "\\.ai/harness/"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "\\.ai/"
+          }
+        ]
+      },
+      "anti_graders": {
+        "files_not_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "delete user content without archive"
+          }
+        ]
+      },
+      "expectations": [
+        "Replaces docs/TODO.md with tasks/todos.md as the primary task contract.",
+        "Installs docs/spec.md, tasks/reviews/, and .ai/harness/ as first-class harness artifacts.",
+        "Removes docs/plan.md compatibility pointers in favor of plans/ as the active-plan source of truth.",
+        "Adds repo-local task-sync enforcement such as scripts/check-task-sync.sh.",
+        "Updates migration guidance and scripts rather than only editing prose.",
+        "Installs a shared .ai/ hook layer and routes Claude hook settings through it."
+      ]
+    },
+    {
+      "id": 4,
+      "slug": "audit-workflow-drift",
+      "prompt": "Audit this AI-assisted coding setup. Tell me whether Claude and Codex can both follow the same repo contract, and identify any workflow drift or missing files.",
+      "expected_output": "A concrete audit that inspects AGENTS.md, CLAUDE.md, tasks/, hooks, and reference docs, then identifies drift and recommends the minimal safe set of fixes.",
+      "files": [
+        "evals/fixtures/audit-drift"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "AGENTS\\.md"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "CLAUDE\\.md"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "tasks/"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "\\.ai/"
+          }
+        ]
+      },
+      "anti_graders": {
+        "files_not_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "only.*hook.*fix"
+          }
+        ]
+      },
+      "expectations": [
+        "Checks both Claude-specific hooks and cross-agent repo-local contracts.",
+        "Flags docs/PROGRESS.md misuse if it is acting as an execution log.",
+        "Flags duplicated active-plan state outside plans/ as workflow drift.",
+        "Flags missing docs/spec.md, tasks/reviews/, or .ai/harness/ as incomplete 3.0 migration.",
+        "Mentions migration or template updates when current files are out of sync with the skill.",
+        "Calls out when a repo only has .claude hook wiring but lacks the shared .ai/ automation layer."
+      ]
+    },
+    {
+      "id": 5,
+      "slug": "codex-skill-factory-lifecycle",
+      "prompt": "This repo has Skill Factory enabled with Codex as the primary agent. The state file shows 2 bug-fix sessions and 2 testing-conventions lessons — both one session away from the proposal threshold. Run the skill-factory-check script, simulate a third session that pushes both patterns over threshold, verify that pending proposals are created for both a workflow skill and a knowledge skill, and confirm that normal post-edit activity is not treated as optimization feedback unless explicit feedback is recorded.",
+      "expected_output": "A Codex-driven session that updates tasks/lessons.md with a third testing-conventions entry, runs skill-factory-check.sh to confirm state, executes the session-end hook to trigger pattern detection, verifies both a workflow proposal (bug-fix) and a knowledge proposal (testing-conventions) appear in ~/.claude/.skill-proposals.json, and keeps optimization hints tied to explicit feedback recorded through skill-factory-check.sh.",
+      "files": [
+        "evals/fixtures/codex-skill-factory"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "\\.skill-factory-state\\.json"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "skill-factory-check\\.sh"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "\\.skill-proposals\\.json"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "skill-factory-create\\.sh"
+          }
+        ]
+      },
+      "anti_graders": {
+        "files_not_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "auto-create skills"
+          }
+        ]
+      },
+      "expectations": [
+        "Reads .claude/.skill-factory-state.json to understand current pattern counts.",
+        "Uses AGENTS.md Skill Factory protocol to group lessons by theme.",
+        "Runs bash scripts/skill-factory-check.sh to inspect current state.",
+        "After the third session, both workflow and knowledge proposals reach pending status.",
+        "Adds evidence-aware proposal context including evidence score or correction count when reporting workflow proposal state.",
+        "Does not auto-create skills — proposals require explicit human promotion via skill-factory-create.sh.",
+        "Does not treat ordinary post-edit activity as optimization feedback.",
+        "Uses bash scripts/skill-factory-check.sh --record-feedback <slug> --signal <label> when explicit feedback is needed."
+      ]
+    },
+    {
+      "id": 6,
+      "slug": "initialize-plan-g-project",
+      "prompt": "Initialize a new AI quantitative trading project (Plan G) with factor research scaffolding, factor-lab scripts, and Plan G workflow guidance in the generated automation docs.",
+      "expected_output": "A Plan G initialization path that exposes factor research scaffolding, includes tasks/factors/registry.json plus factor-lab commands, and keeps the rest of the tasks-first workflow intact.",
+      "files": [
+        "evals/fixtures/new-project-empty"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "tasks/factors"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "registry\\.json"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "factor-lab"
+          }
+        ]
+      },
+      "expectations": [
+        "Selects Plan G or explicitly identifies the AI quantitative trading preset.",
+        "Mentions the factor registry as the source of truth for factor lifecycle state.",
+        "Includes the factor-lab new/promote/reject/check commands in the generated workflow discussion.",
+        "Preserves the standard tasks-first workflow alongside factor research scaffolding."
+      ]
+    },
+    {
+      "id": 7,
+      "slug": "route-existing-repo-init",
+      "prompt": "Initialize this existing repo with the repo-harness workflow. Do not create a new Vite or app scaffold; just add the repo-local harness, hooks, docs/spec.md, tasks, plans, .ai/context, and .ai/harness.",
+      "expected_output": "Routes the request to repo-harness-init, inspects the existing repo first, uses migrate-project-template --apply for the safe init path, and explicitly avoids app scaffolding.",
+      "files": [
+        "evals/fixtures/new-project-empty"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "repo-harness-init"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "inspect-project-state"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "migrate-project-template"
+          }
+        ]
+      },
+      "anti_graders": {
+        "files_not_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "create new Vite"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "hooks-init.*public command"
+          }
+        ]
+      },
+      "expectations": [
+        "Treats init as existing-repo adoption, not product scaffold creation.",
+        "Names repo-harness-init as the public command.",
+        "Keeps hook and docs initialization behind the migration engine."
+      ]
+    },
+    {
+      "id": 8,
+      "slug": "route-new-project-scaffold",
+      "prompt": "Scaffold a new Vite + TanStack Router internal tool with the repo-harness workflow attached from the beginning.",
+      "expected_output": "Routes the request to repo-harness-scaffold, selects the Vite/TanStack plan catalog entry, creates the new project scaffold, and attaches the tasks-first harness.",
+      "files": [
+        "evals/fixtures/new-project-empty"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "repo-harness-scaffold"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "Plan C|Vite"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "tasks-first"
+          }
+        ]
+      },
+      "anti_graders": {
+        "files_not_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "repo-harness-init.*existing repo only"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "create-project-dirs.*public command"
+          }
+        ]
+      },
+      "expectations": [
+        "Treats scaffold as new project or module creation.",
+        "Uses plan catalog A-K instead of ad hoc stack guessing.",
+        "Attaches the repo-local workflow after product scaffold creation."
+      ]
+    },
+    {
+      "id": 9,
+      "slug": "route-legacy-migrate",
+      "prompt": "This older Claude repo has docs/TODO.md, docs/PROGRESS.md, and old .claude hook shims. Migrate it to the current repo-harness harness without deleting my notes.",
+      "expected_output": "Routes the request to repo-harness-migrate, archives or preserves legacy docs, removes only known_generated stale shims, and verifies the tasks-first harness.",
+      "files": [
+        "evals/fixtures/migrate-legacy"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "repo-harness-migrate"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "archive|preserve"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "known_generated"
+          }
+        ]
+      },
+      "anti_graders": {
+        "files_not_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "delete user content"
+          }
+        ]
+      },
+      "expectations": [
+        "Preserves or archives user-authored legacy workflow docs.",
+        "Does not conflate migration with scaffold.",
+        "Uses the manifest-owned removal boundary."
+      ]
+    },
+    {
+      "id": 10,
+      "slug": "route-current-upgrade",
+      "prompt": "This repo already has the tasks-first harness. Upgrade it to the latest repo-harness contract and refresh managed helper files, but preserve _ref, _ops, custom hooks, and local env.",
+      "expected_output": "Routes the request to repo-harness-upgrade, reads the inspector upgrade_plan, applies manifest-owned upgrade actions only, and preserves user-local/private surfaces.",
+      "files": [
+        "evals/fixtures/audit-drift"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "repo-harness-upgrade"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "upgrade_plan"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "_ops|_ref"
+          }
+        ]
+      },
+      "anti_graders": {
+        "files_not_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "delete custom hooks"
+          }
+        ]
+      },
+      "expectations": [
+        "Uses upgrade for current harness refresh, not migration.",
+        "Reads manifest-owned upgrade actions.",
+        "Preserves private and user-local paths."
+      ]
+    },
+    {
+      "id": 11,
+      "slug": "route-harness-repair",
+      "prompt": "The agentic workflow is already installed, but task sync and hook routing are broken. Repair the current harness without migrating legacy docs or scaffolding a new app.",
+      "expected_output": "Routes the request to repo-harness-repair, reproduces the failing path, fixes task sync or hook routing minimally, and reruns the relevant workflow gate.",
+      "files": [
+        "evals/fixtures/fix-agents"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "repo-harness-repair"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "task sync|hook routing"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "check-task-workflow"
+          }
+        ]
+      },
+      "anti_graders": {
+        "files_not_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "repo-harness-scaffold"
+          }
+        ]
+      },
+      "expectations": [
+        "Uses repair only after recognizing a current harness surface.",
+        "Traces the failing workflow path before fixing.",
+        "Keeps the fix targeted to task sync, hooks, handoff, context, policy, or helpers."
+      ]
+    },
+    {
+      "id": 12,
+      "slug": "route-workflow-check",
+      "prompt": "Check whether this repo-harness harness is ready to merge. Run the workflow gates, inspector, task sync, and migration dry-run and give me the release readiness verdict.",
+      "expected_output": "Routes the request to repo-harness-check, runs or names the required workflow gates, reports pass/fail evidence, and does not mutate repo files by default.",
+      "files": [
+        "evals/fixtures/audit-drift"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "repo-harness-check"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "check-task-sync"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "migrate-project-template.*dry-run"
+          }
+        ]
+      },
+      "expectations": [
+        "Uses check as a verification entrypoint, not a mutating repair.",
+        "Includes inspector and migration dry-run in the evidence set.",
+        "Gives a readiness verdict grounded in command output."
+      ]
+    },
+    {
+      "id": 13,
+      "slug": "route-repo-harness-plan",
+      "prompt": "Plan how we should change the repo-harness workflow command surface, but do not edit files yet.",
+      "expected_output": "Routes the request to repo-harness-plan, inspects repo state, produces a decision-complete plan, and names the next action command without mutating files.",
+      "files": [
+        "evals/fixtures/audit-drift"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "repo-harness-plan"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "inspect-project-state"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "next action command"
+          }
+        ]
+      },
+      "anti_graders": {
+        "files_not_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "implemented|modified files"
+          }
+        ]
+      },
+      "expectations": [
+        "Keeps planning non-mutating by default.",
+        "Produces one recommended action path.",
+        "Separates plan output from implementation."
+      ]
+    },
+    {
+      "id": 14,
+      "slug": "route-repo-harness-review",
+      "prompt": "Review this existing repo-harness plan for product, engineering, design, and DevEx issues before implementation.",
+      "expected_output": "Routes the request to repo-harness-review, reads the plan, selects review dimensions, reports blocking issues first, and does not implement by default.",
+      "files": [
+        "evals/fixtures/audit-drift"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "repo-harness-review"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "product"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "DevEx"
+          }
+        ]
+      },
+      "expectations": [
+        "Treats review as plan-stage critique.",
+        "Covers product, engineering, design, and DevEx when relevant.",
+        "Keeps implementation separate from review."
+      ]
+    },
+    {
+      "id": 15,
+      "slug": "route-repo-harness-autoplan",
+      "prompt": "Autoplan the repo-harness command change: read the repo, make the planning decisions for me, run the workflow automatically, and ship through the default PR closeout.",
+      "expected_output": "Routes the request to repo-harness-autoplan, runs plan then two self-review passes, executes the approved plan, runs check gates, and delegates PR closeout to repo-harness-ship.",
+      "files": [
+        "evals/fixtures/audit-drift"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "repo-harness-autoplan"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "self-review|self review"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "repo-harness-ship"
+          }
+        ]
+      },
+      "expectations": [
+        "Runs the full planning, self-review, execution, check, and ship sequence automatically.",
+        "Surfaces only material final decision gates.",
+        "Does not redirect into long interactive review unless automatic workflow execution is unsafe."
+      ]
+    },
+    {
+      "id": 16,
+      "slug": "route-repo-harness-capability",
+      "prompt": "This repo already has repo-harness. Add only a docs/payments capability boundary with local AGENTS.md and CLAUDE.md files; do not run full init.",
+      "expected_output": "Routes the request to repo-harness-capability, uses capability-config add for explicit prefixes, validates with capability-resolver, and avoids full init, migrate, or upgrade.",
+      "files": [
+        "assets/skill-commands/repo-harness-capability/SKILL.md"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "repo-harness-capability"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "capability-config"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "capability-resolver"
+          }
+        ]
+      },
+      "anti_graders": {
+        "files_not_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "migrate-project-template.*--apply"
+          }
+        ]
+      },
+      "expectations": [
+        "Uses explicit prefixes instead of inferring broad directory globs.",
+        "Creates only requested local AGENTS.md and CLAUDE.md contract files.",
+        "Does not run the full repo-harness-init path."
+      ]
+    },
+    {
+      "id": 17,
+      "slug": "route-repo-harness-architecture",
+      "prompt": "Resolve the pending architecture drift request and update the architecture diagram if it helps, but do not refresh the whole harness.",
+      "expected_output": "Routes the request to repo-harness-architecture, inspects docs/architecture/index.md and pending requests, uses capability matching when relevant, archives handled requests, and only generates a diagram through diagram-design when useful.",
+      "files": [
+        "assets/skill-commands/repo-harness-architecture/SKILL.md"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "repo-harness-architecture"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "archive-architecture-request"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "diagram-design"
+          }
+        ]
+      },
+      "anti_graders": {
+        "files_not_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "migrate-project-template.*--apply"
+          }
+        ]
+      },
+      "expectations": [
+        "Treats hooks as architecture request recorders, not prose rewriters.",
+        "Keeps docs/architecture/requests pending-only after handling a request.",
+        "Does not run a full harness refresh."
+      ]
+    },
+    {
+      "id": 18,
+      "slug": "route-repo-harness-handoff",
+      "prompt": "Prepare a Codex handoff for this long task and print the resume prompt. Do not run the full workflow check.",
+      "expected_output": "Routes the request to repo-harness-handoff, runs prepare-codex-handoff or codex-handoff-resume as appropriate, verifies current.md and resume.md, and reports the exact next step without running /check by default.",
+      "files": [
+        "assets/skill-commands/repo-harness-handoff/SKILL.md"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "repo-harness-handoff"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "prepare-codex-handoff"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "resume.md"
+          }
+        ]
+      },
+      "anti_graders": {
+        "files_not_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "check-task-workflow.*--strict"
+          }
+        ]
+      },
+      "expectations": [
+        "Limits mutation to the handoff packet files.",
+        "Reports the resume prompt when requested.",
+        "Does not substitute handoff preparation for readiness verification."
+      ]
+    },
+    {
+      "id": 19,
+      "slug": "route-repo-harness-deploy",
+      "prompt": "Check whether our deploy folder and private _ops setup are ready. Do not deploy anything.",
+      "expected_output": "Routes the request to repo-harness-deploy, reads the operations policy, checks deploy/ and _ops/ boundaries, runs check-deploy-sql-order, and reports readiness gaps without publishing or deploying.",
+      "files": [
+        "assets/skill-commands/repo-harness-deploy/SKILL.md"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "repo-harness-deploy"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "check-deploy-sql-order"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "_ops"
+          }
+        ]
+      },
+      "anti_graders": {
+        "files_not_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "publish|deployed|deployment succeeded"
+          }
+        ]
+      },
+      "expectations": [
+        "Keeps the check read-only by default.",
+        "Separates tracked deploy assets from ignored private operations state.",
+        "Does not print secrets, tokens, or real environment values."
+      ]
+    },
+    {
+      "id": 20,
+      "slug": "repair-codex-hook-workflow",
+      "prompt": "Codex is not detecting this repo's hooks after migration. Audit and repair the hook workflow, and do not make hooks run autoresearch mutations in the background.",
+      "expected_output": "Routes the request as a runtime-harness hook workflow repair, checks the user-level Codex hook adapter, Codex Settings trust, repo-harness-hook resolution, the active target hook script, trace or events evidence, and keeps autoresearch as an agent-run loop rather than a background hook mutation.",
+      "files": [
+        "evals/fixtures/audit-drift"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "\\.codex/hooks\\.json"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "Codex Settings|trusted|trust"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "\\.ai/hooks/run-hook\\.sh"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "autoresearch"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "tests/hook-runtime\\.test\\.ts|hook-runtime"
+          }
+        ]
+      },
+      "anti_graders": {
+        "files_not_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "automatically mutate SKILL\\.md|background.*promote"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "\\.claude/hooks/.*source of truth"
+          }
+        ]
+      },
+      "expectations": [
+        "Treats the task as runtime-harness hook workflow repair.",
+        "Checks Codex adapter config separately from Codex Settings trust.",
+        "Debugs through repo-harness-hook resolution, the active hook script, and hook-specific trace or events evidence.",
+        "Keeps any autoresearch hook advisory and self-host/dev-only rather than making it a default user-installed hook.",
+        "Keeps hooks as advisory guards over repo-local plans, tasks, contracts, checks, and handoff artifacts.",
+        "Does not silently run a full autoresearch mutation loop from PostEdit or Prompt hooks."
+      ]
+    },
+    {
+      "id": 21,
+      "slug": "handoff-no-active-plan-resume",
+      "prompt": "The repo has no active plan but still has old plan files. Refresh the Codex handoff and make sure the resume packet does not point a fresh session at old work.",
+      "expected_output": "Routes to repo-harness-handoff, runs prepare-codex-handoff or codex-handoff-resume, and reports that plan, contract, and notes are none when there is no active marker.",
+      "files": [
+        "assets/skill-commands/repo-harness-handoff/SKILL.md"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "repo-harness-handoff"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "prepare-codex-handoff|codex-handoff-resume"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "no active plan|\\(none\\)"
+          }
+        ]
+      },
+      "anti_graders": {
+        "files_not_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "latest historical plan|tail -1"
+          }
+        ]
+      },
+      "expectations": [
+        "Does not infer active work from the newest plan file.",
+        "Keeps current user input above handoff recovery artifacts.",
+        "Reports the exact next step from current.md."
+      ]
+    },
+    {
+      "id": 22,
+      "slug": "route-init-vs-scaffold-contrast",
+      "prompt": "Decide whether this request should use repo-harness-init or repo-harness-scaffold: I have an existing repo and only want hooks, docs/spec.md, tasks, plans, .ai/context, and .ai/harness added.",
+      "expected_output": "Routes to repo-harness-init, names scaffold as the new-project path only, and avoids creating a Vite or other app scaffold.",
+      "files": [
+        "evals/fixtures/new-project-empty"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "repo-harness-init"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "existing repo"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "repo-harness-scaffold"
+          }
+        ]
+      },
+      "anti_graders": {
+        "files_not_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "create new Vite|new app scaffold"
+          }
+        ]
+      },
+      "expectations": [
+        "Keeps existing-repo adoption separate from app scaffolding.",
+        "Names scaffold only as the out-of-scope route.",
+        "Uses inspector or migration engine before applying changes."
+      ]
+    },
+    {
+      "id": 23,
+      "slug": "workflow-check-yellow-readiness",
+      "prompt": "Check release readiness. The workflow gates pass, but Waza has Codex staging drift and gbrain reports a warning. Give the verdict without silently treating those as pass or hard fail.",
+      "expected_output": "Routes to repo-harness-check, keeps required workflow gates as hard pass/fail, reports Waza drift and gbrain warning as yellow flags, and treats missing CodeGraph or Codex health/check/mermaid as hard failures.",
+      "files": [
+        "assets/skill-commands/repo-harness-check/SKILL.md"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "repo-harness-check"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "yellow|warning"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "Waza|gbrain"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "CodeGraph|health|check|mermaid"
+          }
+        ]
+      },
+      "expectations": [
+        "Separates hard workflow gates from advisory readiness.",
+        "Does not fail only because Waza staging drift or gbrain warning is present.",
+        "Does not claim clean readiness without listing yellow flags."
+      ]
+    },
+    {
+      "id": 24,
+      "slug": "plan-sprint-program-backlog",
+      "prompt": "This repo already has the harness installed. Use repo-harness-sprint to plan a program-level sprint for a notification feature: discuss the PRD, decompose it into an ordered backlog under plans/sprints/ linking the upper-layer PRD in plans/prds/ when present, and explain how each backlog task will execute and be tracked.",
+      "expected_output": "Routes to repo-harness-sprint: PM+architect PRD discussion, sprint-backlog.sh init, an ordered backlog table with concrete acceptance per row, user approval before Approved status, then per-task execution through capture-plan (--source repo-harness-sprint) into the plan -> contract -> worktree flow with warn-only finish back-fill; tasks/todos.md stays the deferred-goal ledger.",
+      "files": [
+        "evals/fixtures/fix-agents"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "repo-harness-sprint"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "plans/sprints"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "[Bb]acklog"
+          }
+        ]
+      },
+      "anti_graders": {
+        "files_not_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "write the backlog into tasks/todo\\.md"
+          }
+        ]
+      },
+      "expectations": [
+        "Routes the request to repo-harness-sprint instead of plain repo-harness-plan.",
+        "Keeps tasks/todos.md as the deferred-goal ledger and places the backlog in plans/sprints/.",
+        "Requires a concrete acceptance line per backlog row before Approved status.",
+        "Executes each backlog task through the existing plan -> contract -> worktree gates."
+      ]
+    },
+    {
+      "id": 25,
+      "slug": "route-nl-vs-ts",
+      "prompt": "Run the route-nl-vs-ts shadow eval for the loop engine. Locate the mounted repo-harness skill root: use .skill-src when it exists, otherwise use .claude/skills/repo-harness. Create .ai/harness/runs/. Write scenarios with `bun \"$SKILL_ROOT/scripts/route-nl-vs-ts-eval.ts\" --emit-scenarios > .ai/harness/runs/route-nl-vs-ts-scenarios.json`. Read `$SKILL_ROOT/docs/reference-configs/loop-engine-nl-decision-table.md`, then make your own NL decision-table routing choices for every scenario and write `.ai/harness/runs/route-nl-vs-ts-decisions.json` with a top-level `decisions` array of `{scenario_id,intent,action,rationale}` objects. The intent and action fields MUST be exact strings from the scenario pack `allowed_intents` and `allowed_actions` arrays; do not invent synonyms such as enter_done_gate, capture_pending_plan, or scaffold_contract. Do not use `--write-expected-decisions` for the NL arm. Run `bun \"$SKILL_ROOT/scripts/route-nl-vs-ts-eval.ts\" --agent benchmark --decisions .ai/harness/runs/route-nl-vs-ts-decisions.json --out .ai/harness/runs/route-nl-vs-ts-report.json`. Final response must summarize compliance_rate, false_positive_count, false_negative_count, estimated_token_delta_per_prompt, and go/no-go. Do not edit source files.",
+      "expected_output": "A shadow-routing eval run that leaves a route-nl-vs-ts report under .ai/harness/runs/, compares the current TS verdict arm against NL decision-table self-routing, and reports compliance, false positives, false negatives, token delta, and go/no-go without changing runtime prompt-guard behavior.",
+      "files": [
+        "evals/fixtures/route-nl-vs-ts"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md",
+          ".ai/harness/runs/route-nl-vs-ts-report.json"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "route-nl-vs-ts"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "compliance|合规"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "false_positive|误报"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "token_delta|token"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "go|no-go"
+          },
+          {
+            "path": ".ai/harness/runs/route-nl-vs-ts-report.json",
+            "pattern": "\"protocol\": \"route-nl-vs-ts/report/v1\""
+          },
+          {
+            "path": ".ai/harness/runs/route-nl-vs-ts-report.json",
+            "pattern": "\"compliance_rate\""
+          },
+          {
+            "path": ".ai/harness/runs/route-nl-vs-ts-report.json",
+            "pattern": "\"false_positive_count\""
+          },
+          {
+            "path": ".ai/harness/runs/route-nl-vs-ts-report.json",
+            "pattern": "\"estimated_token_delta_per_prompt\""
+          },
+          {
+            "path": ".ai/harness/runs/route-nl-vs-ts-report.json",
+            "pattern": "\"go_no_go\""
+          }
+        ],
+        "commands_succeed": [
+          "skill_root=.skill-src; if [ ! -e \"$skill_root/scripts/route-nl-vs-ts-eval.ts\" ]; then skill_root=.claude/skills/repo-harness; fi; bun \"$skill_root/scripts/route-nl-vs-ts-eval.ts\" --check-report .ai/harness/runs/route-nl-vs-ts-report.json"
+        ]
+      },
+      "anti_graders": {
+        "files_not_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "changed runtime prompt-guard|cutover"
+          }
+        ]
+      },
+      "expectations": [
+        "Runs the existing TS prompt-guard verdict as the A arm without changing it.",
+        "Uses the natural-language decision table as the B arm and writes agent-made route decisions.",
+        "Covers historical route regressions from lessons.md and hook runtime tests.",
+        "Reports compliance rate, false positives, false negatives, token delta, and go/no-go in .ai/harness/runs/.",
+        "Keeps classifier cutover out of scope."
+      ]
+    },
+    {
+      "id": 26,
+      "slug": "generate-prd-from-idea",
+      "prompt": "Use repo-harness-prd to generate a PRD from this product idea: notification preferences for a small SaaS app. Keep it compact, save it under plans/prds/, and summarize only the AI Quick-Read Card in the final response.",
+      "expected_output": "Routes to repo-harness-prd, activates $geju for a direction pass, uses Claude-first claude -p --model opus drafting with Codex only as fallback, and writes a compact PRD under plans/prds/ with an AI Quick-Read Card, evidence-marked unknowns, acceptance scenarios, module behavior, data model, performance targets, and a developer handoff. The final response gives the Quick-Read Card, geju thesis, drafting path, and file path only.",
+      "files": [
+        "evals/fixtures/prd-from-idea"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "repo-harness-prd"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "geju|格局|thesis"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "Claude|claude -p|opus|Codex fallback"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "plans/prds/"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "AI Quick-Read Card|AI 速读卡"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "Acceptance|验收"
+          }
+        ]
+      },
+      "anti_graders": {
+        "files_not_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "Slack|Notion|Linear|Intercom"
+          }
+        ]
+      },
+      "expectations": [
+        "Routes the request to repo-harness-prd instead of repo-harness-sprint.",
+        "Runs a geju direction pass before PRD drafting.",
+        "Uses Claude-first claude -p --model opus drafting and keeps Codex as fallback only.",
+        "Writes the PRD under plans/prds/ and does not create a sprint backlog.",
+        "Keeps competitor or SaaS vendor claims out unless explicitly verified.",
+        "Includes Quick-Read Card, acceptance scenarios, and developer handoff."
+      ]
+    },
+    {
+      "id": 27,
+      "slug": "sprint-from-existing-prd",
+      "prompt": "Use repo-harness-sprint from-prd plans/prds/20260101-0000-sample-feature.prd.md to create a sprint backlog. Preserve the PRD as Source PRD, put the backlog under plans/sprints/, and do not write tasks/todos.md.",
+      "expected_output": "Routes to repo-harness-sprint from-prd, reads the sample PRD, sets Source PRD, writes or describes an ordered sprint backlog under plans/sprints/ with machine-checkable acceptance lines traceable to the PRD, and keeps tasks/todos.md as the deferred-goal ledger.",
+      "files": [
+        "evals/fixtures/prd-to-sprint"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md",
+          "plans/prds/20260101-0000-sample-feature.prd.md"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "repo-harness-sprint"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "Source PRD|plans/prds/20260101-0000-sample-feature\\.prd\\.md"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "plans/sprints/"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "Acceptance|验收|grep|test|exists"
+          }
+        ]
+      },
+      "anti_graders": {
+        "files_not_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "tasks/todos\\.md.*backlog|write.*tasks/todos\\.md"
+          }
+        ]
+      },
+      "expectations": [
+        "Routes the request to repo-harness-sprint from-prd.",
+        "Keeps the PRD in plans/prds/ and places the backlog in plans/sprints/.",
+        "Backlog acceptance lines are machine-checkable and traceable to PRD scenarios.",
+        "Does not use tasks/todos.md as an execution backlog."
+      ]
+    },
+    {
+      "id": 28,
+      "slug": "goal-from-prd-or-sprint",
+      "prompt": "Use repo-harness:goal to prepare a Codex or Claude /goal session for plans/prds/20260101-0000-sample-feature.prd.md. Require the detailed PRD or Sprint document as source of truth, produce the bounded /goal prompt, and do not start implementation if the source document is missing.",
+      "expected_output": "Routes to repo-harness-goal / repo-harness:goal, requires a detailed PRD or Sprint artifact before native /goal continuation, prepares a bounded Codex/Claude /goal prompt with source of truth, scope, non-goals, acceptance checks, stop condition, and repo-harness workflow gates, and stops to request the PRD/Sprint document when missing.",
+      "files": [
+        "evals/fixtures/prd-to-sprint"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md",
+          "plans/prds/20260101-0000-sample-feature.prd.md"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "repo-harness-goal|repo-harness:goal"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "/goal"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "PRD|Sprint|plans/prds/20260101-0000-sample-feature\\.prd\\.md"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "acceptance|Acceptance|验收"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "stop condition|Stop condition|停止条件"
+          }
+        ]
+      },
+      "anti_graders": {
+        "files_not_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "started implementation|implemented|已实现"
+          }
+        ]
+      },
+      "expectations": [
+        "Routes the request to repo-harness-goal instead of repo-harness-autoplan.",
+        "Requires a detailed PRD or Sprint artifact as the goal source of truth.",
+        "Produces a host-native /goal prompt with bounded scope, non-goals, acceptance checks, and stop condition.",
+        "Does not start implementation when the source PRD/Sprint document is missing."
+      ]
+    },
+    {
+      "id": 29,
+      "slug": "gptpro-browser-mcp-setup",
+      "prompt": "Use repo-harness:gptpro_setup to guide setup for both gptpro_browser and gptpro_mcp. The user has ChatGPT Pro in the browser and wants local repo-harness to use browser/session consults while ChatGPT can also connect back to the local repo through MCP.",
+      "expected_output": "Routes to repo-harness-gptpro-setup / repo-harness:gptpro_setup, separates gptpro_browser local ChatGPT Web browser/session consults from gptpro_mcp ChatGPT Connector -> local MCP sidecar setup, runs or names browser-setup/browser-doctor and mcp setup/doctor, requires HTTPS tunnel/manual ChatGPT Connector steps, redacts local auth files, and states ChatGPT Pro is not OpenAI API quota.",
+      "files": [
+        "assets/skill-commands/repo-harness-gptpro-setup/SKILL.md"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "repo-harness-gptpro-setup|repo-harness:gptpro_setup"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "gptpro_browser"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "gptpro_mcp"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "browser-setup|browser-doctor"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "mcp setup|mcp doctor|MCP"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "HTTPS tunnel|Connector"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "API quota|API key|API billing"
+          }
+        ]
+      },
+      "anti_graders": {
+        "files_not_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "print.*token|print.*passphrase|show.*cookies"
+          }
+        ]
+      },
+      "expectations": [
+        "Routes the request to repo-harness-gptpro-setup.",
+        "Keeps gptpro_browser and gptpro_mcp as separate setup lanes with different directions.",
+        "Requires browser doctor and MCP doctor verification before claiming success.",
+        "Keeps ChatGPT Pro Web access separate from OpenAI API quota or API keys.",
+        "Redacts local auth files and requires explicit HTTPS tunnel/manual Connector setup."
+      ]
+    },
+    {
+      "id": 30,
+      "slug": "gptpro-browser-session-consult",
+      "prompt": "Use repo-harness:gptpro to ask GPT Pro for architecture feedback on the current plan. If there is an existing GPT Pro session, continue it; otherwise start a new browser-session consult and write the result into the repo handoff area.",
+      "expected_output": "Routes to repo-harness-gptpro / repo-harness:gptpro, speaks in gptpro consult/read/continue/open language, maps the actual work to browser-doctor plus browser-consult or browser-followup, can read/open existing saved sessions with browser-session/browser-open, writes or names .ai/harness/handoff/gptpro-consult.md, and routes setup or gptpro_mcp requests back to repo-harness:gptpro_setup.",
+      "files": [
+        "assets/skill-commands/repo-harness-gptpro/SKILL.md"
+      ],
+      "graders": {
+        "files_exist": [
+          "final-response.md"
+        ],
+        "files_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "repo-harness-gptpro|repo-harness:gptpro"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "gptpro consult|GPT Pro consult"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "gptpro continue|browser-followup"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "browser-consult|browser-session|browser-open"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "\\.ai/harness/handoff/gptpro-consult\\.md"
+          },
+          {
+            "path": "final-response.md",
+            "pattern": "repo-harness:gptpro_setup|setup"
+          }
+        ]
+      },
+      "anti_graders": {
+        "files_not_contain": [
+          {
+            "path": "final-response.md",
+            "pattern": "rename.*browser-\\* CLI|replace.*browser-\\* CLI"
+          }
+        ]
+      },
+      "expectations": [
+        "Routes the request to repo-harness-gptpro.",
+        "Uses GPT Pro wording for the user while keeping browser-* as the implementation engine.",
+        "Supports both new consults and continuing existing saved GPT Pro sessions.",
+        "Writes or names a repo-local handoff artifact for the GPT Pro result.",
+        "Routes setup and gptpro_mcp work back to repo-harness-gptpro-setup."
+      ]
+    }
+  ]
+}

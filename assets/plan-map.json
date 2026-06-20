@@ -1,0 +1,301 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "Canonical stack-family mapping for repo-harness. A-F are core stack families. G-J are sidecar/runtime presets. K is fully custom.",
+  "planTiers": {
+    "core": ["A", "B", "C", "D", "E", "F"],
+    "presets": ["G", "H", "I", "J"],
+    "custom": ["K"]
+  },
+  "aliases": {
+    "C+": "C"
+  },
+  "quickDefaults": {
+    "USER_NAME": "Developer",
+    "SERVICE_TARGET": "User",
+    "INTERACTION_STYLE": "Technical, concise",
+    "PROHIBITIONS": "- No `any` in production code\\n- No `console.log` in production code\\n- Always present 2-3 options with trade-offs at ambiguous decision points\\n- Always push back on requests that violate project rules"
+  },
+  "plans": {
+    "A": {
+      "name": "Astro-first SSR/content shell",
+      "stack": "Astro + TypeScript + Cloudflare/Node adapters",
+      "tier": "core",
+      "cloudflareNative": true,
+      "webappRenderingDefaults": {
+        "defaultModel": "astro-content",
+        "recommendedModels": ["astro-content", "start-workers"]
+      },
+      "aiNativeOverlayDefaults": {
+        "defaultProfile": "none",
+        "recommendedProfiles": ["chat-agent", "product-copilot"]
+      },
+      "defaultHarnessProfiles": {
+        "orchestration": "shared-long-running-harness",
+        "evaluation": "browser-qa",
+        "handoff": "artifact-aware",
+        "recovery": "hybrid",
+        "state": "file-backed"
+      },
+      "defaultLsp": "typescript-lsp",
+      "defaultTemplateVariables": {
+        "PROJECT_STRUCTURE_FILE": "assets/project-structures/astro-ssr.txt",
+        "TECH_STACK_TABLE": "| Frontend shell | Astro + TypeScript |\\n| UI | Astro islands + shadcn/Radix-compatible components where React is needed |\\n| Deploy | Cloudflare Pages/Workers or Node adapter |\\n| Data | Postgres/Supabase or SQLite/Turso by workload |"
+      }
+    },
+    "B": {
+      "name": "Vite 8 client-only app shell",
+      "stack": "Vite 8 + React + TanStack Router/Query",
+      "tier": "core",
+      "cloudflareNative": true,
+      "webappRenderingDefaults": {
+        "defaultModel": "client-only",
+        "recommendedModels": ["client-only", "start-workers"]
+      },
+      "aiNativeOverlayDefaults": {
+        "defaultProfile": "none",
+        "recommendedProfiles": ["runtime-console", "product-copilot", "chat-agent", "collaborative-editor"]
+      },
+      "defaultHarnessProfiles": {
+        "orchestration": "shared-long-running-harness",
+        "evaluation": "browser-qa",
+        "handoff": "artifact-aware",
+        "recovery": "hybrid",
+        "state": "file-backed"
+      },
+      "defaultLsp": "typescript-lsp",
+      "defaultTemplateVariables": {
+        "PROJECT_STRUCTURE_FILE": "assets/project-structures/vite-tanstack.txt",
+        "TECH_STACK_TABLE": "| Frontend app | Vite 8 + React + TypeScript |\\n| Rendering | Client-only SPA/CSR; no crawler-visible SSR guarantee |\\n| Routing/data | TanStack Router + TanStack Query |\\n| UI | shadcn/Radix-style components + Tailwind CSS |\\n| Data authority | Postgres/Supabase by default; SQLite/Turso for lightweight edge/local-first work |"
+      }
+    },
+    "C": {
+      "name": "TanStack Start Workers webapp",
+      "stack": "TanStack Start + Vite + Cloudflare Workers",
+      "tier": "core",
+      "cloudflareNative": true,
+      "webappRenderingDefaults": {
+        "defaultModel": "start-workers",
+        "recommendedModels": ["start-workers", "client-only", "astro-content"]
+      },
+      "aiNativeOverlayDefaults": {
+        "defaultProfile": "none",
+        "recommendedProfiles": ["runtime-console", "product-copilot", "chat-agent", "collaborative-editor"]
+      },
+      "defaultHarnessProfiles": {
+        "orchestration": "shared-long-running-harness",
+        "evaluation": "browser-qa",
+        "handoff": "artifact-aware",
+        "recovery": "hybrid",
+        "state": "file-backed"
+      },
+      "defaultLsp": "typescript-lsp",
+      "defaultTemplateVariables": {
+        "PROJECT_STRUCTURE_FILE": "assets/project-structures/tanstack-start-workers.txt",
+        "TECH_STACK_TABLE": "| React webapp | TanStack Start + Vite + React |\\n| Deploy | Cloudflare Workers with `@cloudflare/vite-plugin`, `wrangler.jsonc`, Worker assets, and `wrangler deploy` |\\n| Public route | `/` SSR/prerender-capable landing with meta/OG/canonical |\\n| Workspace route | `/app` client-only via route-level `ssr: false`; lazy-load browser-only/WebGL components |\\n| Frontend count | One deployable frontend component under `apps/web`; do not scaffold `apps/marketing` + `apps/web` by default |\\n| Fallback | Evaluate Vike or React Router Framework Mode only if Start fails the thin gate |\\n| Non-default | Next.js is not the default recommendation |"
+      }
+    },
+    "D": {
+      "name": "Shared frontend/backend monorepo",
+      "stack": "Bun Workspaces + Hono + Shared Contracts",
+      "tier": "core",
+      "cloudflareNative": true,
+      "webappRenderingDefaults": {
+        "defaultModel": "start-workers",
+        "recommendedModels": ["start-workers", "client-only", "astro-content"]
+      },
+      "aiNativeOverlayDefaults": {
+        "defaultProfile": "none",
+        "recommendedProfiles": ["runtime-console", "sidecar-kernel", "enterprise-agent-platform"]
+      },
+      "defaultHarnessProfiles": {
+        "orchestration": "shared-long-running-harness",
+        "evaluation": "command-qa",
+        "handoff": "artifact-aware",
+        "recovery": "hybrid",
+        "state": "file-backed"
+      },
+      "defaultLsp": "typescript-lsp",
+      "defaultTemplateVariables": {
+        "PROJECT_STRUCTURE_FILE": "assets/project-structures/monorepo.txt",
+        "TECH_STACK_TABLE": "| Workspace | Bun Workspaces, optional Turborepo only at scale |\\n| Web app | Single `apps/web` frontend by default; use TanStack Start + Workers for SEO/SSR plus app workspace |\\n| Apps | API, Agent, MCP, Expo companion, or admin surfaces only when they own separate runtime authority |\\n| Services | Hono gateways, workers, and sidecars |\\n| Shared packages | contracts, ui, data access, tool adapters, test fixtures |"
+      }
+    },
+    "E": {
+      "name": "Cloudflare edge web stack",
+      "stack": "Cloudflare Pages/Workers + R2/KV/Queues/Durable Objects + external SQL",
+      "tier": "core",
+      "cloudflareNative": true,
+      "webappRenderingDefaults": {
+        "defaultModel": "start-workers",
+        "recommendedModels": ["start-workers", "client-only", "astro-content"]
+      },
+      "aiNativeOverlayDefaults": {
+        "defaultProfile": "none",
+        "recommendedProfiles": ["product-copilot", "enterprise-agent-platform", "sidecar-kernel"]
+      },
+      "defaultHarnessProfiles": {
+        "orchestration": "shared-long-running-harness",
+        "evaluation": "browser-qa",
+        "handoff": "artifact-aware",
+        "recovery": "hybrid",
+        "state": "file-backed"
+      },
+      "defaultLsp": "typescript-lsp",
+      "defaultTemplateVariables": {
+        "TECH_STACK_TABLE": "| Edge web | Cloudflare Workers for SSR React webapps; Pages only for static/client-only assets or content shells |\\n| Start deploy | TanStack Start + Vite + `@cloudflare/vite-plugin` + Worker assets + `wrangler deploy` |\\n| Cloudflare storage | R2, KV, Queues, Durable Objects, Hyperdrive when useful |\\n| SQL authority | Postgres/Supabase or SQLite/Turso; D1 is opt-in only |\\n| Agent runtime | VPS behind Hono when Node APIs, tools, or long-lived workers are required |"
+      }
+    },
+    "F": {
+      "name": "Mobile/realtime companion",
+      "stack": "Expo Router + React Native New Architecture + NativeWind",
+      "tier": "core",
+      "cloudflareNative": false,
+      "webappRenderingDefaults": {
+        "defaultModel": "none",
+        "recommendedModels": ["none"]
+      },
+      "aiNativeOverlayDefaults": {
+        "defaultProfile": "none",
+        "recommendedProfiles": ["chat-agent", "voice-agent"]
+      },
+      "defaultHarnessProfiles": {
+        "orchestration": "shared-long-running-harness",
+        "evaluation": "browser-qa",
+        "handoff": "artifact-aware",
+        "recovery": "hybrid",
+        "state": "file-backed"
+      },
+      "defaultLsp": "typescript-lsp",
+      "defaultTemplateVariables": {
+        "PROJECT_STRUCTURE_FILE": "assets/project-structures/expo-nativewind.txt",
+        "TECH_STACK_TABLE": "| Mobile | Expo Router + React Native New Architecture |\\n| Styling | NativeWind when useful |\\n| State | TanStack Query + Zustand |\\n| Backend | Shared Hono/API boundary, Supabase/Postgres, or realtime/media sidecar |"
+      }
+    },
+    "G": {
+      "name": "Python research/data/agent sidecar",
+      "stack": "uv + FastAPI/Pydantic AI + DuckDB/Polars",
+      "tier": "preset",
+      "cloudflareNative": false,
+      "factorFactory": true,
+      "webappRenderingDefaults": {
+        "defaultModel": "none",
+        "recommendedModels": ["none", "start-workers"]
+      },
+      "aiNativeOverlayDefaults": {
+        "defaultProfile": "none",
+        "recommendedProfiles": ["research-agent", "sidecar-kernel", "runtime-console"]
+      },
+      "defaultHarnessProfiles": {
+        "orchestration": "shared-long-running-harness",
+        "evaluation": "command-qa",
+        "handoff": "artifact-aware",
+        "recovery": "hybrid",
+        "state": "file-backed"
+      },
+      "defaultLsp": "pyright-lsp",
+      "defaultTemplateVariables": {
+        "TECH_STACK_TABLE": "| Python runtime | uv + FastAPI or Pydantic AI |\\n| Data/research | DuckDB + Polars + artifact storage |\\n| App boundary | Hono gateway owns auth, run IDs, tools, and approvals |\\n| UI | Vite/assistant-ui report or runtime console when user-visible |"
+      }
+    },
+    "H": {
+      "name": "Go high-concurrency/financial sidecar",
+      "stack": "Go/Gin sidecar + Hono gateway + TypeScript app",
+      "tier": "preset",
+      "cloudflareNative": false,
+      "webappRenderingDefaults": {
+        "defaultModel": "none",
+        "recommendedModels": ["none", "start-workers"]
+      },
+      "aiNativeOverlayDefaults": {
+        "defaultProfile": "none",
+        "recommendedProfiles": ["sidecar-kernel", "runtime-console"]
+      },
+      "defaultHarnessProfiles": {
+        "orchestration": "shared-long-running-harness",
+        "evaluation": "command-qa",
+        "handoff": "artifact-aware",
+        "recovery": "hybrid",
+        "state": "file-backed"
+      },
+      "defaultLsp": "gopls-lsp",
+      "defaultTemplateVariables": {
+        "TECH_STACK_TABLE": "| Go sidecar | Go/Gin or narrow Go workers |\\n| Best fit | Market data, FIX/RFQ, fan-out, infra adapters, high-concurrency jobs |\\n| App gateway | Hono owns product-facing contracts and auth |\\n| Data | Postgres/Supabase for authority; queues/streams by capability |"
+      }
+    },
+    "I": {
+      "name": "Local-first/lightweight SQL stack",
+      "stack": "SQLite/Turso/libSQL + Turso Sync + optional CRDT",
+      "tier": "preset",
+      "cloudflareNative": false,
+      "webappRenderingDefaults": {
+        "defaultModel": "client-only",
+        "recommendedModels": ["client-only", "start-workers"]
+      },
+      "aiNativeOverlayDefaults": {
+        "defaultProfile": "none",
+        "recommendedProfiles": ["collaborative-editor", "product-copilot", "sidecar-kernel"]
+      },
+      "defaultHarnessProfiles": {
+        "orchestration": "shared-long-running-harness",
+        "evaluation": "browser-qa",
+        "handoff": "artifact-aware",
+        "recovery": "hybrid",
+        "state": "file-backed"
+      },
+      "defaultLsp": "typescript-lsp",
+      "defaultTemplateVariables": {
+        "TECH_STACK_TABLE": "| SQL | SQLite, Turso/libSQL, or embedded local stores |\\n| Sync | Turso Sync for new local-first sync work; explicit replication, conflict, and ownership contracts |\\n| Local-first | Loro/CRDT only when collaborative document state requires it |\\n| Gateway | Hono or existing app API boundary |"
+      }
+    },
+    "J": {
+      "name": "Rust native/performance sidecar",
+      "stack": "Rust sidecar + TypeScript app/gateway",
+      "tier": "preset",
+      "cloudflareNative": false,
+      "webappRenderingDefaults": {
+        "defaultModel": "none",
+        "recommendedModels": ["none", "client-only"]
+      },
+      "aiNativeOverlayDefaults": {
+        "defaultProfile": "none",
+        "recommendedProfiles": ["coding-agent", "runtime-console", "sidecar-kernel"]
+      },
+      "defaultHarnessProfiles": {
+        "orchestration": "shared-long-running-harness",
+        "evaluation": "command-qa",
+        "handoff": "artifact-aware",
+        "recovery": "hybrid",
+        "state": "file-backed"
+      },
+      "defaultLsp": "rust-analyzer-lsp",
+      "defaultTemplateVariables": {
+        "TECH_STACK_TABLE": "| Rust sidecar | Parsers, indexing, sandboxing, native kernels, low-latency tools |\\n| Interface | MCP tools or narrow HTTP jobs behind Hono |\\n| UI | OpenTUI/Ink or Vite IDE surface when needed |\\n| Constraint | Use only when the team can support Rust operational complexity |"
+      }
+    },
+    "K": {
+      "name": "Custom Configuration",
+      "stack": "Manual stack-family composition",
+      "tier": "custom",
+      "cloudflareNative": false,
+      "webappRenderingDefaults": {
+        "defaultModel": "none",
+        "recommendedModels": ["none", "client-only", "start-workers"]
+      },
+      "aiNativeOverlayDefaults": {
+        "defaultProfile": "none",
+        "recommendedProfiles": ["runtime-console", "product-copilot", "sidecar-kernel"]
+      },
+      "defaultHarnessProfiles": {
+        "orchestration": "shared-long-running-harness",
+        "evaluation": "command-qa",
+        "handoff": "artifact-aware",
+        "recovery": "hybrid",
+        "state": "file-backed"
+      },
+      "defaultLsp": "typescript-lsp",
+      "defaultTemplateVariables": {
+        "TECH_STACK_TABLE": "| Stack | Custom composition of A-J families |\\n| Constraints | Defined during guided Q&A |"
+      }
+    }
+  }
+}

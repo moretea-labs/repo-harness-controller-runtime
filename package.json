@@ -1,0 +1,69 @@
+{
+  "name": "repo-harness",
+  "version": "0.8.0",
+  "description": "Installs, migrates, audits, and repairs repo-local agentic development harnesses",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ancienttwo/repo-harness.git"
+  },
+  "type": "module",
+  "files": [
+    ".agents/skills/repo-harness-chatgpt-browser/",
+    "agents/",
+    "assets/",
+    "docs/images/",
+    "docs/repo-harness-chatgpt-browser-engine.md",
+    "docs/repo-harness-chatgpt-controller.md",
+    "docs/repo-harness-chatgpt-mcp-setup.md",
+    "docs/repo-harness-github-issue-launcher.md",
+    "docs/repo-harness-local-execution-bridge.md",
+    "README.zh-CN.md",
+    "install.sh",
+    "install.ps1",
+    "scripts/",
+    "src/",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "SKILL.md",
+    "README.md"
+  ],
+  "bin": {
+    "repo-harness": "src/cli/index.ts",
+    "repo-harness-hook": "src/cli/hook-entry.ts"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "scripts": {
+    "benchmark:skills": "bun scripts/run-skill-evals.ts",
+    "test": "bun test",
+    "test:coverage": "bun test --coverage",
+    "check:type": "tsc --noEmit",
+    "check:ci": "bash scripts/check-ci.sh",
+    "check:release": "bash scripts/check-npm-release.sh",
+    "check:release-published": "bash scripts/check-release-published.sh",
+    "smoke:tarball-install": "bash scripts/check-tarball-install-smoke.sh",
+    "check:brain-manifest": "bash scripts/check-brain-manifest.sh",
+    "check:context-files": "bash scripts/check-context-files.sh",
+    "check:deploy-sql": "bash scripts/check-deploy-sql-order.sh",
+    "check:architecture-sync": "bash scripts/check-architecture-sync.sh",
+    "check:task-sync": "bash scripts/check-task-sync.sh",
+    "check:task-workflow": "bash scripts/check-task-workflow.sh --strict",
+    "prepublishOnly": "bash scripts/check-npm-release.sh",
+    "sync:brain-docs": "bash scripts/sync-brain-docs.sh --all",
+    "sync:codex-installed": "bash scripts/sync-codex-installed-copies.sh"
+  },
+  "devDependencies": {
+    "@colbymchenry/codegraph": "1.0.1",
+    "@types/bun": "latest",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "typescript": "^6.0.3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.28.0",
+    "commander": "^14.0.3",
+    "express": "^5.2.1"
+  }
+}

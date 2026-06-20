@@ -1,0 +1,19 @@
+# AI-native Sidecar Kernel Overlay
+
+{{PROJECT_NAME}}/
+├── services/
+│   └── agent-gateway/
+│       ├── src/routes/agent-run.ts         # Bun/Hono app-facing gateway
+│       ├── src/sidecars/                   # MCP/HTTP client adapters
+│       └── src/otel/                       # sidecar latency and outcome telemetry
+├── packages/
+│   └── contracts/
+│       ├── src/jobs.ts                     # sidecar job request/result schemas
+│       ├── src/events.ts                   # user-visible AG-UI event adapters
+│       └── src/tools.ts                    # MCP tool contracts
+├── workers/
+│   ├── python-kernel/                      # model frameworks, evals, data science
+│   ├── go-worker/                          # high-concurrency jobs and infra adapters
+│   └── rust-kernel/                        # parsing, indexing, sandboxing, native kernels
+└── docs/
+    └── sidecar-boundaries.md               # ownership, protocol, and failure semantics

@@ -1,0 +1,120 @@
+{
+  "mode": "minimal",
+  "apply": false,
+  "operations": [
+    {
+      "id": "mkdir:plans",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": "plans"
+    },
+    {
+      "id": "mkdir:tasks",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": "tasks"
+    },
+    {
+      "id": "mkdir:tasks/issues",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": "tasks/issues"
+    },
+    {
+      "id": "mkdir:tasks/contracts",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": "tasks/contracts"
+    },
+    {
+      "id": "mkdir:tasks/reviews",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": "tasks/reviews"
+    },
+    {
+      "id": "mkdir:tasks/notes",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": "tasks/notes"
+    },
+    {
+      "id": "mkdir:docs",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": "docs"
+    },
+    {
+      "id": "mkdir:.ai/harness/checks",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": ".ai/harness/checks"
+    },
+    {
+      "id": "mkdir:.ai/harness/handoff",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": ".ai/harness/handoff"
+    },
+    {
+      "id": "writeFile:docs/spec.md:ifMissing",
+      "kind": "writeFile",
+      "status": "planned",
+      "path": "docs/spec.md",
+      "ifMissing": true
+    },
+    {
+      "id": "writeFile:tasks/todos.md:ifMissing",
+      "kind": "writeFile",
+      "status": "planned",
+      "path": "tasks/todos.md",
+      "ifMissing": true
+    },
+    {
+      "id": "writeFile:tasks/current.md:ifMissing",
+      "kind": "writeFile",
+      "status": "planned",
+      "path": "tasks/current.md",
+      "ifMissing": true
+    },
+    {
+      "id": "writeFile:tasks/lessons.md:ifMissing",
+      "kind": "writeFile",
+      "status": "planned",
+      "path": "tasks/lessons.md",
+      "ifMissing": true
+    },
+    {
+      "id": "writeFile:.ai/harness/workflow-contract.json:workflow-contract",
+      "kind": "writeFile",
+      "status": "planned",
+      "path": ".ai/harness/workflow-contract.json"
+    },
+    {
+      "id": "appendManagedBlock:.gitignore:repo-harness-generated-runtime",
+      "kind": "appendManagedBlock",
+      "status": "planned",
+      "path": ".gitignore",
+      "marker": "repo-harness generated-runtime"
+    }
+  ],
+  "summary": {
+    "total": 15,
+    "byKind": {
+      "mkdir": 9,
+      "writeFile": 5,
+      "appendManagedBlock": 1
+    },
+    "byStatus": {
+      "planned": 15
+    },
+    "plannedTotal": 15,
+    "skippedTotal": 0,
+    "failedTotal": 0,
+    "userOwnedFilesTouched": 1,
+    "generatedFiles": 6,
+    "repoHarnessOwnedFiles": 3,
+    "requiresVerification": false
+  },
+  "warnings": []
+}

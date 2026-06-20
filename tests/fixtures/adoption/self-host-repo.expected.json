@@ -1,0 +1,206 @@
+{
+  "mode": "self-host",
+  "apply": false,
+  "operations": [
+    {
+      "id": "mkdir:plans",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": "plans"
+    },
+    {
+      "id": "mkdir:tasks",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": "tasks"
+    },
+    {
+      "id": "mkdir:tasks/issues",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": "tasks/issues"
+    },
+    {
+      "id": "mkdir:tasks/contracts",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": "tasks/contracts"
+    },
+    {
+      "id": "mkdir:tasks/reviews",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": "tasks/reviews"
+    },
+    {
+      "id": "mkdir:tasks/notes",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": "tasks/notes"
+    },
+    {
+      "id": "mkdir:docs",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": "docs"
+    },
+    {
+      "id": "mkdir:.ai/harness/checks",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": ".ai/harness/checks"
+    },
+    {
+      "id": "mkdir:.ai/harness/handoff",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": ".ai/harness/handoff"
+    },
+    {
+      "id": "mkdir:plans/archive",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": "plans/archive"
+    },
+    {
+      "id": "mkdir:plans/prds",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": "plans/prds"
+    },
+    {
+      "id": "mkdir:plans/sprints",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": "plans/sprints"
+    },
+    {
+      "id": "mkdir:tasks/workstreams",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": "tasks/workstreams"
+    },
+    {
+      "id": "mkdir:docs/reference-configs",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": "docs/reference-configs"
+    },
+    {
+      "id": "mkdir:.ai/context",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": ".ai/context"
+    },
+    {
+      "id": "mkdir:.ai/harness/failures",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": ".ai/harness/failures"
+    },
+    {
+      "id": "mkdir:.ai/harness/architecture",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": ".ai/harness/architecture"
+    },
+    {
+      "id": "mkdir:.ai/harness/runs",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": ".ai/harness/runs"
+    },
+    {
+      "id": "mkdir:.ai/harness/worktrees",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": ".ai/harness/worktrees"
+    },
+    {
+      "id": "mkdir:.ai/harness/jobs",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": ".ai/harness/jobs"
+    },
+    {
+      "id": "mkdir:.ai/harness/edit-sessions",
+      "kind": "mkdir",
+      "status": "planned",
+      "path": ".ai/harness/edit-sessions"
+    },
+    {
+      "id": "writeFile:docs/spec.md:ifMissing",
+      "kind": "writeFile",
+      "status": "planned",
+      "path": "docs/spec.md",
+      "ifMissing": true
+    },
+    {
+      "id": "writeFile:tasks/todos.md:ifMissing",
+      "kind": "writeFile",
+      "status": "planned",
+      "path": "tasks/todos.md",
+      "ifMissing": true
+    },
+    {
+      "id": "writeFile:tasks/current.md:ifMissing",
+      "kind": "writeFile",
+      "status": "planned",
+      "path": "tasks/current.md",
+      "ifMissing": true
+    },
+    {
+      "id": "writeFile:tasks/lessons.md:ifMissing",
+      "kind": "writeFile",
+      "status": "planned",
+      "path": "tasks/lessons.md",
+      "ifMissing": true
+    },
+    {
+      "id": "writeFile:.ai/harness/workflow-contract.json:workflow-contract",
+      "kind": "writeFile",
+      "status": "planned",
+      "path": ".ai/harness/workflow-contract.json"
+    },
+    {
+      "id": "appendManagedBlock:.gitignore:repo-harness-generated-runtime",
+      "kind": "appendManagedBlock",
+      "status": "planned",
+      "path": ".gitignore",
+      "marker": "repo-harness generated-runtime"
+    },
+    {
+      "id": "runCheck:self-host-adoption-boundary-review",
+      "kind": "runCheck",
+      "status": "skipped",
+      "command": "manual:self-host-hook-helper-pin-review"
+    }
+  ],
+  "summary": {
+    "total": 28,
+    "byKind": {
+      "mkdir": 21,
+      "writeFile": 5,
+      "appendManagedBlock": 1,
+      "runCheck": 1
+    },
+    "byStatus": {
+      "planned": 27,
+      "skipped": 1
+    },
+    "plannedTotal": 27,
+    "skippedTotal": 1,
+    "failedTotal": 0,
+    "userOwnedFilesTouched": 1,
+    "generatedFiles": 6,
+    "repoHarnessOwnedFiles": 10,
+    "requiresVerification": true
+  },
+  "warnings": [
+    {
+      "code": "self-host-hook-helper-pin",
+      "message": "Self-host mode only records the hook/helper pin review boundary in this sprint; it does not migrate hooks.",
+      "risk": "medium"
+    }
+  ]
+}

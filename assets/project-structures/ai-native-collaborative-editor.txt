@@ -1,0 +1,25 @@
+# AI-native Collaborative Editor Overlay
+
+{{PROJECT_NAME}}/
+├── apps/
+│   └── web/
+│       ├── src/routes/documents.$id.tsx     # editor route and document run surface
+│       ├── src/components/editor/           # Plate editor, toolbars, nodes, marks
+│       ├── src/components/assistant/        # document assistant or inline actions
+│       ├── src/collab/loro-doc.ts           # Loro document factory and peer identity
+│       ├── src/collab/sync-client.ts        # sync transport adapter
+│       └── src/stores/editor-ui-store.ts    # bounded Zustand UI chrome only
+├── services/
+│   └── document-gateway/
+│       ├── src/routes/documents.ts          # Bun/Hono document CRUD and auth boundary
+│       ├── src/routes/sync.ts               # CRDT sync endpoint
+│       ├── src/routes/agent-actions.ts      # AI SDK or AG-UI document actions
+│       └── src/storage/                     # snapshots, updates, and audit records
+├── packages/
+│   └── contracts/
+│       ├── src/documents.ts                 # document metadata and ACL schemas
+│       ├── src/crdt.ts                      # Loro update/snapshot contracts
+│       ├── src/editor-nodes.ts              # Plate node/plugin contracts
+│       └── src/agent-actions.ts             # assistant action input/output schemas
+└── workers/
+    └── indexing/                            # optional extraction, search, or sync compaction

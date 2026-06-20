@@ -1,0 +1,136 @@
+{
+  "version": 1,
+  "project": "repo-harness",
+  "mode": "repo-contract-external-knowledge",
+  "default_brain_path": "brain/repo-harness/*",
+  "rules": [
+    "repo-local contracts, hooks, scripts, checks, and evidence remain authoritative",
+    "default brain stores long-lived explanations, runbooks, decisions, references, and patterns",
+    "hook runtime may sync explicitly opted-in repo-to-brain entries only; it must not query gbrain, MCP, or unregistered default brain paths"
+  ],
+  "entries": [
+    {
+      "id": "ai-workflows",
+      "role": "externalized",
+      "repo_path": "docs/reference-configs/ai-workflows.md",
+      "asset_path": "assets/reference-configs/ai-workflows.md",
+      "brain_path": "brain/repo-harness/references/ai-assisted-workflows-reference.md",
+      "gbrain_slug": "references/ai-assisted-workflows-reference",
+      "max_repo_lines": 40
+    },
+    {
+      "id": "git-strategy",
+      "role": "externalized",
+      "repo_path": "docs/reference-configs/git-strategy.md",
+      "asset_path": "assets/reference-configs/git-strategy.md",
+      "brain_path": "brain/repo-harness/references/ai-driven-version-control-strategy.md",
+      "gbrain_slug": "references/ai-driven-version-control-strategy",
+      "max_repo_lines": 40
+    },
+    {
+      "id": "changelog-versioning",
+      "role": "externalized",
+      "repo_path": "docs/reference-configs/changelog-versioning.md",
+      "asset_path": "assets/reference-configs/changelog-versioning.md",
+      "brain_path": "brain/repo-harness/references/changelog-versioning-reference.md",
+      "gbrain_slug": "references/changelog-versioning-reference",
+      "max_repo_lines": 40
+    },
+    {
+      "id": "coding-standards",
+      "role": "externalized",
+      "repo_path": "docs/reference-configs/coding-standards.md",
+      "asset_path": "assets/reference-configs/coding-standards.md",
+      "brain_path": "brain/repo-harness/references/coding-standards-reference.md",
+      "gbrain_slug": "references/coding-standards-reference",
+      "max_repo_lines": 40
+    },
+    {
+      "id": "release-deploy",
+      "role": "externalized",
+      "repo_path": "docs/reference-configs/release-deploy.md",
+      "asset_path": "assets/reference-configs/release-deploy.md",
+      "brain_path": "brain/repo-harness/runbooks/runbook-agentic-release-deploy.md",
+      "gbrain_slug": "runbooks/runbook-agentic-release-deploy",
+      "max_repo_lines": 40
+    },
+    {
+      "id": "spa-day-protocol",
+      "role": "externalized",
+      "repo_path": "docs/reference-configs/spa-day-protocol.md",
+      "asset_path": "assets/reference-configs/spa-day-protocol.md",
+      "brain_path": "brain/repo-harness/runbooks/runbook-agentic-spa-day-protocol.md",
+      "gbrain_slug": "runbooks/runbook-agentic-spa-day-protocol",
+      "max_repo_lines": 40
+    },
+    {
+      "id": "workflow-orchestration",
+      "role": "externalized",
+      "repo_path": "docs/reference-configs/workflow-orchestration.md",
+      "asset_path": "assets/reference-configs/workflow-orchestration.md",
+      "brain_path": "brain/repo-harness/patterns/pattern-agentic-workflow-orchestration.md",
+      "gbrain_slug": "patterns/pattern-agentic-workflow-orchestration",
+      "max_repo_lines": 40
+    },
+    {
+      "id": "development-protocol",
+      "role": "partial",
+      "repo_path": "docs/reference-configs/development-protocol.md",
+      "asset_path": "assets/reference-configs/development-protocol.md",
+      "brain_path": "brain/repo-harness/patterns/pattern-agentic-development-protocol.md",
+      "gbrain_slug": "patterns/pattern-agentic-development-protocol",
+      "max_repo_lines": 80
+    },
+    {
+      "id": "evaluator-rubric",
+      "role": "partial",
+      "repo_path": "docs/reference-configs/evaluator-rubric.md",
+      "asset_path": "assets/reference-configs/evaluator-rubric.md",
+      "brain_path": "brain/repo-harness/references/evaluator-rubric-reference.md",
+      "gbrain_slug": "references/evaluator-rubric-reference",
+      "max_repo_lines": 80
+    },
+    {
+      "id": "hook-operations",
+      "role": "partial",
+      "repo_path": "docs/reference-configs/hook-operations.md",
+      "asset_path": "assets/reference-configs/hook-operations.md",
+      "brain_path": "brain/repo-harness/runbooks/runbook-repo-harness-hook-troubleshooting.md",
+      "gbrain_slug": "runbooks/runbook-repo-harness-hook-troubleshooting",
+      "max_repo_lines": 100
+    },
+    {
+      "id": "agentic-development-flow",
+      "role": "repo-authored",
+      "repo_path": "docs/reference-configs/agentic-development-flow.md",
+      "asset_path": "assets/reference-configs/agentic-development-flow.md",
+      "brain_path": "brain/repo-harness/references/agentic-development-flow.md",
+      "gbrain_slug": "references/agentic-development-flow",
+      "sync": {
+        "direction": "repo-to-brain"
+      }
+    },
+    {
+      "id": "harness-overview",
+      "role": "repo-authored",
+      "repo_path": "docs/reference-configs/harness-overview.md",
+      "asset_path": "assets/reference-configs/harness-overview.md",
+      "brain_path": "brain/repo-harness/references/harness-overview.md",
+      "gbrain_slug": "references/harness-overview",
+      "sync": {
+        "direction": "repo-to-brain"
+      }
+    },
+    {
+      "id": "external-tooling",
+      "role": "repo-authored",
+      "repo_path": "docs/reference-configs/external-tooling.md",
+      "asset_path": "assets/reference-configs/external-tooling.md",
+      "brain_path": "brain/repo-harness/references/external-tooling.md",
+      "gbrain_slug": "references/external-tooling",
+      "sync": {
+        "direction": "repo-to-brain"
+      }
+    }
+  ]
+}

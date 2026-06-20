@@ -1,0 +1,25 @@
+# Astro-first SSR/Content Shell Structure
+
+{{PROJECT_NAME}}/
+├── apps/
+│   └── web/
+│       ├── src/pages/                  # Astro routes and SSR pages
+│       ├── src/content/                # Content collections for docs/blog/reference
+│       ├── src/components/             # Astro components and small islands
+│       ├── src/components/islands/     # React islands only where interaction needs it
+│       ├── src/layouts/                # Shell layouts, SEO, metadata, navigation
+│       └── src/lib/                    # loaders, auth/session helpers, adapters
+├── services/
+│   └── gateway/
+│       ├── src/routes/                 # Hono API or adapter routes when needed
+│       └── src/policies/               # auth, rate limits, and app policy checks
+├── packages/
+│   └── contracts/
+│       ├── src/content.ts              # content/frontmatter schemas
+│       ├── src/public-api.ts           # public request/response contracts
+│       └── src/auth.ts                 # auth/session contracts when present
+├── deploy/
+│   ├── runbooks/                       # Pages/Workers or Node adapter deployment notes
+│   └── env/                            # environment examples only
+└── docs/
+    └── architecture/                   # shell, content, and runtime boundaries

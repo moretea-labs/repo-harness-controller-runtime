@@ -1,0 +1,94 @@
+# Dependencies
+node_modules/
+
+# Test coverage
+coverage/
+
+# Bun
+bun.lockb
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/settings.json
+
+# Sisyphus internal state (not project deliverables)
+.sisyphus/boulder.json
+.sisyphus/notepads/
+
+# Local Claude overrides/state
+# BEGIN: claude-runtime-temp (managed by repo-harness)
+.claude/settings.local.json
+.claude/.atomic_pending
+.claude/.session-id
+.claude/.trace.jsonl
+.claude/.session-handoff.md
+.claude/.task-state.json
+.claude/.task-handoff.md
+.claude/.codegraph-state/
+.claude/*.tmp
+.claude/*.bak
+.claude/*.bak.*
+.claude/*.backup-*
+tasks/.current.md.tmp.*
+.ai/harness/checks/latest.json
+.ai/harness/checks/post-bash-latest.json
+.ai/harness/events.jsonl
+.ai/harness/archive/
+.ai/harness/failures/latest.jsonl
+.ai/harness/handoff/current.md
+.ai/harness/handoff/resume.md
+.ai/harness/capability-context/
+.ai/harness/security/*
+!.ai/harness/security/.gitkeep
+.ai/harness/planning/*
+!.ai/harness/planning/.gitkeep
+.ai/harness/architecture/events.jsonl
+.ai/harness/active-plan
+.ai/harness/active-worktree
+.ai/harness/sprint/
+.ai/harness/worktrees/
+.ai/harness/runs/
+.ai/harness/jobs/
+.ai/harness/edit-sessions/
+.ai/harness/mcp/audit.log
+.ai/harness/chatgpt/browser-lock.json
+.ai/harness/chatgpt/bridge-extension/
+.ai/harness/chatgpt/oracle-home/
+.ai/harness/chatgpt/tmp/
+.ai/harness/chatgpt/sessions/
+.ai/harness/handoff/gptpro/*.md
+.ai/harness/triage/*
+!.ai/harness/triage/.gitkeep
+.codex/*
+.claude/.active-plan
+.claude/.plan-state/
+# END: claude-runtime-temp
+# Project-specific
+artifacts/
+autoresearch/
+*.tar.gz
+*.tgz
+_ref/
+_ops/
+.repo-harness/mcp.local.json
+.repo-harness/mcp.tokens.json
+.repo-harness/chatgpt-browser.local.json
+.repo-harness/chatgpt-browser.tokens.json
+.codegraph/
+.understand-anything/
+# Environment
+.env
+.env.*
+!.env.example
+# OS metadata
+# External references
+# Operations
+# Local operations state
+.claude/worktrees/
+.repo-harness/mcp.oauth.json
+.repo-harness/mcp.oauth-tokens.json
+.repo-harness/mcp.runtime.json
+.ai/harness/local-jobs/

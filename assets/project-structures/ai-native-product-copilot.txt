@@ -1,0 +1,21 @@
+# AI-native Product Copilot Overlay
+
+{{PROJECT_NAME}}/
+├── src/
+│   ├── components/copilot/                 # CopilotKit or assistant-ui headless surfaces
+│   ├── routes/_app/copilot.tsx             # in-product copilot route/panel
+│   ├── stores/copilot-store.ts             # session, selection, draft action state
+│   └── lib/agent-client.ts                 # AG-UI client adapter
+├── services/
+│   └── agent-gateway/
+│       ├── src/routes/copilot-run.ts       # Hono copilot run endpoint
+│       ├── src/context/                    # product context loaders
+│       ├── src/actions/                    # business action tool wrappers
+│       └── src/policies/                   # approval and authorization gates
+├── packages/
+│   └── contracts/
+│       ├── src/copilot-events.ts           # app-domain AG-UI event payloads
+│       ├── src/actions.ts                  # typed business action contracts
+│       └── src/approvals.ts                # approval request/result contracts
+└── docs/
+    └── agent-boundaries.md                 # product context, action, and approval boundaries

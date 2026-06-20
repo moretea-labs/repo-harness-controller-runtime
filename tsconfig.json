@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "allowJs": false,
+    "isolatedModules": true,
+    "module": "Preserve",
+    "moduleDetection": "force",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "resolveJsonModule": true,
+    "strict": true,
+    "target": "ES2022",
+    "types": ["bun"]
+  },
+  "include": [
+    "src/core/adoption/**/*.ts",
+    "src/effects/**/*.ts",
+    "src/cli/runtime/**/*.ts",
+    "tests/process-runner.test.ts",
+    "tests/cli/run.test.ts",
+    "tests/cli/adoption-plan.test.ts"
+  ]
+}
