@@ -45,6 +45,10 @@ The skill should not carry the whole workflow contract in prose. It should:
   `repo-harness-migrate`, `repo-harness-upgrade`, or `repo-harness-repair`
 - ordinary product feature work
 
+## Controller direct-change rule
+
+When this skill is used to operate the Controller itself, prefer a bounded direct edit for known small documentation, configuration, or code changes. The expected chain is `read_repository_file -> begin_edit_session -> apply_patch -> get_edit_session_diff -> verify_edit_session -> finalize_edit_session`. Create an Issue only when investigation, dependencies, broad scope, parallelism, long-running verification, or elevated risk requires durable orchestration. Issue creation alone is never a completed result.
+
 ## Router Protocol
 
 Always start with structured inspection, not prompt guessing.

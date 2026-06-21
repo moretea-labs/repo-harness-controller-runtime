@@ -20,20 +20,24 @@ Use it to:
 Give the agent a complete PRD or Sprint; after that, your loop is just review
 and `next`, or start `/goal` and go AFK.
 
-Repository: `https://github.com/greysonOuyang/repo-harness-controller-runtime-v2-20260620`
+Repository: `https://github.com/Ancienttwo/repo-harness`
 
 [English](README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [Français](README.fr.md) | [Español](README.es.md)
 
-## Controller V2
+## Controller V6: Direct Change First
 
-For ChatGPT-led local development, repo-harness now provides a persistent Controller surface rather than a single large Goal handoff:
+repo-harness V6 makes actual repository changes the default result for known, bounded work. Creating an Issue is no longer the first step for a small documentation, configuration, or code change.
 
-- ChatGPT can inspect ordinary repository source, create dependency-aware Issues/Tasks, dispatch scoped Codex/Claude Runs, review diffs, and record Verification Gate evidence.
-- A localhost-only visual controller at `http://127.0.0.1:8766/` shows the task board, approvals, live logs, Run events, elapsed/remaining time, cancellation, and retry.
-- Local Agent Runs default to 60 minutes and support explicit limits up to 12 hours. Timeout values are persisted unchanged and invalid values fail explicitly.
-- The MCP health fingerprint `controller-local-execution-v2` detects stale Planner schemas or the wrong process occupying the MCP port.
+- `assess_work_request` classifies work as `direct_edit`, `quick_agent`, or `issue_task` before any durable planning object is created.
+- Known low-risk changes use a bounded transaction: read the file and SHA, open an edit session, apply an atomic patch, inspect the persisted unified diff, run named checks, and finalize or roll back.
+- Direct edits do not require an Issue or Task. Optional `issueId` and `taskId` links are available when the change belongs to an existing execution line.
+- Every edit session records changed files, changed-line estimates, before/after hashes, a persisted patch, check artifacts, reviewer, timestamps, finalization, and rollback evidence.
+- The localhost Controller promotes **File Changes** to a primary view. It shows the real patch and verification state instead of presenting Issue creation as delivery.
+- `create_issue` is reserved for uncertain, multi-file, long-running, parallel, high-risk, or dependency-managed work. Existing V5 focus, governance, retry, evidence-gate, closure, and archiving behavior remains available for that path.
+- `read_repository_file` returns the full-file SHA-256 even for a line-range read, so direct replacements can use an explicit stale-write precondition.
+- The MCP fingerprint is `controller-direct-change-v6`; the default Connector name is `repo-harness-controller-v6`.
 
-See [ChatGPT MCP setup](docs/repo-harness-chatgpt-mcp-setup.md) and [Local Execution Bridge](docs/repo-harness-local-execution-bridge.md).
+See [V6 Direct Change First](docs/repo-harness-direct-change-v6.md), [V6 verification record](docs/repo-harness-v6-verification.md), [ChatGPT MCP setup](docs/repo-harness-chatgpt-mcp-setup.md), and [Local Execution Bridge](docs/repo-harness-local-execution-bridge.md).
 
 ## Why repo-harness
 
@@ -54,12 +58,12 @@ See [ChatGPT MCP setup](docs/repo-harness-chatgpt-mcp-setup.md) and [Local Execu
 
 In an adopted repo, the surface area is intentionally small:
 
-| Surface | Purpose |
-| --- | --- |
-| `docs/spec.md` and `docs/reference-configs/` | Shared standards and stable product intent that every agent session can read. |
-| `plans/`, `plans/prds/`, and `plans/sprints/` | Decision-complete work packages before implementation starts. |
-| `tasks/contracts/`, `tasks/reviews/`, and `.ai/harness/checks/` | Scope, verification, and review evidence for proving the work is done. |
-| `.ai/harness/handoff/` and `tasks/current.md` | Session journal and resumable status, derived from workflow artifacts instead of chat memory. |
+| Surface                                                         | Purpose                                                                                       |
+| --------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `docs/spec.md` and `docs/reference-configs/`                    | Shared standards and stable product intent that every agent session can read.                 |
+| `plans/`, `plans/prds/`, and `plans/sprints/`                   | Decision-complete work packages before implementation starts.                                 |
+| `tasks/contracts/`, `tasks/reviews/`, and `.ai/harness/checks/` | Scope, verification, and review evidence for proving the work is done.                        |
+| `.ai/harness/handoff/` and `tasks/current.md`                   | Session journal and resumable status, derived from workflow artifacts instead of chat memory. |
 
 ## Human Review Path
 
@@ -75,13 +79,13 @@ pass, `not_required`, or an explicit manual override.
 
 Agents read source artifacts before derived summaries:
 
-| Agent reads first | Human reviews first |
-| --- | --- |
+| Agent reads first                        | Human reviews first                                |
+| ---------------------------------------- | -------------------------------------------------- |
 | Current user prompt and referenced files | `tasks/reviews/<task>.review.md` Human Review Card |
-| `AGENTS.md` / `CLAUDE.md` | Changed files and diff |
-| Active plan in `.ai/harness/active-plan` | Active contract allowed paths and exit criteria |
-| Active contract in `tasks/contracts/` | `.ai/harness/checks/latest.json` and run trace |
-| Latest handoff in `.ai/harness/handoff/` | Residual risks and rollback |
+| `AGENTS.md` / `CLAUDE.md`                | Changed files and diff                             |
+| Active plan in `.ai/harness/active-plan` | Active contract allowed paths and exit criteria    |
+| Active contract in `tasks/contracts/`    | `.ai/harness/checks/latest.json` and run trace     |
+| Latest handoff in `.ai/harness/handoff/` | Residual risks and rollback                        |
 
 `tasks/current.md` is only an orientation snapshot. If it disagrees with the
 active plan, contract, review, checks, or handoff, the source artifacts win.
@@ -89,7 +93,7 @@ active plan, contract, review, checks, or handoff, the source artifacts win.
 ## What's New
 
 Release notes live in [`docs/CHANGELOG.md`](docs/CHANGELOG.md). The current line
-is `0.8.0`.
+is `1.2.0`.
 
 ## How It Works
 
@@ -241,10 +245,10 @@ If Bun is missing, it installs Bun first, then installs the `repo-harness` CLI.
 
 ```bash
 # macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/greysonOuyang/repo-harness-controller-runtime-v2-20260620/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Ancienttwo/repo-harness/main/install.sh | sh
 
 # Windows (PowerShell)
-irm https://raw.githubusercontent.com/greysonOuyang/repo-harness-controller-runtime-v2-20260620/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Ancienttwo/repo-harness/main/install.ps1 | iex
 ```
 
 <details>
@@ -356,7 +360,7 @@ capabilities:
 - apply small SHA-guarded edits with limits, backups, diff review, and rollback;
 - dispatch ready Tasks to allowed local Codex/Claude workers or visible GitHub Copilot cloud sessions.
 
-The controller does not expose arbitrary shell input and never automatically merges or pushes. Local Agent Runs are persistent and normally use an isolated Git worktree. GitHub-mode Tasks can publish Issues/Task sub-issues to a Project and open visible Copilot coding-agent sessions with draft pull requests. A successful Run moves its Task to review; ChatGPT must inspect its diff or pull request, record check and acceptance evidence, and only then accept it or request changes.
+The controller does not expose arbitrary shell input and never automatically pushes or merges remote pull requests. Local Agent Runs are persistent and use automatic execution placement: a single local Run works directly in the current workspace, while concurrent Runs use isolated Git worktrees. Successful isolated Runs are automatically integrated into the current workspace and their temporary worktree/branch is removed; conflicts preserve the worktree for review. GitHub-mode Tasks can publish Issues/Task sub-issues to a Project and open visible Copilot coding-agent sessions with draft pull requests. Changes still pass the Verification Gate before acceptance.
 
 ```bash
 repo-harness mcp setup chatgpt --repo .
@@ -364,7 +368,7 @@ repo-harness mcp keepalive --repo . --profile controller \
   --enable-dev-runner --dev-runner-agents codex,claude --tunnel quick
 ```
 
-For the `controller` profile, keepalive also starts a localhost-only visual control surface at `http://127.0.0.1:8766/`. From that page you can launch ready Tasks, create a small Codex/Claude session, approve local Job Tickets, inspect live Run logs, and execute named checks without repeatedly typing scripts. Use `--open-local-ui` to open it automatically or `--no-local-ui` to disable it.
+For the `controller` profile, keepalive also starts a localhost-only task workstation at `http://127.0.0.1:8766/`. Its Overview, Progress Center, Task Management, Run Monitor, Worklog, Approvals, Checks, and GitHub Plugin areas expose the current Agent phase, command or file activity, semantic progress, heartbeat, live output, diff, execution mode, and automatic-integration state. You can launch ready Tasks, create a small Codex/Claude session, approve local Job Tickets, and execute named checks without repeatedly typing scripts. Use `--open-local-ui` to open it automatically or `--no-local-ui` to disable it.
 
 The generated setup guide is written to:
 
@@ -420,16 +424,16 @@ The installed adapter owns eight managed hook routes. The route tuple
 `event + routeId + matcher` is the stable contract; script names are the current
 implementation under `assets/hooks/` or a repo-pinned `.ai/hooks/` copy.
 
-| Route | Matcher | Scripts | Function |
-| --- | --- | --- | --- |
-| `SessionStart.default` | all sessions | `session-start-context.sh`, `security-sentinel.sh` | Injects prior handoff, sprint status, and read-only config-security findings before work starts. |
-| `PreToolUse.edit` | `Edit|Write` | `worktree-guard.sh`, `pre-edit-guard.sh` | Enforces worktree policy and plan/contract readiness before implementation edits. |
-| `PreToolUse.subagent` | `Task|Agent|SendUserMessage` | `subagent-return-channel-guard.sh` | Keeps delegated work returning through the parent session instead of leaking completion claims. |
-| `PostToolUse.edit` | `Edit|Write` | `post-edit-guard.sh` | Records edit traces, refreshes handoff/task status, and queues architecture drift when controlled files change. |
-| `PostToolUse.bash` | `Bash` | `post-bash.sh` | Observes command results and captures verification evidence without replacing the command runner. |
-| `PostToolUse.always` | all tools | `post-tool-observer.sh` | Provides low-noise always-on trace and runtime observation; stale pinned copies soft-skip with a refresh hint. |
-| `UserPromptSubmit.default` | all prompts | `prompt-guard.sh` | Classifies prompt intent, routes planning/check/hunt hints, and renders host-safe workflow guidance. |
-| `Stop.default` | session stop | `stop-orchestrator.sh` | Finalizes handoff and guards against ending with unresolved draft-plan or completion evidence gaps. |
+| Route                      | Matcher      | Scripts                                            | Function                                                                                                       |
+| -------------------------- | ------------ | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `SessionStart.default`     | all sessions | `session-start-context.sh`, `security-sentinel.sh` | Injects prior handoff, sprint status, and read-only config-security findings before work starts.               |
+| `PreToolUse.edit`          | `Edit        | Write`                                             | `worktree-guard.sh`, `pre-edit-guard.sh`                                                                       | Enforces worktree policy and plan/contract readiness before implementation edits.                               |
+| `PreToolUse.subagent`      | `Task        | Agent                                              | SendUserMessage`                                                                                               | `subagent-return-channel-guard.sh`                                                                              | Keeps delegated work returning through the parent session instead of leaking completion claims. |
+| `PostToolUse.edit`         | `Edit        | Write`                                             | `post-edit-guard.sh`                                                                                           | Records edit traces, refreshes handoff/task status, and queues architecture drift when controlled files change. |
+| `PostToolUse.bash`         | `Bash`       | `post-bash.sh`                                     | Observes command results and captures verification evidence without replacing the command runner.              |
+| `PostToolUse.always`       | all tools    | `post-tool-observer.sh`                            | Provides low-noise always-on trace and runtime observation; stale pinned copies soft-skip with a refresh hint. |
+| `UserPromptSubmit.default` | all prompts  | `prompt-guard.sh`                                  | Classifies prompt intent, routes planning/check/hunt hints, and renders host-safe workflow guidance.           |
+| `Stop.default`             | session stop | `stop-orchestrator.sh`                             | Finalizes handoff and guards against ending with unresolved draft-plan or completion evidence gaps.            |
 
 `SessionStart` resolves hooks central-first, then runs two ordered scripts before
 work begins:
@@ -498,9 +502,9 @@ Most common guards:
 
 ## Current Release
 
-- npm package: `repo-harness@0.8.0`
-- Generated workflow stamp: `repo-harness@0.8.0+template@0.8.0`
-- GitHub repository: `greysonOuyang/repo-harness-controller-runtime-v2-20260620`
+- npm package: `repo-harness@1.2.0`
+- Generated workflow stamp: `repo-harness@1.2.0+template@1.2.0`
+- GitHub repository: `Ancienttwo/repo-harness`
 - Release history: [`docs/CHANGELOG.md`](docs/CHANGELOG.md)
 
 ## Acknowledgements and Workflow Influences
@@ -511,15 +515,15 @@ proved useful while this project was being designed, debugged, and released.
 They are acknowledged here because they shaped the workflow contract, but they
 are not ordinary bundled product dependencies.
 
-| Tool or repo | Used for | Dependency shape |
-| --- | --- | --- |
-| [Hylarucoder](https://x.com/hylarucoder) / Geju | P1/P2/P3 due-diligence method and Geju practice that shaped the planning, tracing, and decision-rationale discipline in this workflow | Methodology contribution and acknowledgement; not a bundled dependency |
-| Waza by [TW93](https://x.com/HiTw93), including `think`, `hunt`, `check`, and `health` | Daily planning, bug hunts, verification, health checks, and Codex-first skill sync | Installed through the skills CLI into host skill roots |
-| gstack skills and `gbrain` by [Garry Tan](https://x.com/garrytan) | Product discovery, plan review, design review, post-ship documentation hygiene, knowledge sync, handoff retrieval, and long-form repo memory | External operator workflow plus optional external CLI/index; advisory by default |
-| `mermaid` | Human-readable architecture and system-flow diagrams when Mermaid is not enough | Runtime-referenced skill, not vendored into generated repos |
-| CodeGraph (`@colbymchenry/codegraph`) | Symbol-aware navigation, impact tracing, and readiness checks for this self-host repo | Dev dependency in this repo; generated repos stay global-MCP-first unless policy opts in |
-| [Oracle](https://github.com/steipete/oracle) by [Peter Steinberger](https://x.com/steipete) (`@steipete/oracle`, MIT) | Default GPT Pro / ChatGPT Web browser consult engine that the `chatgpt-browser` Oracle provider shells out to for `gptpro` consults | Externally-resolved binary (`--oracle-bin`, `REPO_HARNESS_ORACLE_BIN`, `node_modules/.bin`, or `PATH`); never auto-downloaded, and a missing binary is a hard `ORACLE_NOT_INSTALLED` failure |
-| OpenAI Codex | Primary execution agent for repo-local implementation, verification, and GitHub contributor attribution when a commit materially includes Codex-authored work | External agent runtime; attribution is an explicit commit trailer, not hidden hook automation |
+| Tool or repo                                                                                                          | Used for                                                                                                                                                      | Dependency shape                                                                                                                                                                             |
+| --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [Hylarucoder](https://x.com/hylarucoder) / Geju                                                                       | P1/P2/P3 due-diligence method and Geju practice that shaped the planning, tracing, and decision-rationale discipline in this workflow                         | Methodology contribution and acknowledgement; not a bundled dependency                                                                                                                       |
+| Waza by [TW93](https://x.com/HiTw93), including `think`, `hunt`, `check`, and `health`                                | Daily planning, bug hunts, verification, health checks, and Codex-first skill sync                                                                            | Installed through the skills CLI into host skill roots                                                                                                                                       |
+| gstack skills and `gbrain` by [Garry Tan](https://x.com/garrytan)                                                     | Product discovery, plan review, design review, post-ship documentation hygiene, knowledge sync, handoff retrieval, and long-form repo memory                  | External operator workflow plus optional external CLI/index; advisory by default                                                                                                             |
+| `mermaid`                                                                                                             | Human-readable architecture and system-flow diagrams when Mermaid is not enough                                                                               | Runtime-referenced skill, not vendored into generated repos                                                                                                                                  |
+| CodeGraph (`@colbymchenry/codegraph`)                                                                                 | Symbol-aware navigation, impact tracing, and readiness checks for this self-host repo                                                                         | Dev dependency in this repo; generated repos stay global-MCP-first unless policy opts in                                                                                                     |
+| [Oracle](https://github.com/steipete/oracle) by [Peter Steinberger](https://x.com/steipete) (`@steipete/oracle`, MIT) | Default GPT Pro / ChatGPT Web browser consult engine that the `chatgpt-browser` Oracle provider shells out to for `gptpro` consults                           | Externally-resolved binary (`--oracle-bin`, `REPO_HARNESS_ORACLE_BIN`, `node_modules/.bin`, or `PATH`); never auto-downloaded, and a missing binary is a hard `ORACLE_NOT_INSTALLED` failure |
+| OpenAI Codex                                                                                                          | Primary execution agent for repo-local implementation, verification, and GitHub contributor attribution when a commit materially includes Codex-authored work | External agent runtime; attribution is an explicit commit trailer, not hidden hook automation                                                                                                |
 
 ### GitHub Contributor Attribution
 
@@ -589,12 +593,12 @@ narrow instead of refreshing the full harness.
 Maintainers editing the package itself need a source checkout:
 
 ```bash
-git clone https://github.com/greysonOuyang/repo-harness-controller-runtime-v2-20260620.git ~/Projects/repo-harness-controller-runtime-v2-20260620
-cd ~/Projects/repo-harness-controller-runtime-v2-20260620
+git clone https://github.com/Ancienttwo/repo-harness.git ~/Projects/repo-harness
+cd ~/Projects/repo-harness
 bun src/cli/index.ts update
 ```
 
-The `~/Projects/repo-harness-controller-runtime-v2-20260620` repo is the only editable source of truth; local
+The `~/Projects/repo-harness` repo is the only editable source of truth; local
 Claude/Codex paths (`~/.claude/skills/repo-harness`,
 `~/.codex/skills/repo-harness`) are symlink-backed runtime entrypoints. Only
 `~/.codex/skills/repo-harness` exposes `SKILL.md` and `assets/skill-commands/`;

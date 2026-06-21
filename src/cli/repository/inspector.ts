@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from 'fs';
 import { join } from 'path';
 import { runProcess } from '../../effects/process-runner';
@@ -16,6 +17,7 @@ const DEFAULT_EXCLUDES = [
   '.ai/harness/edit-sessions/**',
   '.ai/harness/jobs/**',
   '.ai/harness/local-jobs/**',
+  '.ai/harness/controller/**',
 ];
 
 function isExcluded(path: string, excludes: string[]): boolean {
@@ -86,7 +88,8 @@ export function searchRepository(repoRoot: string, policy: McpPolicy, opts: Sear
     const bytes = readFileSync(decision.absolutePath);
     if (binary(bytes)) continue;
     scannedFiles += 1;
-    const lines = bytes.toString('utf-8').split(/\r?\n/);
+    const raw = bytes.toString('utf-8');
+  const lines = raw.split(/\r?\n/);
     for (let index = 0; index < lines.length && results.length < maxResults; index += 1) {
       const haystack = opts.caseSensitive ? lines[index] : lines[index].toLowerCase();
       if (haystack.includes(needle)) results.push({ path, line: index + 1, text: lines[index].slice(0, 500) });
@@ -101,6 +104,7 @@ export function readRepositoryRange(repoRoot: string, policy: McpPolicy, path: s
   endLine: number;
   totalLines: number;
   content: string;
+  sha256: string;
 } {
   const decision = resolveMcpPath(repoRoot, path, policy, 'read');
   if (!decision.ok || !decision.absolutePath || !decision.relativePath) throw new Error(decision.reason ?? 'path denied');
@@ -109,7 +113,8 @@ export function readRepositoryRange(repoRoot: string, policy: McpPolicy, path: s
   if (info.size > policy.maxFileBytes) throw new Error(`file exceeds ${policy.maxFileBytes} bytes`);
   const bytes = readFileSync(decision.absolutePath);
   if (binary(bytes)) throw new Error('binary files are not supported');
-  const lines = bytes.toString('utf-8').split(/\r?\n/);
+  const raw = bytes.toString('utf-8');
+  const lines = raw.split(/\r?\n/);
   const start = Math.min(Math.max(Math.trunc(startLine), 1), Math.max(lines.length, 1));
   const end = Math.min(Math.max(Math.trunc(endLine), start), lines.length);
   return {
@@ -117,6 +122,7 @@ export function readRepositoryRange(repoRoot: string, policy: McpPolicy, path: s
     startLine: start,
     endLine: end,
     totalLines: lines.length,
+    sha256: createHash('sha256').update(raw).digest('hex'),
     content: lines.slice(start - 1, end).map((line, index) => `${start + index}: ${line}`).join('\n'),
   };
 }

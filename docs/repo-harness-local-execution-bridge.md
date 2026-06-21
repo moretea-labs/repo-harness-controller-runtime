@@ -38,20 +38,31 @@ This command is mainly for diagnostics or when MCP supervision is not running.
 
 ## Daily visual workflow
 
-The page provides four primary surfaces:
+The V6 page is a direct-change-first execution workstation. Its primary surfaces are:
 
-1. **Quick Agent Session** — create a small durable Issue/Task and launch Codex or Claude without preparing a script or goal file.
-2. **Approval Queue** — review confirmation-required or manual-only local Jobs.
-3. **Issue/Task Board** — launch ready Tasks directly from their cards.
-4. **Runs and Checks** — inspect live logs and execute named repository checks.
+1. **执行中心 / Work Overview** — overall state and next actions.
+2. **文件变更 / File Changes** — direct-edit sessions, changed files, persisted patch, checks, review, finalization, and rollback.
+3. **当前主线 / Current Focus** — the one Issue used only for complex work.
+4. **任务管理 / Task Management** — dependency-aware complex Tasks and five evidence gates.
+5. **执行记录 / Run Monitor** — every Codex, Claude, or GitHub execution attempt.
+6. **治理异常 / Governance** — inconsistent dependencies, stale states, and safe reconciliation.
+7. **工作留痕 / Worklog** — Issue, Task, Run, edit, verification, approval, and GitHub events with export.
+8. **历史归档 / Archive** — terminal complex-work history separated from current work.
+9. **GitHub 插件 / GitHub Plugin** — optional explicit remote collaboration.
 
-A Quick Agent Session still uses the normal durable model:
+Known small edits use:
 
 ```text
-Issue -> Task -> Local Job -> Agent Run -> Review -> Verification -> Done
+read -> edit session -> atomic patch -> persisted diff -> named checks -> finalize
 ```
 
-It is not an untracked terminal process.
+They do not require an Issue or Task. Complex work keeps the durable path:
+
+```text
+Issue -> Task -> Agent Run -> Integration -> Verification -> Acceptance -> Archive
+```
+
+A Run detail view separates activity, raw console, and diff. An edit detail view separately shows the exact applied patch and verification state, so “Issue created” is never presented as a file-change result.
 
 ## Local Job Tickets
 
@@ -77,8 +88,9 @@ Approval levels:
 
 Default policy is intentionally conservative:
 
-- isolated low/medium-risk local Tasks with an explicit allowed-path scope may auto-dispatch;
-- high-risk, unscoped, or non-isolated Tasks require confirmation;
+- low/medium-risk local Tasks with an explicit allowed-path scope may auto-dispatch;
+- automatic placement uses the current workspace when no other local Run is active and creates a worktree only for concurrency;
+- high-risk or unscoped Tasks require confirmation;
 - named checks may auto-run;
 - arbitrary shell input is never accepted.
 
@@ -106,21 +118,26 @@ Path:
 
 ## ChatGPT tools
 
-The controller MCP surface adds:
+The controller MCP surface includes direct-change tools plus the V5 complex-work execution-closure model:
 
-- `local_bridge_status`
-- `submit_local_job`
-- `list_local_jobs`
-- `get_local_job`
-- `approve_local_job`
+- `assess_work_request`, `begin_edit_session`, `apply_patch`, `list_edit_sessions`, `get_edit_session_diff`, `verify_edit_session`, `finalize_edit_session`, `rollback_edit_session`;
+- `local_bridge_status`, `submit_local_job`, `list_local_jobs`, `get_local_job`, `approve_local_job`;
+- `get_project_progress`, `get_task_progress_detail`, `get_worklog_timeline`, `export_worklog`;
+- `get_github_plugin_status`, `configure_github_plugin`.
 
 `controller_capabilities` reports:
 
 ```text
-controller-local-execution-v2
+controller-direct-change-v6
 ```
 
 When ChatGPT can call the action, `submit_local_job` creates the same persistent Job used by the visual UI. When a platform policy blocks the action, open the local controller and launch the existing Task from its card or use Quick Agent Session.
+
+## V6 worklog, edit evidence, and archiving
+
+The append-only local ledger lives at `.ai/harness/controller/worklog.jsonl`. The directory is ignored by Git so routine activity does not dirty the working tree. Export selected history to `tasks/reports/` when it should become durable review evidence.
+
+The browser uses token-protected SSE. It emits a refresh only when the controller state signature changes and emits an idle heartbeat otherwise; a slower timer remains as a fallback.
 
 ## Security model
 
@@ -141,11 +158,12 @@ Manual-only local approval does not weaken the immutable deny rules for credenti
 Launching from the visual controller starts the same persistent local Agent Run used by `dispatch_task`:
 
 - the Task prompt is generated from Issue intent and Task scope;
-- a Git worktree is created when isolation is enabled;
-- stdout and stderr stream into Run logs;
-- the page polls and displays live output;
-- completion moves the Task to review, not done;
-- integration and verification are still separate controller decisions.
+- execution placement defaults to `auto`: direct current-workspace execution when only one local Run exists, worktree isolation when concurrent work is detected;
+- Codex JSON events and generic Agent output are parsed into structured phases and human-readable current activity while stdout/stderr remain available;
+- the page displays live activity, output, heartbeat, elapsed/remaining time, diff, and execution mode;
+- a successful isolated Run is automatically integrated into the current workspace, then its temporary worktree and branch are removed; integration conflicts preserve the worktree and surface a manual action;
+- direct-workspace changes need no integration step;
+- completion/integration moves the Task toward review, while verification remains a separate mandatory gate before done.
 
 This version uses the installed Codex/Claude CLI worker. A future adapter may use Codex App Server for richer mid-run steering while retaining the same Job and Run records.
 
@@ -184,7 +202,6 @@ Values outside the configured range are rejected. They are never silently replac
 
 ## Connector diagnostics
 
-The page displays the MCP runtime profile, tool-surface fingerprint, tool count, tunnel reconnect state, and whether the active service matches `controller-local-execution-v2`. A warning means the local execution bridge can still be used, but ChatGPT may be holding an obsolete Planner tool snapshot.
+The page displays the MCP runtime profile, tool-surface fingerprint, tool count, tunnel reconnect state, and whether the active service matches `controller-direct-change-v6`. A warning means the local execution bridge can still be used, but ChatGPT may be holding an obsolete Planner tool snapshot.
 
-Use the versioned default Connector name `repo-harness-controller-v2`, restart keepalive from the updated installation, and recreate or rescan the ChatGPT Connector when the warning persists. Ordinary repository source is readable in the `controller` profile; credentials, secrets, Git internals, runtime security files, lockfiles, and CI workflows remain denied.
-
+Use the versioned default Connector name `repo-harness-controller-v6`, restart keepalive from the updated installation, and recreate or rescan the ChatGPT Connector when the warning persists. Ordinary repository source is readable in the `controller` profile; credentials, secrets, Git internals, runtime security files, lockfiles, and CI workflows remain denied.

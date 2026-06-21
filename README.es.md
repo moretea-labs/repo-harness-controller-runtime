@@ -23,7 +23,7 @@ Entrega al agente un PRD o Sprint completo; después, tu bucle es solo review an
 
 [English](README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [Français](README.fr.md) | [Español](README.es.md)
 
-Dirección del repositorio: `https://github.com/greysonOuyang/repo-harness-controller-runtime-v2-20260620`
+Dirección del repositorio: `https://github.com/Ancienttwo/repo-harness`
 
 ## Por qué usar repo-harness
 
@@ -85,7 +85,7 @@ artifacts.
 ## Novedades
 
 Las notas de versión viven en [`docs/CHANGELOG.md`](docs/CHANGELOG.md). La línea
-actual es `0.8.0`.
+actual es `1.0.0`.
 
 ## Cómo funciona
 
@@ -205,10 +205,10 @@ Bun no existe, instala Bun primero y después instala el CLI `repo-harness`.
 
 ```bash
 # macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/greysonOuyang/repo-harness-controller-runtime-v2-20260620/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Ancienttwo/repo-harness/main/install.sh | sh
 
 # Windows (PowerShell)
-irm https://raw.githubusercontent.com/greysonOuyang/repo-harness-controller-runtime-v2-20260620/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Ancienttwo/repo-harness/main/install.ps1 | iex
 ```
 
 <details>
@@ -419,9 +419,9 @@ Guards habituales:
 
 ## Release actual
 
-- npm package: `repo-harness@0.8.0`
-- Generated workflow stamp: `repo-harness@0.8.0+template@0.8.0`
-- GitHub repository: `greysonOuyang/repo-harness-controller-runtime-v2-20260620`
+- npm package: `repo-harness@1.2.0`
+- Generated workflow stamp: `repo-harness@1.2.0+template@1.2.0`
+- GitHub repository: `Ancienttwo/repo-harness`
 - Release history: [`docs/CHANGELOG.md`](docs/CHANGELOG.md)
 
 ## Agradecimientos
@@ -493,12 +493,12 @@ queda como branch command para crear proyectos o módulos nuevos. `hooks-init`, 
 Quienes editan el propio paquete necesitan un checkout del código fuente:
 
 ```bash
-git clone https://github.com/greysonOuyang/repo-harness-controller-runtime-v2-20260620.git ~/Projects/repo-harness-controller-runtime-v2-20260620
-cd ~/Projects/repo-harness-controller-runtime-v2-20260620
+git clone https://github.com/Ancienttwo/repo-harness.git ~/Projects/repo-harness
+cd ~/Projects/repo-harness
 bun src/cli/index.ts update
 ```
 
-`~/Projects/repo-harness-controller-runtime-v2-20260620` es la única source of truth editable; las rutas locales
+`~/Projects/repo-harness` es la única source of truth editable; las rutas locales
 de Claude/Codex (`~/.claude/skills/repo-harness`, `~/.codex/skills/repo-harness`)
 son runtime entrypoints respaldados por symlinks. Solo
 `~/.codex/skills/repo-harness` expone `SKILL.md` y `assets/skill-commands/`;

@@ -320,7 +320,7 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
     res.json({
       status: 'ok',
       server: 'repo-harness-mcp',
-      version: '0.8.0',
+      version: '1.2.0',
       profile: toolContext.policy.profile,
       toolSurface,
       toolCount: toolDefinitions.length,

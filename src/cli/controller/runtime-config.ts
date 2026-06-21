@@ -1,8 +1,8 @@
 import { createHash } from 'crypto';
 import { realpathSync } from 'fs';
 
-export const CONTROLLER_TOOL_SURFACE = 'controller-local-execution-v2';
-export const CONTROLLER_SCHEMA_VERSION = 4;
+export const CONTROLLER_TOOL_SURFACE = 'controller-direct-change-v6';
+export const CONTROLLER_SCHEMA_VERSION = 8;
 
 export const MIN_AGENT_TIMEOUT_MS = 5_000;
 export const DEFAULT_AGENT_TIMEOUT_MS = 60 * 60 * 1000;

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { dirname, join, normalize, relative, resolve } from 'path';
 import { runProcess, type ProcessRunResult } from '../../effects/process-runner';
 
@@ -22,6 +22,7 @@ interface CheckConfig {
 }
 
 const CHECK_CONFIG = '.repo-harness/checks.json';
+const CHECK_EVIDENCE_ROOT = '.ai/harness/checks/controller';
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_TIMEOUT_MS = 30 * 60 * 1000;
 const SAFE_PACKAGE_SCRIPT = /^(test(?::|$)|check(?::|$)|lint(?::|$)|typecheck(?::|$)|format:check$)/;
@@ -87,6 +88,63 @@ export interface ControllerCheckResult {
   stdout: string;
   stderr: string;
   command: readonly string[];
+  executedAt: string;
+  artifactPath: string;
+}
+
+export interface ControllerCheckEvidence {
+  schemaVersion: 1;
+  checkId: string;
+  description: string;
+  source: ControllerCheck['source'];
+  command: readonly string[];
+  cwd: string;
+  ok: boolean;
+  status: number;
+  timedOut: boolean;
+  stdout: string;
+  stderr: string;
+  executedAt: string;
+}
+
+function artifactSlug(id: string): string {
+  return id.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'check';
+}
+
+function evidencePath(repoRoot: string, id: string): string {
+  return join(repoRoot, CHECK_EVIDENCE_ROOT, `latest-${artifactSlug(id)}.json`);
+}
+
+function persistCheckEvidence(repoRoot: string, result: Omit<ControllerCheckResult, 'artifactPath'>): string {
+  const path = evidencePath(repoRoot, result.check.id);
+  mkdirSync(dirname(path), { recursive: true });
+  const evidence: ControllerCheckEvidence = {
+    schemaVersion: 1,
+    checkId: result.check.id,
+    description: result.check.description,
+    source: result.check.source,
+    command: result.command,
+    cwd: result.check.cwd,
+    ok: result.ok,
+    status: result.status,
+    timedOut: result.timedOut,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    executedAt: result.executedAt,
+  };
+  writeFileSync(path, `${JSON.stringify(evidence, null, 2)}\n`, 'utf-8');
+  return relative(repoRoot, path).replace(/\\/g, '/');
+}
+
+export function readLatestControllerCheckEvidence(repoRoot: string, id: string): ControllerCheckEvidence | undefined {
+  const path = evidencePath(repoRoot, id);
+  if (!existsSync(path)) return undefined;
+  try {
+    const value = JSON.parse(readFileSync(path, 'utf-8')) as ControllerCheckEvidence;
+    return value.schemaVersion === 1 && value.checkId === id ? value : undefined;
+  } catch (_error) {
+    return undefined;
+  }
 }
 
 export function runControllerCheck(repoRoot: string, id: string, requestedTimeoutMs?: number): ControllerCheckResult {
@@ -98,7 +156,7 @@ export function runControllerCheck(repoRoot: string, id: string, requestedTimeou
     timeoutMs,
     maxOutputBytes: 256 * 1024,
   });
-  return {
+  const withoutPath = {
     check,
     ok: result.ok,
     status: result.status,
@@ -106,5 +164,7 @@ export function runControllerCheck(repoRoot: string, id: string, requestedTimeou
     stdout: result.stdout,
     stderr: result.stderr || result.error,
     command: result.command,
+    executedAt: new Date().toISOString(),
   };
+  return { ...withoutPath, artifactPath: persistCheckEvidence(repoRoot, withoutPath) };
 }

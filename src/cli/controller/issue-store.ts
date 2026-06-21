@@ -14,6 +14,8 @@ import type {
   TaskStatus,
   TaskVerification,
 } from './types';
+import { loadControllerProjectState, saveControllerProjectState } from './project-state';
+import { tryAppendControllerWorklogEvent } from './worklog';
 
 const ISSUE_ROOT = 'tasks/issues';
 
@@ -80,7 +82,8 @@ function renderIssueMarkdown(issue: ControllerIssue): string {
     `kind: ${JSON.stringify(issue.kind)}`,
     `status: ${JSON.stringify(issue.status)}`,
     `updated_at: ${JSON.stringify(issue.updatedAt)}`,
-    'source: "repo-harness-controller"',
+    ...(issue.archivedAt ? [`archived_at: ${JSON.stringify(issue.archivedAt)}`] : []),
+    'source: "repo-harness-controller-v6"',
     '---',
     '',
     `# ${issue.title}`,
@@ -116,7 +119,7 @@ function renderIssueMarkdown(issue: ControllerIssue): string {
 function writeIssue(repoRoot: string, issue: ControllerIssue): ControllerIssue {
   const root = join(repoRoot, ISSUE_ROOT);
   mkdirSync(root, { recursive: true });
-  issue.schemaVersion = 2;
+  issue.schemaVersion = 3;
   const expectedJson = issuePath(repoRoot, issue);
   const expectedMarkdown = markdownPath(repoRoot, issue);
   for (const name of readdirSync(root)) {
@@ -216,14 +219,15 @@ function buildTasks(drafts: TaskDraft[], now = new Date().toISOString()): Contro
 function refreshReadiness(issue: ControllerIssue): void {
   for (const task of issue.tasks) {
     if (!['planned', 'ready', 'launch_blocked'].includes(task.status)) continue;
-    const dependenciesDone = task.dependsOn.every((id) => {
-      const dependency = issue.tasks.find((candidate) => candidate.id === id);
-      return dependency?.status === 'done' || dependency?.status === 'superseded';
-    });
-    task.status = dependenciesDone ? 'ready' : 'planned';
+    const dependencies = task.dependsOn.map((id) => issue.tasks.find((candidate) => candidate.id === id));
+    const hasCancelledDependency = dependencies.some((dependency) => dependency?.status === 'cancelled');
+    const hasStaleReplacement = dependencies.some((dependency) => dependency?.status === 'superseded' && (dependency.supersededBy?.length ?? 0) > 0);
+    const dependenciesDone = dependencies.every((dependency) => dependency?.status === 'done' || (dependency?.status === 'superseded' && (dependency.supersededBy?.length ?? 0) === 0));
+    task.status = hasCancelledDependency ? 'launch_blocked' : dependenciesDone && !hasStaleReplacement ? 'ready' : 'planned';
   }
-  const active = issue.tasks.filter((task) => task.status !== 'superseded');
+  const active = issue.tasks.filter((task) => !['superseded', 'cancelled'].includes(task.status));
   if (active.length > 0 && active.every((task) => task.status === 'done')) issue.status = 'done';
+  else if (active.length === 0 && issue.tasks.some((task) => task.status === 'cancelled')) issue.status = 'cancelled';
   else if (active.some((task) => ['running', 'review', 'integrated', 'verifying', 'changes_requested', 'verified', 'done'].includes(task.status))) issue.status = 'in_progress';
   else if (active.some((task) => task.status === 'launch_blocked')) issue.status = 'launch_blocked';
   else if (active.length > 0) issue.status = 'planned';
@@ -238,12 +242,38 @@ export function createIssue(repoRoot: string, input: {
   acceptanceCriteria?: string[];
   relatedArtifacts?: string[];
   tasks?: TaskDraft[];
+  allowWhileFocused?: boolean;
+  allowDuplicate?: boolean;
+  allowWhenPaused?: boolean;
 }): ControllerIssue {
   const title = input.title.trim();
   if (!title) throw new Error('issue title is required');
+  const projectState = loadControllerProjectState(repoRoot);
+  const existingIssues = listIssues(repoRoot);
+  const normalizedTitle = title.toLowerCase().replace(/[^a-z0-9\u3400-\u9fff]+/g, '');
+  const duplicate = existingIssues.find((entry) => !entry.archivedAt && !['done', 'cancelled'].includes(entry.status)
+    && entry.title.toLowerCase().replace(/[^a-z0-9\u3400-\u9fff]+/g, '') === normalizedTitle);
+  if (duplicate && !input.allowDuplicate) {
+    throw new Error(`an active Issue with the same title already exists: ${duplicate.id}; append a Task or explicitly allow a duplicate`);
+  }
+  if (projectState.issueCreationMode === 'paused' && !input.allowWhenPaused) {
+    throw new Error('Issue creation is paused; resume the creation policy or explicitly override it');
+  }
+  const activeExisting = existingIssues.filter((entry) => !entry.archivedAt && !['done', 'cancelled'].includes(entry.status));
+  const focused = projectState.currentIssueId
+    ? activeExisting.find((entry) => entry.id === projectState.currentIssueId)
+    : undefined;
+  if (projectState.issueCreationMode === 'focus_only' && !input.allowWhileFocused) {
+    if (focused) {
+      throw new Error(`current execution focus ${focused.id} is still active; append or split a Task there instead of creating another Issue`);
+    }
+    if (activeExisting.length > 0) {
+      throw new Error(`${activeExisting.length} active Issue(s) already exist without a selected current focus; select and converge one before creating another Issue`);
+    }
+  }
   const now = new Date().toISOString();
   const issue: ControllerIssue = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     id: issueId(),
     title,
     slug: slugify(title),
@@ -259,7 +289,24 @@ export function createIssue(repoRoot: string, input: {
     updatedAt: now,
   };
   refreshReadiness(issue);
-  return writeIssue(repoRoot, issue);
+  const written = writeIssue(repoRoot, issue);
+  tryAppendControllerWorklogEvent(repoRoot, {
+    category: 'issue',
+    action: 'issue_created',
+    summary: `Created ${issue.id}: ${issue.title}`,
+    issueId: issue.id,
+    statusTo: issue.status,
+    details: {
+      kind: issue.kind,
+      taskCount: issue.tasks.length,
+      creationPolicy: projectState.issueCreationMode,
+      policyOverride: Boolean(input.allowWhileFocused || input.allowWhenPaused || input.allowDuplicate),
+    },
+  });
+  if (!focused && activeExisting.length === 0 && !['done', 'cancelled'].includes(issue.status)) {
+    saveControllerProjectState(repoRoot, { currentIssueId: issue.id }, 'issue-creation-policy');
+  }
+  return written;
 }
 
 export function planIssue(repoRoot: string, id: string, drafts: TaskDraft[]): ControllerIssue {
@@ -270,7 +317,9 @@ export function planIssue(repoRoot: string, id: string, drafts: TaskDraft[]): Co
   issue.status = issue.tasks.length ? 'planned' : 'analysis';
   issue.updatedAt = now;
   refreshReadiness(issue);
-  return writeIssue(repoRoot, issue);
+  const written = writeIssue(repoRoot, issue);
+  tryAppendControllerWorklogEvent(repoRoot, { category: 'issue', action: 'issue_planned', summary: `Replaced the Task plan for ${issue.id} with ${issue.tasks.length} Tasks.`, issueId: issue.id, details: { taskIds: issue.tasks.map((task) => task.id) } });
+  return written;
 }
 
 export function appendTask(repoRoot: string, issueIdValue: string, draft: TaskDraft): ControllerIssue {
@@ -280,13 +329,17 @@ export function appendTask(repoRoot: string, issueIdValue: string, draft: TaskDr
   validateTaskGraph(issue.tasks);
   issue.updatedAt = now;
   refreshReadiness(issue);
-  return writeIssue(repoRoot, issue);
+  const task = issue.tasks.at(-1)!;
+  const written = writeIssue(repoRoot, issue);
+  tryAppendControllerWorklogEvent(repoRoot, { category: 'task', action: 'task_added', summary: `Added ${task.id}: ${task.title}`, issueId: issue.id, taskId: task.id, statusTo: task.status });
+  return written;
 }
 
 export function splitTask(repoRoot: string, issueIdValue: string, taskId: string, drafts: TaskDraft[]): ControllerIssue {
   if (drafts.length < 2) throw new Error('split_task requires at least two replacement tasks');
   const issue = getIssue(repoRoot, issueIdValue);
   const original = issue.tasks.find((task) => task.id === taskId);
+  const originalStatus = original?.status;
   if (!original) throw new Error(`task not found: ${issueIdValue}/${taskId}`);
   if (['running', 'done', 'verified'].includes(original.status)) throw new Error(`cannot split task from status ${original.status}`);
   const now = new Date().toISOString();
@@ -314,7 +367,9 @@ export function splitTask(repoRoot: string, issueIdValue: string, taskId: string
   validateTaskGraph(issue.tasks);
   issue.updatedAt = now;
   refreshReadiness(issue);
-  return writeIssue(repoRoot, issue);
+  const written = writeIssue(repoRoot, issue);
+  tryAppendControllerWorklogEvent(repoRoot, { category: 'task', action: 'task_split', summary: `Split ${taskId} into ${replacements.map((task) => task.id).join(', ')}.`, issueId: issue.id, taskId, statusFrom: originalStatus, statusTo: 'superseded', details: { replacements: replacements.map((task) => task.id) } });
+  return written;
 }
 
 export function supersedeTask(repoRoot: string, issueIdValue: string, taskId: string, replacementTaskIds: string[] = []): ControllerIssue {
@@ -331,7 +386,9 @@ export function supersedeTask(repoRoot: string, issueIdValue: string, taskId: st
   task.updatedAt = now;
   issue.updatedAt = now;
   refreshReadiness(issue);
-  return writeIssue(repoRoot, issue);
+  const written = writeIssue(repoRoot, issue);
+  tryAppendControllerWorklogEvent(repoRoot, { category: 'task', action: 'task_superseded', summary: `Superseded ${taskId}.`, issueId: issue.id, taskId, statusTo: 'superseded', details: { replacementTaskIds } });
+  return written;
 }
 
 export function setTaskDependencies(repoRoot: string, issueIdValue: string, taskId: string, dependsOn: string[]): ControllerIssue {
@@ -343,7 +400,9 @@ export function setTaskDependencies(repoRoot: string, issueIdValue: string, task
   task.updatedAt = new Date().toISOString();
   issue.updatedAt = task.updatedAt;
   refreshReadiness(issue);
-  return writeIssue(repoRoot, issue);
+  const written = writeIssue(repoRoot, issue);
+  tryAppendControllerWorklogEvent(repoRoot, { category: 'task', action: 'task_dependencies_changed', summary: `Updated dependencies for ${taskId}.`, issueId: issue.id, taskId, details: { dependsOn: task.dependsOn } });
+  return written;
 }
 
 export function updateIssue(repoRoot: string, id: string, patch: {
@@ -357,6 +416,7 @@ export function updateIssue(repoRoot: string, id: string, patch: {
   github?: GitHubIssueLink;
 }): ControllerIssue {
   const issue = getIssue(repoRoot, id);
+  const previousStatus = issue.status;
   if (patch.title !== undefined) {
     issue.title = patch.title.trim() || issue.title;
     issue.slug = slugify(issue.title);
@@ -369,7 +429,17 @@ export function updateIssue(repoRoot: string, id: string, patch: {
   if (patch.relatedArtifacts !== undefined) issue.relatedArtifacts = normalizeStrings(patch.relatedArtifacts);
   if (patch.github !== undefined) issue.github = patch.github;
   issue.updatedAt = new Date().toISOString();
-  return writeIssue(repoRoot, issue);
+  const written = writeIssue(repoRoot, issue);
+  tryAppendControllerWorklogEvent(repoRoot, {
+    category: patch.github ? 'github' : 'issue',
+    action: patch.github ? 'issue_github_linked' : 'issue_updated',
+    summary: patch.status && patch.status !== previousStatus ? `Issue ${issue.id} moved from ${previousStatus} to ${patch.status}.` : `Updated ${issue.id}: ${issue.title}`,
+    issueId: issue.id,
+    statusFrom: previousStatus,
+    statusTo: issue.status,
+    details: { fields: Object.keys(patch), githubUrl: patch.github?.url },
+  });
+  return written;
 }
 
 export function updateTask(repoRoot: string, issueIdValue: string, taskId: string, patch: {
@@ -382,6 +452,7 @@ export function updateTask(repoRoot: string, issueIdValue: string, taskId: strin
   const issue = getIssue(repoRoot, issueIdValue);
   const task = issue.tasks.find((entry) => entry.id === taskId);
   if (!task) throw new Error(`task not found: ${issueIdValue}/${taskId}`);
+  const previousStatus = task.status;
   if (patch.status) task.status = patch.status;
   if (patch.note?.trim()) task.notes.push(patch.note.trim());
   if (patch.runId?.trim() && !task.runIds.includes(patch.runId.trim())) task.runIds.push(patch.runId.trim());
@@ -390,7 +461,15 @@ export function updateTask(repoRoot: string, issueIdValue: string, taskId: strin
   task.updatedAt = new Date().toISOString();
   issue.updatedAt = task.updatedAt;
   refreshReadiness(issue);
-  return writeIssue(repoRoot, issue);
+  const written = writeIssue(repoRoot, issue);
+  if (patch.status && patch.status !== previousStatus) {
+    tryAppendControllerWorklogEvent(repoRoot, { category: 'task', action: 'task_status_changed', summary: `${task.id} moved from ${previousStatus} to ${task.status}.`, issueId: issue.id, taskId: task.id, statusFrom: previousStatus, statusTo: task.status, details: { title: task.title } });
+  }
+  if (patch.note?.trim()) tryAppendControllerWorklogEvent(repoRoot, { category: 'task', action: 'task_note_added', summary: patch.note.trim(), issueId: issue.id, taskId: task.id });
+  if (patch.runId?.trim()) tryAppendControllerWorklogEvent(repoRoot, { category: 'run', action: 'run_linked_to_task', summary: `Linked ${patch.runId.trim()} to ${task.id}.`, issueId: issue.id, taskId: task.id, runId: patch.runId.trim() });
+  if (patch.github) tryAppendControllerWorklogEvent(repoRoot, { category: 'github', action: 'task_github_linked', summary: `Linked ${task.id} to GitHub.`, issueId: issue.id, taskId: task.id, details: { url: patch.github.url } });
+  if (patch.verification) tryAppendControllerWorklogEvent(repoRoot, { category: 'verification', action: task.status === 'verified' ? 'verification_passed' : 'verification_recorded', summary: `${task.id} verification recorded by ${patch.verification.reviewer}.`, issueId: issue.id, taskId: task.id, runId: patch.verification.runId, details: { checks: patch.verification.checkResults, acceptance: patch.verification.acceptanceResults } });
+  return written;
 }
 
 function finding(code: string, level: 'blocker' | 'warning', message: string, taskId?: string): IssueReadinessFinding {
@@ -413,12 +492,23 @@ export function inspectIssueReadiness(repoRoot: string, issueIdValue: string): I
     if (task.risk === 'high' && task.recommendedAgent === 'github-copilot') findings.push(finding('HIGH_RISK_CLOUD_AGENT', 'warning', 'High-risk Task is assigned to a GitHub cloud session; require explicit review before merge.', task.id));
   }
   try { validateTaskGraph(issue.tasks); } catch (error) { findings.push(finding('TASK_GRAPH_INVALID', 'blocker', error instanceof Error ? error.message : String(error))); }
-  const blockers = findings.filter((entry) => entry.level === 'blocker');
-  const warnings = findings.filter((entry) => entry.level === 'warning');
+  for (const task of launchRelevantTasks) {
+    for (const dependencyId of task.dependsOn) {
+      const dependency = issue.tasks.find((entry) => entry.id === dependencyId);
+      if (dependency?.status === 'cancelled') findings.push(finding('CANCELLED_DEPENDENCY', 'blocker', `Task depends on cancelled Task ${dependencyId}. Repair or replace the dependency before launch.`, task.id));
+      if (dependency?.status === 'superseded' && (dependency.supersededBy?.length ?? 0) > 0) findings.push(finding('STALE_SUPERSEDED_DEPENDENCY', 'warning', `Task still points at superseded Task ${dependencyId}; replace it with ${dependency.supersededBy?.join(', ')}.`, task.id));
+    }
+  }
   const readyTasks = issue.tasks.filter((task) => task.status === 'ready');
+  const hasInFlightOrReview = issue.tasks.some((task) => ['running', 'review', 'integrated', 'verifying', 'verified'].includes(task.status));
+  if (readyTasks.length === 0 && !hasInFlightOrReview && issue.status !== 'done') findings.push(finding('NO_READY_TASKS', 'blocker', 'Issue has no dispatchable Task. Resolve dependencies, review pending work, or close the Issue.'));
   const agents: Record<ControllerAgent, number> = { codex: 0, claude: 0, 'github-copilot': 0 };
   for (const task of readyTasks) agents[task.recommendedAgent] += 1;
-  const score = Math.max(0, 100 - blockers.length * 20 - warnings.length * 5);
+  const blockers = findings.filter((entry) => entry.level === 'blocker');
+  const warnings = findings.filter((entry) => entry.level === 'warning');
+  const score = blockers.some((entry) => entry.code === 'NO_READY_TASKS')
+    ? Math.min(60, Math.max(0, 100 - blockers.length * 20 - warnings.length * 5))
+    : Math.max(0, 100 - blockers.length * 20 - warnings.length * 5);
   return {
     issueId: issue.id,
     score,
@@ -431,6 +521,38 @@ export function inspectIssueReadiness(repoRoot: string, issueIdValue: string): I
   };
 }
 
+export function archiveIssue(repoRoot: string, issueIdValue: string): ControllerIssue {
+  const issue = getIssue(repoRoot, issueIdValue);
+  if (!['done', 'cancelled'].includes(issue.status)) throw new Error(`only done or cancelled Issues can be archived (current: ${issue.status})`);
+  if (issue.archivedAt) return issue;
+  issue.archivedAt = new Date().toISOString();
+  issue.updatedAt = issue.archivedAt;
+  const written = writeIssue(repoRoot, issue);
+  const projectState = loadControllerProjectState(repoRoot);
+  if (projectState.currentIssueId === issue.id) saveControllerProjectState(repoRoot, { currentIssueId: '' }, 'issue-archive');
+  tryAppendControllerWorklogEvent(repoRoot, { category: 'issue', action: 'issue_archived', summary: `Archived ${issue.id}: ${issue.title}`, issueId: issue.id, statusFrom: issue.status, statusTo: issue.status });
+  return written;
+}
+
+export function restoreIssue(repoRoot: string, issueIdValue: string): ControllerIssue {
+  const issue = getIssue(repoRoot, issueIdValue);
+  if (!issue.archivedAt) return issue;
+  const archivedAt = issue.archivedAt;
+  delete issue.archivedAt;
+  issue.updatedAt = new Date().toISOString();
+  const written = writeIssue(repoRoot, issue);
+  tryAppendControllerWorklogEvent(repoRoot, { category: 'issue', action: 'issue_restored', summary: `Restored ${issue.id}: ${issue.title}`, issueId: issue.id, details: { archivedAt } });
+  return written;
+}
+
+export function acceptVerifiedTask(repoRoot: string, issueIdValue: string, taskId: string, note = 'Accepted after controller verification.'): ControllerIssue {
+  const issue = getIssue(repoRoot, issueIdValue);
+  const task = issue.tasks.find((entry) => entry.id === taskId);
+  if (!task) throw new Error(`task not found: ${issueIdValue}/${taskId}`);
+  if (task.status !== 'verified' || !task.verification) throw new Error(`task must pass the Verification Gate before acceptance (current: ${task.status})`);
+  return updateTask(repoRoot, issueIdValue, taskId, { status: 'done', note });
+}
+
 export function recordTaskVerification(repoRoot: string, issueIdValue: string, taskId: string, verification: TaskVerification): ControllerIssue {
   const issue = getIssue(repoRoot, issueIdValue);
   const task = issue.tasks.find((entry) => entry.id === taskId);
@@ -438,10 +560,12 @@ export function recordTaskVerification(repoRoot: string, issueIdValue: string, t
   if (!['review', 'integrated', 'verifying'].includes(task.status)) throw new Error(`task cannot be verified from status ${task.status}`);
   if (!verification.reviewer.trim()) throw new Error('verification reviewer is required');
   if (verification.checkResults.some((entry) => !entry.checkId.trim())) throw new Error('verification check IDs cannot be empty');
-  const checksOk = verification.checkResults.length > 0 && verification.checkResults.every((entry) => entry.ok);
-  const acceptanceOk = verification.acceptanceResults.every((entry) => entry.ok) && (task.acceptanceCriteria.length === 0
+  const checksOk = task.checks.length > 0
+    ? task.checks.every((checkId) => verification.checkResults.some((entry) => entry.checkId === checkId && entry.ok))
+    : verification.checkResults.length > 0 && verification.checkResults.every((entry) => entry.ok);
+  const acceptanceOk = task.acceptanceCriteria.length === 0
     ? true
-    : task.acceptanceCriteria.every((criterion) => verification.acceptanceResults.some((entry) => entry.criterion === criterion && entry.ok)));
+    : task.acceptanceCriteria.every((criterion) => verification.acceptanceResults.some((entry) => entry.criterion === criterion && entry.ok));
   return updateTask(repoRoot, issueIdValue, taskId, {
     status: checksOk && acceptanceOk ? 'verified' : 'changes_requested',
     verification,
@@ -449,14 +573,30 @@ export function recordTaskVerification(repoRoot: string, issueIdValue: string, t
   });
 }
 
-export function projectBoard(repoRoot: string): { issues: Array<Record<string, unknown>>; counts: Record<string, number>; readyTasks: Array<Record<string, string>> } {
+export function projectBoard(repoRoot: string): {
+  issues: Array<Record<string, unknown>>;
+  counts: Record<string, number>;
+  archivedCounts: Record<string, number>;
+  readyTasks: Array<Record<string, string>>;
+  currentIssueId?: string;
+  archivedIssueCount: number;
+} {
   const issues = listIssues(repoRoot);
+  const projectState = loadControllerProjectState(repoRoot);
+  const activeIssues = issues.filter((issue) => !issue.archivedAt && !['done', 'cancelled'].includes(issue.status));
+  const queueIssueId = projectState.currentIssueId && activeIssues.some((issue) => issue.id === projectState.currentIssueId)
+    ? projectState.currentIssueId
+    : activeIssues.length === 1 ? activeIssues[0].id : undefined;
   const counts: Record<string, number> = {};
+  const archivedCounts: Record<string, number> = {};
   const readyTasks: Array<Record<string, string>> = [];
   for (const issue of issues) {
+    const targetCounts = issue.archivedAt ? archivedCounts : counts;
     for (const task of issue.tasks) {
-      counts[task.status] = (counts[task.status] ?? 0) + 1;
-      if (task.status === 'ready') readyTasks.push({ issueId: issue.id, taskId: task.id, title: task.title, agent: task.recommendedAgent });
+      targetCounts[task.status] = (targetCounts[task.status] ?? 0) + 1;
+      if (issue.id === queueIssueId && task.status === 'ready') {
+        readyTasks.push({ issueId: issue.id, taskId: task.id, title: task.title, agent: task.recommendedAgent });
+      }
     }
   }
   return {
@@ -466,7 +606,9 @@ export function projectBoard(repoRoot: string): { issues: Array<Record<string, u
       kind: issue.kind,
       status: issue.status,
       github: issue.github,
+      archivedAt: issue.archivedAt,
       updatedAt: issue.updatedAt,
+      isCurrent: issue.id === queueIssueId,
       tasks: issue.tasks.map((task) => ({
         id: task.id,
         title: task.title,
@@ -478,6 +620,9 @@ export function projectBoard(repoRoot: string): { issues: Array<Record<string, u
       })),
     })),
     counts,
+    archivedCounts,
     readyTasks,
+    currentIssueId: queueIssueId,
+    archivedIssueCount: issues.filter((issue) => Boolean(issue.archivedAt)).length,
   };
 }

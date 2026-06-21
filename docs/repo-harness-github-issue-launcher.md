@@ -10,9 +10,23 @@ repo-harness uses two complementary state layers:
 Publishing is explicit. repo-harness does not silently overwrite GitHub Issues, close them, merge pull requests, or treat a remote checkbox as local verification.
 
 
+## Optional GitHub plugin
+
+GitHub integration is disabled by default. Local Controller files remain authoritative even after the plugin is enabled. Configure it explicitly:
+
+```bash
+repo-harness controller github configure --enable \
+  --github-repo owner/repository --sync-mode manual --include-tasks
+repo-harness controller github status --json
+```
+
+The configuration is stored at `.repo-harness/plugins/github.json` and contains no credential. Authentication remains in the local `gh` CLI. `manual` and `checkpoint` are policy labels; both require an explicit publish or refresh action, so no hidden background network write can block local Task progress.
+
+The corresponding MCP tools are `get_github_plugin_status` and `configure_github_plugin`. Existing low-level GitHub tools remain available for compatibility.
+
 ## Verify the loaded tool surface
 
-After connecting ChatGPT, call `controller_capabilities`. It should report `controller-local-execution-v2` and list the Issue Launcher, GitHub session, Run inspection, bounded edit, and Verification Gate tools. If ChatGPT only shows legacy planning tools, refresh or recreate the connector so it reloads the MCP tool schema.
+After connecting ChatGPT, call `controller_capabilities`. It should report `controller-direct-change-v6` and list direct-change evidence, Issue Launcher, GitHub session, Run inspection, and Verification Gate tools. If ChatGPT only shows legacy planning tools, refresh or recreate the connector so it reloads the MCP tool schema.
 
 ## What “GitHub session” means
 
@@ -41,7 +55,7 @@ gh auth login
 5. Verify the local environment:
 
 ```bash
-repo-harness controller github-status --repo .
+repo-harness controller github status --repo .
 ```
 
 The equivalent MCP tool is `github_status`.

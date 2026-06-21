@@ -47,7 +47,7 @@ export interface ControllerTask {
 }
 
 export interface ControllerIssue {
-  schemaVersion: 1 | 2;
+  schemaVersion: 1 | 2 | 3;
   id: string;
   title: string;
   slug: string;
@@ -60,6 +60,7 @@ export interface ControllerIssue {
   relatedArtifacts: string[];
   tasks: ControllerTask[];
   github?: GitHubIssueLink;
+  archivedAt?: string;
   createdAt: string;
   updatedAt: string;
 }

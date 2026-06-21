@@ -1,9 +1,16 @@
 import { Command } from 'commander';
 import { resolve } from 'path';
 import { getAgentJob, getAgentJobEvents, getAgentJobLog, listAgentJobs } from '../agent-jobs/job-manager';
-import { projectBoard } from '../controller/issue-store';
+import { archiveIssue, getIssue, inspectIssueReadiness, projectBoard, restoreIssue } from '../controller/issue-store';
+import { getControllerTimeline, getProjectProgress } from '../controller/progress';
+import { exportControllerWorklog, parseWorklogCategory } from '../controller/worklog';
+import { inspectProjectGovernance, reconcileProjectGovernance } from '../controller/governance';
+import { assessWorkMode } from '../controller/work-mode';
+import { finalizeEditSession, getEditSession, getEditSessionDiff, listEditSessions, rollbackEditSession, verifyEditSession } from '../editing/edit-session';
+import { loadControllerProjectState, saveControllerProjectState } from '../controller/project-state';
+import { closeIssueWithGitHubPlugin, getGitHubPluginStatus, publishIssueWithGitHubPlugin, refreshIssueWithGitHubPlugin, saveGitHubPluginConfig } from '../github/plugin';
 import { getGitHubStatus } from '../github/github';
-import { loadLocalBridgeConfig } from '../local-bridge/job-store';
+import { executeLocalBridgeJob, loadLocalBridgeConfig, submitLocalBridgeJob } from '../local-bridge/job-store';
 import { startLocalBridgeServer } from '../local-bridge/server';
 
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled']);
@@ -131,10 +138,292 @@ export function buildControllerCommand(): Command {
       await watchRun(repoRoot(opts.repo), runId, Number(opts.interval ?? 2), opts.log === true, opts.json === true);
     });
 
+  command.command('assess')
+    .description('Choose direct_edit, quick_agent, or issue_task for one work request')
+    .argument('<description>', 'Work request description')
+    .option('--repo <path>', 'Repository root')
+    .option('--path <path...>', 'Known target paths')
+    .option('--expected-files <count>', 'Estimated file count')
+    .option('--expected-lines <count>', 'Estimated changed lines')
+    .option('--investigation', 'Root-cause investigation is required')
+    .option('--parallel', 'Parallel work is required')
+    .option('--long-checks', 'Long-running verification is required')
+    .option('--dependencies', 'A durable Task dependency graph is required')
+    .option('--risk <risk>', 'low, medium, or high', 'low')
+    .option('--json', 'Output JSON')
+    .action((description: string, opts: { path?: string[]; expectedFiles?: string; expectedLines?: string; investigation?: boolean; parallel?: boolean; longChecks?: boolean; dependencies?: boolean; risk?: 'low' | 'medium' | 'high'; json?: boolean }) => {
+      const result = assessWorkMode({
+        description,
+        knownPaths: opts.path,
+        expectedFiles: opts.expectedFiles ? Number(opts.expectedFiles) : undefined,
+        expectedChangedLines: opts.expectedLines ? Number(opts.expectedLines) : undefined,
+        requiresInvestigation: opts.investigation,
+        requiresParallelism: opts.parallel,
+        requiresLongRunningChecks: opts.longChecks,
+        needsDependencies: opts.dependencies,
+        risk: opts.risk,
+      });
+      output(result, opts.json === true);
+    });
+
+  command.command('edits')
+    .description('List direct-edit sessions and their file/check evidence')
+    .option('--repo <path>', 'Repository root')
+    .option('--limit <count>', 'Maximum sessions', '50')
+    .option('--json', 'Output JSON')
+    .action((opts: { repo?: string; limit?: string; json?: boolean }) => {
+      const sessions = listEditSessions(repoRoot(opts.repo), Number(opts.limit ?? 50));
+      if (opts.json) return output({ sessions }, true);
+      output(sessions.length ? sessions.map((session) => `${session.sessionId}  [${session.status}]  ${session.changedFiles} files / ${session.changedLines} lines / ${session.checksPassed}/${session.checksTotal} checks\n  ${session.purpose}`).join('\n\n') : 'No direct-edit sessions.');
+    });
+
+  command.command('edit')
+    .description('Show one direct-edit session')
+    .argument('<session-id>', 'Edit session ID')
+    .option('--repo <path>', 'Repository root')
+    .option('--json', 'Output JSON')
+    .action((sessionId: string, opts: { repo?: string; json?: boolean }) => output(getEditSession(repoRoot(opts.repo), sessionId), opts.json === true));
+
+  command.command('edit-diff')
+    .description('Print the persisted patch for one direct-edit session')
+    .argument('<session-id>', 'Edit session ID')
+    .option('--repo <path>', 'Repository root')
+    .option('--json', 'Output JSON')
+    .action((sessionId: string, opts: { repo?: string; json?: boolean }) => {
+      const result = getEditSessionDiff(repoRoot(opts.repo), sessionId);
+      output(opts.json ? result : result.patch || '(no patch)', opts.json === true);
+    });
+
+  command.command('verify-edit')
+    .description('Run named checks and record review evidence for a direct edit')
+    .argument('<session-id>', 'Edit session ID')
+    .option('--repo <path>', 'Repository root')
+    .option('--check <id...>', 'Override named checks')
+    .option('--reviewer <name>', 'Reviewer identity', 'controller-cli-human')
+    .option('--note <text>', 'Review note')
+    .option('--json', 'Output JSON')
+    .action((sessionId: string, opts: { repo?: string; check?: string[]; reviewer?: string; note?: string; json?: boolean }) => output(verifyEditSession(repoRoot(opts.repo), sessionId, { checkIds: opts.check, reviewer: opts.reviewer, note: opts.note }), opts.json === true));
+
+  command.command('finalize-edit')
+    .description('Finalize a verified direct edit')
+    .argument('<session-id>', 'Edit session ID')
+    .option('--repo <path>', 'Repository root')
+    .option('--reviewer <name>', 'Reviewer identity', 'controller-cli-human')
+    .option('--note <text>', 'Final note')
+    .option('--json', 'Output JSON')
+    .action((sessionId: string, opts: { repo?: string; reviewer?: string; note?: string; json?: boolean }) => output(finalizeEditSession(repoRoot(opts.repo), sessionId, { reviewer: opts.reviewer, note: opts.note }), opts.json === true));
+
+  command.command('rollback-edit')
+    .description('Rollback a non-finalized direct edit')
+    .argument('<session-id>', 'Edit session ID')
+    .option('--repo <path>', 'Repository root')
+    .option('--json', 'Output JSON')
+    .action((sessionId: string, opts: { repo?: string; json?: boolean }) => output(rollbackEditSession(repoRoot(opts.repo), sessionId), opts.json === true));
+
+  command.command('progress')
+    .description('Show project, Issue, and Task progress derived from durable controller state')
+    .option('--repo <path>', 'Repository root')
+    .option('--json', 'Output JSON')
+    .action((opts: { repo?: string; json?: boolean }) => {
+      const progress = getProjectProgress(repoRoot(opts.repo));
+      if (opts.json) return output(progress, true);
+      const lines = [
+        `Evidence gates: ${progress.completedGates}/${progress.totalGates} complete`,
+        `Current Issue: ${progress.currentIssueId ?? 'not selected'}`,
+        `Issues: ${progress.activeIssueCount} active / ${progress.archivedIssueCount} archived / ${progress.issueCount} total`,
+        `Tasks: ${progress.completedTaskCount} accepted / ${progress.taskCount} total`,
+        `Active Runs: ${progress.activeRunCount}`,
+        '',
+        ...progress.issues.map((issue) => `${issue.id}  ${issue.completedGates}/${issue.totalGates} gates  [${issue.status}]  ${issue.title}${issue.isCurrent ? '  CURRENT' : ''}${issue.attentionCount ? `  attention=${issue.attentionCount}` : ''}`),
+      ];
+      output(lines.join('\n'));
+    });
+
+  command.command('governance')
+    .description('Inspect execution focus, dead dependencies, retryable failures, review/acceptance backlog, duplicates, and closeout anomalies')
+    .option('--repo <path>', 'Repository root')
+    .option('--json', 'Output JSON')
+    .action((opts: { repo?: string; json?: boolean }) => {
+      const result = inspectProjectGovernance(repoRoot(opts.repo));
+      if (opts.json) return output(result, true);
+      const lines = [
+        `Governance: ${result.health}`,
+        `Current Issue: ${result.currentIssueId ?? 'not selected'}`,
+        `Execution queue: ${result.executionQueue.length}`,
+        `Findings: critical=${result.counts.critical ?? 0} warning=${result.counts.warning ?? 0} info=${result.counts.info ?? 0}`,
+        '',
+        ...result.findings.map((entry) => `${entry.severity.toUpperCase()}  ${entry.code}  ${[entry.issueId, entry.taskId].filter(Boolean).join('/')}\n  ${entry.message}`),
+      ];
+      output(lines.join('\n'));
+    });
+
+  command.command('reconcile')
+    .description('Apply safe project-governance repairs and refresh the execution queue')
+    .option('--repo <path>', 'Repository root')
+    .option('--json', 'Output JSON')
+    .action((opts: { repo?: string; json?: boolean }) => output(reconcileProjectGovernance(repoRoot(opts.repo)), opts.json === true));
+
+  command.command('focus')
+    .description('Select the one active Issue that drives execution')
+    .argument('<issue-id>', 'Controller Issue ID')
+    .option('--repo <path>', 'Repository root')
+    .option('--json', 'Output JSON')
+    .action((issueId: string, opts: { repo?: string; json?: boolean }) => {
+      const root = repoRoot(opts.repo);
+      const issue = getIssue(root, issueId);
+      if (issue.archivedAt || ['done', 'cancelled'].includes(issue.status)) throw new Error(`Issue is not active: ${issue.status}`);
+      output(saveControllerProjectState(root, { currentIssueId: issue.id }, 'controller-cli'), opts.json === true);
+    });
+
+  command.command('launch')
+    .description('Launch readiness-approved Tasks from one Issue through the local approval bridge')
+    .argument('<issue-id>', 'Controller Issue ID')
+    .option('--repo <path>', 'Repository root')
+    .option('--max-parallel <count>', 'Maximum Tasks to launch', '1')
+    .option('--timeout-ms <milliseconds>', 'Agent timeout')
+    .option('--json', 'Output JSON')
+    .action((issueId: string, opts: { repo?: string; maxParallel?: string; timeoutMs?: string; json?: boolean }) => {
+      const root = repoRoot(opts.repo);
+      const readiness = inspectIssueReadiness(root, issueId);
+      if (!readiness.ready) throw new Error(`Issue has no readiness-approved Tasks: ${readiness.blockers.map((entry) => entry.code).join(', ') || 'no ready Tasks'}`);
+      saveControllerProjectState(root, { currentIssueId: issueId }, 'controller-cli');
+      const count = Math.max(1, Math.min(Number(opts.maxParallel ?? 1), readiness.readyTaskIds.length));
+      const jobs = readiness.readyTaskIds.slice(0, count).map((taskId) => {
+        const job = submitLocalBridgeJob(root, {
+          action: 'launch-task',
+          requestedBy: 'controller-cli',
+          payload: { issueId, taskId, timeoutMs: opts.timeoutMs ? Number(opts.timeoutMs) : undefined },
+        });
+        return job.status === 'approved' ? executeLocalBridgeJob(root, job.jobId) : job;
+      });
+      output({ readiness, jobs }, opts.json === true);
+    });
+
+  command.command('archive')
+    .description('Archive a done or cancelled Issue')
+    .argument('<issue-id>', 'Controller Issue ID')
+    .option('--repo <path>', 'Repository root')
+    .option('--json', 'Output JSON')
+    .action((issueId: string, opts: { repo?: string; json?: boolean }) => output(archiveIssue(repoRoot(opts.repo), issueId), opts.json === true));
+
+  command.command('restore')
+    .description('Restore an archived Issue')
+    .argument('<issue-id>', 'Controller Issue ID')
+    .option('--repo <path>', 'Repository root')
+    .option('--json', 'Output JSON')
+    .action((issueId: string, opts: { repo?: string; json?: boolean }) => output(restoreIssue(repoRoot(opts.repo), issueId), opts.json === true));
+
+  command.command('policy')
+    .description('Read or update Controller execution policy')
+    .option('--repo <path>', 'Repository root')
+    .option('--issue-creation-mode <mode>', 'open, focus_only, or paused')
+    .option('--json', 'Output JSON')
+    .action((opts: { repo?: string; issueCreationMode?: string; json?: boolean }) => {
+      const root = repoRoot(opts.repo);
+      const mode = opts.issueCreationMode;
+      if (mode && !['open', 'focus_only', 'paused'].includes(mode)) throw new Error('issue creation mode must be open, focus_only, or paused');
+      const result = mode ? saveControllerProjectState(root, { issueCreationMode: mode as 'open' | 'focus_only' | 'paused' }, 'controller-cli') : loadControllerProjectState(root);
+      output(result, opts.json === true);
+    });
+
+  command.command('timeline')
+    .description('Show the unified controller worklog and Run timeline')
+    .option('--repo <path>', 'Repository root')
+    .option('--issue <id>', 'Filter by Issue ID')
+    .option('--task <id>', 'Filter by Task ID')
+    .option('--run <id>', 'Filter by Run ID')
+    .option('--category <name>', 'Filter by category')
+    .option('--limit <count>', 'Maximum events', '100')
+    .option('--json', 'Output JSON')
+    .action((opts: { repo?: string; issue?: string; task?: string; run?: string; category?: string; limit?: string; json?: boolean }) => {
+      const events = getControllerTimeline(repoRoot(opts.repo), {
+        issueId: opts.issue,
+        taskId: opts.task,
+        runId: opts.run,
+        category: parseWorklogCategory(opts.category),
+        limit: Math.max(1, Number(opts.limit ?? 100)),
+      });
+      if (opts.json) return output({ events }, true);
+      output(events.map((event) => `${event.at}  ${event.category}/${event.action}  ${[event.issueId, event.taskId, event.runId].filter(Boolean).join('/')}
+  ${event.summary}`).join('\n'));
+    });
+
+  command.command('export-worklog')
+    .description('Export the controller worklog to a tracked Markdown or JSON report')
+    .option('--repo <path>', 'Repository root')
+    .option('--format <format>', 'markdown or json', 'markdown')
+    .option('--output <path>', 'Repository-relative output path')
+    .option('--issue <id>', 'Filter by Issue ID')
+    .option('--task <id>', 'Filter by Task ID')
+    .option('--run <id>', 'Filter by Run ID')
+    .option('--json', 'Output command result as JSON')
+    .action((opts: { repo?: string; format?: string; output?: string; issue?: string; task?: string; run?: string; json?: boolean }) => {
+      const result = exportControllerWorklog(repoRoot(opts.repo), {
+        format: opts.format === 'json' ? 'json' : 'markdown',
+        outputPath: opts.output,
+        filter: { issueId: opts.issue, taskId: opts.task, runId: opts.run },
+      });
+      output(opts.json ? result : `Exported ${result.eventCount} events to ${result.path}`, opts.json === true);
+    });
+
+  const githubPlugin = command.command('github')
+    .description('Configure and use the optional GitHub Issue/Project plugin');
+
+  githubPlugin.command('status')
+    .option('--repo <path>', 'Repository root')
+    .option('--json', 'Output JSON')
+    .action((opts: { repo?: string; json?: boolean }) => output(getGitHubPluginStatus(repoRoot(opts.repo)), opts.json === true));
+
+  githubPlugin.command('configure')
+    .option('--repo <path>', 'Repository root')
+    .option('--enable', 'Enable the plugin')
+    .option('--disable', 'Disable the plugin')
+    .option('--github-repo <owner/repo>', 'Explicit GitHub repository')
+    .option('--clear-repository', 'Clear the configured GitHub repository')
+    .option('--sync-mode <mode>', 'manual or checkpoint')
+    .option('--include-tasks', 'Mirror Tasks as GitHub sub-issues')
+    .option('--exclude-tasks', 'Do not mirror Tasks')
+    .option('--project-owner <owner>', 'GitHub Project owner')
+    .option('--project-number <number>', 'GitHub Project number')
+    .option('--clear-project', 'Clear GitHub Project owner and number')
+    .option('--json', 'Output JSON')
+    .action((opts: { repo?: string; enable?: boolean; disable?: boolean; githubRepo?: string; clearRepository?: boolean; syncMode?: string; includeTasks?: boolean; excludeTasks?: boolean; projectOwner?: string; projectNumber?: string; clearProject?: boolean; json?: boolean }) => {
+      if (opts.enable && opts.disable) throw new Error('choose either --enable or --disable');
+      if (opts.includeTasks && opts.excludeTasks) throw new Error('choose either --include-tasks or --exclude-tasks');
+      const config = saveGitHubPluginConfig(repoRoot(opts.repo), {
+        enabled: opts.enable ? true : opts.disable ? false : undefined,
+        repository: opts.clearRepository ? '' : opts.githubRepo,
+        syncMode: opts.syncMode === 'checkpoint' ? 'checkpoint' : opts.syncMode === 'manual' ? 'manual' : undefined,
+        includeTasks: opts.includeTasks ? true : opts.excludeTasks ? false : undefined,
+        projectOwner: opts.clearProject ? '' : opts.projectOwner,
+        projectNumber: opts.clearProject ? null : opts.projectNumber ? Number(opts.projectNumber) : undefined,
+      });
+      output(config, opts.json === true);
+    });
+
+  githubPlugin.command('publish')
+    .argument('<issue-id>', 'Controller Issue ID')
+    .option('--repo <path>', 'Repository root')
+    .option('--json', 'Output JSON')
+    .action((issueId: string, opts: { repo?: string; json?: boolean }) => output(publishIssueWithGitHubPlugin(repoRoot(opts.repo), issueId), opts.json === true));
+
+  githubPlugin.command('refresh')
+    .argument('<issue-id>', 'Controller Issue ID')
+    .option('--repo <path>', 'Repository root')
+    .option('--json', 'Output JSON')
+    .action((issueId: string, opts: { repo?: string; json?: boolean }) => output(refreshIssueWithGitHubPlugin(repoRoot(opts.repo), issueId), opts.json === true));
+
+  githubPlugin.command('close')
+    .argument('<issue-id>', 'Controller Issue ID')
+    .option('--repo <path>', 'Repository root')
+    .option('--json', 'Output JSON')
+    .action((issueId: string, opts: { repo?: string; json?: boolean }) => output(closeIssueWithGitHubPlugin(repoRoot(opts.repo), issueId), opts.json === true));
+
   command.command('github-status')
     .description('Check gh authentication, repository resolution, Projects access prerequisites, and Copilot agent-task CLI support')
     .option('--repo <path>', 'Repository root')
     .option('--github-repo <owner/repo>', 'Explicit GitHub repository')
+    .option('--clear-repository', 'Clear the configured GitHub repository')
     .option('--json', 'Output JSON')
     .action((opts: { repo?: string; githubRepo?: string; json?: boolean }) => {
       output(getGitHubStatus(repoRoot(opts.repo), opts.githubRepo), opts.json === true);

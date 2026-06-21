@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
-import { isIP } from 'net';
-import { dirname, join, relative } from 'path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { isIP } from "net";
+import { dirname, join, relative } from "path";
 import {
   ensureMcpBearerToken,
   ensureMcpOAuthPassphrase,
@@ -9,95 +9,131 @@ import {
   mcpOAuthPath,
   mcpRuntimeStatePath,
   mcpTokenPath,
-} from './auth';
-import { resolveMcpRepoRoot } from './repo';
-import { CONTROLLER_TOOL_SURFACE, DEFAULT_AGENT_TIMEOUT_MS, MAX_AGENT_TIMEOUT_MS } from '../controller/runtime-config';
+} from "./auth";
+import { resolveMcpRepoRoot } from "./repo";
+import {
+  CONTROLLER_TOOL_SURFACE,
+  DEFAULT_AGENT_TIMEOUT_MS,
+  MAX_AGENT_TIMEOUT_MS,
+} from "../controller/runtime-config";
 
 export interface McpSetupResult {
-  status: 'ok';
+  status: "ok";
   repoRoot: string;
   changed: string[];
   lines: string[];
 }
 
 const REQUIRED_CODEX_TOOLS = [
-  'harness_status',
-  'read_workflow_file',
-  'latest_handoff',
-  'latest_checks',
-  'prepare_codex_goal_from_sprint',
-  'write_codex_goal',
-  'run_workflow_check',
+  "harness_status",
+  "read_workflow_file",
+  "latest_handoff",
+  "latest_checks",
+  "prepare_codex_goal_from_sprint",
+  "write_codex_goal",
+  "run_workflow_check",
 ];
 
-const CHATGPT_MCP_ENDPOINT_PLACEHOLDER = '<https-tunnel-url>/mcp';
-const CHATGPT_NAMED_TUNNEL_HOST_PLACEHOLDER = '<named-tunnel-host>';
-const DEFAULT_CHATGPT_MCP_SERVER_NAME = 'repo-harness-controller-v2';
-const LEGACY_DEFAULT_SERVER_NAMES = new Set(['repo-harness', 'repo-harness-controller-v1']);
-const ENDPOINT_ERROR = 'expected a public HTTPS URL exactly ending in /mcp with no username, password, query, or fragment';
-const SERVER_NAME_ERROR = 'expected a ChatGPT MCP server name using 1-80 letters, numbers, spaces, dots, underscores, or hyphens';
+const CHATGPT_MCP_ENDPOINT_PLACEHOLDER = "<https-tunnel-url>/mcp";
+const CHATGPT_NAMED_TUNNEL_HOST_PLACEHOLDER = "<named-tunnel-host>";
+const DEFAULT_CHATGPT_MCP_SERVER_NAME = "repo-harness-controller-v6";
+const LEGACY_DEFAULT_SERVER_NAMES = new Set([
+  "repo-harness",
+  "repo-harness-controller-v1",
+  "repo-harness-controller-v2",
+  "repo-harness-controller-v3",
+  "repo-harness-controller-v4",
+  "repo-harness-controller-v5",
+]);
+const ENDPOINT_ERROR =
+  "expected a public HTTPS URL exactly ending in /mcp with no username, password, query, or fragment";
+const SERVER_NAME_ERROR =
+  "expected a ChatGPT MCP server name using 1-80 letters, numbers, spaces, dots, underscores, or hyphens";
 
-function writeFileIfChanged(path: string, content: string, changed: string[]): void {
-  if (existsSync(path) && readFileSync(path, 'utf-8') === content) return;
+function writeFileIfChanged(
+  path: string,
+  content: string,
+  changed: string[],
+): void {
+  if (existsSync(path) && readFileSync(path, "utf-8") === content) return;
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, content, 'utf-8');
+  writeFileSync(path, content, "utf-8");
   changed.push(path);
 }
 
-function ensureGitignoreEntries(repoRoot: string, entries: string[], changed: string[]): void {
-  const path = join(repoRoot, '.gitignore');
-  const current = existsSync(path) ? readFileSync(path, 'utf-8') : '';
+function ensureGitignoreEntries(
+  repoRoot: string,
+  entries: string[],
+  changed: string[],
+): void {
+  const path = join(repoRoot, ".gitignore");
+  const current = existsSync(path) ? readFileSync(path, "utf-8") : "";
   const lines = current.split(/\r?\n/);
   let next = current.trimEnd();
   for (const entry of entries) {
     if (lines.includes(entry)) continue;
-    next += `${next.length > 0 ? '\n' : ''}${entry}`;
+    next += `${next.length > 0 ? "\n" : ""}${entry}`;
   }
-  next += '\n';
+  next += "\n";
   writeFileIfChanged(path, next, changed);
 }
 
 function isPrivateOrLocalIPv4(hostname: string): boolean {
-  const parts = hostname.split('.').map((part) => Number(part));
-  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return true;
+  const parts = hostname.split(".").map((part) => Number(part));
+  if (
+    parts.length !== 4 ||
+    parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)
+  )
+    return true;
   const [a, b] = parts;
-  return a === 0 ||
+  return (
+    a === 0 ||
     a === 10 ||
     a === 127 ||
-    a === 169 && b === 254 ||
-    a === 172 && b >= 16 && b <= 31 ||
-    a === 192 && b === 168 ||
-    a === 100 && b >= 64 && b <= 127 ||
-    a === 192 && b === 0 ||
-    a === 198 && (b === 18 || b === 19) ||
-    a >= 224;
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 192 && b === 0) ||
+    (a === 198 && (b === 18 || b === 19)) ||
+    a >= 224
+  );
 }
 
 function isPrivateOrLocalIPv6(hostname: string): boolean {
-  const normalized = hostname.replace(/^\[|\]$/g, '').toLowerCase();
-  return normalized === '::' ||
-    normalized === '::1' ||
-    normalized.startsWith('fc') ||
-    normalized.startsWith('fd') ||
-    normalized.startsWith('fe8') ||
-    normalized.startsWith('fe9') ||
-    normalized.startsWith('fea') ||
-    normalized.startsWith('feb');
+  const normalized = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  return (
+    normalized === "::" ||
+    normalized === "::1" ||
+    normalized.startsWith("fc") ||
+    normalized.startsWith("fd") ||
+    normalized.startsWith("fe8") ||
+    normalized.startsWith("fe9") ||
+    normalized.startsWith("fea") ||
+    normalized.startsWith("feb")
+  );
 }
 
 function isPrivateOrLocalHost(hostname: string): boolean {
-  const normalized = hostname.toLowerCase().replace(/\.$/, '');
-  if (!normalized || normalized === 'localhost' || normalized.endsWith('.localhost') || normalized.endsWith('.local')) {
+  const normalized = hostname.toLowerCase().replace(/\.$/, "");
+  if (
+    !normalized ||
+    normalized === "localhost" ||
+    normalized.endsWith(".localhost") ||
+    normalized.endsWith(".local")
+  ) {
     return true;
   }
-  const ipCandidate = normalized.replace(/^\[|\]$/g, '');
+  const ipCandidate = normalized.replace(/^\[|\]$/g, "");
   const ipVersion = isIP(ipCandidate);
   if (ipVersion === 4) return isPrivateOrLocalIPv4(ipCandidate);
   if (ipVersion === 6) return isPrivateOrLocalIPv6(ipCandidate);
   return false;
 }
 
-function normalizePublicMcpEndpoint(endpoint: string | undefined): string | undefined {
+function normalizePublicMcpEndpoint(
+  endpoint: string | undefined,
+): string | undefined {
   if (endpoint === undefined) return undefined;
   const trimmed = endpoint.trim();
   if (trimmed.length === 0) return undefined;
@@ -108,12 +144,12 @@ function normalizePublicMcpEndpoint(endpoint: string | undefined): string | unde
     throw new Error(`invalid --endpoint "${endpoint}" (${ENDPOINT_ERROR})`);
   }
   if (
-    parsed.protocol !== 'https:' ||
-    parsed.pathname !== '/mcp' ||
-    parsed.username !== '' ||
-    parsed.password !== '' ||
-    parsed.search !== '' ||
-    parsed.hash !== '' ||
+    parsed.protocol !== "https:" ||
+    parsed.pathname !== "/mcp" ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.search !== "" ||
+    parsed.hash !== "" ||
     isPrivateOrLocalHost(parsed.hostname)
   ) {
     throw new Error(`invalid --endpoint "${endpoint}" (${ENDPOINT_ERROR})`);
@@ -129,12 +165,16 @@ function normalizeChatgptMcpServerName(value: string | undefined): string {
     !/^[A-Za-z0-9][A-Za-z0-9._ -]*$/.test(trimmed) ||
     / {2,}/.test(trimmed)
   ) {
-    throw new Error(`invalid --server-name "${value ?? ''}" (${SERVER_NAME_ERROR})`);
+    throw new Error(
+      `invalid --server-name "${value ?? ""}" (${SERVER_NAME_ERROR})`,
+    );
   }
   return trimmed;
 }
 
-export function chatgptGuideMarkdown(endpoint = CHATGPT_MCP_ENDPOINT_PLACEHOLDER): string {
+export function chatgptGuideMarkdown(
+  endpoint = CHATGPT_MCP_ENDPOINT_PLACEHOLDER,
+): string {
   return `# repo-harness ChatGPT Controller Setup
 
 ## Purpose
@@ -323,20 +363,31 @@ The executor profile remains read-oriented. Controller-dispatched Codex work is 
 `;
 }
 
-export function runMcpSetupChatgpt(opts: { repo?: string; host?: string; port?: string; endpoint?: string; serverName?: string }): McpSetupResult {
-  const repoRoot = resolveMcpRepoRoot(opts.repo ?? '.');
+export function runMcpSetupChatgpt(opts: {
+  repo?: string;
+  host?: string;
+  port?: string;
+  endpoint?: string;
+  serverName?: string;
+}): McpSetupResult {
+  const repoRoot = resolveMcpRepoRoot(opts.repo ?? ".");
   const changed: string[] = [];
   const existingConfig = loadMcpLocalConfig(repoRoot);
-  const host = opts.host ?? existingConfig?.server?.host ?? '127.0.0.1';
+  const host = opts.host ?? existingConfig?.server?.host ?? "127.0.0.1";
   const port = opts.port ?? String(existingConfig?.server?.port ?? 8765);
   const existingServerName = existingConfig?.chatgpt?.serverName;
-  const migratedServerName = existingServerName && !LEGACY_DEFAULT_SERVER_NAMES.has(existingServerName)
-    ? existingServerName
-    : undefined;
-  const serverName = normalizeChatgptMcpServerName(opts.serverName ?? migratedServerName);
-  const endpoint = normalizePublicMcpEndpoint(opts.endpoint ?? existingConfig?.chatgpt?.endpoint);
-  const configPath = join(repoRoot, '.repo-harness', 'mcp.local.json');
-  const guidePath = join(repoRoot, 'docs', 'repo-harness-chatgpt-mcp-setup.md');
+  const migratedServerName =
+    existingServerName && !LEGACY_DEFAULT_SERVER_NAMES.has(existingServerName)
+      ? existingServerName
+      : undefined;
+  const serverName = normalizeChatgptMcpServerName(
+    opts.serverName ?? migratedServerName,
+  );
+  const endpoint = normalizePublicMcpEndpoint(
+    opts.endpoint ?? existingConfig?.chatgpt?.endpoint,
+  );
+  const configPath = join(repoRoot, ".repo-harness", "mcp.local.json");
+  const guidePath = join(repoRoot, "docs", "repo-harness-chatgpt-mcp-setup.md");
   const token = ensureMcpBearerToken(repoRoot);
   const oauth = ensureMcpOAuthPassphrase(repoRoot);
   if (token.changed) changed.push(token.path);
@@ -344,56 +395,77 @@ export function runMcpSetupChatgpt(opts: { repo?: string; host?: string; port?: 
   const config = {
     version: 1,
     repo: repoRoot,
-    server: { ...existingConfig?.server, host, port: Number(port), transport: existingConfig?.server?.transport ?? 'http' },
-    auth: existingConfig?.auth ?? { mode: 'oauth', oauthFile: '.repo-harness/mcp.oauth.json', tokenFile: '.repo-harness/mcp.tokens.json' },
+    server: {
+      ...existingConfig?.server,
+      host,
+      port: Number(port),
+      transport: existingConfig?.server?.transport ?? "http",
+    },
+    auth: existingConfig?.auth ?? {
+      mode: "oauth",
+      oauthFile: ".repo-harness/mcp.oauth.json",
+      tokenFile: ".repo-harness/mcp.tokens.json",
+    },
     chatgpt: {
       ...existingConfig?.chatgpt,
       serverName,
       ...(endpoint ? { endpoint } : {}),
     },
-    profile: existingConfig?.profile ?? 'controller',
+    profile: existingConfig?.profile ?? "controller",
     localController: existingConfig?.localController ?? {
       enabled: true,
-      host: '127.0.0.1',
+      host: "127.0.0.1",
       port: 8766,
       autoOpen: false,
     },
     devMode: {
       ...existingConfig?.devMode,
       agentRunner: existingConfig?.devMode?.agentRunner ?? true,
-      allowedAgents: existingConfig?.devMode?.allowedAgents ?? ['codex'],
-      timeoutMs: !existingConfig?.devMode?.timeoutMs || existingConfig.devMode.timeoutMs === 120_000
-        ? DEFAULT_AGENT_TIMEOUT_MS
-        : existingConfig.devMode.timeoutMs,
-      maxTimeoutMs: existingConfig?.devMode?.maxTimeoutMs ?? MAX_AGENT_TIMEOUT_MS,
+      allowedAgents: existingConfig?.devMode?.allowedAgents ?? ["codex"],
+      timeoutMs:
+        !existingConfig?.devMode?.timeoutMs ||
+        existingConfig.devMode.timeoutMs === 120_000
+          ? DEFAULT_AGENT_TIMEOUT_MS
+          : existingConfig.devMode.timeoutMs,
+      maxTimeoutMs:
+        existingConfig?.devMode?.maxTimeoutMs ?? MAX_AGENT_TIMEOUT_MS,
     },
   };
-  writeFileIfChanged(configPath, `${JSON.stringify(config, null, 2)}\n`, changed);
+  writeFileIfChanged(
+    configPath,
+    `${JSON.stringify(config, null, 2)}\n`,
+    changed,
+  );
   writeFileIfChanged(guidePath, chatgptGuideMarkdown(), changed);
-  ensureGitignoreEntries(repoRoot, [
-    '.repo-harness/mcp.local.json',
-    '.repo-harness/mcp.tokens.json',
-    '.repo-harness/mcp.oauth.json',
-    '.repo-harness/mcp.oauth-tokens.json',
-    '.repo-harness/mcp.runtime.json',
-    '.ai/harness/mcp/audit.log',
-    '.ai/harness/local-jobs/',
-  ], changed);
+  ensureGitignoreEntries(
+    repoRoot,
+    [
+      ".repo-harness/mcp.local.json",
+      ".repo-harness/mcp.tokens.json",
+      ".repo-harness/mcp.oauth.json",
+      ".repo-harness/mcp.oauth-tokens.json",
+      ".repo-harness/mcp.runtime.json",
+      ".ai/harness/mcp/audit.log",
+      ".ai/harness/local-jobs/",
+      ".ai/harness/controller/",
+    ],
+    changed,
+  );
 
   return {
-    status: 'ok',
+    status: "ok",
     repoRoot,
     changed,
     lines: [
       `[repo-harness mcp] Repo: ${repoRoot}`,
-      '[repo-harness mcp] Profile: controller',
+      "[repo-harness mcp] Profile: controller",
       `[repo-harness mcp] ChatGPT MCP server name: ${serverName}`,
       `[repo-harness mcp] Local endpoint: http://${host}:${port}/mcp`,
       `[repo-harness mcp] Local Controller: http://${config.localController.host}:${config.localController.port}/`,
       `[repo-harness mcp] Local agent timeout: ${config.devMode.timeoutMs}ms (max ${config.devMode.maxTimeoutMs}ms)`,
       endpoint
         ? `[repo-harness mcp] ChatGPT endpoint: ${endpoint}`
-        : '[repo-harness mcp] ChatGPT endpoint: requires stable HTTPS tunnel',
+        : "[repo-harness mcp] ChatGPT endpoint: requires stable HTTPS tunnel",
       `[repo-harness mcp] Auth: OAuth passphrase (${relative(repoRoot, oauth.path)})`,
       `[repo-harness mcp] Bearer fallback token: ${relative(repoRoot, token.path)}`,
       `[repo-harness mcp] Config: ${relative(repoRoot, configPath)}`,
@@ -431,26 +503,37 @@ default_tools_approval_mode = "prompt"
 export function patchCodexConfigToml(current: string): string {
   const normalized = current.trimEnd();
   const blockPattern = /\n?\[mcp_servers\.repo_harness\][\s\S]*?(?=\n\[|$)/;
-  const prefix = normalized.length > 0 ? `${normalized}\n\n` : '';
+  const prefix = normalized.length > 0 ? `${normalized}\n\n` : "";
   if (!blockPattern.test(normalized)) return `${prefix}${CODEX_MCP_BLOCK}`;
   return `${normalized.replace(blockPattern, `\n${CODEX_MCP_BLOCK}`.trimEnd())}\n`;
 }
 
-export function runMcpSetupCodex(opts: { repo?: string; scope?: string; dryRun?: boolean }): McpSetupResult {
-  if ((opts.scope ?? 'project') !== 'project') {
-    throw new Error('repo-harness mcp setup codex currently supports --scope project only');
+export function runMcpSetupCodex(opts: {
+  repo?: string;
+  scope?: string;
+  dryRun?: boolean;
+}): McpSetupResult {
+  if ((opts.scope ?? "project") !== "project") {
+    throw new Error(
+      "repo-harness mcp setup codex currently supports --scope project only",
+    );
   }
-  const repoRoot = resolveMcpRepoRoot(opts.repo ?? '.');
-  const configPath = join(repoRoot, '.codex', 'config.toml');
+  const repoRoot = resolveMcpRepoRoot(opts.repo ?? ".");
+  const configPath = join(repoRoot, ".codex", "config.toml");
   const changed: string[] = [];
-  const current = existsSync(configPath) ? readFileSync(configPath, 'utf-8') : '';
+  const current = existsSync(configPath)
+    ? readFileSync(configPath, "utf-8")
+    : "";
   const next = patchCodexConfigToml(current);
   if (opts.dryRun === true) {
     return {
-      status: 'ok',
+      status: "ok",
       repoRoot,
       changed: [],
-      lines: [`[repo-harness mcp] Dry run: would patch ${relative(repoRoot, configPath)}`, next],
+      lines: [
+        `[repo-harness mcp] Dry run: would patch ${relative(repoRoot, configPath)}`,
+        next,
+      ],
     };
   }
   if (existsSync(configPath) && current !== next) {
@@ -459,13 +542,13 @@ export function runMcpSetupCodex(opts: { repo?: string; scope?: string; dryRun?:
   }
   writeFileIfChanged(configPath, next, changed);
   return {
-    status: 'ok',
+    status: "ok",
     repoRoot,
     changed,
     lines: [
       `[repo-harness mcp] Codex config: ${relative(repoRoot, configPath)}`,
-      '[repo-harness mcp] Server: repo_harness',
-      '[repo-harness mcp] Transport: stdio',
+      "[repo-harness mcp] Server: repo_harness",
+      "[repo-harness mcp] Transport: stdio",
     ],
   };
 }
@@ -551,98 +634,152 @@ For a small fix, use \`begin_edit_session\`, \`apply_patch\`, \`get_git_diff\`, 
 When a repository still requires the older handoff, preserve idea -> PRD -> checklist Sprint -> Codex Goal. Do not mix that large goal handoff with controller Task Runs for the same implementation slice.
 `;
 
-export function runMcpInstallSkill(opts: { repo?: string; overwrite?: boolean; dryRun?: boolean }): McpSetupResult {
-  const repoRoot = resolveMcpRepoRoot(opts.repo ?? '.');
+export function runMcpInstallSkill(opts: {
+  repo?: string;
+  overwrite?: boolean;
+  dryRun?: boolean;
+}): McpSetupResult {
+  const repoRoot = resolveMcpRepoRoot(opts.repo ?? ".");
   const changed: string[] = [];
-  const skillRoot = join(repoRoot, '.agents', 'skills', 'repo-harness-chatgpt-bridge');
-  const skillPath = join(skillRoot, 'SKILL.md');
+  const skillRoot = join(
+    repoRoot,
+    ".agents",
+    "skills",
+    "repo-harness-chatgpt-bridge",
+  );
+  const skillPath = join(skillRoot, "SKILL.md");
   if (existsSync(skillPath) && opts.overwrite !== true) {
     return {
-      status: 'ok',
+      status: "ok",
       repoRoot,
       changed,
-      lines: [`[repo-harness mcp] Skill already exists: ${relative(repoRoot, skillPath)}`, '[repo-harness mcp] Use --overwrite to replace it.'],
+      lines: [
+        `[repo-harness mcp] Skill already exists: ${relative(repoRoot, skillPath)}`,
+        "[repo-harness mcp] Use --overwrite to replace it.",
+      ],
     };
   }
   if (opts.dryRun === true) {
     return {
-      status: 'ok',
+      status: "ok",
       repoRoot,
       changed,
-      lines: [`[repo-harness mcp] Dry run: would install ${relative(repoRoot, skillRoot)}`],
+      lines: [
+        `[repo-harness mcp] Dry run: would install ${relative(repoRoot, skillRoot)}`,
+      ],
     };
   }
-  writeFileIfChanged(join(skillRoot, 'SKILL.md'), SKILL_MD, changed);
-  writeFileIfChanged(join(skillRoot, 'references', 'workflow.md'), SKILL_WORKFLOW_MD, changed);
-  writeFileIfChanged(join(skillRoot, 'references', 'chatgpt-connector-manual.md'), chatgptGuideMarkdown(), changed);
-  return {
-    status: 'ok',
-    repoRoot,
+  writeFileIfChanged(join(skillRoot, "SKILL.md"), SKILL_MD, changed);
+  writeFileIfChanged(
+    join(skillRoot, "references", "workflow.md"),
+    SKILL_WORKFLOW_MD,
     changed,
-    lines: [`[repo-harness mcp] Skill installed: ${relative(repoRoot, skillRoot)}`],
-  };
-}
-
-export function runMcpPrintGuide(opts: { repo?: string; endpoint?: string; write?: boolean }): McpSetupResult {
-  const repoRoot = resolveMcpRepoRoot(opts.repo ?? '.');
-  const changed: string[] = [];
-  const endpoint = normalizePublicMcpEndpoint(opts.endpoint);
-  const content = chatgptGuideMarkdown(opts.write === true ? undefined : endpoint);
-  if (opts.write === true) {
-    writeFileIfChanged(join(repoRoot, 'docs', 'repo-harness-chatgpt-mcp-setup.md'), chatgptGuideMarkdown(), changed);
-  }
+  );
+  writeFileIfChanged(
+    join(skillRoot, "references", "chatgpt-connector-manual.md"),
+    chatgptGuideMarkdown(),
+    changed,
+  );
   return {
-    status: 'ok',
+    status: "ok",
     repoRoot,
     changed,
     lines: [
-      content.trimEnd(),
-      ...(opts.write === true && endpoint ? ['', `[repo-harness mcp] ChatGPT endpoint for this session: ${endpoint}`] : []),
+      `[repo-harness mcp] Skill installed: ${relative(repoRoot, skillRoot)}`,
     ],
   };
 }
 
-export function runMcpDoctor(opts: { repo?: string; json?: boolean }): McpSetupResult {
-  const repoRoot = resolveMcpRepoRoot(opts.repo ?? '.');
+export function runMcpPrintGuide(opts: {
+  repo?: string;
+  endpoint?: string;
+  write?: boolean;
+}): McpSetupResult {
+  const repoRoot = resolveMcpRepoRoot(opts.repo ?? ".");
+  const changed: string[] = [];
+  const endpoint = normalizePublicMcpEndpoint(opts.endpoint);
+  const content = chatgptGuideMarkdown(
+    opts.write === true ? undefined : endpoint,
+  );
+  if (opts.write === true) {
+    writeFileIfChanged(
+      join(repoRoot, "docs", "repo-harness-chatgpt-mcp-setup.md"),
+      chatgptGuideMarkdown(),
+      changed,
+    );
+  }
+  return {
+    status: "ok",
+    repoRoot,
+    changed,
+    lines: [
+      content.trimEnd(),
+      ...(opts.write === true && endpoint
+        ? [
+            "",
+            `[repo-harness mcp] ChatGPT endpoint for this session: ${endpoint}`,
+          ]
+        : []),
+    ],
+  };
+}
+
+export function runMcpDoctor(opts: {
+  repo?: string;
+  json?: boolean;
+}): McpSetupResult {
+  const repoRoot = resolveMcpRepoRoot(opts.repo ?? ".");
   const localConfig = loadMcpLocalConfig(repoRoot);
   const runtimeState = loadMcpRuntimeState(repoRoot);
   const configuredServerName = localConfig?.chatgpt?.serverName;
-  const host = localConfig?.server?.host ?? '127.0.0.1';
+  const host = localConfig?.server?.host ?? "127.0.0.1";
   const port = localConfig?.server?.port ?? 8765;
-  const authMode = localConfig?.auth?.mode ?? 'missing';
-  const codexConfigPath = join(repoRoot, '.codex', 'config.toml');
-  const codexConfig = existsSync(codexConfigPath) ? readFileSync(codexConfigPath, 'utf-8') : '';
-  const codexHasServer = codexConfig.includes('[mcp_servers.repo_harness]');
-  const missingTools = REQUIRED_CODEX_TOOLS.filter((tool) => !codexConfig.includes(`"${tool}"`));
-  const codexCommand = Bun.which('codex');
+  const authMode = localConfig?.auth?.mode ?? "missing";
+  const codexConfigPath = join(repoRoot, ".codex", "config.toml");
+  const codexConfig = existsSync(codexConfigPath)
+    ? readFileSync(codexConfigPath, "utf-8")
+    : "";
+  const codexHasServer = codexConfig.includes("[mcp_servers.repo_harness]");
+  const missingTools = REQUIRED_CODEX_TOOLS.filter(
+    (tool) => !codexConfig.includes(`"${tool}"`),
+  );
+  const codexCommand = Bun.which("codex");
   const report = {
-    status: existsSync(join(repoRoot, '.ai', 'harness', 'policy.json')) ? 'ready_local' : 'not_adopted',
+    status: existsSync(join(repoRoot, ".ai", "harness", "policy.json"))
+      ? "ready_local"
+      : "not_adopted",
     repo: repoRoot,
     mcp: {
-      localConfig: existsSync(join(repoRoot, '.repo-harness', 'mcp.local.json')),
-      guide: existsSync(join(repoRoot, 'docs', 'repo-harness-chatgpt-mcp-setup.md')),
-      authConfigured: (authMode === 'oauth' && existsSync(mcpOAuthPath(repoRoot))) ||
-        (authMode === 'bearer' && existsSync(mcpTokenPath(repoRoot))),
+      localConfig: existsSync(
+        join(repoRoot, ".repo-harness", "mcp.local.json"),
+      ),
+      guide: existsSync(
+        join(repoRoot, "docs", "repo-harness-chatgpt-mcp-setup.md"),
+      ),
+      authConfigured:
+        (authMode === "oauth" && existsSync(mcpOAuthPath(repoRoot))) ||
+        (authMode === "bearer" && existsSync(mcpTokenPath(repoRoot))),
       localController: {
         enabled: localConfig?.localController?.enabled ?? true,
-        host: localConfig?.localController?.host ?? '127.0.0.1',
+        host: localConfig?.localController?.host ?? "127.0.0.1",
         port: localConfig?.localController?.port ?? 8766,
         autoOpen: localConfig?.localController?.autoOpen ?? false,
       },
       devMode: {
         agentRunner: localConfig?.devMode?.agentRunner === true,
-        allowedAgents: localConfig?.devMode?.allowedAgents ?? ['codex'],
+        allowedAgents: localConfig?.devMode?.allowedAgents ?? ["codex"],
         timeoutMs: localConfig?.devMode?.timeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS,
-        maxTimeoutMs: localConfig?.devMode?.maxTimeoutMs ?? MAX_AGENT_TIMEOUT_MS,
+        maxTimeoutMs:
+          localConfig?.devMode?.maxTimeoutMs ?? MAX_AGENT_TIMEOUT_MS,
       },
     },
     codex: {
       cliAvailable: codexCommand !== null,
       configured: codexHasServer && missingTools.length === 0,
-      configPath: '.codex/config.toml',
+      configPath: ".codex/config.toml",
       hasServer: codexHasServer,
       missingTools,
-      fix: 'repo-harness mcp setup codex --repo . --scope project',
+      fix: "repo-harness mcp setup codex --repo . --scope project",
     },
     chatgpt: {
       ...(configuredServerName ? { serverName: configuredServerName } : {}),
@@ -650,57 +787,64 @@ export function runMcpDoctor(opts: { repo?: string; json?: boolean }): McpSetupR
       defaultServerName: DEFAULT_CHATGPT_MCP_SERVER_NAME,
       expectedToolSurface: CONTROLLER_TOOL_SURFACE,
       localEndpoint: `http://${host}:${port}/mcp`,
-      localController: `http://${localConfig?.localController?.host ?? '127.0.0.1'}:${localConfig?.localController?.port ?? 8766}/`,
+      localController: `http://${localConfig?.localController?.host ?? "127.0.0.1"}:${localConfig?.localController?.port ?? 8766}/`,
       publicEndpoint: localConfig?.chatgpt?.endpoint,
       authMode,
       manualStepsRequired: true,
-      setup: 'repo-harness mcp setup chatgpt --repo .',
+      setup: "repo-harness mcp setup chatgpt --repo .",
     },
-    runtime: runtimeState ? {
-      status: runtimeState.status,
-      tunnelMode: runtimeState.tunnelMode,
-      localHealthy: runtimeState.server.healthy,
-      localPid: runtimeState.server.pid,
-      localRestartCount: runtimeState.server.restartCount,
-      publicEndpoint: runtimeState.tunnel?.publicEndpoint,
-      publicHealthy: runtimeState.tunnel?.healthy,
-      tunnelPid: runtimeState.tunnel?.pid,
-      tunnelRestartCount: runtimeState.tunnel?.restartCount,
-      connectorNeedsReconnect: runtimeState.tunnel?.connectorNeedsReconnect === true,
-      updatedAt: runtimeState.updatedAt,
-    } : null,
+    runtime: runtimeState
+      ? {
+          status: runtimeState.status,
+          tunnelMode: runtimeState.tunnelMode,
+          localHealthy: runtimeState.server.healthy,
+          localPid: runtimeState.server.pid,
+          localRestartCount: runtimeState.server.restartCount,
+          publicEndpoint: runtimeState.tunnel?.publicEndpoint,
+          publicHealthy: runtimeState.tunnel?.healthy,
+          tunnelPid: runtimeState.tunnel?.pid,
+          tunnelRestartCount: runtimeState.tunnel?.restartCount,
+          connectorNeedsReconnect:
+            runtimeState.tunnel?.connectorNeedsReconnect === true,
+          updatedAt: runtimeState.updatedAt,
+        }
+      : null,
   };
   return {
-    status: 'ok',
+    status: "ok",
     repoRoot,
     changed: [],
-    lines: opts.json === true ? [JSON.stringify(report, null, 2)] : [
-      `[repo-harness mcp] Repo: ${repoRoot}`,
-      `[repo-harness mcp] Status: ${report.status}`,
-      `[repo-harness mcp] ChatGPT MCP server name: ${
-        configuredServerName ?? `missing (run setup; default is ${DEFAULT_CHATGPT_MCP_SERVER_NAME})`
-      }`,
-      `[repo-harness mcp] ChatGPT guide: ${report.mcp.guide ? 'present' : 'missing'}`,
-      `[repo-harness mcp] Local Controller: ${report.mcp.localController.enabled ? report.chatgpt.localController : 'disabled'}`,
-      `[repo-harness mcp] ChatGPT auth: ${report.mcp.authConfigured ? `${authMode} present` : 'missing'}`,
-      `[repo-harness mcp] Runtime: ${
-        report.runtime
-          ? `${report.runtime.status} (local=${report.runtime.localHealthy ? 'ok' : 'down'}${
-            report.runtime.tunnelMode !== 'none'
-              ? `, public=${report.runtime.publicHealthy ? 'ok' : 'down'} via ${report.runtime.tunnelMode}`
-              : ''
-          })`
-          : 'not running'
-      }`,
-      ...(
-        report.runtime?.connectorNeedsReconnect === true
-          ? ['[repo-harness mcp] Runtime note: public quick tunnel URL changed; update the ChatGPT connector or switch to a named tunnel']
-          : []
-      ),
-      `[repo-harness mcp] Dev runner: ${report.mcp.devMode.agentRunner ? `enabled (${report.mcp.devMode.allowedAgents.join(',')})` : 'disabled'}`,
-      `[repo-harness mcp] Codex config: ${report.codex.configured ? 'present' : 'missing'}`,
-      `[repo-harness mcp] Codex CLI: ${report.codex.cliAvailable ? 'present' : 'missing'}`,
-      `[repo-harness mcp] Next ChatGPT setup: ${report.chatgpt.setup}`,
-    ],
+    lines:
+      opts.json === true
+        ? [JSON.stringify(report, null, 2)]
+        : [
+            `[repo-harness mcp] Repo: ${repoRoot}`,
+            `[repo-harness mcp] Status: ${report.status}`,
+            `[repo-harness mcp] ChatGPT MCP server name: ${
+              configuredServerName ??
+              `missing (run setup; default is ${DEFAULT_CHATGPT_MCP_SERVER_NAME})`
+            }`,
+            `[repo-harness mcp] ChatGPT guide: ${report.mcp.guide ? "present" : "missing"}`,
+            `[repo-harness mcp] Local Controller: ${report.mcp.localController.enabled ? report.chatgpt.localController : "disabled"}`,
+            `[repo-harness mcp] ChatGPT auth: ${report.mcp.authConfigured ? `${authMode} present` : "missing"}`,
+            `[repo-harness mcp] Runtime: ${
+              report.runtime
+                ? `${report.runtime.status} (local=${report.runtime.localHealthy ? "ok" : "down"}${
+                    report.runtime.tunnelMode !== "none"
+                      ? `, public=${report.runtime.publicHealthy ? "ok" : "down"} via ${report.runtime.tunnelMode}`
+                      : ""
+                  })`
+                : "not running"
+            }`,
+            ...(report.runtime?.connectorNeedsReconnect === true
+              ? [
+                  "[repo-harness mcp] Runtime note: public quick tunnel URL changed; update the ChatGPT connector or switch to a named tunnel",
+                ]
+              : []),
+            `[repo-harness mcp] Dev runner: ${report.mcp.devMode.agentRunner ? `enabled (${report.mcp.devMode.allowedAgents.join(",")})` : "disabled"}`,
+            `[repo-harness mcp] Codex config: ${report.codex.configured ? "present" : "missing"}`,
+            `[repo-harness mcp] Codex CLI: ${report.codex.cliAvailable ? "present" : "missing"}`,
+            `[repo-harness mcp] Next ChatGPT setup: ${report.chatgpt.setup}`,
+          ],
   };
 }

@@ -1,6 +1,6 @@
 {
-  "version": "0.8.0",
-  "templateVersion": "0.8.0",
+  "version": "1.2.0",
+  "templateVersion": "1.2.0",
   "skillName": "repo-harness",
   "contractId": "tasks-first-harness-v1",
   "compatibility": {
@@ -155,6 +155,22 @@
     {
       "version": "0.8.0",
       "description": "Adds the Controller V2 tool surface, explicit long-running Agent timeout propagation, heartbeat and retry evidence, stale Connector diagnostics, and a visual Issue/Task/Run control plane."
+    },
+    {
+      "version": "0.9.0",
+      "description": "Adds the live Task workstation, structured Agent progress, automatic workspace/worktree placement, and automatic worktree integration and cleanup."
+    },
+    {
+      "version": "1.0.0",
+      "description": "Adds the V4 progress ledger, effective Task status, unified worklog timeline, exportable evidence reports, SSE dashboard updates, and optional GitHub Issue/Project plugin configuration."
+    },
+    {
+      "version": "1.1.0",
+      "description": "Adds the V5 execution-closure model with a single current Issue, creation-policy guardrails, governance diagnostics and reconciliation, retryable Run failures, evidence-gate progress, direct launch/verify/accept actions, and historical Issue archiving."
+    },
+    {
+      "version": "1.2.0",
+      "description": "Promotes bounded direct edits to a first-class workflow with request-mode assessment, persisted patch evidence, named-check verification, file-change dashboards, and Issue-free completion for known small changes."
     }
   ],
   "generatedProjectStamp": {

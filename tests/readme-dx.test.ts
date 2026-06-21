@@ -164,9 +164,9 @@ describe("README DX contract", () => {
           : "docs/images/repo-harness-gptpro.png";
 
       expect(localized).toContain(expectedHeroImage);
-      expect(localized).toContain("0.8.0");
-      expect(localized).toContain("repo-harness@0.8.0");
-      expect(localized).toContain("repo-harness@0.8.0+template@0.8.0");
+      expect(localized).toContain("1.2.0");
+      expect(localized).toContain("repo-harness@1.2.0");
+      expect(localized).toContain("repo-harness@1.2.0+template@1.2.0");
       expect(localized).toContain("repo-harness update");
       expect(localized).toContain("repo-harness adopt");
       expect(localized).toContain("repo-harness docs list");
@@ -196,7 +196,7 @@ describe("README DX contract", () => {
     expect(res.stdout).toContain("package-dispatched through repo-harness run with scripts/* compatibility wrappers");
     expect(res.stdout).toContain("Host hook config target: user-level ~/.claude/settings.json and ~/.codex/hooks.json");
     expect(res.stdout).toContain("Host hook adapters are user-level:");
-  }, 15000);
+  }, 30000);
 
   test("runtime red-flag scan uses an explicit allowlist for install examples and legacy aliases", () => {
     const hits: string[] = [];

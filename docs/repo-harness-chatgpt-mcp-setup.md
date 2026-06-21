@@ -9,7 +9,24 @@ Legacy `planner`, `executor`, and `orchestrator` profiles remain available for c
 
 ## Verify the loaded tool surface
 
-After connecting ChatGPT, call `controller_capabilities`. It should report `controller-local-execution-v2` and list the Issue Launcher, GitHub session, Run inspection, bounded edit, and Verification Gate tools. If ChatGPT only shows legacy planning tools, refresh or recreate the connector so it reloads the MCP tool schema.
+After connecting ChatGPT, call `controller_capabilities`. It should report `controller-direct-change-v6` and list request assessment, direct edit sessions, persisted patch inspection, named-check verification, Issue/Task execution, and optional GitHub tools. If ChatGPT only shows legacy planning tools, refresh or recreate the connector so it reloads the MCP tool schema.
+
+
+## Direct-change-first workflow
+
+For a known small documentation, configuration, or code change, do not create an Issue first. Use:
+
+```text
+assess_work_request
+-> read_repository_file
+-> begin_edit_session
+-> apply_patch
+-> get_edit_session_diff
+-> verify_edit_session
+-> finalize_edit_session
+```
+
+Use `create_issue` and Agent Runs only when the work needs investigation, dependencies, broad scope, parallel execution, long-running checks, or elevated risk. The local Controller **File Changes** view shows direct-edit files, the persisted patch, checks, finalization, and rollback history.
 
 ## Prerequisites
 
@@ -23,8 +40,8 @@ After connecting ChatGPT, call `controller_capabilities`. It should report `cont
 ## Install from an editable checkout
 
 ```bash
-git clone https://github.com/greysonOuyang/repo-harness-controller-runtime-v2-20260620.git ~/DevProjects/repo-harness-controller-runtime-v2-20260620
-cd ~/DevProjects/repo-harness-controller-runtime-v2-20260620
+git clone https://github.com/Ancienttwo/repo-harness.git ~/DevProjects/repo-harness
+cd ~/DevProjects/repo-harness
 bun install
 bun src/cli/index.ts install --target codex --no-hooks --no-external-skills --no-codegraph
 ```
@@ -42,7 +59,7 @@ repo-harness mcp setup codex --repo . --scope project
 Check GitHub integration when needed:
 
 ```bash
-repo-harness controller github-status --repo .
+repo-harness controller github status --repo .
 ```
 
 ## Start the Controller
@@ -56,7 +73,7 @@ repo-harness mcp keepalive --repo . \
   --tunnel quick
 ```
 
-The `controller` profile starts a localhost-only visual controller at `http://127.0.0.1:8766/` by default. It is separate from the public MCP tunnel. Use it to launch ready Tasks, create small Codex/Claude sessions, approve local Jobs, inspect live logs, and run named checks. Add `--open-local-ui` to open it automatically, or `--no-local-ui` to disable it.
+The `controller` profile starts a localhost-only V6 direct-change and execution-closure controller at `http://127.0.0.1:8766/` by default. It is separate from the public MCP tunnel. Use it to inspect actual file changes and persisted patches, verify/finalize/rollback direct edits, inspect project progress and Task history, launch complex work, review worklog evidence, approve local Jobs, inspect live logs, run named checks, and configure the optional GitHub plugin. Add `--open-local-ui` to open it automatically, or `--no-local-ui` to disable it.
 
 `--enable-dev-runner` is required only for local Codex/Claude workers. GitHub Copilot cloud sessions use authenticated `gh` and do not require the local dev runner.
 

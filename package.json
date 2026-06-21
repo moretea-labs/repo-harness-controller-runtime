@@ -1,11 +1,11 @@
 {
   "name": "repo-harness",
-  "version": "0.8.0",
+  "version": "1.2.0",
   "description": "Installs, migrates, audits, and repairs repo-local agentic development harnesses",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/greysonOuyang/repo-harness-controller-runtime-v2-20260620.git"
+    "url": "git+https://github.com/Ancienttwo/repo-harness.git"
   },
   "type": "module",
   "files": [
@@ -18,6 +18,15 @@
     "docs/repo-harness-chatgpt-mcp-setup.md",
     "docs/repo-harness-github-issue-launcher.md",
     "docs/repo-harness-local-execution-bridge.md",
+    "docs/repo-harness-progress-ledger-v4.md",
+    "docs/repo-harness-v4-verification.md",
+    "docs/repo-harness-v4-file-manifest.sha256",
+    "docs/repo-harness-execution-closure-v5.md",
+    "docs/repo-harness-v5-verification.md",
+    "docs/repo-harness-v5-file-manifest.sha256",
+    "docs/repo-harness-direct-change-v6.md",
+    "docs/repo-harness-v6-verification.md",
+    "docs/repo-harness-v6-file-manifest.sha256",
     "README.zh-CN.md",
     "install.sh",
     "install.ps1",

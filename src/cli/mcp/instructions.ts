@@ -9,8 +9,9 @@ export function mcpServerInstructions(profile: McpProfileName): string {
   if (profile === 'controller') {
     return [
       ...common,
-      'Act as the project controller: inspect code and documents, maintain Issues and dependency-aware Tasks, run readiness previews, optionally publish to GitHub Issues/Projects, dispatch short local Runs or visible GitHub Copilot cloud sessions, and decide whether to verify, accept, retry, split, or block work.',
-      'Use direct edit sessions only for bounded changes. Bind edits to a purpose and narrow allowed paths, preserve SHA preconditions, inspect Git diff, run focused checks, and finalize or rollback the session.',
+      'Act as the project controller: inspect code and documents, choose the smallest valid work mode, execute bounded changes directly, and use durable Issues only for complex, investigative, dependency-aware, parallel, or long-running work.',
+      'Before creating an Issue for an ordinary change, assess whether the request is a bounded direct edit. Known small code, configuration, and documentation changes should use read_repository_file -> begin_edit_session -> apply_patch -> get_edit_session_diff -> verify_edit_session -> finalize_edit_session.',
+      'Bind direct edits to a purpose and narrow allowed paths, preserve SHA preconditions, persist the patch, run focused checks, and finalize or rollback the session. A created Issue is not a completed result.',
       'Do not dispatch one large Issue as one agent prompt. Prefer small Tasks with explicit acceptance criteria, path scope, dependencies, and checks. Never accept a Task until the Verification Gate records passing checks and criterion-level evidence.',
       'Do not commit, merge, push, alter credentials, or modify protected CI and lock files through controller tools.',
     ].join(' ');

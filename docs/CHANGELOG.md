@@ -4,6 +4,76 @@ All notable changes to this skill are documented here.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-06-21
+
+### Added
+
+- Added request-mode assessment that routes work to `direct_edit`, `quick_agent`, or `issue_task` before creating durable Issues.
+- Added first-class direct-edit session listing, persisted unified patches, real named-check verification, reviewer evidence, and finalization/rollback lifecycle.
+- Added a primary File Changes view and local APIs for reading edit details and patches, running verification, finalizing, and rolling back.
+- Added CLI and MCP surfaces for work assessment, edit-session history, patch inspection, verification, finalization, and rollback.
+- Added full-file SHA-256 to `read_repository_file`, including ranged reads, so bounded replacements can enforce stale-write preconditions.
+
+### Changed
+
+- Small known code, configuration, and documentation changes now default to direct edits instead of Issue creation.
+- `create_issue` is documented and instructed as the complex-work path for investigation, dependencies, broad scope, parallelism, long checks, or high risk.
+- Direct edits now require persisted patch evidence and verification before finalization; failed verification can be rerun or rolled back without losing history.
+- Unified worklog and Controller snapshots now include edit-session events and summaries alongside Issue/Task/Run evidence.
+- Versioned the Controller fingerprint as `controller-direct-change-v6`, the default Connector identity as `repo-harness-controller-v6`, the Controller schema as `8`, and the package/template line as `1.2.0`.
+
+## [1.1.0] - 2026-06-21
+
+### Added
+
+- Added a single current execution Issue and project-state policy (`open`, `focus_only`, or `paused`) so project-wide execution no longer mixes unrelated active Issues.
+- Added Issue-creation guardrails for duplicate titles, active-focus proliferation, explicit policy overrides, and automatic first-Issue focus.
+- Added project governance diagnostics and safe reconciliation for dead dependencies, stale superseded dependencies, retryable failed attempts, review/acceptance backlog, closeout drift, and archiving drift.
+- Added evidence-gate progress based on implementation, integration, named checks, acceptance criteria, and explicit human acceptance.
+- Added direct Controller actions to launch ready work, retry failed attempts, run declared named checks with explicit criterion confirmation, accept verified Tasks, request changes, cancel Tasks, repair dependencies, and archive/restore terminal Issues.
+- Added current-work versus archived-history separation while retaining the full Task, Run, Verification, GitHub, and worklog evidence chain.
+
+### Changed
+
+- Failed, unknown, or cancelled Runs now remain attempt history while the Task returns to a retryable state unless a real dependency or human decision blocks it.
+- Project-wide ready-task dispatch now requires an explicit or current Issue and no longer traverses every active Issue by default.
+- Readiness scoring can no longer report 100 when no Task is dispatchable.
+- `projectBoard.readyTasks` is scoped to the current execution Issue; archived Task counts are separated.
+- Versioned the Controller fingerprint as `controller-execution-closure-v5`, the default Connector identity as `repo-harness-controller-v5`, the Controller schema as `7`, and the package/template line as `1.1.0`.
+
+## [1.0.0] - 2026-06-21
+
+### Added
+
+- Added a project progress ledger that aggregates Issue, Task, Run, approval, verification, and GitHub synchronization state into one effective progress model.
+- Added durable controller worklog events under `.ai/harness/controller/worklog.jsonl`, unified Task timelines, evidence inspection, and Markdown/JSON export under `tasks/reports/`.
+- Added a V4 localhost control center with progress, Task detail, Run monitoring, worklog, approval, checks, and optional GitHub plugin views.
+- Added SSE dashboard refresh with polling fallback.
+- Added optional GitHub Issue/Project plugin configuration. Local controller files remain authoritative and synchronization is explicit.
+- Added MCP and CLI surfaces for project progress, Task detail, timeline inspection, worklog export, and GitHub plugin configuration.
+
+### Changed
+
+- Versioned the Controller fingerprint as `controller-progress-ledger-v4`, the default Connector identity as `repo-harness-controller-v4`, the controller schema as `6`, and the package line as `1.0.0`.
+- Task progress now uses effective status derived from durable Task state plus the latest associated Run, preventing stale Task labels from hiding active or failed execution.
+- GitHub integration is disabled by default and exposed as a plugin so local execution and evidence remain usable without GitHub.
+
+
+## [0.9.0] - 2026-06-20
+
+### Added
+
+- Added a redesigned localhost task workstation with overview, Task board, live Run monitoring, approvals, checks, activity timeline, console, diff, heartbeat, timing, and integration state.
+- Added structured Codex/Claude activity parsing so raw output is translated into inspecting, editing, testing, finalizing, waiting, completed, and failed phases.
+- Added automatic execution placement: the first local Task runs directly in the current workspace and concurrent Tasks receive isolated worktrees.
+- Added automatic post-success integration and cleanup for isolated worktree Runs, while preserving archived diff evidence and retaining conflicted worktrees for manual review.
+
+### Changed
+
+- Made omitted `isolate` mean automatic placement instead of forced worktree isolation. Explicit `false` now refuses to start when another local Run is active.
+- Kept Verification Gate mandatory after direct changes or automatic integration; worktree usage is now an execution-safety detail rather than an extra normal user step.
+- Versioned the Controller fingerprint as `controller-live-workspace-v3`, the default Connector identity as `repo-harness-controller-v3`, and the package line as `0.9.0`.
+
 ## [0.8.0] - 2026-06-20
 
 ### Added
@@ -85,7 +155,7 @@ All notable changes to this skill are documented here.
   Connector MCP setup without treating ChatGPT Pro as API quota.
 - Added `repo-harness-gptpro` / `repo-harness:gptpro` as the local consult
   skill for GPT Pro browser-session assistance, using `gptpro
-  consult/read/continue/open` language over the existing ChatGPT Web browser
+consult/read/continue/open` language over the existing ChatGPT Web browser
   session engine.
 
 ### Fixed
@@ -408,7 +478,7 @@ All notable changes to this skill are documented here.
 ### Added
 
 - Added a loop-engine evidence surface: `repo-harness-hook state-snapshot
-  --json`, an NL decision-table reference, route NL-vs-TS benchmark fixtures,
+--json`, an NL decision-table reference, route NL-vs-TS benchmark fixtures,
   and a cutover gate that keeps TypeScript routing authoritative unless
   measured evidence passes.
 - Added `scripts/architecture-queue.sh` plus

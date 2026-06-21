@@ -1,22 +1,27 @@
-import type { ControllerAgent, TaskRisk } from '../controller/types';
+import type { ControllerAgent, TaskRisk } from "../controller/types";
 
-export type LocalBridgeApproval = 'auto' | 'confirm' | 'manual-only';
+export type LocalBridgeApproval = "auto" | "confirm" | "manual-only";
+export type LocalExecutionPreference = "auto" | "workspace" | "worktree";
 export type LocalBridgeJobStatus =
-  | 'pending_approval'
-  | 'approved'
-  | 'running'
-  | 'dispatched'
-  | 'succeeded'
-  | 'failed'
-  | 'cancelled';
+  | "pending_approval"
+  | "approved"
+  | "running"
+  | "dispatched"
+  | "succeeded"
+  | "failed"
+  | "cancelled";
 
-export type LocalBridgeJobAction = 'launch-task' | 'quick-agent-session' | 'run-check';
+export type LocalBridgeJobAction =
+  | "launch-task"
+  | "quick-agent-session"
+  | "run-check";
 
 export interface LaunchTaskPayload {
   issueId: string;
   taskId: string;
   agent?: ControllerAgent;
   isolate?: boolean;
+  executionMode?: LocalExecutionPreference;
   timeoutMs?: number;
   githubRepo?: string;
   baseRef?: string;
@@ -33,8 +38,9 @@ export interface QuickAgentSessionPayload {
   checks?: string[];
   acceptanceCriteria?: string[];
   risk?: TaskRisk;
-  agent?: Exclude<ControllerAgent, 'github-copilot'>;
+  agent?: Exclude<ControllerAgent, "github-copilot">;
   isolate?: boolean;
+  executionMode?: LocalExecutionPreference;
   timeoutMs?: number;
 }
 
@@ -43,7 +49,10 @@ export interface RunCheckPayload {
   timeoutMs?: number;
 }
 
-export type LocalBridgeJobPayload = LaunchTaskPayload | QuickAgentSessionPayload | RunCheckPayload;
+export type LocalBridgeJobPayload =
+  | LaunchTaskPayload
+  | QuickAgentSessionPayload
+  | RunCheckPayload;
 
 export interface LocalBridgeJobRequest {
   action: LocalBridgeJobAction;
@@ -54,7 +63,14 @@ export interface LocalBridgeJobRequest {
 
 export interface LocalBridgeJobEvent {
   at: string;
-  type: 'job_created' | 'job_approved' | 'job_started' | 'job_dispatched' | 'job_succeeded' | 'job_failed' | 'job_cancelled';
+  type:
+    | "job_created"
+    | "job_approved"
+    | "job_started"
+    | "job_dispatched"
+    | "job_succeeded"
+    | "job_failed"
+    | "job_cancelled";
   message?: string;
   data?: Record<string, unknown>;
 }

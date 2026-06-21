@@ -1,7 +1,14 @@
-import { describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
-import { tmpdir } from 'os';
-import { join } from 'path';
+import { describe, expect, test } from "bun:test";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import {
   chatgptGuideMarkdown,
   patchCodexConfigToml,
@@ -10,340 +17,488 @@ import {
   runMcpPrintGuide,
   runMcpSetupChatgpt,
   runMcpSetupCodex,
-} from '../../src/cli/mcp/setup';
+} from "../../src/cli/mcp/setup";
 
 function withTmpRepo<T>(fn: (repoRoot: string) => T): T {
-  const repoRoot = mkdtempSync(join(tmpdir(), 'repo-harness-mcp-setup-'));
+  const repoRoot = mkdtempSync(join(tmpdir(), "repo-harness-mcp-setup-"));
   try {
-    mkdirSync(join(repoRoot, '.ai/harness'), { recursive: true });
-    writeFileSync(join(repoRoot, '.ai/harness/policy.json'), '{}\n');
+    mkdirSync(join(repoRoot, ".ai/harness"), { recursive: true });
+    writeFileSync(join(repoRoot, ".ai/harness/policy.json"), "{}\n");
     return fn(repoRoot);
   } finally {
     rmSync(repoRoot, { recursive: true, force: true });
   }
 }
 
-describe('mcp setup', () => {
-  test('generates ChatGPT local config, guide, and ignore entries', () => {
+describe("mcp setup", () => {
+  test("generates ChatGPT local config, guide, and ignore entries", () => {
     withTmpRepo((repoRoot) => {
       const result = runMcpSetupChatgpt({ repo: repoRoot });
       expect(result.changed.length).toBeGreaterThan(0);
-      expect(existsSync(join(repoRoot, '.repo-harness/mcp.local.json'))).toBe(true);
-      expect(existsSync(join(repoRoot, '.repo-harness/mcp.tokens.json'))).toBe(true);
-      expect(existsSync(join(repoRoot, '.repo-harness/mcp.oauth.json'))).toBe(true);
-      expect(existsSync(join(repoRoot, 'docs/repo-harness-chatgpt-mcp-setup.md'))).toBe(true);
-      const config = JSON.parse(readFileSync(join(repoRoot, '.repo-harness/mcp.local.json'), 'utf-8'));
+      expect(existsSync(join(repoRoot, ".repo-harness/mcp.local.json"))).toBe(
+        true,
+      );
+      expect(existsSync(join(repoRoot, ".repo-harness/mcp.tokens.json"))).toBe(
+        true,
+      );
+      expect(existsSync(join(repoRoot, ".repo-harness/mcp.oauth.json"))).toBe(
+        true,
+      );
+      expect(
+        existsSync(join(repoRoot, "docs/repo-harness-chatgpt-mcp-setup.md")),
+      ).toBe(true);
+      const config = JSON.parse(
+        readFileSync(join(repoRoot, ".repo-harness/mcp.local.json"), "utf-8"),
+      );
       expect(config.auth).toMatchObject({
-        mode: 'oauth',
-        oauthFile: '.repo-harness/mcp.oauth.json',
-        tokenFile: '.repo-harness/mcp.tokens.json',
+        mode: "oauth",
+        oauthFile: ".repo-harness/mcp.oauth.json",
+        tokenFile: ".repo-harness/mcp.tokens.json",
       });
-      expect(config.chatgpt.serverName).toBe('repo-harness-controller-v2');
-      expect(config.profile).toBe('controller');
+      expect(config.chatgpt.serverName).toBe("repo-harness-controller-v6");
+      expect(config.profile).toBe("controller");
       expect(config.localController).toEqual({
         enabled: true,
-        host: '127.0.0.1',
+        host: "127.0.0.1",
         port: 8766,
         autoOpen: false,
       });
       expect(config.devMode).toMatchObject({
         agentRunner: true,
-        allowedAgents: ['codex'],
+        allowedAgents: ["codex"],
         timeoutMs: 3_600_000,
         maxTimeoutMs: 43_200_000,
       });
-      const token = JSON.parse(readFileSync(join(repoRoot, '.repo-harness/mcp.tokens.json'), 'utf-8')).bearerToken;
-      expect(typeof token).toBe('string');
+      const token = JSON.parse(
+        readFileSync(join(repoRoot, ".repo-harness/mcp.tokens.json"), "utf-8"),
+      ).bearerToken;
+      expect(typeof token).toBe("string");
       expect(token.length).toBeGreaterThan(30);
-      const passphrase = JSON.parse(readFileSync(join(repoRoot, '.repo-harness/mcp.oauth.json'), 'utf-8')).passphrase;
-      expect(typeof passphrase).toBe('string');
+      const passphrase = JSON.parse(
+        readFileSync(join(repoRoot, ".repo-harness/mcp.oauth.json"), "utf-8"),
+      ).passphrase;
+      expect(typeof passphrase).toBe("string");
       expect(passphrase.length).toBeGreaterThan(20);
-      const ignore = readFileSync(join(repoRoot, '.gitignore'), 'utf-8');
-      expect(ignore).toContain('.repo-harness/mcp.local.json');
-      expect(ignore).toContain('.repo-harness/mcp.tokens.json');
-      expect(ignore).toContain('.repo-harness/mcp.oauth.json');
-      expect(ignore).toContain('.repo-harness/mcp.oauth-tokens.json');
-      expect(ignore).toContain('.repo-harness/mcp.runtime.json');
-      expect(ignore).toContain('.ai/harness/mcp/audit.log');
-      expect(ignore).toContain('.ai/harness/local-jobs/');
+      const ignore = readFileSync(join(repoRoot, ".gitignore"), "utf-8");
+      expect(ignore).toContain(".repo-harness/mcp.local.json");
+      expect(ignore).toContain(".repo-harness/mcp.tokens.json");
+      expect(ignore).toContain(".repo-harness/mcp.oauth.json");
+      expect(ignore).toContain(".repo-harness/mcp.oauth-tokens.json");
+      expect(ignore).toContain(".repo-harness/mcp.runtime.json");
+      expect(ignore).toContain(".ai/harness/mcp/audit.log");
+      expect(ignore).toContain(".ai/harness/local-jobs/");
 
-      const doctor = JSON.parse(runMcpDoctor({ repo: repoRoot, json: true }).lines[0]);
+      const doctor = JSON.parse(
+        runMcpDoctor({ repo: repoRoot, json: true }).lines[0],
+      );
       expect(doctor.mcp.authConfigured).toBe(true);
       expect(doctor.mcp.devMode.agentRunner).toBe(true);
-      expect(doctor.chatgpt.serverName).toBe('repo-harness-controller-v2');
-      expect(doctor.chatgpt.localEndpoint).toBe('http://127.0.0.1:8765/mcp');
-      expect(doctor.chatgpt.localController).toBe('http://127.0.0.1:8766/');
+      expect(doctor.chatgpt.serverName).toBe("repo-harness-controller-v6");
+      expect(doctor.chatgpt.localEndpoint).toBe("http://127.0.0.1:8765/mcp");
+      expect(doctor.chatgpt.localController).toBe("http://127.0.0.1:8766/");
       expect(doctor.mcp.localController.enabled).toBe(true);
     });
   });
 
-  test('migrates legacy connector identity and 120-second timeout defaults', () => {
+  test("migrates legacy connector identity and 120-second timeout defaults", () => {
     withTmpRepo((repoRoot) => {
-      mkdirSync(join(repoRoot, '.repo-harness'), { recursive: true });
-      writeFileSync(join(repoRoot, '.repo-harness/mcp.local.json'), `${JSON.stringify({
-        version: 1,
-        repo: repoRoot,
-        server: { host: '127.0.0.1', port: 8765, transport: 'http' },
-        chatgpt: { serverName: 'repo-harness' },
-        profile: 'controller',
-        devMode: { agentRunner: true, allowedAgents: ['codex'], timeoutMs: 120000 },
-      }, null, 2)}\n`);
+      mkdirSync(join(repoRoot, ".repo-harness"), { recursive: true });
+      writeFileSync(
+        join(repoRoot, ".repo-harness/mcp.local.json"),
+        `${JSON.stringify(
+          {
+            version: 1,
+            repo: repoRoot,
+            server: { host: "127.0.0.1", port: 8765, transport: "http" },
+            chatgpt: { serverName: "repo-harness" },
+            profile: "controller",
+            devMode: {
+              agentRunner: true,
+              allowedAgents: ["codex"],
+              timeoutMs: 120000,
+            },
+          },
+          null,
+          2,
+        )}\n`,
+      );
 
       runMcpSetupChatgpt({ repo: repoRoot });
-      const config = JSON.parse(readFileSync(join(repoRoot, '.repo-harness/mcp.local.json'), 'utf-8'));
-      expect(config.chatgpt.serverName).toBe('repo-harness-controller-v2');
+      const config = JSON.parse(
+        readFileSync(join(repoRoot, ".repo-harness/mcp.local.json"), "utf-8"),
+      );
+      expect(config.chatgpt.serverName).toBe("repo-harness-controller-v6");
       expect(config.devMode.timeoutMs).toBe(3_600_000);
       expect(config.devMode.maxTimeoutMs).toBe(43_200_000);
     });
   });
 
-  test('records and preserves the ChatGPT MCP server name in ignored local config', () => {
+  test("records and preserves the ChatGPT MCP server name in ignored local config", () => {
     withTmpRepo((repoRoot) => {
-      const setup = runMcpSetupChatgpt({ repo: repoRoot, serverName: 'team-review-mcp' });
-      expect(setup.lines.join('\n')).toContain('ChatGPT MCP server name: team-review-mcp');
+      const setup = runMcpSetupChatgpt({
+        repo: repoRoot,
+        serverName: "team-review-mcp",
+      });
+      expect(setup.lines.join("\n")).toContain(
+        "ChatGPT MCP server name: team-review-mcp",
+      );
 
-      let config = JSON.parse(readFileSync(join(repoRoot, '.repo-harness/mcp.local.json'), 'utf-8'));
-      expect(config.chatgpt.serverName).toBe('team-review-mcp');
+      let config = JSON.parse(
+        readFileSync(join(repoRoot, ".repo-harness/mcp.local.json"), "utf-8"),
+      );
+      expect(config.chatgpt.serverName).toBe("team-review-mcp");
 
-      runMcpSetupChatgpt({ repo: repoRoot, endpoint: 'https://repo-harness-mcp.example.com/mcp' });
-      config = JSON.parse(readFileSync(join(repoRoot, '.repo-harness/mcp.local.json'), 'utf-8'));
-      expect(config.chatgpt.serverName).toBe('team-review-mcp');
-      expect(config.chatgpt.endpoint).toBe('https://repo-harness-mcp.example.com/mcp');
+      runMcpSetupChatgpt({
+        repo: repoRoot,
+        endpoint: "https://repo-harness-mcp.example.com/mcp",
+      });
+      config = JSON.parse(
+        readFileSync(join(repoRoot, ".repo-harness/mcp.local.json"), "utf-8"),
+      );
+      expect(config.chatgpt.serverName).toBe("team-review-mcp");
+      expect(config.chatgpt.endpoint).toBe(
+        "https://repo-harness-mcp.example.com/mcp",
+      );
 
       runMcpSetupChatgpt({ repo: repoRoot });
-      config = JSON.parse(readFileSync(join(repoRoot, '.repo-harness/mcp.local.json'), 'utf-8'));
-      expect(config.chatgpt.serverName).toBe('team-review-mcp');
-      expect(config.chatgpt.endpoint).toBe('https://repo-harness-mcp.example.com/mcp');
+      config = JSON.parse(
+        readFileSync(join(repoRoot, ".repo-harness/mcp.local.json"), "utf-8"),
+      );
+      expect(config.chatgpt.serverName).toBe("team-review-mcp");
+      expect(config.chatgpt.endpoint).toBe(
+        "https://repo-harness-mcp.example.com/mcp",
+      );
 
-      const doctor = JSON.parse(runMcpDoctor({ repo: repoRoot, json: true }).lines[0]);
-      expect(doctor.chatgpt.serverName).toBe('team-review-mcp');
+      const doctor = JSON.parse(
+        runMcpDoctor({ repo: repoRoot, json: true }).lines[0],
+      );
+      expect(doctor.chatgpt.serverName).toBe("team-review-mcp");
       expect(doctor.chatgpt.serverNameConfigured).toBe(true);
     });
   });
 
-  test('mcp doctor does not mask a missing recorded ChatGPT server name', () => {
+  test("mcp doctor does not mask a missing recorded ChatGPT server name", () => {
     withTmpRepo((repoRoot) => {
-      mkdirSync(join(repoRoot, '.repo-harness'), { recursive: true });
-      writeFileSync(join(repoRoot, '.repo-harness/mcp.local.json'), `${JSON.stringify({
-        version: 1,
-        repo: repoRoot,
-        server: { host: '127.0.0.1', port: 8765, transport: 'http' },
-        auth: { mode: 'oauth', oauthFile: '.repo-harness/mcp.oauth.json', tokenFile: '.repo-harness/mcp.tokens.json' },
-        chatgpt: { endpoint: 'https://repo-harness-mcp.example.com/mcp' },
-        profile: 'planner',
-      }, null, 2)}\n`);
+      mkdirSync(join(repoRoot, ".repo-harness"), { recursive: true });
+      writeFileSync(
+        join(repoRoot, ".repo-harness/mcp.local.json"),
+        `${JSON.stringify(
+          {
+            version: 1,
+            repo: repoRoot,
+            server: { host: "127.0.0.1", port: 8765, transport: "http" },
+            auth: {
+              mode: "oauth",
+              oauthFile: ".repo-harness/mcp.oauth.json",
+              tokenFile: ".repo-harness/mcp.tokens.json",
+            },
+            chatgpt: { endpoint: "https://repo-harness-mcp.example.com/mcp" },
+            profile: "planner",
+          },
+          null,
+          2,
+        )}\n`,
+      );
 
-      const doctor = JSON.parse(runMcpDoctor({ repo: repoRoot, json: true }).lines[0]);
+      const doctor = JSON.parse(
+        runMcpDoctor({ repo: repoRoot, json: true }).lines[0],
+      );
       expect(doctor.chatgpt.serverName).toBeUndefined();
       expect(doctor.chatgpt.serverNameConfigured).toBe(false);
-      expect(doctor.chatgpt.defaultServerName).toBe('repo-harness-controller-v2');
-      expect(doctor.chatgpt.publicEndpoint).toBe('https://repo-harness-mcp.example.com/mcp');
-      expect(runMcpDoctor({ repo: repoRoot }).lines.join('\n')).toContain('ChatGPT MCP server name: missing');
+      expect(doctor.chatgpt.defaultServerName).toBe(
+        "repo-harness-controller-v6",
+      );
+      expect(doctor.chatgpt.publicEndpoint).toBe(
+        "https://repo-harness-mcp.example.com/mcp",
+      );
+      expect(runMcpDoctor({ repo: repoRoot }).lines.join("\n")).toContain(
+        "ChatGPT MCP server name: missing",
+      );
     });
   });
 
-  test('server-name-only ChatGPT setup preserves existing endpoint and operator settings', () => {
+  test("server-name-only ChatGPT setup preserves existing endpoint and operator settings", () => {
     withTmpRepo((repoRoot) => {
-      mkdirSync(join(repoRoot, '.repo-harness'), { recursive: true });
-      writeFileSync(join(repoRoot, '.repo-harness/mcp.local.json'), `${JSON.stringify({
-        version: 1,
-        repo: repoRoot,
-        server: { host: '0.0.0.0', port: 9876, transport: 'http' },
-        auth: { mode: 'bearer', tokenFile: '.repo-harness/custom.tokens.json' },
-        chatgpt: { endpoint: 'https://repo-harness-mcp.example.com/mcp' },
-        profile: 'orchestrator',
-        devMode: {
-          agentRunner: true,
-          allowedAgents: ['codex', 'claude'],
-          timeoutMs: 300000,
-        },
-      }, null, 2)}\n`);
+      mkdirSync(join(repoRoot, ".repo-harness"), { recursive: true });
+      writeFileSync(
+        join(repoRoot, ".repo-harness/mcp.local.json"),
+        `${JSON.stringify(
+          {
+            version: 1,
+            repo: repoRoot,
+            server: { host: "0.0.0.0", port: 9876, transport: "http" },
+            auth: {
+              mode: "bearer",
+              tokenFile: ".repo-harness/custom.tokens.json",
+            },
+            chatgpt: { endpoint: "https://repo-harness-mcp.example.com/mcp" },
+            profile: "orchestrator",
+            devMode: {
+              agentRunner: true,
+              allowedAgents: ["codex", "claude"],
+              timeoutMs: 300000,
+            },
+          },
+          null,
+          2,
+        )}\n`,
+      );
 
-      runMcpSetupChatgpt({ repo: repoRoot, serverName: 'team-review-mcp' });
-      const config = JSON.parse(readFileSync(join(repoRoot, '.repo-harness/mcp.local.json'), 'utf-8'));
-      expect(config.server).toMatchObject({ host: '0.0.0.0', port: 9876, transport: 'http' });
-      expect(config.auth).toMatchObject({ mode: 'bearer', tokenFile: '.repo-harness/custom.tokens.json' });
-      expect(config.chatgpt).toMatchObject({
-        serverName: 'team-review-mcp',
-        endpoint: 'https://repo-harness-mcp.example.com/mcp',
+      runMcpSetupChatgpt({ repo: repoRoot, serverName: "team-review-mcp" });
+      const config = JSON.parse(
+        readFileSync(join(repoRoot, ".repo-harness/mcp.local.json"), "utf-8"),
+      );
+      expect(config.server).toMatchObject({
+        host: "0.0.0.0",
+        port: 9876,
+        transport: "http",
       });
-      expect(config.profile).toBe('orchestrator');
+      expect(config.auth).toMatchObject({
+        mode: "bearer",
+        tokenFile: ".repo-harness/custom.tokens.json",
+      });
+      expect(config.chatgpt).toMatchObject({
+        serverName: "team-review-mcp",
+        endpoint: "https://repo-harness-mcp.example.com/mcp",
+      });
+      expect(config.profile).toBe("orchestrator");
       expect(config.devMode).toMatchObject({
         agentRunner: true,
-        allowedAgents: ['codex', 'claude'],
+        allowedAgents: ["codex", "claude"],
         timeoutMs: 300000,
       });
     });
   });
 
-  test('stores a stable ChatGPT endpoint in ignored local config and keeps the tracked guide generic', () => {
+  test("stores a stable ChatGPT endpoint in ignored local config and keeps the tracked guide generic", () => {
     withTmpRepo((repoRoot) => {
-      runMcpSetupChatgpt({ repo: repoRoot, endpoint: 'https://repo-harness-mcp.example.com/mcp' });
+      runMcpSetupChatgpt({
+        repo: repoRoot,
+        endpoint: "https://repo-harness-mcp.example.com/mcp",
+      });
 
-      const config = JSON.parse(readFileSync(join(repoRoot, '.repo-harness/mcp.local.json'), 'utf-8'));
-      expect(config.chatgpt.endpoint).toBe('https://repo-harness-mcp.example.com/mcp');
+      const config = JSON.parse(
+        readFileSync(join(repoRoot, ".repo-harness/mcp.local.json"), "utf-8"),
+      );
+      expect(config.chatgpt.endpoint).toBe(
+        "https://repo-harness-mcp.example.com/mcp",
+      );
 
-      const guide = readFileSync(join(repoRoot, 'docs/repo-harness-chatgpt-mcp-setup.md'), 'utf-8');
-      expect(guide).not.toContain('https://repo-harness-mcp.example.com/mcp');
-      expect(guide).toContain('<https-tunnel-url>/mcp');
-      expect(guide).toContain('Quick tunnels are useful for one-off smoke tests');
-      expect(guide).toContain('tracked guide stays placeholder-only');
-      expect(guide).toContain('chatgpt.serverName');
-      expect(guide).toContain('repo-harness mcp keepalive');
+      const guide = readFileSync(
+        join(repoRoot, "docs/repo-harness-chatgpt-mcp-setup.md"),
+        "utf-8",
+      );
+      expect(guide).not.toContain("https://repo-harness-mcp.example.com/mcp");
+      expect(guide).toContain("<https-tunnel-url>/mcp");
+      expect(guide).toContain(
+        "Quick tunnels are useful for one-off smoke tests",
+      );
+      expect(guide).toContain("tracked guide stays placeholder-only");
+      expect(guide).toContain("chatgpt.serverName");
+      expect(guide).toContain("repo-harness mcp keepalive");
 
-      const doctor = JSON.parse(runMcpDoctor({ repo: repoRoot, json: true }).lines[0]);
-      expect(doctor.chatgpt.publicEndpoint).toBe('https://repo-harness-mcp.example.com/mcp');
+      const doctor = JSON.parse(
+        runMcpDoctor({ repo: repoRoot, json: true }).lines[0],
+      );
+      expect(doctor.chatgpt.publicEndpoint).toBe(
+        "https://repo-harness-mcp.example.com/mcp",
+      );
     });
   });
 
-  test('rejects unstable ChatGPT endpoint values', () => {
+  test("rejects unstable ChatGPT endpoint values", () => {
     withTmpRepo((repoRoot) => {
       for (const endpoint of [
-        'http://example.com/mcp',
-        'https://example.com/not-mcp',
-        'https://example.com/foo/mcp',
-        'https://localhost/mcp',
-        'https://127.0.0.1/mcp',
-        'https://10.0.0.1/mcp',
-        'https://172.16.0.1/mcp',
-        'https://192.168.1.1/mcp',
-        'https://169.254.1.1/mcp',
-        'https://[::1]/mcp',
-        'https://[fc00::1]/mcp',
-        'https://user:pass@example.com/mcp',
-        'https://example.com/mcp?token=secret',
-        'https://example.com/mcp#fragment',
+        "http://example.com/mcp",
+        "https://example.com/not-mcp",
+        "https://example.com/foo/mcp",
+        "https://localhost/mcp",
+        "https://127.0.0.1/mcp",
+        "https://10.0.0.1/mcp",
+        "https://172.16.0.1/mcp",
+        "https://192.168.1.1/mcp",
+        "https://169.254.1.1/mcp",
+        "https://[::1]/mcp",
+        "https://[fc00::1]/mcp",
+        "https://user:pass@example.com/mcp",
+        "https://example.com/mcp?token=secret",
+        "https://example.com/mcp#fragment",
       ]) {
         expect(() => runMcpSetupChatgpt({ repo: repoRoot, endpoint })).toThrow(
-          'expected a public HTTPS URL exactly ending in /mcp with no username, password, query, or fragment',
+          "expected a public HTTPS URL exactly ending in /mcp with no username, password, query, or fragment",
         );
       }
     });
   });
 
-  test('rejects unsafe ChatGPT MCP server names', () => {
+  test("rejects unsafe ChatGPT MCP server names", () => {
     withTmpRepo((repoRoot) => {
-      for (const serverName of ['', 'bad/name', 'bad\nname', '`bad`', 'x'.repeat(81)]) {
-        expect(() => runMcpSetupChatgpt({ repo: repoRoot, serverName })).toThrow(
-          'expected a ChatGPT MCP server name',
-        );
+      for (const serverName of [
+        "",
+        "bad/name",
+        "bad\nname",
+        "`bad`",
+        "x".repeat(81),
+      ]) {
+        expect(() =>
+          runMcpSetupChatgpt({ repo: repoRoot, serverName }),
+        ).toThrow("expected a ChatGPT MCP server name");
       }
     });
   });
 
-  test('print guide write mode keeps tracked docs generic while reporting the session endpoint', () => {
+  test("print guide write mode keeps tracked docs generic while reporting the session endpoint", () => {
     withTmpRepo((repoRoot) => {
       const result = runMcpPrintGuide({
         repo: repoRoot,
-        endpoint: 'https://repo-harness-mcp.example.com/mcp',
+        endpoint: "https://repo-harness-mcp.example.com/mcp",
         write: true,
       });
 
-      const guide = readFileSync(join(repoRoot, 'docs/repo-harness-chatgpt-mcp-setup.md'), 'utf-8');
-      expect(guide).toContain('<https-tunnel-url>/mcp');
-      expect(guide).not.toContain('https://repo-harness-mcp.example.com/mcp');
-      expect(result.lines.join('\n')).toContain('https://repo-harness-mcp.example.com/mcp');
+      const guide = readFileSync(
+        join(repoRoot, "docs/repo-harness-chatgpt-mcp-setup.md"),
+        "utf-8",
+      );
+      expect(guide).toContain("<https-tunnel-url>/mcp");
+      expect(guide).not.toContain("https://repo-harness-mcp.example.com/mcp");
+      expect(result.lines.join("\n")).toContain(
+        "https://repo-harness-mcp.example.com/mcp",
+      );
     });
   });
 
-  test('doctor reports runtime keepalive state when present', () => {
+  test("doctor reports runtime keepalive state when present", () => {
     withTmpRepo((repoRoot) => {
-      mkdirSync(join(repoRoot, '.repo-harness'), { recursive: true });
-      writeFileSync(join(repoRoot, '.repo-harness/mcp.runtime.json'), `${JSON.stringify({
-        version: 1,
-        repo: repoRoot,
-        startedAt: '2026-06-19T00:00:00.000Z',
-        updatedAt: '2026-06-19T00:05:00.000Z',
-        status: 'running',
-        tunnelMode: 'quick',
-        server: {
-          endpoint: 'http://127.0.0.1:8765/mcp',
-          pid: 123,
-          running: true,
-          healthy: true,
-          restartCount: 1,
-        },
-        tunnel: {
-          pid: 456,
-          running: true,
-          healthy: false,
-          restartCount: 2,
-          publicEndpoint: 'https://new-url.trycloudflare.com/mcp',
-          connectorNeedsReconnect: true,
-        },
-        recentErrors: [],
-      }, null, 2)}\n`);
+      mkdirSync(join(repoRoot, ".repo-harness"), { recursive: true });
+      writeFileSync(
+        join(repoRoot, ".repo-harness/mcp.runtime.json"),
+        `${JSON.stringify(
+          {
+            version: 1,
+            repo: repoRoot,
+            startedAt: "2026-06-19T00:00:00.000Z",
+            updatedAt: "2026-06-19T00:05:00.000Z",
+            status: "running",
+            tunnelMode: "quick",
+            server: {
+              endpoint: "http://127.0.0.1:8765/mcp",
+              pid: 123,
+              running: true,
+              healthy: true,
+              restartCount: 1,
+            },
+            tunnel: {
+              pid: 456,
+              running: true,
+              healthy: false,
+              restartCount: 2,
+              publicEndpoint: "https://new-url.trycloudflare.com/mcp",
+              connectorNeedsReconnect: true,
+            },
+            recentErrors: [],
+          },
+          null,
+          2,
+        )}\n`,
+      );
 
-      const doctor = JSON.parse(runMcpDoctor({ repo: repoRoot, json: true }).lines[0]);
-      expect(doctor.runtime.status).toBe('running');
-      expect(doctor.runtime.tunnelMode).toBe('quick');
+      const doctor = JSON.parse(
+        runMcpDoctor({ repo: repoRoot, json: true }).lines[0],
+      );
+      expect(doctor.runtime.status).toBe("running");
+      expect(doctor.runtime.tunnelMode).toBe("quick");
       expect(doctor.runtime.localHealthy).toBe(true);
       expect(doctor.runtime.publicHealthy).toBe(false);
       expect(doctor.runtime.connectorNeedsReconnect).toBe(true);
-      expect(runMcpDoctor({ repo: repoRoot }).lines.join('\n')).toContain('public quick tunnel URL changed');
+      expect(runMcpDoctor({ repo: repoRoot }).lines.join("\n")).toContain(
+        "public quick tunnel URL changed",
+      );
     });
   });
 
-  test('ChatGPT guide uses OAuth for ChatGPT and documents bearer fallback', () => {
-    const guide = chatgptGuideMarkdown('https://example.test/mcp');
-    expect(guide).toContain('Configure Connector authentication as OAuth');
-    expect(guide).toContain('.repo-harness/mcp.oauth.json');
-    expect(guide).toContain('~/DevProjects/repo-harness');
-    expect(guide).toContain('.repo-harness/mcp.policy.json');
-    expect(guide).toContain('oauth-protected-resource');
-    expect(guide).toContain('--auth bearer');
-    expect(guide).toContain('mcp keepalive');
-    expect(guide).toContain('## Dev Mode Agent Runner');
-    expect(guide).toContain('--enable-dev-runner');
-    expect(guide).toContain('run_agent_goal');
-    expect(guide).toContain('https://example.test/mcp');
-    expect(guide).toContain('cloudflared tunnel create repo-harness-mcp');
-    expect(guide).toContain('quick tunnel');
-    expect(guide).toContain('chatgpt.serverName');
+  test("ChatGPT guide uses OAuth for ChatGPT and documents bearer fallback", () => {
+    const guide = chatgptGuideMarkdown("https://example.test/mcp");
+    expect(guide).toContain("Configure Connector authentication as OAuth");
+    expect(guide).toContain(".repo-harness/mcp.oauth.json");
+    expect(guide).toContain("~/DevProjects/repo-harness");
+    expect(guide).toContain(".repo-harness/mcp.policy.json");
+    expect(guide).toContain("oauth-protected-resource");
+    expect(guide).toContain("--auth bearer");
+    expect(guide).toContain("mcp keepalive");
+    expect(guide).toContain("## Dev Mode Agent Runner");
+    expect(guide).toContain("--enable-dev-runner");
+    expect(guide).toContain("run_agent_goal");
+    expect(guide).toContain("https://example.test/mcp");
+    expect(guide).toContain("cloudflared tunnel create repo-harness-mcp");
+    expect(guide).toContain("quick tunnel");
+    expect(guide).toContain("chatgpt.serverName");
   });
 
-  test('patches Codex config while preserving unrelated content', () => {
-    const patched = patchCodexConfigToml('[profiles.default]\nmodel = "gpt-5"\n');
-    expect(patched).toContain('[profiles.default]');
-    expect(patched).toContain('[mcp_servers.repo_harness]');
+  test("patches Codex config while preserving unrelated content", () => {
+    const patched = patchCodexConfigToml(
+      '[profiles.default]\nmodel = "gpt-5"\n',
+    );
+    expect(patched).toContain("[profiles.default]");
+    expect(patched).toContain("[mcp_servers.repo_harness]");
     expect(patched).toContain('"mcp"');
 
     withTmpRepo((repoRoot) => {
-      mkdirSync(join(repoRoot, '.codex'), { recursive: true });
-      writeFileSync(join(repoRoot, '.codex/config.toml'), '[profiles.default]\nmodel = "gpt-5"\n');
-      const dryRun = runMcpSetupCodex({ repo: repoRoot, scope: 'project', dryRun: true });
+      mkdirSync(join(repoRoot, ".codex"), { recursive: true });
+      writeFileSync(
+        join(repoRoot, ".codex/config.toml"),
+        '[profiles.default]\nmodel = "gpt-5"\n',
+      );
+      const dryRun = runMcpSetupCodex({
+        repo: repoRoot,
+        scope: "project",
+        dryRun: true,
+      });
       expect(dryRun.changed).toHaveLength(0);
-      expect(readFileSync(join(repoRoot, '.codex/config.toml'), 'utf-8')).not.toContain('[mcp_servers.repo_harness]');
+      expect(
+        readFileSync(join(repoRoot, ".codex/config.toml"), "utf-8"),
+      ).not.toContain("[mcp_servers.repo_harness]");
 
-      const result = runMcpSetupCodex({ repo: repoRoot, scope: 'project' });
-      expect(result.changed.some((path) => path.endsWith('.codex/config.toml'))).toBe(true);
-      expect(existsSync(join(repoRoot, '.codex/config.toml.bak'))).toBe(true);
-      const config = readFileSync(join(repoRoot, '.codex/config.toml'), 'utf-8');
-      expect(config).toContain('[profiles.default]');
-      expect(config).toContain('[mcp_servers.repo_harness]');
+      const result = runMcpSetupCodex({ repo: repoRoot, scope: "project" });
+      expect(
+        result.changed.some((path) => path.endsWith(".codex/config.toml")),
+      ).toBe(true);
+      expect(existsSync(join(repoRoot, ".codex/config.toml.bak"))).toBe(true);
+      const config = readFileSync(
+        join(repoRoot, ".codex/config.toml"),
+        "utf-8",
+      );
+      expect(config).toContain("[profiles.default]");
+      expect(config).toContain("[mcp_servers.repo_harness]");
 
-      const again = runMcpSetupCodex({ repo: repoRoot, scope: 'project' });
+      const again = runMcpSetupCodex({ repo: repoRoot, scope: "project" });
       expect(again.changed).toHaveLength(0);
     });
   });
 
-  test('installs bridge skill template with overwrite protection', () => {
+  test("installs bridge skill template with overwrite protection", () => {
     withTmpRepo((repoRoot) => {
       runMcpInstallSkill({ repo: repoRoot });
-      const skill = join(repoRoot, '.agents/skills/repo-harness-chatgpt-bridge/SKILL.md');
+      const skill = join(
+        repoRoot,
+        ".agents/skills/repo-harness-chatgpt-bridge/SKILL.md",
+      );
       expect(existsSync(skill)).toBe(true);
-      expect(readFileSync(skill, 'utf-8')).toContain('repo-harness-chatgpt-bridge');
-      writeFileSync(skill, 'custom\n');
+      expect(readFileSync(skill, "utf-8")).toContain(
+        "repo-harness-chatgpt-bridge",
+      );
+      writeFileSync(skill, "custom\n");
       const protectedResult = runMcpInstallSkill({ repo: repoRoot });
       expect(protectedResult.changed).toHaveLength(0);
-      expect(readFileSync(skill, 'utf-8')).toBe('custom\n');
+      expect(readFileSync(skill, "utf-8")).toBe("custom\n");
       runMcpInstallSkill({ repo: repoRoot, overwrite: true });
-      const installed = readFileSync(skill, 'utf-8');
-      expect(installed).toContain('repo-harness-chatgpt-bridge');
-      expect(installed).toContain("Use the user's language for status reports unless repo-local instructions require otherwise.");
-      expect(installed).not.toContain('阅读：');
-      expect(installed).not.toContain('开worktree完整执行');
-      expect(installed).not.toContain('完成阶段性任务，要staging再继续');
+      const installed = readFileSync(skill, "utf-8");
+      expect(installed).toContain("repo-harness-chatgpt-bridge");
+      expect(installed).toContain(
+        "Use the user's language for status reports unless repo-local instructions require otherwise.",
+      );
+      expect(installed).not.toContain("阅读：");
+      expect(installed).not.toContain("开worktree完整执行");
+      expect(installed).not.toContain("完成阶段性任务，要staging再继续");
     });
   });
 });
