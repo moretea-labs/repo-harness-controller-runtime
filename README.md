@@ -24,19 +24,18 @@ Repository: `https://github.com/Ancienttwo/repo-harness`
 
 [English](README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [Français](README.fr.md) | [Español](README.es.md)
 
-## Controller V7: Execution First, Risk Adaptive, Task Local
+## Controller V8: ChatGPT-Controlled Execution Bridge
 
-repo-harness V7 removes Issue-wide workflow ceremony from the execution path. The Controller is a bridge for local capabilities and evidence; Task-local state and real safety boundaries decide whether work can run.
+repo-harness V8 makes the division of responsibility explicit: ChatGPT reads, reasons, plans, chooses the execution mode, and reviews results; repo-harness supplies repository read/edit/diff/check/Git capabilities. Direct Edit is the default, while Codex, Claude, and GitHub Copilot are optional implementation workers selected at Run time.
 
-- `inspect_task_readiness`, `dispatch_task`, `launch_issue`, and cross-project dispatch all evaluate one Task at a time. Unrelated blocked Tasks, multiple active Issues, and current focus do not block independent work.
-- Missing named checks are warnings. Checks become completion evidence and execute automatically after a successful Run when the Task declares them.
-- Read-only, low-risk, medium-risk, high-risk, and destructive Tasks receive progressively stronger verification and approval requirements. Read-only and low-risk work no longer pays a five-stage acceptance tax.
-- Successful Runs automatically continue into applicable checks, verification, auto-completion, or human acceptance. Startup deadlocks and contradictory Job/Run terminal timestamps are reconciled.
-- Quick Agent sessions are ephemeral by default and stay out of the durable Issue board; terminal sessions clean their temporary Issue metadata while retaining Run evidence.
-- Real hard boundaries remain: sensitive/out-of-scope paths, overlapping writes, irreversible Git actions, remote publication, real check failures, and high-risk data mutations.
-- Repository glob semantics, targeted reads, progress, snapshot/log size, Connector surface drift, and reported command evidence are normalized.
+- A Direct Edit session is now a multi-revision transaction. It supports repeated patch batches, 100-file / 50,000-line practical defaults, localized aggregate diffs, SHA preconditions, named savepoints, targeted rollback, checks, and finalization.
+- Task records no longer hard-bind an Agent. `recommendedAgent` is an optional hint only; `dispatch_task`, `launch_issue`, and `dispatch_ready_tasks` accept the runtime Agent choice.
+- Local medium/high risk classifications no longer create approval blockers or a visual approval queue. `approve_risk` has been removed from the public execution surface. Explicit destructive or irreversible work still requires same-request authorization.
+- The Controller UI has four top-level destinations: Overview, Work, Activity, and Settings. Issues contain child Tasks, and Tasks contain their Runs, Direct Edits, checks, and change evidence.
+- Agent delegation is intended for large or exploratory implementation work, not as the mandatory path for every change. ChatGPT may combine Agent execution with Direct Edit cleanup in the same Task.
+- The MCP surface is `controller-chatgpt-bridge-v8`, schema `10`, surface version `8`.
 
-The MCP surface is `controller-execution-first-v7`, schema `9`, surface version `7`. See [V7 Execution First](docs/repo-harness-execution-first-v7.md).
+See [V8 ChatGPT Execution Bridge](docs/repo-harness-chatgpt-bridge-v8.md) and [V8 verification record](docs/repo-harness-v8-verification.md).
 
 ## Controller V6: Direct Change First
 
@@ -382,7 +381,7 @@ repo-harness mcp keepalive --repo . --profile controller \
   --enable-dev-runner --dev-runner-agents codex,claude --tunnel quick
 ```
 
-For the `controller` profile, keepalive also starts a localhost-only task workstation at `http://127.0.0.1:8766/`. Its Overview, Progress Center, Task Management, Run Monitor, Worklog, Approvals, Checks, and GitHub Plugin areas expose the current Agent phase, command or file activity, semantic progress, heartbeat, live output, diff, execution mode, and automatic-integration state. You can launch ready Tasks, create a small Codex/Claude session, approve local Job Tickets, and execute named checks without repeatedly typing scripts. Use `--open-local-ui` to open it automatically or `--no-local-ui` to disable it.
+For the `controller` profile, keepalive also starts a localhost-only task workstation at `http://127.0.0.1:8766/`. Its Overview, Work, Activity, and Settings areas expose the current Agent phase, command or file activity, semantic progress, heartbeat, live output, diff, execution mode, and automatic-integration state. You can launch ready Tasks with a runtime-selected Agent, inspect Direct Edit revisions, and execute named checks without repeatedly typing scripts. Use `--open-local-ui` to open it automatically or `--no-local-ui` to disable it.
 
 The generated setup guide is written to:
 
@@ -422,7 +421,7 @@ Focused verification is exposed through named checks only. Safe package scripts
 (`test*`, `check*`, `lint*`, `typecheck*`) are discovered automatically, and
 additional fixed command arrays can be declared in `.repo-harness/checks.json`.
 See [ChatGPT Controller Workflow](docs/repo-harness-chatgpt-controller.md) and
-[GitHub Issue Launcher](docs/repo-harness-github-issue-launcher.md), and [Local Execution Bridge](docs/repo-harness-local-execution-bridge.md) for the state model, GitHub Projects/session integration, visual approval queue, security boundaries, and operating examples.
+[GitHub Issue Launcher](docs/repo-harness-github-issue-launcher.md), and [Local Execution Bridge](docs/repo-harness-local-execution-bridge.md) for the state model, GitHub Projects/session integration, execution bridge, security boundaries, and operating examples.
 
 ## Hook Authority Map
 

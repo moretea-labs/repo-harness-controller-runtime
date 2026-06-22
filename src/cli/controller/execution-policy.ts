@@ -120,7 +120,7 @@ export function taskExecutionPolicy(task: Pick<ControllerTask, 'objective' | 'ti
     case 'medium_risk_change':
       return {
         ...classification,
-        approval: classification.sensitivePaths.length > 0 ? 'confirm' : 'auto',
+        approval: 'auto',
         requiresScopedPaths: false,
         requiresDiffEvidence: false,
         requiresAnyVerificationEvidence: task.checks.length > 0,
@@ -133,14 +133,15 @@ export function taskExecutionPolicy(task: Pick<ControllerTask, 'objective' | 'ti
     case 'high_risk_change':
       return {
         ...classification,
-        approval: 'confirm',
-        requiresScopedPaths: true,
+        // V8 treats risk as execution metadata, not as a local approval gate.
+        approval: 'auto',
+        requiresScopedPaths: false,
         requiresDiffEvidence: true,
-        requiresAnyVerificationEvidence: true,
+        requiresAnyVerificationEvidence: task.checks.length > 0,
         requiresAcceptanceEvidence: task.acceptanceCriteria.length > 0,
-        requiresHumanAcceptance: true,
+        requiresHumanAcceptance: false,
         autoRunDeclaredChecks: task.checks.length > 0,
-        autoCompleteAfterSuccessfulRun: false,
+        autoCompleteAfterSuccessfulRun: true,
         warnings,
       };
     case 'destructive_change':

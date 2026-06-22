@@ -50,7 +50,6 @@ import {
   saveGitHubPluginConfig,
 } from "../github/plugin";
 import {
-  approveLocalBridgeJob,
   cancelLocalBridgeJob,
   executeLocalBridgeJob,
   getLocalBridgeJob,
@@ -60,6 +59,7 @@ import {
   submitLocalBridgeJob,
 } from "./job-store";
 import {
+  createEditSavepoint,
   finalizeEditSession,
   getEditSession,
   getEditSessionDiff,
@@ -216,6 +216,13 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
           : undefined),
     },
     timeoutPolicy: localBridgeTimeoutPolicy(repoRoot),
+    execution: {
+      defaultMode: "direct-edit",
+      agentRunner: mcpConfig?.devMode?.agentRunner === true,
+      allowedAgents: mcpConfig?.devMode?.allowedAgents ?? ["codex"],
+      taskAgentBinding: false,
+      localRiskApprovalGate: false,
+    },
     board: projectBoard(repoRoot),
     projectState: loadControllerProjectState(repoRoot),
     governance: inspectProjectGovernance(repoRoot),
@@ -282,6 +289,9 @@ export async function startLocalBridgeServer(
         "direct-edit-first",
         "edit-session-diffs",
         "edit-session-verification",
+        "multi-revision-direct-edit",
+        "runtime-agent-selection",
+        "hierarchical-work-ui",
       ],
     });
   });
@@ -438,6 +448,7 @@ export async function startLocalBridgeServer(
           payload: {
             issueId: request.params.issueId,
             taskId: task.id,
+            agent: ["codex", "claude", "github-copilot"].includes(String(request.body?.agent)) ? request.body.agent : undefined,
             timeoutMs: typeof request.body?.timeoutMs === "number" ? request.body.timeoutMs : undefined,
             isolate: typeof request.body?.isolate === "boolean" ? request.body.isolate : undefined,
           },
@@ -468,7 +479,7 @@ export async function startLocalBridgeServer(
     try {
       const readiness = inspectTaskReadiness(options.repoRoot, request.params.issueId, request.params.taskId);
       if (!readiness.queueable) {
-        response.status(409).json({ error: "Task has non-approval launch blockers.", readiness });
+        response.status(409).json({ error: "Task has launch blockers.", readiness });
         return;
       }
       saveControllerProjectState(options.repoRoot, { currentIssueId: request.params.issueId }, "local-ui");
@@ -478,6 +489,7 @@ export async function startLocalBridgeServer(
         payload: {
           issueId: request.params.issueId,
           taskId: request.params.taskId,
+          agent: ["codex", "claude", "github-copilot"].includes(String(request.body?.agent)) ? request.body.agent : undefined,
           timeoutMs: typeof request.body?.timeoutMs === "number" ? request.body.timeoutMs : undefined,
           isolate: typeof request.body?.isolate === "boolean" ? request.body.isolate : undefined,
         },
@@ -662,6 +674,13 @@ export async function startLocalBridgeServer(
       response.status(404).json({ error: errorMessage(error) });
     }
   });
+  app.post("/api/edit-sessions/:sessionId/savepoints", (request, response) => {
+    try {
+      response.json(createEditSavepoint(options.repoRoot, request.params.sessionId, String(request.body?.name ?? "")));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
   app.post("/api/edit-sessions/:sessionId/verify", (request, response) => {
     try {
       response.json(verifyEditSession(options.repoRoot, request.params.sessionId, {
@@ -685,7 +704,10 @@ export async function startLocalBridgeServer(
   });
   app.post("/api/edit-sessions/:sessionId/rollback", (request, response) => {
     try {
-      response.json(rollbackEditSession(options.repoRoot, request.params.sessionId));
+      response.json(rollbackEditSession(options.repoRoot, request.params.sessionId, {
+        toRevision: typeof request.body?.toRevision === "number" ? Math.trunc(request.body.toRevision) : undefined,
+        savepoint: queryString(request.body?.savepoint),
+      }));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
@@ -748,19 +770,6 @@ export async function startLocalBridgeServer(
         request.body as LocalBridgeJobRequest,
       );
       if (job.status === "approved") asyncExecute(options.repoRoot, job.jobId);
-      response.status(202).json(job);
-    } catch (error) {
-      response.status(400).json({ error: errorMessage(error) });
-    }
-  });
-  app.post("/api/jobs/:jobId/approve", (request, response) => {
-    try {
-      const job = approveLocalBridgeJob(
-        options.repoRoot,
-        request.params.jobId,
-        true,
-      );
-      asyncExecute(options.repoRoot, job.jobId);
       response.status(202).json(job);
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });

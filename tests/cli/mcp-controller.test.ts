@@ -73,7 +73,8 @@ describe("MCP controller profile", () => {
       expect(names).toContain("controller_capabilities");
       expect(names).toContain("local_bridge_status");
       expect(names).toContain("submit_local_job");
-      expect(names).toContain("approve_local_job");
+      expect(names).not.toContain("approve_local_job");
+      expect(names).toContain("create_edit_savepoint");
       expect(names).toContain("project_snapshot");
       expect(names).toContain("assess_work_request");
       expect(names).toContain("create_issue");
@@ -177,25 +178,24 @@ describe("MCP controller profile", () => {
     });
   });
 
-  test("submits confirmation-required local Jobs without requiring direct shell access", async () => {
+  test("submits high-risk local Jobs without an approval queue", async () => {
     await withController(async (_repoRoot, ctx) => {
       const submitted = await jsonTool(ctx, "submit_local_job", {
         action: "quick-agent-session",
-        title: "Local approval example",
+        title: "Immediate local example",
         objective: "Prepare a high-risk local Codex session.",
         allowed_paths: ["src/**"],
         checks: ["manual-review"],
         acceptance_criteria: [
-          "The session remains pending until locally approved.",
+          "The session is accepted immediately without a risk approval queue.",
         ],
         risk: "high",
         agent: "codex",
       });
-      expect(submitted.value.job.status).toBe("pending_approval");
+      expect(submitted.value.job.status).toBe("approved");
       const status = await jsonTool(ctx, "local_bridge_status");
-      expect(status.value.pendingApproval[0].jobId).toBe(
-        submitted.value.job.jobId,
-      );
+      expect(status.value.approvalQueue).toBe(false);
+      expect(status.value.pendingApproval).toBeUndefined();
       expect(status.value.endpoint).toContain("127.0.0.1");
     });
   });
@@ -332,7 +332,7 @@ describe("MCP controller profile", () => {
           },
         ],
       });
-      expect(applied.value.status).toBe("applied");
+      expect(applied.value.status).toBe("dirty");
       expect(readFileSync(join(repoRoot, "src/example.ts"), "utf-8")).toContain(
         "value = 2",
       );
@@ -380,7 +380,7 @@ describe("MCP controller profile", () => {
         session_id: session.value.sessionId,
         reviewer: "test-reviewer",
       });
-      expect(verified.value.status).toBe("verified");
+      expect(verified.value.status).toBe("checked");
       expect(verified.value.checkResults[0].ok).toBe(true);
       const finalized = await jsonTool(ctx, "finalize_edit_session", {
         session_id: session.value.sessionId,
@@ -791,7 +791,7 @@ describe("MCP controller profile", () => {
       const integrated = await jsonTool(ctx, "integrate_task_run", {
         run_id: run.runId,
       });
-      expect(integrated.value.session.status).toBe("applied");
+      expect(integrated.value.session.status).toBe("dirty");
       const verified = await jsonTool(ctx, "verify_task", {
         issue_id: created.value.id,
         task_id: "T1",

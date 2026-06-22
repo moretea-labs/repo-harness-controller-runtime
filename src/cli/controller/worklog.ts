@@ -177,7 +177,7 @@ export function exportControllerWorklog(
     const lines = [
       "---",
       `generated_at: ${JSON.stringify(new Date().toISOString())}`,
-      'source: "repo-harness-controller-v7"',
+      'source: "repo-harness-controller-v8"',
       `event_count: ${events.length}`,
       "---",
       "",

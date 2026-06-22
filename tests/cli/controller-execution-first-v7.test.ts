@@ -80,8 +80,8 @@ function writeRun(
   }, null, 2)}\n`);
 }
 
-describe("Controller v7 execution-first task-local policy", () => {
-  test("one blocked Task does not make an independent Task unlaunchable", () => {
+describe("Controller v7 compatibility on the V8 execution bridge", () => {
+  test("high-risk metadata does not block local execution", () => {
     const root = repo();
     const issue = createIssue(root, {
       title: "Task-local readiness",
@@ -100,20 +100,21 @@ describe("Controller v7 execution-first task-local policy", () => {
       ],
     });
 
-    const blocked = inspectTaskReadiness(root, issue.id, "T1", { approveRisk: true });
+    const highRisk = inspectTaskReadiness(root, issue.id, "T1");
     const ready = inspectTaskReadiness(root, issue.id, "T2");
     const aggregate = inspectIssueReadiness(root, issue.id);
 
-    expect(blocked.ready).toBe(false);
-    expect(blocked.blockers.some((entry) => entry.code === "TASK_SCOPE_REQUIRED")).toBe(true);
+    expect(highRisk.ready).toBe(true);
+    expect(highRisk.approvalSatisfied).toBe(true);
+    expect(highRisk.blockers.some((entry) => entry.code === "RISK_CONFIRMATION_REQUIRED")).toBe(false);
     expect(ready.ready).toBe(true);
     expect(ready.warnings.some((entry) => entry.message.includes("No named checks"))).toBe(true);
     expect(aggregate.ready).toBe(true);
     expect(aggregate.readyTaskIds).toContain("T2");
-    expect(aggregate.blockedTaskIds).toContain("T1");
+    expect(aggregate.readyTaskIds).toContain("T1");
   });
 
-  test("approval-gated Tasks remain queueable through the Local Bridge", () => {
+  test("high-risk Tasks are directly executable without an approval queue", () => {
     const root = repo();
     const issue = createIssue(root, {
       title: "Approval queue",
@@ -126,12 +127,12 @@ describe("Controller v7 execution-first task-local policy", () => {
     });
     const task = inspectTaskReadiness(root, issue.id, "T1");
     const aggregate = inspectIssueReadiness(root, issue.id);
-    expect(task.ready).toBe(false);
+    expect(task.ready).toBe(true);
     expect(task.queueable).toBe(true);
-    expect(task.approvalSatisfied).toBe(false);
-    expect(aggregate.queueable).toBe(true);
-    expect(aggregate.queueableTaskIds).toEqual(["T1"]);
-    expect(aggregate.approvalPendingTaskIds).toEqual(["T1"]);
+    expect(task.approvalSatisfied).toBe(true);
+    expect(aggregate.ready).toBe(true);
+    expect(aggregate.readyTaskIds).toEqual(["T1"]);
+    expect(aggregate.approvalPendingTaskIds).toEqual([]);
   });
 
   test("missing named checks are completion warnings rather than launch blockers", () => {

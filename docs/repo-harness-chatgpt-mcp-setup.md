@@ -9,7 +9,7 @@ Legacy `planner`, `executor`, and `orchestrator` profiles remain available for c
 
 ## Verify the loaded tool surface
 
-After connecting ChatGPT, call `controller_capabilities`. It should report `controller-execution-first-v7` and list request assessment, direct edit sessions, persisted patch inspection, named-check verification, Issue/Task execution, and optional GitHub tools. If ChatGPT only shows legacy planning tools, refresh or recreate the connector so it reloads the MCP tool schema.
+After connecting ChatGPT, call `controller_capabilities`. It should report `controller-chatgpt-bridge-v8` and list request assessment, direct edit sessions, persisted patch inspection, named-check verification, Issue/Task execution, and optional GitHub tools. If ChatGPT only shows legacy planning tools, refresh or recreate the connector so it reloads the MCP tool schema.
 
 
 ## Direct-change-first workflow

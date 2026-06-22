@@ -22,19 +22,18 @@ handoff、检查结果和 review evidence 写回项目文件，让下一个 agen
 
 仓库地址：`https://github.com/Ancienttwo/repo-harness`
 
-## Controller V7：执行优先、风险自适应、Task 局部判断
+## Controller V8：由 ChatGPT 总控的仓库执行桥
 
-repo-harness V7 将 Issue 级流程仪式从执行链路中移除。Controller 只负责接入本地能力、持久 Run 和证据；是否可以执行，由单个 Task 的真实状态与必要安全边界决定。
+repo-harness V8 明确拆分职责：ChatGPT 负责阅读、分析、方案、执行方式选择和结果审阅；repo-harness 只提供仓库读取、编辑、Diff、检查、Git 与可选 Agent 执行能力。默认优先 Direct Edit，Codex、Claude、GitHub Copilot 只是在复杂实施场景下按 Run 选择的执行工具。
 
-- `inspect_task_readiness`、`dispatch_task`、`launch_issue` 和跨项目派发都按单个 Task 判断；其他 Task 被阻塞、存在多个 active Issue、current focus 指向哪里，都不会阻止无冲突工作。
-- 缺少 named checks 只产生 warning。检查主要是 Run 成功后的完成证据，并在 Task 声明后自动执行。
-- 只读、低风险、中风险、高风险和破坏性操作按风险逐级增加验证与审批；只读和低风险任务不再强制经历完整五阶段验收。
-- Run 成功后自动续跑到适用检查、验证、自动完成或人工验收；启动卡死以及 Job/Run 的终态时间矛盾会被收敛。
-- Quick Agent 默认 ephemeral，不进入正式 Issue 看板；终态后清理临时 Issue 元数据，但保留 Run 证据。
-- 真正的硬边界继续保留：敏感/越界路径、并发写冲突、不可逆 Git 操作、远程发布、真实检查失败和高风险数据变更。
-- repository glob、定向读取、动态进度、snapshot/log 体积、Connector surface 漂移和 reported command evidence 已统一。
+- Direct Edit 变为多 revision 事务：同一 Session 可连续提交多个 Patch batch，默认可覆盖 100 个文件和 50,000 行变更，并支持 SHA 前置条件、局部聚合 Diff、Savepoint、定向回滚、检查和最终收口。
+- Task 不再永久绑定 Agent。`recommendedAgent` 只作为可选提示，真正执行时由 `dispatch_task`、`launch_issue` 或 `dispatch_ready_tasks` 的调用方选择 Agent。
+- 本地 medium/high risk 只作为风险元数据，不再产生审批阻塞或人工批准队列；公开执行接口移除 `approve_risk`。只有明确破坏性或不可逆操作仍要求在同一次请求中显式授权。
+- Controller 一级导航收敛为“概览、工作项、活动、设置”。Issue 下展示子 Task，Task 下聚合 Run、Direct Edit、检查和变更证据，不再把所有技术对象平铺。
+- Agent 用于大范围调查、复杂重构或持续编译修复，不是默认工作流。ChatGPT 可以先委托 Agent，再用 Direct Edit 收尾。
+- MCP surface 为 `controller-chatgpt-bridge-v8`，schema `10`，surface version `8`。
 
-MCP surface 为 `controller-execution-first-v7`，schema `9`，surface version `7`。详见 [V7 执行优先模型](docs/repo-harness-execution-first-v7.md)。
+详见 [V8 ChatGPT 执行桥](docs/repo-harness-chatgpt-bridge-v8.md) 与 [V8 验证记录](docs/repo-harness-v8-verification.md)。
 
 ## Controller V6：直接变更优先
 
@@ -342,7 +341,7 @@ repo-harness mcp keepalive --repo . --profile controller \
   --enable-dev-runner --dev-runner-agents codex,claude --tunnel quick
 ```
 
-`controller` profile 启动 keepalive 时还会默认启动仅监听本机的任务工作台：`http://127.0.0.1:8766/`。工作台提供工作总览、进度中心、Task 管理、执行监控、工作留痕、审批、检查和 GitHub 插件区域；运行中的 Codex/Claude 会显示当前阶段、正在执行的命令或修改文件、语义进度、心跳、实时输出、diff 与自动集成状态。你可以直接启动 ready Task、创建小型会话、批准本地 Job 和运行命名检查，不需要反复手动执行脚本。使用 `--open-local-ui` 可在启动时自动打开页面，使用 `--no-local-ui` 可关闭该能力。
+`controller` profile 启动 keepalive 时还会默认启动仅监听本机的任务工作台：`http://127.0.0.1:8766/`。工作台提供概览、工作项、活动和设置四个分层区域；运行中的 Codex/Claude 会显示当前阶段、正在执行的命令或修改文件、语义进度、心跳、实时输出、diff 与自动集成状态。你可以按 Run 选择 Agent 启动 ready Task、查看 Direct Edit revision，并运行命名检查，不需要反复手动执行脚本。使用 `--open-local-ui` 可在启动时自动打开页面，使用 `--no-local-ui` 可关闭该能力。
 
 安装命令会生成：
 

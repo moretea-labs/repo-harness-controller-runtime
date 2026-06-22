@@ -52,7 +52,8 @@ export interface ControllerTask {
   checks: string[];
   acceptanceCriteria: string[];
   risk: TaskRisk;
-  recommendedAgent: ControllerAgent;
+  /** Optional planning hint only. The executor is selected at dispatch time. */
+  recommendedAgent?: ControllerAgent;
   notes: string[];
   runIds: string[];
   github?: GitHubIssueLink;
@@ -63,7 +64,7 @@ export interface ControllerTask {
 }
 
 export interface ControllerIssue {
-  schemaVersion: 1 | 2 | 3 | 4;
+  schemaVersion: 1 | 2 | 3 | 4 | 5;
   id: string;
   title: string;
   slug: string;

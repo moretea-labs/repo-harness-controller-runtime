@@ -16,7 +16,6 @@ import { createIssue, updateTask } from "../../src/cli/controller/issue-store";
 import { beginEditSession, applyEditOperations } from "../../src/cli/editing/edit-session";
 import { getMcpPolicy } from "../../src/cli/mcp/policy";
 import {
-  approveAndExecuteLocalBridgeJob,
   executeLocalBridgeJob,
   getLocalBridgeJob,
   listLocalBridgeJobs,
@@ -315,12 +314,11 @@ printf '%s\n' '{"type":"turn.completed"}'
     }
   });
 
-  test("keeps high-risk quick sessions in the local approval queue", () => {
+  test("accepts high-risk quick sessions immediately without an approval queue", () => {
     const root = repo();
     const job = submitLocalBridgeJob(root, {
       action: "quick-agent-session",
       requestedBy: "chatgpt",
-      approval: "auto",
       payload: {
         title: "High risk local change",
         objective: "Inspect a risky project-level change.",
@@ -330,43 +328,26 @@ printf '%s\n' '{"type":"turn.completed"}'
         agent: "codex",
       },
     });
-    expect(job.status).toBe("pending_approval");
+    expect(job.status).toBe("approved");
+    expect(job.approval).toBe("auto");
     expect(listLocalBridgeJobs(root)[0]?.jobId).toBe(job.jobId);
-    expect(() => executeLocalBridgeJob(root, job.jobId)).toThrow(
-      "requires local approval",
-    );
   });
 
-  test("allows manual-only Jobs only after explicit localhost-style approval", async () => {
+  test("does not create an approval queue for ordinary local work", () => {
     const root = repo();
-    const codex = fakeCodex();
-    try {
-      const job = submitLocalBridgeJob(root, {
-        action: "quick-agent-session",
-        approval: "manual-only",
-        requestedBy: "local-ui",
-        payload: {
-          title: "Manual local session",
-          objective: "Run only after explicit local approval.",
-          allowedPaths: ["src/**"],
-          checks: ["manual"],
-          acceptanceCriteria: ["The local Run is dispatched."],
-          risk: "low",
-          agent: "codex",
-          isolate: true,
-          timeoutMs: 10_000,
-        },
-      });
-      expect(job.status).toBe("pending_approval");
-      expect(() => approveAndExecuteLocalBridgeJob(root, job.jobId)).toThrow(
-        "localhost visual controller",
-      );
-      const dispatched = approveAndExecuteLocalBridgeJob(root, job.jobId, true);
-      expect(dispatched.status).toBe("dispatched");
-      expect(dispatched.runId).toBeTruthy();
-    } finally {
-      codex.restore();
-    }
+    const job = submitLocalBridgeJob(root, {
+      action: "quick-agent-session",
+      requestedBy: "local-ui",
+      payload: {
+        title: "Ordinary local session",
+        objective: "Run ordinary bounded local work.",
+        allowedPaths: ["src/**"],
+        risk: "low",
+        agent: "codex",
+      },
+    });
+    expect(job.status).toBe("approved");
+    expect(job.approval).toBe("auto");
   });
 
   test("serves V5 focus, governance, direct action, worklog, and GitHub plugin APIs", async () => {
@@ -468,7 +449,7 @@ printf '%s\n' '{"type":"turn.completed"}'
     servers.push(handle);
     const headers = { "x-repo-harness-local-token": handle.token };
     const snapshot = await fetch(new URL("/api/snapshot", handle.url), { headers }).then((response) => response.json());
-    expect(snapshot.editSessions[0]).toMatchObject({ sessionId: session.sessionId, status: "applied", changedFiles: 1 });
+    expect(snapshot.editSessions[0]).toMatchObject({ sessionId: session.sessionId, status: "dirty", changedFiles: 1 });
     const diff = await fetch(new URL(`/api/edit-sessions/${session.sessionId}/diff`, handle.url), { headers }).then((response) => response.json());
     expect(diff.patch).toContain("+export const value = 4;");
     const verified = await fetch(new URL(`/api/edit-sessions/${session.sessionId}/verify`, handle.url), {
@@ -476,7 +457,7 @@ printf '%s\n' '{"type":"turn.completed"}'
       headers: { ...headers, "content-type": "application/json" },
       body: JSON.stringify({ reviewer: "local-test" }),
     }).then((response) => response.json());
-    expect(verified.status).toBe("verified");
+    expect(verified.status).toBe("checked");
     const finalized = await fetch(new URL(`/api/edit-sessions/${session.sessionId}/finalize`, handle.url), {
       method: "POST",
       headers: { ...headers, "content-type": "application/json" },
@@ -485,7 +466,7 @@ printf '%s\n' '{"type":"turn.completed"}'
     expect(finalized.status).toBe("finalized");
     const dashboard = await fetch(handle.url).then((response) => response.text());
     expect(dashboard).toContain("文件变更");
-    expect(dashboard).toContain("小修改直接落地");
+    expect(dashboard).toContain("Direct Edit");
   });
 
   test("serves a token-protected localhost visual control surface", async () => {

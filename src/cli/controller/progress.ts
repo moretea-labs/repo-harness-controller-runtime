@@ -278,7 +278,7 @@ function taskProgress(
       ...dependencies.supersededMigrations.map((entry) => entry.dependencyTaskId),
     ],
     risk: task.risk,
-    agent: task.recommendedAgent,
+    agent: task.recommendedAgent ?? "runtime-selected",
     verification: state.verificationStatus,
     githubUrl: task.github?.url,
   };

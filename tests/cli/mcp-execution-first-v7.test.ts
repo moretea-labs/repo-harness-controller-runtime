@@ -33,7 +33,7 @@ function value(result: Awaited<ReturnType<typeof callMcpTool>>): any {
   return JSON.parse(result.content[0]!.text);
 }
 
-describe("MCP execution-first v7 surface", () => {
+describe("MCP v7 compatibility on the V8 surface", () => {
   test("publishes versioned task-local capabilities and bounded log controls", async () => {
     const { ctx } = controller();
     const definitions = buildMcpToolDefinitions(ctx.policy);
@@ -43,7 +43,7 @@ describe("MCP execution-first v7 surface", () => {
     const logTool = definitions.find((entry) => entry.name === "get_task_run_log")!;
     expect(JSON.stringify(logTool.inputSchema)).toContain("max_bytes");
     const dispatch = definitions.find((entry) => entry.name === "dispatch_task")!;
-    expect(JSON.stringify(dispatch.inputSchema)).toContain("approve_risk");
+    expect(JSON.stringify(dispatch.inputSchema)).not.toContain("approve_risk");
     expect(JSON.stringify(dispatch.inputSchema)).toContain("approve_destructive");
 
     const capabilities = value(await callMcpTool(ctx, "controller_capabilities"));
@@ -104,7 +104,8 @@ describe("MCP execution-first v7 surface", () => {
     const readiness = value(await callMcpTool(ctx, "inspect_issue_readiness", { issue_id: issue.id }));
     expect(readiness.ready).toBe(true);
     expect(readiness.blockers).toHaveLength(0);
-    expect(readiness.taskBlockers.some((entry: { code: string }) => entry.code === "TASK_SCOPE_REQUIRED")).toBe(true);
+    expect(readiness.taskBlockers.some((entry: { code: string }) => entry.code === "TASK_SCOPE_REQUIRED")).toBe(false);
+    expect(readiness.readyTaskIds).toContain("T1");
     expect(readiness.readyTaskIds).toContain("T2");
   });
 });

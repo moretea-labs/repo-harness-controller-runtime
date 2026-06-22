@@ -1,9 +1,9 @@
 import { createHash } from 'crypto';
 import { realpathSync } from 'fs';
 
-export const CONTROLLER_TOOL_SURFACE = 'controller-execution-first-v7';
-export const CONTROLLER_SCHEMA_VERSION = 9;
-export const CONTROLLER_TOOL_SURFACE_VERSION = 7;
+export const CONTROLLER_TOOL_SURFACE = 'controller-chatgpt-bridge-v8';
+export const CONTROLLER_SCHEMA_VERSION = 10;
+export const CONTROLLER_TOOL_SURFACE_VERSION = 8;
 
 export function controllerToolSurfaceFingerprint(): string {
   return createHash('sha256')

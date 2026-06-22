@@ -98,7 +98,7 @@ function taskQueueItem(issue: ControllerIssue, task: ControllerTask, state: Effe
     issueTitle: issue.title,
     taskId: task.id,
     taskTitle: task.title,
-    agent: task.recommendedAgent,
+    agent: task.recommendedAgent ?? "runtime-selected",
     risk: task.risk,
     latestRunId: state.latestRunId,
     latestRunStatus: state.latestRunStatus,

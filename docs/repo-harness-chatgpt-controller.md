@@ -58,24 +58,27 @@ Small fixes do not require a full PRD/Sprint. Large product work can keep those 
 
 - `begin_edit_session`
 - `apply_patch`
-- `get_edit_session`
+- `create_edit_savepoint`
+- `get_edit_session`, `get_edit_session_diff`
+- `verify_edit_session`
 - `rollback_edit_session`
 - `finalize_edit_session`
 
-An edit session has a purpose, allowed paths, maximum file count, and maximum changed-line budget. Replacements and deletes require the expected SHA-256 of the source file. Operations are applied with backups, and rollback refuses to overwrite later unrelated changes.
+Direct Edit is the default execution path when ChatGPT already understands the required implementation. A session is a long-lived transaction: multiple small patch batches may be appended to the same session, every batch creates a revision, savepoints can be named, and rollback can target a revision or savepoint. This keeps each MCP call bounded while still producing one aggregate localized diff.
 
-Use direct edits only for small, well-understood changes. Dependency changes, CI workflows, lockfiles, secrets, broad refactors, and other protected operations should be handled through explicit user-approved work.
+SHA-256 preconditions, allowed paths, cumulative file/line budgets, backups, and named checks remain available as integrity controls. They are not human approval gates. Finalization closes the transaction after the configured checks have passed, or immediately when no check is configured.
 
-### Local control and approval
+### Local execution bridge
 
 - `local_bridge_status`
 - `submit_local_job`
 - `list_local_jobs`, `get_local_job`
-- `approve_local_job`
 
-The localhost-only Local Controller runs alongside MCP keepalive by default for the `controller` profile. It provides a visual Issue/Task board, a Quick Agent Session form, a local approval queue, live Run logs, and named checks at `http://127.0.0.1:8766/`. It is not exposed through the MCP tunnel. When a ChatGPT write action is unavailable, the user can launch the same durable Task or approve its Job from this page without creating a separate shell workflow.
+The localhost-only Controller runs alongside MCP keepalive for the `controller` profile. It provides a hierarchical Issue -> Task -> Execution workspace, runtime Agent selection, Direct Edit revisions/savepoints, live Run logs, and named checks at `http://127.0.0.1:8766/`. It is not exposed through the MCP tunnel.
 
-Local Job Tickets are persisted under `.ai/harness/local-jobs/`. Isolated low/medium-risk local sessions with an explicit allowed-path scope can auto-dispatch; high-risk, unscoped, or non-isolated work waits for local confirmation. Manual-only work cannot be approved through MCP.
+V8 has no ordinary local approval queue and no `approve_local_job` action. Medium/high risk classifications are metadata for verification depth, not permission gates. An explicitly destructive or irreversible operation must carry `approve_destructive: true` in the same request; it is never parked for later human approval.
+
+Local Job records remain persisted under `.ai/harness/local-jobs/` for audit and status inspection. Legacy pending records can be read or cancelled, but must be resubmitted under the V8 execution model.
 
 ### Execute
 

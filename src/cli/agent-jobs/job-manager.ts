@@ -405,7 +405,7 @@ function baseMeta(
     runId,
     issueId: opts.issueId,
     taskId: opts.taskId,
-    agent: opts.agent ?? task.recommendedAgent,
+    agent: opts.agent!,
     provider,
     executionMode,
     executionClass: taskExecutionPolicy(task).executionClass,
@@ -443,6 +443,9 @@ export function startTaskJob(opts: StartTaskJobOptions): AgentJobMeta {
   const issue = getIssue(opts.repoRoot, opts.issueId);
   const task = issue.tasks.find((entry) => entry.id === opts.taskId);
   if (!task) throw new Error(`task not found: ${opts.issueId}/${opts.taskId}`);
+  const selectedAgent = opts.agent ?? task.recommendedAgent;
+  if (!selectedAgent) throw new Error('agent must be selected at dispatch time');
+  opts = { ...opts, agent: selectedAgent };
   const readiness = inspectTaskReadiness(opts.repoRoot, opts.issueId, opts.taskId, {
     approveRisk: opts.approveRisk,
     approveDestructive: opts.approveDestructive,
@@ -452,7 +455,7 @@ export function startTaskJob(opts: StartTaskJobOptions): AgentJobMeta {
     throw new Error(`task-local launch blocked: ${readiness.blockers.map((entry) => `${entry.code}: ${entry.message}`).join('; ')}`);
   }
   assertNoTaskScopeConflict(opts.repoRoot, opts.issueId, task);
-  const agent = opts.agent ?? task.recommendedAgent;
+  const agent = opts.agent!;
   const provider = agent === "github-copilot" ? "github" : "local";
   const runId = `RUN-${sanitize(opts.issueId)}-${sanitize(opts.taskId)}-${Date.now()}-${shortId()}`;
   let executionMode = resolveExecutionMode(

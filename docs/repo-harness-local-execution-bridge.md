@@ -80,19 +80,15 @@ Supported actions:
 - `quick-agent-session`: create a small Issue/Task and dispatch it.
 - `run-check`: execute one named check from the safe check registry.
 
-Approval levels:
+Execution policy:
 
-- `auto`: execute immediately under local policy.
-- `confirm`: wait in the visual approval queue.
-- `manual-only`: cannot be approved through MCP; it must be approved from the localhost visual controller.
+- New local Jobs execute immediately after submission.
+- Risk labels determine expected evidence and verification depth; they do not create a pending approval state.
+- Agent choice is supplied at execution time. When omitted, repo-harness uses the first enabled local Agent rather than binding the Task permanently to Codex.
+- Explicitly destructive or irreversible work requires `approve_destructive: true` in the same request.
+- Arbitrary shell input is never accepted by the MCP surface.
 
-Default policy is intentionally conservative:
-
-- low/medium-risk local Tasks with an explicit allowed-path scope may auto-dispatch;
-- automatic placement uses the current workspace when no other local Run is active and creates a worktree only for concurrency;
-- high-risk or unscoped Tasks require confirmation;
-- named checks may auto-run;
-- arbitrary shell input is never accepted.
+There is no visual approval queue, no `confirm` workflow, and no `approve_local_job` tool in V8. Existing persisted pending Jobs are compatibility records only and may be read or cancelled.
 
 Repository-specific defaults may be stored in the ignored local file:
 
@@ -102,10 +98,8 @@ Repository-specific defaults may be stored in the ignored local file:
   "host": "127.0.0.1",
   "port": 8766,
   "autoOpen": false,
-  "approvals": {
-    "launch-task": "confirm",
-    "quick-agent-session": "confirm",
-    "run-check": "auto"
+  "execution": {
+    "defaultMode": "direct-edit"
   }
 }
 ```
@@ -121,14 +115,14 @@ Path:
 The controller MCP surface includes direct-change tools plus the V5 complex-work execution-closure model:
 
 - `assess_work_request`, `begin_edit_session`, `apply_patch`, `list_edit_sessions`, `get_edit_session_diff`, `verify_edit_session`, `finalize_edit_session`, `rollback_edit_session`;
-- `local_bridge_status`, `submit_local_job`, `list_local_jobs`, `get_local_job`, `approve_local_job`;
+- `local_bridge_status`, `submit_local_job`, `list_local_jobs`, `get_local_job`;
 - `get_project_progress`, `get_task_progress_detail`, `get_worklog_timeline`, `export_worklog`;
 - `get_github_plugin_status`, `configure_github_plugin`.
 
 `controller_capabilities` reports:
 
 ```text
-controller-execution-first-v7
+controller-chatgpt-bridge-v8
 ```
 
 When ChatGPT can call the action, `submit_local_job` creates the same persistent Job used by the visual UI. When a platform policy blocks the action, open the local controller and launch the existing Task from its card or use Quick Agent Session.
@@ -202,6 +196,6 @@ Values outside the configured range are rejected. They are never silently replac
 
 ## Connector diagnostics
 
-The page displays the MCP runtime profile, tool-surface fingerprint, tool count, tunnel reconnect state, and whether the active service matches `controller-execution-first-v7`. A warning means the local execution bridge can still be used, but ChatGPT may be holding an obsolete Planner tool snapshot.
+The page displays the MCP runtime profile, tool-surface fingerprint, tool count, tunnel reconnect state, and whether the active service matches `controller-chatgpt-bridge-v8`. A warning means the local execution bridge can still be used, but ChatGPT may be holding an obsolete Planner tool snapshot.
 
 Use the versioned default Connector name `repo-harness-controller-v7`, restart keepalive from the updated installation, and recreate or rescan the ChatGPT Connector when the warning persists. Ordinary repository source is readable in the `controller` profile; credentials, secrets, Git internals, runtime security files, lockfiles, and CI workflows remain denied.

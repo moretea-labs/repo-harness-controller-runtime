@@ -1,6 +1,6 @@
 {
   "name": "repo-harness",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Installs, migrates, audits, and repairs repo-local agentic development harnesses",
   "license": "MIT",
   "repository": {
@@ -10,6 +10,8 @@
   "type": "module",
   "files": [
     ".agents/skills/repo-harness-chatgpt-browser/",
+    "scripts/verify-controller-v8.sh",
+    ".agents/skills/repo-harness-chatgpt-bridge/",
     "agents/",
     "assets/",
     "docs/images/",
@@ -27,6 +29,9 @@
     "docs/repo-harness-direct-change-v6.md",
     "docs/repo-harness-v6-verification.md",
     "docs/repo-harness-execution-first-v7.md",
+    "docs/repo-harness-chatgpt-bridge-v8.md",
+    "docs/repo-harness-v8-verification.md",
+    "docs/repo-harness-v8-file-manifest.sha256",
     "docs/repo-harness-v6-file-manifest.sha256",
     "README.zh-CN.md",
     "install.sh",
@@ -62,7 +67,8 @@
     "check:task-workflow": "bash scripts/check-task-workflow.sh --strict",
     "prepublishOnly": "bash scripts/check-npm-release.sh",
     "sync:brain-docs": "bash scripts/sync-brain-docs.sh --all",
-    "sync:codex-installed": "bash scripts/sync-codex-installed-copies.sh"
+    "sync:codex-installed": "bash scripts/sync-codex-installed-copies.sh",
+    "check:controller-v8": "bash scripts/verify-controller-v8.sh"
   },
   "devDependencies": {
     "@colbymchenry/codegraph": "1.0.1",

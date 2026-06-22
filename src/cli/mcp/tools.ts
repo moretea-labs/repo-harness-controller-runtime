@@ -13,6 +13,7 @@ import { runProcess } from "../../effects/process-runner";
 import {
   beginEditSession,
   applyEditOperations,
+  createEditSavepoint,
   finalizeEditSession,
   getEditSession,
   getEditSessionDiff,
@@ -104,7 +105,6 @@ import {
   saveGitHubPluginConfig,
 } from "../github/plugin";
 import {
-  approveAndExecuteLocalBridgeJob,
   executeLocalBridgeJob,
   getLocalBridgeJob,
   getLocalBridgeJobEvents,
@@ -112,7 +112,6 @@ import {
   submitLocalBridgeJob,
 } from "../local-bridge/job-store";
 import type {
-  LocalBridgeApproval,
   LocalBridgeJobAction,
 } from "../local-bridge/types";
 import { runHelper } from "../runtime/helper-runner";
@@ -320,6 +319,19 @@ function parseControllerAgent(value: unknown): ControllerAgent | null {
     : null;
 }
 
+function resolveDispatchAgent(
+  ctx: McpToolContext,
+  task: ControllerTask,
+  requested: unknown,
+): ControllerAgent | null {
+  const hasExplicitRequest = requested !== undefined && requested !== null && String(requested).trim() !== "";
+  if (hasExplicitRequest) return parseControllerAgent(requested);
+  if (task.recommendedAgent === "github-copilot") return task.recommendedAgent;
+  if (task.recommendedAgent && ctx.policy.execution.allowedAgents.includes(task.recommendedAgent)) return task.recommendedAgent;
+  const firstLocal = ctx.policy.execution.allowedAgents[0];
+  return firstLocal ?? task.recommendedAgent ?? null;
+}
+
 function parseLocalBridgeAction(value: unknown): LocalBridgeJobAction | null {
   const normalized = String(value ?? "").trim();
   return normalized === "launch-task" ||
@@ -329,27 +341,12 @@ function parseLocalBridgeAction(value: unknown): LocalBridgeJobAction | null {
     : null;
 }
 
-function parseLocalBridgeApproval(
-  value: unknown,
-): LocalBridgeApproval | undefined {
-  if (value === undefined || value === null || value === "") return undefined;
-  const normalized = String(value).trim();
-  if (
-    normalized === "auto" ||
-    normalized === "confirm" ||
-    normalized === "manual-only"
-  )
-    return normalized;
-  throw new Error(`invalid local bridge approval: ${normalized}`);
-}
-
 function localBridgeRequestFromArgs(args: Record<string, unknown>) {
   const action = parseLocalBridgeAction(args.action);
   if (!action)
     throw new Error(
       "action must be launch-task, quick-agent-session, or run-check",
     );
-  const approval = parseLocalBridgeApproval(args.approval);
   const requestedBy =
     String(args.requested_by ?? "chatgpt").trim() || "chatgpt";
   if (action === "launch-task") {
@@ -359,7 +356,6 @@ function localBridgeRequestFromArgs(args: Record<string, unknown>) {
       throw new Error("launch-task requires issue_id and task_id");
     return {
       action,
-      approval,
       requestedBy,
       payload: {
         issueId,
@@ -376,7 +372,6 @@ function localBridgeRequestFromArgs(args: Record<string, unknown>) {
           typeof args.create_pull_request === "boolean"
             ? args.create_pull_request
             : undefined,
-        approveRisk: args.approve_risk === true,
         approveDestructive: args.approve_destructive === true,
       },
     } as const;
@@ -386,7 +381,6 @@ function localBridgeRequestFromArgs(args: Record<string, unknown>) {
     if (!checkId) throw new Error("run-check requires check_id");
     return {
       action,
-      approval,
       requestedBy,
       payload: {
         checkId,
@@ -404,7 +398,6 @@ function localBridgeRequestFromArgs(args: Record<string, unknown>) {
     throw new Error("quick-agent-session supports local codex or claude only");
   return {
     action,
-    approval,
     requestedBy,
     payload: {
       title,
@@ -415,11 +408,12 @@ function localBridgeRequestFromArgs(args: Record<string, unknown>) {
       checks: stringList(args.checks),
       acceptanceCriteria: stringList(args.acceptance_criteria),
       risk: ["readonly", "low", "medium", "high", "destructive"].includes(String(args.risk)) ? args.risk as TaskRisk : "low",
-      agent: agent === "claude" ? "claude" : "codex",
+      agent: agent === "claude" || agent === "codex" ? agent : undefined,
       isolate: typeof args.isolate === "boolean" ? args.isolate : undefined,
       timeoutMs:
         typeof args.timeout_ms === "number" ? args.timeout_ms : undefined,
       ephemeral: typeof args.ephemeral === "boolean" ? args.ephemeral : true,
+      approveDestructive: args.approve_destructive === true,
     },
   } as const;
 }
@@ -675,7 +669,7 @@ function controllerTaskDrafts(value: unknown): TaskDraft[] {
       ? String(task.risk)
       : "medium") as TaskRisk,
     recommendedAgent:
-      parseControllerAgent(task.agent ?? task.recommendedAgent) ?? "codex",
+      parseControllerAgent(task.agent ?? task.recommendedAgent) ?? undefined,
   }));
 }
 
@@ -688,44 +682,36 @@ function controllerEditOperations(value: unknown): EditOperation[] {
     )
     .map((entry) => {
       const type = String(entry.type);
-      if (type === "create")
+      const path = String(entry.path ?? "");
+      const expectedSha256 = String(entry.expected_sha256 ?? entry.expectedSha256 ?? "");
+      if (type === "create") return { type, path, content: String(entry.content ?? "") };
+      if (type === "delete") return { type, path, expectedSha256 };
+      if (type === "write") return { type, path, expectedSha256, content: String(entry.content ?? "") };
+      if (type === "replace") {
         return {
           type,
-          path: String(entry.path ?? ""),
-          content: String(entry.content ?? ""),
-        };
-      if (type === "delete")
-        return {
-          type,
-          path: String(entry.path ?? ""),
-          expectedSha256: String(
-            entry.expected_sha256 ?? entry.expectedSha256 ?? "",
-          ),
-        };
-      if (type === "write")
-        return {
-          type,
-          path: String(entry.path ?? ""),
-          expectedSha256: String(
-            entry.expected_sha256 ?? entry.expectedSha256 ?? "",
-          ),
-          content: String(entry.content ?? ""),
-        };
-      if (type === "replace")
-        return {
-          type,
-          path: String(entry.path ?? ""),
-          expectedSha256: String(
-            entry.expected_sha256 ?? entry.expectedSha256 ?? "",
-          ),
+          path,
+          expectedSha256,
           replacements: taskObjects(entry.replacements).map((replacement) => ({
             oldText: String(replacement.old_text ?? replacement.oldText ?? ""),
             newText: String(replacement.new_text ?? replacement.newText ?? ""),
-            replaceAll:
-              replacement.replace_all === true ||
-              replacement.replaceAll === true,
+            replaceAll: replacement.replace_all === true || replacement.replaceAll === true,
           })),
         };
+      }
+      if (type === "insert_before" || type === "insert_after") {
+        return {
+          type,
+          path,
+          expectedSha256,
+          anchor: String(entry.anchor ?? ""),
+          content: String(entry.content ?? ""),
+          occurrence: typeof entry.occurrence === "number" ? Math.trunc(entry.occurrence) : undefined,
+        };
+      }
+      if (type === "prepend" || type === "append") {
+        return { type, path, expectedSha256, content: String(entry.content ?? "") };
+      }
       throw new Error(`invalid edit operation type: ${type}`);
     });
 }
@@ -1253,24 +1239,20 @@ export function buildMcpToolDefinitions(
       {
         name: "local_bridge_status",
         description:
-          "Return the localhost-only visual controller endpoint, local approval queue, and recent local bridge Jobs.",
+          "Return the localhost-only visual controller endpoint, execution state, and recent local bridge Jobs.",
         inputSchema: EMPTY_SCHEMA,
         annotations: readOnly,
       },
       {
         name: "submit_local_job",
         description:
-          "Submit a high-level local Job Ticket. Low-risk Jobs may auto-dispatch according to local policy; confirmation-required Jobs remain visible in the Local Controller UI.",
+          "Submit a high-level local Job Ticket. Local work dispatches immediately unless it is explicitly destructive; no ordinary risk approval queue is used.",
         inputSchema: {
           type: "object",
           properties: {
             action: {
               type: "string",
               enum: ["launch-task", "quick-agent-session", "run-check"],
-            },
-            approval: {
-              type: "string",
-              enum: ["auto", "confirm", "manual-only"],
             },
             issue_id: { type: "string" },
             task_id: { type: "string" },
@@ -1288,7 +1270,6 @@ export function buildMcpToolDefinitions(
             base_ref: { type: "string" },
             model: { type: "string" },
             create_pull_request: { type: "boolean" },
-            approve_risk: { type: "boolean" },
             approve_destructive: { type: "boolean" },
             ephemeral: { type: "boolean", description: "Quick Agent defaults to true and stays outside the durable Issue board." },
             title: { type: "string" },
@@ -1313,7 +1294,7 @@ export function buildMcpToolDefinitions(
       },
       {
         name: "list_local_jobs",
-        description: "List recent local Job Tickets and approval state.",
+        description: "List recent local Job Tickets and execution state.",
         inputSchema: {
           type: "object",
           properties: { limit: { type: "number" } },
@@ -1331,22 +1312,6 @@ export function buildMcpToolDefinitions(
           additionalProperties: false,
         },
         annotations: readOnly,
-      },
-      {
-        name: "approve_local_job",
-        description:
-          "Approve and execute one confirmation-required local Job Ticket. Manual-only Jobs still require direct local UI action.",
-        inputSchema: {
-          type: "object",
-          properties: { job_id: { type: "string" } },
-          required: ["job_id"],
-          additionalProperties: false,
-        },
-        annotations: {
-          readOnlyHint: false,
-          openWorldHint: false,
-          destructiveHint: false,
-        },
       },
       {
         name: "project_snapshot",
@@ -1520,7 +1485,7 @@ export function buildMcpToolDefinitions(
       {
         name: "get_worklog_timeline",
         description:
-          "Read the unified controller worklog across Issues, Tasks, Runs, approvals, Verification, and GitHub sync.",
+          "Read the unified controller worklog across Issues, Tasks, Runs, Direct Edits, Verification, and GitHub sync.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1658,7 +1623,7 @@ export function buildMcpToolDefinitions(
       {
         name: "inspect_issue_readiness",
         description:
-          "Score launch readiness, list blockers and warnings, and summarize ready Tasks and assigned agents.",
+          "Score launch readiness, list blockers and warnings, and summarize executable Tasks. Agent selection happens at dispatch time.",
         inputSchema: {
           type: "object",
           properties: { issue_id: { type: "string" } },
@@ -1677,7 +1642,6 @@ export function buildMcpToolDefinitions(
             issue_id: { type: "string" },
             task_id: { type: "string" },
             retry_from_run_id: { type: "string" },
-            approve_risk: { type: "boolean" },
             approve_destructive: { type: "boolean" },
           },
           required: ["issue_id", "task_id"],
@@ -1894,7 +1858,7 @@ export function buildMcpToolDefinitions(
       {
         name: "dispatch_task",
         description:
-          "Start one ready Task as a persistent local Codex/Claude run or a visible GitHub Copilot cloud-agent session.",
+          "Execute one Task with an agent selected at dispatch time. Task definitions remain executor-neutral; Codex, Claude, and GitHub Copilot are optional implementation tools.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1914,8 +1878,7 @@ export function buildMcpToolDefinitions(
             base_ref: { type: "string" },
             model: { type: "string" },
             create_pull_request: { type: "boolean" },
-            approve_risk: { type: "boolean", description: "Explicit confirmation for medium/high-risk execution when required by the Task-local policy." },
-            approve_destructive: { type: "boolean", description: "Explicit manual authorization for destructive execution." },
+            approve_destructive: { type: "boolean", description: "Explicit same-request authorization for destructive or irreversible execution." },
           },
           required: ["issue_id", "task_id"],
           additionalProperties: false,
@@ -1929,12 +1892,13 @@ export function buildMcpToolDefinitions(
       {
         name: "launch_issue",
         description:
-          "Launch only readiness-approved independent Tasks, using local agents or visible GitHub Copilot cloud sessions according to each Task.",
+          "Execute independent Tasks from one Issue with an optional runtime agent override. Task definitions do not permanently bind an agent.",
         inputSchema: {
           type: "object",
           properties: {
             issue_id: { type: "string" },
             max_parallel: { type: "number" },
+            agent: { type: "string", enum: ["codex", "claude", "github-copilot"], description: "Optional runtime executor override for selected Tasks." },
             timeout_ms: agentTimeoutSchema,
             isolate: {
               type: "boolean",
@@ -1945,8 +1909,7 @@ export function buildMcpToolDefinitions(
             base_ref: { type: "string" },
             model: { type: "string" },
             create_pull_request: { type: "boolean" },
-            approve_risk: { type: "boolean", description: "Explicit confirmation for medium/high-risk execution when required by the Task-local policy." },
-            approve_destructive: { type: "boolean", description: "Explicit manual authorization for destructive execution." },
+            approve_destructive: { type: "boolean", description: "Explicit same-request authorization for destructive or irreversible execution." },
           },
           required: ["issue_id"],
           additionalProperties: false,
@@ -1960,12 +1923,13 @@ export function buildMcpToolDefinitions(
       {
         name: "dispatch_ready_tasks",
         description:
-          "Start up to max_parallel independent ready Tasks as local runs or GitHub Copilot cloud sessions.",
+          "Execute up to max_parallel independent Tasks with an optional runtime agent override.",
         inputSchema: {
           type: "object",
           properties: {
             issue_id: { type: "string" },
             max_parallel: { type: "number" },
+            agent: { type: "string", enum: ["codex", "claude", "github-copilot"], description: "Optional runtime executor override for selected Tasks." },
             timeout_ms: agentTimeoutSchema,
             isolate: {
               type: "boolean",
@@ -1976,8 +1940,7 @@ export function buildMcpToolDefinitions(
             base_ref: { type: "string" },
             model: { type: "string" },
             create_pull_request: { type: "boolean" },
-            approve_risk: { type: "boolean", description: "Explicit confirmation for medium/high-risk execution when required by the Task-local policy." },
-            approve_destructive: { type: "boolean", description: "Explicit manual authorization for destructive execution." },
+            approve_destructive: { type: "boolean", description: "Explicit same-request authorization for destructive or irreversible execution." },
           },
           additionalProperties: false,
         },
@@ -2220,7 +2183,7 @@ export function buildMcpToolDefinitions(
       {
         name: "apply_patch",
         description:
-          "Apply atomic create, full-content write, exact-text replacement, or delete operations inside an open edit session using SHA preconditions.",
+          "Append one atomic patch batch to an active edit session. The same session accepts multiple batches and aggregates localized diffs by revision.",
         inputSchema: {
           type: "object",
           properties: {
@@ -2232,11 +2195,13 @@ export function buildMcpToolDefinitions(
                 properties: {
                   type: {
                     type: "string",
-                    enum: ["create", "write", "replace", "delete"],
+                    enum: ["create", "write", "replace", "insert_before", "insert_after", "prepend", "append", "delete"],
                   },
                   path: { type: "string" },
                   content: { type: "string" },
                   expected_sha256: { type: "string" },
+                  anchor: { type: "string", description: "Anchor text for insert_before or insert_after." },
+                  occurrence: { type: "number", description: "1-based anchor occurrence; defaults to 1." },
                   replacements: {
                     type: "array",
                     items: {
@@ -2262,12 +2227,12 @@ export function buildMcpToolDefinitions(
         annotations: {
           readOnlyHint: false,
           openWorldHint: false,
-          destructiveHint: true,
+          destructiveHint: false,
         },
       },
       {
         name: "get_edit_session",
-        description: "Read an edit session and its applied operation manifest.",
+        description: "Read an edit session, revisions, savepoints, and operation manifest.",
         inputSchema: {
           type: "object",
           properties: { session_id: { type: "string" } },
@@ -2278,7 +2243,7 @@ export function buildMcpToolDefinitions(
       },
       {
         name: "list_edit_sessions",
-        description: "List recent direct-edit sessions with changed-file and verification summaries.",
+        description: "List recent direct-edit sessions with revision, changed-file, and check summaries.",
         inputSchema: {
           type: "object",
           properties: { limit: { type: "number" } },
@@ -2288,7 +2253,7 @@ export function buildMcpToolDefinitions(
       },
       {
         name: "get_edit_session_diff",
-        description: "Read the persisted unified patch for one direct-edit session.",
+        description: "Read the current aggregate localized diff for one direct-edit session.",
         inputSchema: {
           type: "object",
           properties: { session_id: { type: "string" } },
@@ -2298,8 +2263,22 @@ export function buildMcpToolDefinitions(
         annotations: readOnly,
       },
       {
+        name: "create_edit_savepoint",
+        description: "Name the current edit revision so later patch batches can be rolled back to it.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            session_id: { type: "string" },
+            name: { type: "string" },
+          },
+          required: ["session_id", "name"],
+          additionalProperties: false,
+        },
+        annotations: write,
+      },
+      {
         name: "verify_edit_session",
-        description: "Run named checks against an applied direct edit and persist review evidence. Sessions with no named checks still require explicit reviewer evidence.",
+        description: "Run named checks against the current edit revision and persist evidence. Checks are optional unless configured on the session.",
         inputSchema: {
           type: "object",
           properties: {
@@ -2316,23 +2295,27 @@ export function buildMcpToolDefinitions(
       {
         name: "rollback_edit_session",
         description:
-          "Rollback a non-finalized applied or verified edit session if files have not changed since application.",
+          "Rollback an active edit session completely, to a prior revision, or to a named savepoint.",
         inputSchema: {
           type: "object",
-          properties: { session_id: { type: "string" } },
+          properties: {
+            session_id: { type: "string" },
+            to_revision: { type: "number", description: "Keep revisions up to this value; omit for full rollback." },
+            savepoint: { type: "string", description: "Rollback to a named savepoint." },
+          },
           required: ["session_id"],
           additionalProperties: false,
         },
         annotations: {
           readOnlyHint: false,
           openWorldHint: false,
-          destructiveHint: true,
+          destructiveHint: false,
         },
       },
       {
         name: "finalize_edit_session",
         description:
-          "Finalize an applied edit session after review and checks.",
+          "Close an active edit session. Configured checks must pass; sessions without configured checks finalize directly.",
         inputSchema: {
           type: "object",
           properties: {
@@ -2515,7 +2498,7 @@ export async function callMcpTool(
           toolSurface: CONTROLLER_TOOL_SURFACE,
           toolSurfaceVersion: CONTROLLER_TOOL_SURFACE_VERSION,
           toolSurfaceFingerprint: controllerToolSurfaceFingerprint(),
-          executionModel: "execution-first-risk-adaptive-task-local",
+          executionModel: "chatgpt-controller-execution-bridge",
           profile: ctx.policy.profile,
           capabilities: {
             repositoryInspection: true,
@@ -2524,15 +2507,22 @@ export async function callMcpTool(
             localAgentRuns: ctx.policy.execution.agentRunner,
             githubCopilotSessions: true,
             dynamicTaskGraph: true,
+            runtimeAgentSelection: true,
+            taskAgentBinding: false,
             structuredRunEvents: true,
             boundedDirectEdits: true,
+            multiRevisionDirectEdits: true,
+            editSavepoints: true,
+            partialEditRollback: true,
             directEditFirstRouting: true,
             persistedEditDiffs: true,
             verifiedEditFinalization: true,
             verificationGate: true,
             localRunWatch: true,
             localVisualController: true,
-            localApprovalQueue: true,
+            hierarchicalControllerUI: true,
+            localApprovalQueue: false,
+            localRiskApprovalGate: false,
             quickAgentSessions: true,
             persistentTimeouts: true,
             timeoutProgress: true,
@@ -2578,7 +2568,6 @@ export async function callMcpTool(
             "submit_local_job",
             "list_local_jobs",
             "get_local_job",
-            "approve_local_job",
             "project_snapshot",
             "search_repository",
             "assess_work_request",
@@ -2619,6 +2608,8 @@ export async function callMcpTool(
             "docs/repo-harness-execution-closure-v5.md",
             "docs/repo-harness-direct-change-v6.md",
             "docs/repo-harness-execution-first-v7.md",
+            "docs/repo-harness-chatgpt-bridge-v8.md",
+            "docs/repo-harness-v8-verification.md",
           ],
           staleConnectorHint:
             `Connector clients must match ${CONTROLLER_TOOL_SURFACE} schema ${CONTROLLER_SCHEMA_VERSION}. Refresh MCP setup when toolSurfaceVersion or fingerprint differs.`,
@@ -2643,12 +2634,10 @@ export async function callMcpTool(
             counts[job.status] = (counts[job.status] ?? 0) + 1;
             return counts;
           }, {}),
-          pendingApproval: jobs.filter(
-            (job) => job.status === "pending_approval",
-          ),
+          approvalQueue: false,
           recentJobs: jobs,
           fallback:
-            "Open the localhost Local Controller to approve or launch work when a ChatGPT write action is unavailable.",
+            "Open the localhost Local Controller to launch work or inspect execution when a ChatGPT write action is unavailable.",
         };
         audit(ctx, name, "ok", args);
         return textResult(payload);
@@ -2671,12 +2660,9 @@ export async function callMcpTool(
           localController:
             loadMcpRuntimeState(ctx.repoRoot)?.localController?.endpoint ??
             "http://127.0.0.1:8766/",
-          next:
-            result.status === "pending_approval"
-              ? "Approve this Job in the Local Controller UI."
-              : result.runId
-                ? `Inspect Run ${result.runId}.`
-                : "Inspect the Job result.",
+          next: result.runId
+            ? `Inspect Run ${result.runId}.`
+            : "Inspect the Job result.",
         });
       }
       case "list_local_jobs": {
@@ -2703,17 +2689,6 @@ export async function callMcpTool(
         };
         audit(ctx, name, "ok", args);
         return textResult(payload);
-      }
-      case "approve_local_job": {
-        if (ctx.policy.profile !== "controller")
-          return errorResult(
-            "TOOL_DISABLED",
-            "approve_local_job requires the controller profile",
-          );
-        const jobId = String(args.job_id ?? "").trim();
-        const job = approveAndExecuteLocalBridgeJob(ctx.repoRoot, jobId);
-        audit(ctx, name, "ok", args);
-        return textResult({ job });
       }
       case "project_snapshot": {
         if (ctx.policy.profile !== "controller") return errorResult("TOOL_DISABLED", "project_snapshot requires the controller profile");
@@ -3180,7 +3155,6 @@ export async function callMcpTool(
           String(args.task_id ?? ""),
           {
             retryFromRunId: typeof args.retry_from_run_id === "string" ? args.retry_from_run_id : undefined,
-            approveRisk: args.approve_risk === true,
             approveDestructive: args.approve_destructive === true,
           },
         );
@@ -3217,7 +3191,7 @@ export async function callMcpTool(
           .map((task) => ({
             id: task.id,
             title: task.title,
-            agent: task.recommendedAgent,
+            agent: task.recommendedAgent ?? "runtime-selected",
             risk: task.risk,
             allowedPaths: task.allowedPaths,
             checks: task.checks,
@@ -3418,12 +3392,11 @@ export async function callMcpTool(
         const task = issue.tasks.find((entry) => entry.id === taskId);
         if (!task) return errorResult("TASK_NOT_FOUND", `task not found: ${issueId}/${taskId}`);
         const readiness = inspectTaskReadiness(ctx.repoRoot, issueId, taskId, {
-          approveRisk: args.approve_risk === true,
           approveDestructive: args.approve_destructive === true,
         });
         if (!readiness.ready) return errorResult("TASK_NOT_LAUNCH_READY", "Task-local launch policy blocked execution.", readiness);
-        const requested = parseControllerAgent(args.agent ?? task.recommendedAgent);
-        if (!requested) return errorResult("INVALID_AGENT", `unsupported agent: ${String(args.agent ?? task.recommendedAgent)}`);
+        const requested = resolveDispatchAgent(ctx, task, args.agent);
+        if (!requested) return errorResult("AGENT_REQUIRED", "No agent is selected or enabled. Pass agent explicitly or enable a local agent in the controller profile.");
         if (requested !== "github-copilot") {
           if (!ctx.policy.execution.agentRunner) return errorResult("DEV_RUNNER_DISABLED", "Start the controller profile with --enable-dev-runner to dispatch local Codex or Claude agents.");
           if (!ctx.policy.execution.allowedAgents.includes(requested)) return errorResult("AGENT_DENIED", `local agent is not enabled: ${requested}`);
@@ -3439,7 +3412,6 @@ export async function callMcpTool(
           baseRef: typeof args.base_ref === "string" ? args.base_ref : undefined,
           model: typeof args.model === "string" ? args.model : undefined,
           createPullRequest: args.create_pull_request !== false,
-          approveRisk: args.approve_risk === true,
           approveDestructive: args.approve_destructive === true,
         });
         audit(ctx, name, run.status === "failed" ? "failed" : "ok", args, run.github?.url ?? run.promptPath, run.error);
@@ -3454,7 +3426,6 @@ export async function callMcpTool(
         const skipped: Array<{ taskId: string; reason: string; readiness?: unknown }> = [];
         for (const task of issue.tasks) {
           const readiness = inspectTaskReadiness(ctx.repoRoot, issueId, task.id, {
-            approveRisk: args.approve_risk === true,
             approveDestructive: args.approve_destructive === true,
           });
           if (!readiness.ready) {
@@ -3470,7 +3441,11 @@ export async function callMcpTool(
         }
         const runs = [];
         for (const task of selected) {
-          const agent = task.recommendedAgent;
+          const agent = resolveDispatchAgent(ctx, task, args.agent);
+          if (!agent) {
+            skipped.push({ taskId: task.id, reason: "no runtime agent selected or enabled" });
+            continue;
+          }
           if (agent !== "github-copilot" && (!ctx.policy.execution.agentRunner || !ctx.policy.execution.allowedAgents.includes(agent))) {
             skipped.push({ taskId: task.id, reason: `local agent is not enabled: ${agent}` });
             continue;
@@ -3486,7 +3461,6 @@ export async function callMcpTool(
             baseRef: typeof args.base_ref === "string" ? args.base_ref : undefined,
             model: typeof args.model === "string" ? args.model : undefined,
             createPullRequest: args.create_pull_request !== false,
-            approveRisk: args.approve_risk === true,
             approveDestructive: args.approve_destructive === true,
           }));
         }
@@ -3505,8 +3479,7 @@ export async function callMcpTool(
           if (issue.archivedAt || ["done", "cancelled"].includes(issue.status)) continue;
           for (const task of issue.tasks) {
             const readiness = inspectTaskReadiness(ctx.repoRoot, issue.id, task.id, {
-              approveRisk: args.approve_risk === true,
-              approveDestructive: args.approve_destructive === true,
+                approveDestructive: args.approve_destructive === true,
             });
             if (readiness.ready) candidates.push({ issueId: issue.id, task });
             else if (readiness.blockers.length > 0) skipped.push({ issueId: issue.id, taskId: task.id, reason: readiness.blockers.map((entry) => entry.code).join(", ") });
@@ -3523,7 +3496,11 @@ export async function callMcpTool(
         }
         const runs = [];
         for (const candidate of selected) {
-          const agent = candidate.task.recommendedAgent;
+          const agent = resolveDispatchAgent(ctx, candidate.task, args.agent);
+          if (!agent) {
+            skipped.push({ issueId: candidate.issueId, taskId: candidate.task.id, reason: "no runtime agent selected or enabled" });
+            continue;
+          }
           if (agent !== "github-copilot" && (!ctx.policy.execution.agentRunner || !ctx.policy.execution.allowedAgents.includes(agent))) {
             skipped.push({ issueId: candidate.issueId, taskId: candidate.task.id, reason: `local agent is not enabled: ${agent}` });
             continue;
@@ -3539,7 +3516,6 @@ export async function callMcpTool(
             baseRef: typeof args.base_ref === "string" ? args.base_ref : undefined,
             model: typeof args.model === "string" ? args.model : undefined,
             createPullRequest: args.create_pull_request !== false,
-            approveRisk: args.approve_risk === true,
             approveDestructive: args.approve_destructive === true,
           }));
         }
@@ -3905,6 +3881,17 @@ export async function callMcpTool(
         audit(ctx, name, "ok", args, result.path);
         return textResult(result);
       }
+      case "create_edit_savepoint": {
+        if (ctx.policy.profile !== "controller")
+          return errorResult("TOOL_DISABLED", "create_edit_savepoint requires the controller profile");
+        const session = createEditSavepoint(
+          ctx.repoRoot,
+          String(args.session_id ?? ""),
+          String(args.name ?? ""),
+        );
+        audit(ctx, name, "ok", args, `.ai/harness/edit-sessions/${session.sessionId}`);
+        return textResult(session);
+      }
       case "verify_edit_session": {
         if (ctx.policy.profile !== "controller")
           return errorResult("TOOL_DISABLED", "verify_edit_session requires the controller profile");
@@ -3913,7 +3900,7 @@ export async function callMcpTool(
           reviewer: typeof args.reviewer === "string" ? args.reviewer : undefined,
           note: typeof args.note === "string" ? args.note : undefined,
         });
-        audit(ctx, name, session.status === "verified" ? "ok" : "blocked", args, session.diffPath);
+        audit(ctx, name, session.status === "checked" ? "ok" : "blocked", args, session.diffPath);
         return textResult(session);
       }
       case "rollback_edit_session": {
@@ -3925,6 +3912,10 @@ export async function callMcpTool(
         const session = rollbackEditSession(
           ctx.repoRoot,
           String(args.session_id ?? ""),
+          {
+            toRevision: typeof args.to_revision === "number" ? Math.trunc(args.to_revision) : undefined,
+            savepoint: typeof args.savepoint === "string" ? args.savepoint : undefined,
+          },
         );
         audit(
           ctx,

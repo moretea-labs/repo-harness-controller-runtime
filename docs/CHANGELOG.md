@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.0 — Controller V8 ChatGPT execution bridge
+
+- Made Direct Edit a multi-revision transaction with savepoints and partial rollback.
+- Removed ordinary local risk approval gates and the new-work approval queue.
+- Made Task Agent assignment optional and selected executors at Run time.
+- Reorganized the Local Controller into Overview, Work, Activity, and Settings.
+- Added V7 state migration and V8 compatibility tests.
+
 All notable changes to this skill are documented here.
 
 ## [Unreleased]

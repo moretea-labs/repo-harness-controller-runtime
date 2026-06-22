@@ -152,25 +152,11 @@ function taskApproval(task: ControllerTask): LocalBridgeApproval {
   return taskExecutionPolicy(task).approval;
 }
 
-function stricterApproval(
-  left: LocalBridgeApproval,
-  right: LocalBridgeApproval,
-): LocalBridgeApproval {
-  const rank: Record<LocalBridgeApproval, number> = {
-    auto: 0,
-    confirm: 1,
-    "manual-only": 2,
-  };
-  return rank[left] >= rank[right] ? left : right;
-}
-
-function defaultApproval(
+function executionApproval(
   repoRoot: string,
   action: LocalBridgeJobAction,
   payload: LocalBridgeJobRequest["payload"],
 ): LocalBridgeApproval {
-  const configured = loadLocalBridgeConfig(repoRoot).approvals?.[action];
-  if (configured) return configured;
   if (action === "run-check") return "auto";
   if (action === "launch-task") {
     const input = payload as LaunchTaskPayload;
@@ -192,18 +178,13 @@ function defaultApproval(
     checks: normalizeStringList(input.checks),
     acceptanceCriteria: normalizeStringList(input.acceptanceCriteria),
     risk: input.risk ?? "low",
-    recommendedAgent: input.agent ?? "codex",
+    recommendedAgent: input.agent,
     notes: [],
     runIds: [],
     createdAt: now(),
     updatedAt: now(),
   };
   return taskApproval(synthetic);
-}
-
-function assertApproval(value: string): asserts value is LocalBridgeApproval {
-  if (!["auto", "confirm", "manual-only"].includes(value))
-    throw new Error(`invalid local bridge approval: ${value}`);
 }
 
 export function submitLocalBridgeJob(
@@ -219,14 +200,22 @@ export function submitLocalBridgeJob(
       `unsupported local bridge action: ${String(request.action)}`,
     );
   }
-  const policyApproval = defaultApproval(
+  const policyApproval = executionApproval(
     repoRoot,
     request.action,
     request.payload,
   );
-  const requestedApproval = request.approval ?? policyApproval;
-  assertApproval(requestedApproval);
-  const approval = stricterApproval(policyApproval, requestedApproval);
+  // V8 has no approval queue. Risk is metadata; only destructive work needs
+  // an explicit authorization flag in the same request.
+  const destructiveAuthorized = request.action === "launch-task"
+    ? Boolean((request.payload as LaunchTaskPayload).approveDestructive)
+    : request.action === "quick-agent-session"
+      ? Boolean((request.payload as QuickAgentSessionPayload).approveDestructive)
+      : true;
+  if (policyApproval === "manual-only" && !destructiveAuthorized) {
+    throw new Error("destructive execution requires approve_destructive in the same request");
+  }
+  const approval: LocalBridgeApproval = "auto";
   const createdAt = now();
   const job: LocalBridgeJob = {
     schemaVersion: 1,
@@ -235,22 +224,21 @@ export function submitLocalBridgeJob(
     payload: request.payload,
     requestedBy: request.requestedBy?.trim() || "local-user",
     approval,
-    status: approval === "auto" ? "approved" : "pending_approval",
+    status: "approved",
     createdAt,
     updatedAt: createdAt,
     ...(request.action === "quick-agent-session" && (request.payload as QuickAgentSessionPayload).ephemeral !== false ? { ephemeral: true } : {}),
-    ...(approval === "auto" ? { approvedAt: createdAt } : {}),
+    approvedAt: createdAt,
   };
   writeJson(metaPath(repoRoot, job.jobId), job);
   appendEvent(repoRoot, job.jobId, {
     type: "job_created",
     message: `${job.action} job created with ${approval} approval.`,
   });
-  if (approval === "auto")
-    appendEvent(repoRoot, job.jobId, {
-      type: "job_approved",
-      message: "Automatically approved by local policy.",
-    });
+  appendEvent(repoRoot, job.jobId, {
+    type: "job_approved",
+    message: "Accepted for immediate local execution; no approval queue is used.",
+  });
   return job;
 }
 
@@ -348,26 +336,6 @@ function saveJob(repoRoot: string, job: LocalBridgeJob): LocalBridgeJob {
   return job;
 }
 
-export function approveLocalBridgeJob(
-  repoRoot: string,
-  jobId: string,
-  allowManualOnly = false,
-): LocalBridgeJob {
-  const job = getLocalBridgeJob(repoRoot, jobId);
-  if (job.approval === "manual-only" && !allowManualOnly)
-    throw new Error(
-      "manual-only jobs must be approved from the localhost visual controller",
-    );
-  if (!["pending_approval", "approved"].includes(job.status)) return job;
-  job.status = "approved";
-  job.approvedAt = job.approvedAt ?? now();
-  appendEvent(repoRoot, job.jobId, {
-    type: "job_approved",
-    message: "Approved from the local control surface.",
-  });
-  return saveJob(repoRoot, job);
-}
-
 export function cancelLocalBridgeJob(
   repoRoot: string,
   jobId: string,
@@ -387,8 +355,15 @@ export function cancelLocalBridgeJob(
   return saveJob(repoRoot, job);
 }
 
-function normalizeAgent(value: ControllerAgent | undefined): ControllerAgent {
-  return value ?? "codex";
+function resolveExecutionAgent(
+  repoRoot: string,
+  value: ControllerAgent | undefined,
+): ControllerAgent {
+  if (value) return value;
+  const configured = loadMcpLocalConfig(repoRoot)?.devMode?.allowedAgents ?? [];
+  const local = configured.find((entry) => entry === "codex" || entry === "claude");
+  if (local === "codex" || local === "claude") return local;
+  throw new Error("no local Agent is configured; select an Agent explicitly or enable one in MCP settings");
 }
 
 function resolvedIsolation(payload: {
@@ -410,15 +385,14 @@ function executeLaunchTask(
     repoRoot,
     issueId: payload.issueId,
     taskId: payload.taskId,
-    agent: normalizeAgent(payload.agent),
+    agent: resolveExecutionAgent(repoRoot, payload.agent),
     timeoutMs: resolvedJobTimeout(repoRoot, payload.timeoutMs),
     isolate: resolvedIsolation(payload),
     githubRepo: payload.githubRepo,
     baseRef: payload.baseRef,
     model: payload.model,
     createPullRequest: payload.createPullRequest,
-    approveRisk: job.approval !== "auto" || payload.approveRisk === true,
-    approveDestructive: (job.approval === "manual-only" && Boolean(job.approvedAt)) || payload.approveDestructive === true,
+    approveDestructive: payload.approveDestructive === true,
   });
   job.runId = run.runId;
   job.issueId = payload.issueId;
@@ -474,7 +448,7 @@ function executeQuickSession(
           ? acceptance
           : [`Complete: ${objective}`],
         risk: payload.risk ?? "low",
-        recommendedAgent: payload.agent ?? "codex",
+        recommendedAgent: payload.agent,
       },
     ],
   });
@@ -484,11 +458,10 @@ function executeQuickSession(
     repoRoot,
     issueId: issue.id,
     taskId: task.id,
-    agent: payload.agent ?? "codex",
+    agent: resolveExecutionAgent(repoRoot, payload.agent),
     timeoutMs: resolvedJobTimeout(repoRoot, payload.timeoutMs),
     isolate: resolvedIsolation(payload),
-    approveRisk: job.approval !== "auto",
-    approveDestructive: job.approval === "manual-only" && Boolean(job.approvedAt),
+    approveDestructive: payload.approveDestructive === true,
   });
   job.runId = run.runId;
   job.issueId = issue.id;
@@ -538,9 +511,9 @@ export function executeLocalBridgeJob(
 ): LocalBridgeJob {
   const job = getLocalBridgeJob(repoRoot, jobId);
   if (job.status === "pending_approval")
-    throw new Error("job requires local approval before execution");
+    throw new Error("legacy pending-approval jobs cannot execute in V8; cancel and resubmit the work");
   if (job.approval === "manual-only" && !job.approvedAt)
-    throw new Error("manual-only job requires localhost visual approval");
+    throw new Error("legacy manual-only jobs cannot execute in V8; cancel and resubmit with same-request destructive authorization");
   if (!["approved"].includes(job.status)) return job;
   job.status = "running";
   job.startedAt = now();
@@ -570,13 +543,4 @@ export function executeLocalBridgeJob(
     });
   }
   return saveJob(repoRoot, job);
-}
-
-export function approveAndExecuteLocalBridgeJob(
-  repoRoot: string,
-  jobId: string,
-  allowManualOnly = false,
-): LocalBridgeJob {
-  approveLocalBridgeJob(repoRoot, jobId, allowManualOnly);
-  return executeLocalBridgeJob(repoRoot, jobId);
 }

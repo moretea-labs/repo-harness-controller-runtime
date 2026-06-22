@@ -27,7 +27,6 @@ export interface LaunchTaskPayload {
   baseRef?: string;
   model?: string;
   createPullRequest?: boolean;
-  approveRisk?: boolean;
   approveDestructive?: boolean;
 }
 
@@ -45,6 +44,7 @@ export interface QuickAgentSessionPayload {
   executionMode?: LocalExecutionPreference;
   timeoutMs?: number;
   ephemeral?: boolean;
+  approveDestructive?: boolean;
 }
 
 export interface RunCheckPayload {
@@ -61,7 +61,6 @@ export interface LocalBridgeJobRequest {
   action: LocalBridgeJobAction;
   payload: LocalBridgeJobPayload;
   requestedBy?: string;
-  approval?: LocalBridgeApproval;
 }
 
 export interface LocalBridgeJobEvent {

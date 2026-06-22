@@ -91,7 +91,7 @@ function renderIssueMarkdown(issue: ControllerIssue): string {
       `- Depends on: ${task.dependsOn.length ? task.dependsOn.map((item) => `\`${item}\``).join(', ') : 'none'}`,
       `- Allowed paths: ${task.allowedPaths.length ? task.allowedPaths.map((item) => `\`${item}\``).join(', ') : 'not defined'}`,
       `- Checks: ${task.checks.length ? task.checks.map((item) => `\`${item}\``).join(', ') : 'not defined'}`,
-      `- Agent: \`${task.recommendedAgent}\``,
+      `- Execution hint: ${task.recommendedAgent ? `agent / ${task.recommendedAgent}` : 'selected at runtime'}`,
       ...(task.github ? [`- GitHub: ${task.github.url}`] : []),
       ...(task.supersededBy?.length ? [`- Superseded by: ${task.supersededBy.map((item) => `\`${item}\``).join(', ')}`] : []),
       '',
@@ -103,7 +103,7 @@ function renderIssueMarkdown(issue: ControllerIssue): string {
     `status: ${JSON.stringify(issue.status)}`,
     `updated_at: ${JSON.stringify(issue.updatedAt)}`,
     ...(issue.archivedAt ? [`archived_at: ${JSON.stringify(issue.archivedAt)}`] : []),
-    'source: "repo-harness-controller-v7"',
+    'source: "repo-harness-controller-v8"',
     '---',
     '',
     `# ${issue.title}`,
@@ -139,7 +139,7 @@ function renderIssueMarkdown(issue: ControllerIssue): string {
 function writeIssue(repoRoot: string, issue: ControllerIssue): ControllerIssue {
   const root = join(repoRoot, issueRoot(issue));
   mkdirSync(root, { recursive: true });
-  issue.schemaVersion = 4;
+  issue.schemaVersion = 5;
   const expectedJson = issuePath(repoRoot, issue);
   const expectedMarkdown = markdownPath(repoRoot, issue);
   for (const name of readdirSync(root)) {
@@ -161,7 +161,7 @@ function normalizeLoadedIssue(issue: ControllerIssue): ControllerIssue {
     checks: task.checks ?? [],
     acceptanceCriteria: task.acceptanceCriteria ?? [],
     risk: task.risk ?? 'medium',
-    recommendedAgent: task.recommendedAgent ?? 'codex',
+    recommendedAgent: task.recommendedAgent,
     notes: task.notes ?? [],
     runIds: task.runIds ?? [],
   }));
@@ -250,7 +250,7 @@ function taskFromDraft(id: string, draft: TaskDraft, now: string): ControllerTas
     checks: normalizeStrings(draft.checks),
     acceptanceCriteria: normalizeStrings(draft.acceptanceCriteria),
     risk: draft.risk ?? 'medium',
-    recommendedAgent: draft.recommendedAgent ?? 'codex',
+    recommendedAgent: draft.recommendedAgent,
     notes: [],
     runIds: [],
     createdAt: now,
@@ -342,13 +342,13 @@ function buildTaskReadiness(
     add('TASK_SCOPE_REQUIRED', 'blocker', `${policy.executionClass} requires an explicit allowed path scope.`);
   }
   if (policy.approval === 'confirm' && !options.approveRisk) {
-    add('RISK_CONFIRMATION_REQUIRED', 'blocker', `${policy.executionClass} requires explicit risk confirmation.`);
+    add('RISK_CONFIRMATION_ADVISORY', 'warning', `${policy.executionClass} is marked for extra review, but local execution is not approval-gated in V8.`);
   }
   if (policy.approval === 'manual-only' && !options.approveDestructive) {
-    add('DESTRUCTIVE_APPROVAL_REQUIRED', 'blocker', 'Destructive execution requires explicit manual approval.');
+    add('DESTRUCTIVE_APPROVAL_REQUIRED', 'blocker', 'A destructive or irreversible operation requires explicit authorization.');
   }
 
-  const approvalBlockerCodes = new Set(['RISK_CONFIRMATION_REQUIRED', 'DESTRUCTIVE_APPROVAL_REQUIRED']);
+  const approvalBlockerCodes = new Set(['DESTRUCTIVE_APPROVAL_REQUIRED']);
   const nonApprovalBlockers = blockers.filter((entry) => !approvalBlockerCodes.has(entry.code));
   const approvalSatisfied = !blockers.some((entry) => approvalBlockerCodes.has(entry.code));
   const score = Math.max(0, 100 - blockers.length * 25 - warnings.length * 3);
@@ -449,7 +449,7 @@ export function createIssue(repoRoot: string, input: {
   // focus_only is retained as a UI preference only. Multiple active Issues do not block creation or execution.
   const now = new Date().toISOString();
   const issue: ControllerIssue = {
-    schemaVersion: 4,
+    schemaVersion: 5,
     id: issueId(),
     title,
     slug: slugify(title),
@@ -722,7 +722,7 @@ export function inspectIssueReadiness(repoRoot: string, issueIdValue: string): I
   const agents: Record<ControllerAgent, number> = { codex: 0, claude: 0, 'github-copilot': 0 };
   for (const entry of queueableTasks) {
     const task = issue.tasks.find((candidate) => candidate.id === entry.taskId)!;
-    agents[task.recommendedAgent] += 1;
+    if (task.recommendedAgent) agents[task.recommendedAgent] += 1;
   }
   const taskBlockers = taskReadiness.flatMap((entry) => entry.blockers);
   const taskWarnings = taskReadiness.flatMap((entry) => entry.warnings);
@@ -865,7 +865,7 @@ export function projectBoard(repoRoot: string): {
         issueId: issue.id,
         taskId: task.id,
         title: task.title,
-        agent: task.recommendedAgent,
+        agent: task.recommendedAgent ?? "runtime-selected",
         effectiveStatus: state.effectiveStatus,
         executionClass: readiness.executionClass,
         approval: readiness.approval,
@@ -893,6 +893,12 @@ export function projectBoard(repoRoot: string): {
           return {
             id: task.id,
             title: task.title,
+            objective: task.objective,
+            allowedPaths: task.allowedPaths,
+            forbiddenPaths: task.forbiddenPaths,
+            checks: task.checks,
+            acceptanceCriteria: task.acceptanceCriteria,
+            risk: task.risk,
             status: task.status,
             declaredStatus: state.declaredStatus,
             effectiveStatus: state.effectiveStatus,
@@ -911,7 +917,7 @@ export function projectBoard(repoRoot: string): {
             dependsOn: task.dependsOn,
             dependencyState: resolveTaskDependencies(issue, task, states),
             supersededBy: task.supersededBy,
-            agent: task.recommendedAgent,
+            agent: task.recommendedAgent ?? "runtime-selected",
             runIds: task.runIds,
             github: task.github,
           };

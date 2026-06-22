@@ -29,10 +29,16 @@ The skill should not carry the whole workflow contract in prose. It should:
 3. choose the correct path
 4. rely on the repo contract, migration scripts, and tests for enforcement
 
-## Controller V7 execution model
+## Controller V8 execution bridge
 
-Treat repo-harness as a capability bridge, not as the authority that decides whether capable agents may work. Evaluate launchability per Task. Missing named checks, unrelated blocked Tasks, multiple active Issues, and current focus are advisory, not global gates. Scale verification and approval to actual risk; keep hard blocks only for path/scope violations, overlapping writes, destructive or remote operations, real check failures, and high-risk data changes. Quick Agent sessions are ephemeral by default. After a successful Run, continue automatically into applicable checks, evidence, completion, or explicit acceptance.
+Treat ChatGPT as the controller and repo-harness as its repository execution layer. ChatGPT chooses how to inspect, plan, edit, verify, or delegate. repo-harness provides deterministic repository tools and does not impose an Agent-first workflow.
 
+- Direct Edit is the default for understood work. One session may accept many patch batches, keep revision history, create savepoints, run checks, roll back selected revisions, and finalize one aggregate localized diff.
+- Tasks describe objectives, scope, checks, and acceptance criteria. They do not permanently bind Codex, Claude, or GitHub Copilot. The executor is selected when each Run starts.
+- Agents are optional implementation tools for broad exploration, large refactors, or compile/test/fix loops. They receive a high-level implementation contract; ChatGPT still reviews the result and decides what happens next.
+- Ordinary local risk levels are metadata, not permission gates. There is no approval queue and no `approve_risk` handshake. Only an explicitly destructive or irreversible operation requires authorization in the same request.
+- The Controller UI is hierarchical: Overview, Work, Activity, and Settings. Work is organized as Issue -> Task -> Execution instead of exposing every technical record as a top-level destination.
+- Hard runtime boundaries remain for secrets, credentials, Git internals, concurrent write conflicts, out-of-scope writes when a scope is declared, and remote or irreversible side effects.
 ## When to use
 
 - install or refresh the CLI+hooks workflow in an existing repo

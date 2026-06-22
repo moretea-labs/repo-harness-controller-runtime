@@ -113,7 +113,7 @@ function issueBody(repoRoot: string, issue: ControllerIssue): string {
           .filter((task) => resolveEffectiveTaskState({ issue, task, runs: readTaskRunEvidence(repoRoot, task) }).effectiveStatus !== 'superseded')
           .map((task) => {
             const state = resolveEffectiveTaskState({ issue, task, runs: readTaskRunEvidence(repoRoot, task) });
-            return `- [ ] **${task.id}** — ${task.title} (declared: \`${state.declaredStatus}\`, effective: \`${state.effectiveStatus}\`, run: \`${state.latestRunStatus ?? 'none'}\`, \`${task.recommendedAgent}\`)`;
+            return `- [ ] **${task.id}** — ${task.title} (declared: \`${state.declaredStatus}\`, effective: \`${state.effectiveStatus}\`, run: \`${state.latestRunStatus ?? 'none'}\`, \`${task.recommendedAgent ?? 'runtime-selected'}\`)`;
           })
       : ['- No tasks planned.']),
     '',
@@ -132,7 +132,7 @@ function taskBody(issue: ControllerIssue, task: ControllerTask, parentUrl: strin
     `- Allowed paths: ${task.allowedPaths.length ? task.allowedPaths.map((item) => `\`${item}\``).join(', ') : 'not defined'}`,
     `- Forbidden paths: ${task.forbiddenPaths.length ? task.forbiddenPaths.map((item) => `\`${item}\``).join(', ') : 'default controller denies'}`,
     `- Risk: \`${task.risk}\``,
-    `- Recommended agent: \`${task.recommendedAgent}\``,
+    `- Execution hint: \`${task.recommendedAgent ?? 'runtime-selected'}\``,
     '',
     '## Acceptance criteria',
     ...(task.acceptanceCriteria.length ? task.acceptanceCriteria.map((item) => `- [ ] ${item}`) : ['- [ ] Define task acceptance criteria.']),
