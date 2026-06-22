@@ -36,8 +36,11 @@ import {
   archiveIssue,
   createIssue,
   getIssue,
+  getIssueEffectiveView,
   inspectIssueReadiness,
+  listIssueEffectiveViews,
   listIssues,
+  projectIssueEffectiveView,
   planIssue,
   projectBoard,
   recordTaskVerification,
@@ -2820,15 +2823,25 @@ export async function callMcpTool(
             "list_issues requires the controller profile",
           );
         const projectState = loadControllerProjectState(ctx.repoRoot);
-        const issues = listIssues(ctx.repoRoot).map((issue) => ({
+        const issues = listIssueEffectiveViews(ctx.repoRoot).map((issue) => ({
           id: issue.id,
           title: issue.title,
           kind: issue.kind,
           status: issue.status,
+          lifecycleStatus: issue.lifecycleStatus,
           archivedAt: issue.archivedAt,
           isCurrent: projectState.currentIssueId === issue.id,
           updatedAt: issue.updatedAt,
           taskCount: issue.tasks.length,
+          taskCounts: issue.tasks.reduce<Record<string, number>>((counts, task) => {
+            counts[task.effectiveStatus] = (counts[task.effectiveStatus] ?? 0) + 1;
+            return counts;
+          }, {}),
+          declaredTaskCounts: issue.tasks.reduce<Record<string, number>>((counts, task) => {
+            counts[task.declaredStatus] = (counts[task.declaredStatus] ?? 0) + 1;
+            return counts;
+          }, {}),
+          readyTaskIds: issue.tasks.filter((task) => task.dispatchable && task.dependencyState.ready).map((task) => task.id),
         }));
         audit(ctx, name, "ok", args);
         return textResult({ issues });
@@ -2886,14 +2899,14 @@ export async function callMcpTool(
           return errorResult("TOOL_DISABLED", "archive_issue requires the controller profile");
         const issue = archiveIssue(ctx.repoRoot, String(args.issue_id ?? ""));
         audit(ctx, name, "ok", args, `tasks/issues/${issue.id}`);
-        return textResult(issue);
+        return textResult(projectIssueEffectiveView(ctx.repoRoot, issue));
       }
       case "restore_issue": {
         if (ctx.policy.profile !== "controller")
           return errorResult("TOOL_DISABLED", "restore_issue requires the controller profile");
         const issue = restoreIssue(ctx.repoRoot, String(args.issue_id ?? ""));
         audit(ctx, name, "ok", args, `tasks/issues/${issue.id}`);
-        return textResult(issue);
+        return textResult(projectIssueEffectiveView(ctx.repoRoot, issue));
       }
       case "get_task_progress_detail": {
         if (ctx.policy.profile !== "controller")
@@ -2965,7 +2978,7 @@ export async function callMcpTool(
             "TOOL_DISABLED",
             "get_issue requires the controller profile",
           );
-        const issue = getIssue(ctx.repoRoot, String(args.issue_id ?? ""));
+        const issue = getIssueEffectiveView(ctx.repoRoot, String(args.issue_id ?? ""));
         audit(ctx, name, "ok", args, `tasks/issues/${issue.id}`);
         return textResult(issue);
       }
@@ -3013,7 +3026,7 @@ export async function callMcpTool(
           },
         );
         audit(ctx, name, "ok", args, issue.github?.url);
-        return textResult(issue);
+        return textResult(projectIssueEffectiveView(ctx.repoRoot, issue));
       }
       case "refresh_github_issue": {
         if (ctx.policy.profile !== "controller")
@@ -3026,7 +3039,10 @@ export async function callMcpTool(
           String(args.issue_id ?? ""),
         );
         audit(ctx, name, "ok", args, result.issue.github?.url);
-        return textResult(result);
+        return textResult({
+          ...result,
+          issue: projectIssueEffectiveView(ctx.repoRoot, result.issue),
+        });
       }
       case "close_github_issue": {
         if (ctx.policy.profile !== "controller")
@@ -3039,7 +3055,7 @@ export async function callMcpTool(
           String(args.issue_id ?? ""),
         );
         audit(ctx, name, "ok", args, issue.github?.url);
-        return textResult(issue);
+        return textResult(projectIssueEffectiveView(ctx.repoRoot, issue));
       }
       case "inspect_issue_readiness": {
         if (ctx.policy.profile !== "controller")
@@ -3148,7 +3164,7 @@ export async function callMcpTool(
           allowWhenPaused: args.allow_when_paused === true,
         });
         audit(ctx, name, "ok", args, `tasks/issues/${issue.id}`);
-        return textResult(issue);
+        return textResult(projectIssueEffectiveView(ctx.repoRoot, issue));
       }
       case "update_issue": {
         if (ctx.policy.profile !== "controller")
@@ -3175,7 +3191,7 @@ export async function callMcpTool(
             : undefined,
         });
         audit(ctx, name, "ok", args, `tasks/issues/${issue.id}`);
-        return textResult(issue);
+        return textResult(projectIssueEffectiveView(ctx.repoRoot, issue));
       }
       case "plan_issue": {
         if (ctx.policy.profile !== "controller")
@@ -3189,7 +3205,7 @@ export async function callMcpTool(
           controllerTaskDrafts(args.tasks),
         );
         audit(ctx, name, "ok", args, `tasks/issues/${issue.id}`);
-        return textResult(issue);
+        return textResult(projectIssueEffectiveView(ctx.repoRoot, issue));
       }
       case "append_task": {
         if (ctx.policy.profile !== "controller")
@@ -3209,7 +3225,7 @@ export async function callMcpTool(
           drafts[0],
         );
         audit(ctx, name, "ok", args, `tasks/issues/${issue.id}`);
-        return textResult(issue);
+        return textResult(projectIssueEffectiveView(ctx.repoRoot, issue));
       }
       case "split_task": {
         if (ctx.policy.profile !== "controller")
@@ -3224,7 +3240,7 @@ export async function callMcpTool(
           controllerTaskDrafts(args.tasks),
         );
         audit(ctx, name, "ok", args, `tasks/issues/${issue.id}`);
-        return textResult(issue);
+        return textResult(projectIssueEffectiveView(ctx.repoRoot, issue));
       }
       case "supersede_task": {
         if (ctx.policy.profile !== "controller")
@@ -3239,7 +3255,7 @@ export async function callMcpTool(
           stringList(args.replacement_task_ids),
         );
         audit(ctx, name, "ok", args, `tasks/issues/${issue.id}`);
-        return textResult(issue);
+        return textResult(projectIssueEffectiveView(ctx.repoRoot, issue));
       }
       case "set_task_dependencies": {
         if (ctx.policy.profile !== "controller")
@@ -3254,7 +3270,7 @@ export async function callMcpTool(
           stringList(args.depends_on),
         );
         audit(ctx, name, "ok", args, `tasks/issues/${issue.id}`);
-        return textResult(issue);
+        return textResult(projectIssueEffectiveView(ctx.repoRoot, issue));
       }
       case "update_task": {
         if (ctx.policy.profile !== "controller")
@@ -3275,7 +3291,7 @@ export async function callMcpTool(
           },
         );
         audit(ctx, name, "ok", args, `tasks/issues/${issue.id}`);
-        return textResult(issue);
+        return textResult(projectIssueEffectiveView(ctx.repoRoot, issue));
       }
       case "dispatch_task": {
         if (ctx.policy.profile !== "controller")
@@ -3815,7 +3831,7 @@ export async function callMcpTool(
           args,
           `tasks/issues/${issue.id}`,
         );
-        return textResult(issue);
+        return textResult(projectIssueEffectiveView(ctx.repoRoot, issue));
       }
       case "accept_task": {
         if (ctx.policy.profile !== "controller")
@@ -3863,7 +3879,7 @@ export async function callMcpTool(
               : "Accepted after controller verification.",
         });
         audit(ctx, name, "ok", args, `tasks/issues/${issue.id}`);
-        return textResult(issue);
+        return textResult(projectIssueEffectiveView(ctx.repoRoot, issue));
       }
       case "request_task_changes": {
         if (ctx.policy.profile !== "controller")
@@ -3894,7 +3910,7 @@ export async function callMcpTool(
           note: String(args.note ?? ""),
         });
         audit(ctx, name, "ok", args, `tasks/issues/${issue.id}`);
-        return textResult(issue);
+        return textResult(projectIssueEffectiveView(ctx.repoRoot, issue));
       }
       case "begin_edit_session": {
         if (ctx.policy.profile !== "controller")

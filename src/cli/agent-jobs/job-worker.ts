@@ -485,10 +485,25 @@ event(
   ok ? "Agent process finished successfully." : error,
 );
 
+if (!ok) {
+  try {
+    updateTask(finalMeta.repoRoot, finalMeta.issueId, finalMeta.taskId, {
+      status: "blocked",
+      runId: finalMeta.runId,
+      transition: "run_sync",
+      note: `${finalMeta.runId} ended as ${finalMeta.status}; explicit retry is required.${error ? ` ${error}` : ""}`,
+    });
+  } catch (_error) {
+    /* Explicit terminal or parent lifecycle state remains authoritative. */
+  }
+}
+
 if (ok) {
   try {
     updateTask(finalMeta.repoRoot, finalMeta.issueId, finalMeta.taskId, {
       status: "review",
+      runId: finalMeta.runId,
+      transition: "run_sync",
       note: `${finalMeta.runId} finished successfully.${config.autoIntegrate ? " Automatic integration is starting." : ""}`,
     });
   } catch (_error) {

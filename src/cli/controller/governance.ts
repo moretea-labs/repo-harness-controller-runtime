@@ -10,6 +10,8 @@ import {
 } from "./issue-store";
 import { clearCurrentIssue, loadControllerProjectState, saveControllerProjectState } from "./project-state";
 import type { ControllerIssue, ControllerTask } from "./types";
+import { readIssueRunEvidence } from "./run-evidence";
+import { resolveEffectiveTaskState, resolveIssueTaskStates, resolveTaskDependencies, type EffectiveTaskState } from "./task-status-resolver";
 import { tryAppendControllerWorklogEvent } from "./worklog";
 
 export type GovernanceSeverity = "info" | "warning" | "critical";
@@ -90,59 +92,22 @@ function activeIssues(issues: ControllerIssue[]): ControllerIssue[] {
   return issues.filter((issue) => !issue.archivedAt && !ISSUE_TERMINAL.has(issue.status));
 }
 
-function taskQueueItem(issue: ControllerIssue, task: ControllerTask, run?: AgentJobMeta): ExecutionQueueItem | undefined {
-  if (task.status === "ready" || task.status === "changes_requested") {
-    return {
-      issueId: issue.id,
-      issueTitle: issue.title,
-      taskId: task.id,
-      taskTitle: task.title,
-      agent: task.recommendedAgent,
-      risk: task.risk,
-      latestRunId: run?.runId,
-      latestRunStatus: run?.status,
-      action: run && RUN_FAILED.has(run.status) ? "retry" : "launch",
-    };
-  }
-  if (task.status === "review" || task.status === "integrated" || task.status === "verifying") {
-    return {
-      issueId: issue.id,
-      issueTitle: issue.title,
-      taskId: task.id,
-      taskTitle: task.title,
-      agent: task.recommendedAgent,
-      risk: task.risk,
-      latestRunId: run?.runId,
-      latestRunStatus: run?.status,
-      action: "review",
-    };
-  }
-  if (task.status === "verified") {
-    return {
-      issueId: issue.id,
-      issueTitle: issue.title,
-      taskId: task.id,
-      taskTitle: task.title,
-      agent: task.recommendedAgent,
-      risk: task.risk,
-      latestRunId: run?.runId,
-      latestRunStatus: run?.status,
-      action: "accept",
-    };
-  }
-  if (task.status === "launch_blocked" || task.status === "blocked") {
-    return {
-      issueId: issue.id,
-      issueTitle: issue.title,
-      taskId: task.id,
-      taskTitle: task.title,
-      agent: task.recommendedAgent,
-      risk: task.risk,
-      latestRunId: run?.runId,
-      latestRunStatus: run?.status,
-      action: "unblock",
-    };
-  }
+function taskQueueItem(issue: ControllerIssue, task: ControllerTask, state: EffectiveTaskState): ExecutionQueueItem | undefined {
+  const common = {
+    issueId: issue.id,
+    issueTitle: issue.title,
+    taskId: task.id,
+    taskTitle: task.title,
+    agent: task.recommendedAgent,
+    risk: task.risk,
+    latestRunId: state.latestRunId,
+    latestRunStatus: state.latestRunStatus,
+  };
+  if (state.dispatchable) return { ...common, action: "launch" };
+  if (state.retryable && state.requiresExplicitRetry) return { ...common, action: "retry" };
+  if (["review", "integrated", "verifying"].includes(state.effectiveStatus)) return { ...common, action: "review" };
+  if (state.effectiveStatus === "verified") return { ...common, action: "accept" };
+  if (["launch_blocked", "blocked", "waiting_for_user"].includes(state.effectiveStatus)) return { ...common, action: "unblock" };
   return undefined;
 }
 
@@ -210,8 +175,12 @@ export function inspectProjectGovernance(repoRoot: string): ProjectGovernanceSna
   }
 
   for (const issue of issues.filter((entry) => !entry.archivedAt)) {
-    const nonSuperseded = issue.tasks.filter((task) => !["superseded", "cancelled"].includes(task.status));
-    if (nonSuperseded.length > 0 && nonSuperseded.every((task) => task.status === "done") && issue.status !== "done") {
+    const issueStates = resolveIssueTaskStates(issue, readIssueRunEvidence(repoRoot, issue));
+    const nonSuperseded = issue.tasks.filter((task) => {
+      const state = issueStates.get(task.id)!;
+      return state.effectiveStatus !== "superseded" && state.effectiveStatus !== "cancelled";
+    });
+    if (nonSuperseded.length > 0 && nonSuperseded.every((task) => issueStates.get(task.id)!.effectiveStatus === "done") && issue.status !== "done") {
       findings.push({
         id: findingId("ISSUE_NOT_CLOSED", issue.id),
         code: "ISSUE_NOT_CLOSED",
@@ -236,13 +205,36 @@ export function inspectProjectGovernance(repoRoot: string): ProjectGovernanceSna
 
     let hasActionableTask = false;
     for (const task of issue.tasks) {
-      if (TASK_TERMINAL.has(task.status)) continue;
+      const state = issueStates.get(task.id)!;
+      if (state.terminal || state.inactive) continue;
       const run = latestRun(task, byId);
-      const cancelledDeps = task.dependsOn.filter((dependencyId) => issue.tasks.find((candidate) => candidate.id === dependencyId)?.status === "cancelled");
-      const staleSupersededDeps = task.dependsOn.filter((dependencyId) => {
-        const dependency = issue.tasks.find((candidate) => candidate.id === dependencyId);
-        return dependency?.status === "superseded" && (dependency.supersededBy?.length ?? 0) > 0;
-      });
+      if (state.multipleActiveRuns) {
+        findings.push({
+          id: findingId("MULTIPLE_ACTIVE_RUNS", issue.id, task.id),
+          code: "MULTIPLE_ACTIVE_RUNS",
+          severity: "critical",
+          message: `${task.id} has multiple active Run records: ${state.activeRunIds.join(", ")}.`,
+          issueId: issue.id,
+          taskId: task.id,
+          runId: state.activeRunId,
+          recommendedAction: "none",
+          autoFixable: false,
+        });
+      } else if (state.activeRunIds.length > 0 && !state.activeRunId) {
+        findings.push({
+          id: findingId("STALE_ACTIVE_RUN", issue.id, task.id),
+          code: "STALE_ACTIVE_RUN",
+          severity: "critical",
+          message: `${task.id} has stale active Run evidence: ${state.activeRunIds.join(", ")}. Refresh or cancel it before further execution.`,
+          issueId: issue.id,
+          taskId: task.id,
+          recommendedAction: "none",
+          autoFixable: false,
+        });
+      }
+      const dependencyState = resolveTaskDependencies(issue, task, issueStates);
+      const cancelledDeps = dependencyState.cancelledTaskIds;
+      const staleSupersededDeps = dependencyState.supersededMigrations.map((entry) => entry.dependencyTaskId);
       if (cancelledDeps.length > 0) {
         findings.push({
           id: findingId("CANCELLED_DEPENDENCY", issue.id, task.id),
@@ -267,21 +259,21 @@ export function inspectProjectGovernance(repoRoot: string): ProjectGovernanceSna
           autoFixable: true,
         });
       }
-      if (run && RUN_FAILED.has(run.status) && ["blocked", "launch_blocked"].includes(task.status)) {
+      if (state.retryable && state.requiresExplicitRetry) {
         findings.push({
           id: findingId("FAILED_RUN_BLOCKED_TASK", issue.id, task.id),
           code: "FAILED_RUN_BLOCKED_TASK",
           severity: "warning",
-          message: `${task.id} is permanently blocked by a failed Run. The failed attempt should remain history while the Task returns to a retryable state.`,
+          message: `${task.id} has a failed/cancelled Run recorded as evidence. It remains non-dispatchable until explicit retry.`,
           issueId: issue.id,
           taskId: task.id,
-          runId: run.runId,
+          runId: state.latestRunId,
           recommendedAction: "retry_task",
-          autoFixable: true,
+          autoFixable: false,
         });
       }
-      if (["ready", "changes_requested", "review", "integrated", "verifying", "verified", "running"].includes(task.status)) hasActionableTask = true;
-      if (task.status === "review") {
+      if (state.dispatchable || state.retryable || ["blocked", "launch_blocked", "review", "integrated", "verifying", "verified", "running", "queued", "waiting_for_user"].includes(state.effectiveStatus)) hasActionableTask = true;
+      if (state.effectiveStatus === "review") {
         findings.push({
           id: findingId("TASK_REVIEW_PENDING", issue.id, task.id),
           code: "TASK_REVIEW_PENDING",
@@ -294,7 +286,7 @@ export function inspectProjectGovernance(repoRoot: string): ProjectGovernanceSna
           autoFixable: false,
         });
       }
-      if (task.status === "verified") {
+      if (state.effectiveStatus === "verified") {
         findings.push({
           id: findingId("TASK_ACCEPTANCE_PENDING", issue.id, task.id),
           code: "TASK_ACCEPTANCE_PENDING",
@@ -325,9 +317,17 @@ export function inspectProjectGovernance(repoRoot: string): ProjectGovernanceSna
     ? focus
     : active.length === 1 ? active[0] : undefined;
   const executionQueue = queueIssue
-    ? queueIssue.tasks
-      .map((task) => taskQueueItem(queueIssue, task, latestRun(task, byId)))
-      .filter((entry): entry is ExecutionQueueItem => Boolean(entry))
+    ? (() => {
+        const states = resolveIssueTaskStates(queueIssue, readIssueRunEvidence(repoRoot, queueIssue));
+        return queueIssue.tasks
+          .filter((task) => {
+            const state = states.get(task.id)!;
+            const dependencies = resolveTaskDependencies(queueIssue, task, states);
+            return !state.terminal && !state.inactive && state.activeRunIds.length === 0 && dependencies.ready;
+          })
+          .map((task) => taskQueueItem(queueIssue, task, states.get(task.id)!))
+          .filter((entry): entry is ExecutionQueueItem => Boolean(entry));
+      })()
     : [];
 
   const counts = findings.reduce<Record<string, number>>((result, entry) => {
@@ -356,8 +356,10 @@ export function reconcileProjectGovernance(repoRoot: string): ReconcileResult {
   const byId = new Map(runs.map((run) => [run.runId, run]));
 
   for (const issue of issues.filter((entry) => !entry.archivedAt)) {
+    const issueStates = resolveIssueTaskStates(issue, readIssueRunEvidence(repoRoot, issue));
     for (const task of issue.tasks) {
-      if (TASK_TERMINAL.has(task.status)) continue;
+      const state = issueStates.get(task.id)!;
+      if (state.terminal || state.inactive) continue;
       let nextDependencies = task.dependsOn.slice();
       let dependencyChanged = false;
       for (const dependencyId of task.dependsOn) {
@@ -372,18 +374,28 @@ export function reconcileProjectGovernance(repoRoot: string): ReconcileResult {
         setTaskDependencies(repoRoot, issue.id, task.id, nextDependencies);
         changes.push({ issueId: issue.id, taskId: task.id, action: "repair_dependency", summary: `Replaced superseded dependencies for ${task.id}.` });
       }
-      const run = latestRun(task, byId);
-      if (run && RUN_FAILED.has(run.status) && ["blocked", "launch_blocked"].includes(task.status)) {
+      const latestRunId = state.latestRunId;
+      const latestRunStatus = state.latestRunStatus;
+      if (latestRunId && latestRunStatus === "succeeded" && task.status === "running") {
         updateTask(repoRoot, issue.id, task.id, {
-          status: "ready",
-          note: `${run.runId} remains recorded as a failed attempt; Task returned to ready for retry.`,
+          status: "review",
+          transition: "run_sync",
+          note: `${latestRunId} succeeded; Task moved to review by explicit governance reconciliation.`,
         });
-        changes.push({ issueId: issue.id, taskId: task.id, action: "restore_retryable", summary: `Returned ${task.id} to ready after failed Run.` });
+        changes.push({ issueId: issue.id, taskId: task.id, action: "review_after_run", summary: `Moved ${task.id} to review after succeeded Run.` });
+      } else if (latestRunId && latestRunStatus && ["failed", "unknown", "cancelled"].includes(latestRunStatus) && ["backlog", "analysis", "planned", "ready", "running", "launch_blocked"].includes(task.status)) {
+        updateTask(repoRoot, issue.id, task.id, {
+          status: "blocked",
+          transition: "run_sync",
+          note: `${latestRunId} remains recorded as ${latestRunStatus}; explicit retry is required and no new Run was created.`,
+        });
+        changes.push({ issueId: issue.id, taskId: task.id, action: "block_after_run", summary: `Blocked ${task.id} after ${latestRunStatus} Run; explicit retry required.` });
       }
     }
     const refreshed = getIssue(repoRoot, issue.id);
-    const nonSuperseded = refreshed.tasks.filter((task) => !["superseded", "cancelled"].includes(task.status));
-    if (nonSuperseded.length > 0 && nonSuperseded.every((task) => task.status === "done") && refreshed.status !== "done") {
+    const refreshedStates = resolveIssueTaskStates(refreshed, readIssueRunEvidence(repoRoot, refreshed));
+    const nonSuperseded = refreshed.tasks.filter((task) => !["superseded", "cancelled"].includes(refreshedStates.get(task.id)!.effectiveStatus));
+    if (nonSuperseded.length > 0 && nonSuperseded.every((task) => refreshedStates.get(task.id)!.effectiveStatus === "done") && refreshed.status !== "done") {
       updateIssue(repoRoot, refreshed.id, { status: "done" });
       changes.push({ issueId: refreshed.id, action: "close_issue", summary: `Closed ${refreshed.id} because all active Tasks are done.` });
     }

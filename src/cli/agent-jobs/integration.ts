@@ -10,6 +10,8 @@ import {
   type EditSession,
 } from "../editing/edit-session";
 import { getIssue, updateTask } from "../controller/issue-store";
+import { readTaskRunEvidence } from "../controller/run-evidence";
+import { resolveEffectiveTaskState } from "../controller/task-status-resolver";
 import { resolveMcpPath } from "../mcp/paths";
 import type { McpPolicy } from "../mcp/types";
 import { getAgentJob, markAgentJobIntegrated } from "./job-manager";
@@ -109,9 +111,10 @@ export function integrateAgentJob(
   const issue = getIssue(repoRoot, run.issueId);
   const task = issue.tasks.find((entry) => entry.id === run.taskId);
   if (!task) throw new Error(`task not found: ${run.issueId}/${run.taskId}`);
-  if (!["review", "verified"].includes(task.status))
+  const state = resolveEffectiveTaskState({ issue, task, runs: readTaskRunEvidence(repoRoot, task) });
+  if (state.terminal || state.inactive || !["review", "verified"].includes(state.effectiveStatus))
     throw new Error(
-      `task must be in review before integration (current: ${task.status})`,
+      `task must be active and in review before integration (declared: ${task.status}, effective: ${state.effectiveStatus})`,
     );
 
   const changes = changedPaths(run.worktree);

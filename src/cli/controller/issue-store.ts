@@ -15,6 +15,13 @@ import type {
   TaskVerification,
 } from './types';
 import { loadControllerProjectState, saveControllerProjectState } from './project-state';
+import { readIssueRunEvidence, readTaskRunEvidence } from './run-evidence';
+import {
+  resolveEffectiveTaskState,
+  resolveIssueLifecycleStatus,
+  resolveIssueTaskStates,
+  resolveTaskDependencies,
+} from './task-status-resolver';
 import { tryAppendControllerWorklogEvent } from './worklog';
 
 const ISSUE_ROOT = 'tasks/issues';
@@ -160,6 +167,56 @@ export function getIssue(repoRoot: string, id: string): ControllerIssue {
   return issue;
 }
 
+export function projectIssueEffectiveView(repoRoot: string, issue: ControllerIssue) {
+  const states = resolveIssueTaskStates(issue, readIssueRunEvidence(repoRoot, issue));
+  return {
+    ...issue,
+    lifecycleStatus: resolveIssueLifecycleStatus(issue),
+    tasks: issue.tasks.map((task) => {
+      const state = states.get(task.id)!;
+      return {
+        ...task,
+        declaredStatus: state.declaredStatus,
+        effectiveStatus: state.effectiveStatus,
+        statusReason: state.reason,
+        latestRunId: state.latestRunId,
+        latestRunStatus: state.latestRunStatus,
+        activeRunId: state.activeRunId,
+        activeRunStatus: state.activeRunStatus,
+        activeRunIds: state.activeRunIds,
+        multipleActiveRuns: state.multipleActiveRuns,
+        historicalRunOutcomes: state.historicalRunOutcomes,
+        verificationStatus: state.verificationStatus,
+        terminal: state.terminal,
+        inactive: state.inactive,
+        dispatchable: state.dispatchable,
+        retryable: state.retryable,
+        requiresExplicitRetry: state.requiresExplicitRetry,
+        dependencyState: resolveTaskDependencies(issue, task, states),
+      };
+    }),
+  };
+}
+
+export function getIssueEffectiveView(repoRoot: string, id: string) {
+  return projectIssueEffectiveView(repoRoot, getIssue(repoRoot, id));
+}
+
+export function listIssueEffectiveViews(repoRoot: string) {
+  return listIssues(repoRoot).map((issue) => projectIssueEffectiveView(repoRoot, issue));
+}
+
+function assertIssueExecutionActive(issue: ControllerIssue, operation: string): void {
+  const lifecycle = resolveIssueLifecycleStatus(issue);
+  if (lifecycle !== 'active') {
+    throw new Error(`${operation} is not allowed while Issue ${issue.id} is ${lifecycle}`);
+  }
+}
+
+function effectiveTaskState(repoRoot: string, issue: ControllerIssue, task: ControllerTask) {
+  return resolveEffectiveTaskState({ issue, task, runs: readTaskRunEvidence(repoRoot, task) });
+}
+
 function nextTaskId(tasks: ControllerTask[]): string {
   const max = tasks.reduce((current, task) => {
     const match = /^T(\d+)$/.exec(task.id);
@@ -216,20 +273,29 @@ function buildTasks(drafts: TaskDraft[], now = new Date().toISOString()): Contro
   return tasks;
 }
 
-function refreshReadiness(issue: ControllerIssue): void {
+function refreshReadiness(repoRoot: string, issue: ControllerIssue): void {
+  // Explicit parent lifecycle is never inferred away by child state.
+  if (issue.archivedAt || issue.status === 'cancelled') return;
+
+  const states = resolveIssueTaskStates(issue, readIssueRunEvidence(repoRoot, issue));
   for (const task of issue.tasks) {
+    const state = states.get(task.id)!;
+    if (state.terminal || state.inactive || state.requiresExplicitRetry || state.activeRunIds.length > 0) continue;
     if (!['planned', 'ready', 'launch_blocked'].includes(task.status)) continue;
-    const dependencies = task.dependsOn.map((id) => issue.tasks.find((candidate) => candidate.id === id));
-    const hasCancelledDependency = dependencies.some((dependency) => dependency?.status === 'cancelled');
-    const hasStaleReplacement = dependencies.some((dependency) => dependency?.status === 'superseded' && (dependency.supersededBy?.length ?? 0) > 0);
-    const dependenciesDone = dependencies.every((dependency) => dependency?.status === 'done' || (dependency?.status === 'superseded' && (dependency.supersededBy?.length ?? 0) === 0));
-    task.status = hasCancelledDependency ? 'launch_blocked' : dependenciesDone && !hasStaleReplacement ? 'ready' : 'planned';
+    const dependencies = resolveTaskDependencies(issue, task, states);
+    task.status = dependencies.cancelledTaskIds.length > 0 || dependencies.missingTaskIds.length > 0
+      ? 'launch_blocked'
+      : dependencies.ready ? 'ready' : 'planned';
   }
-  const active = issue.tasks.filter((task) => !['superseded', 'cancelled'].includes(task.status));
-  if (active.length > 0 && active.every((task) => task.status === 'done')) issue.status = 'done';
-  else if (active.length === 0 && issue.tasks.some((task) => task.status === 'cancelled')) issue.status = 'cancelled';
-  else if (active.some((task) => ['running', 'review', 'integrated', 'verifying', 'changes_requested', 'verified', 'done'].includes(task.status))) issue.status = 'in_progress';
-  else if (active.some((task) => task.status === 'launch_blocked')) issue.status = 'launch_blocked';
+
+  const refreshedStates = resolveIssueTaskStates(issue, readIssueRunEvidence(repoRoot, issue));
+  const active = issue.tasks.filter((task) => {
+    const state = refreshedStates.get(task.id)!;
+    return !state.terminal && !state.inactive;
+  });
+  if (issue.tasks.length > 0 && issue.tasks.every((task) => refreshedStates.get(task.id)?.effectiveStatus === 'done')) issue.status = 'done';
+  else if (active.some((task) => ['running', 'review', 'integrated', 'verifying', 'changes_requested', 'verified', 'done'].includes(refreshedStates.get(task.id)!.effectiveStatus))) issue.status = 'in_progress';
+  else if (active.some((task) => refreshedStates.get(task.id)!.effectiveStatus === 'launch_blocked')) issue.status = 'launch_blocked';
   else if (active.length > 0) issue.status = 'planned';
 }
 
@@ -288,7 +354,7 @@ export function createIssue(repoRoot: string, input: {
     createdAt: now,
     updatedAt: now,
   };
-  refreshReadiness(issue);
+  refreshReadiness(repoRoot, issue);
   const written = writeIssue(repoRoot, issue);
   tryAppendControllerWorklogEvent(repoRoot, {
     category: 'issue',
@@ -311,12 +377,13 @@ export function createIssue(repoRoot: string, input: {
 
 export function planIssue(repoRoot: string, id: string, drafts: TaskDraft[]): ControllerIssue {
   const issue = getIssue(repoRoot, id);
+  assertIssueExecutionActive(issue, 'plan_issue');
   if (issue.tasks.some((task) => task.runIds.length > 0)) throw new Error('cannot replace task plan after runs have started; append, split, or supersede Tasks instead');
   const now = new Date().toISOString();
   issue.tasks = buildTasks(drafts, now);
   issue.status = issue.tasks.length ? 'planned' : 'analysis';
   issue.updatedAt = now;
-  refreshReadiness(issue);
+  refreshReadiness(repoRoot, issue);
   const written = writeIssue(repoRoot, issue);
   tryAppendControllerWorklogEvent(repoRoot, { category: 'issue', action: 'issue_planned', summary: `Replaced the Task plan for ${issue.id} with ${issue.tasks.length} Tasks.`, issueId: issue.id, details: { taskIds: issue.tasks.map((task) => task.id) } });
   return written;
@@ -324,11 +391,12 @@ export function planIssue(repoRoot: string, id: string, drafts: TaskDraft[]): Co
 
 export function appendTask(repoRoot: string, issueIdValue: string, draft: TaskDraft): ControllerIssue {
   const issue = getIssue(repoRoot, issueIdValue);
+  assertIssueExecutionActive(issue, 'append_task');
   const now = new Date().toISOString();
   issue.tasks.push(taskFromDraft(nextTaskId(issue.tasks), draft, now));
   validateTaskGraph(issue.tasks);
   issue.updatedAt = now;
-  refreshReadiness(issue);
+  refreshReadiness(repoRoot, issue);
   const task = issue.tasks.at(-1)!;
   const written = writeIssue(repoRoot, issue);
   tryAppendControllerWorklogEvent(repoRoot, { category: 'task', action: 'task_added', summary: `Added ${task.id}: ${task.title}`, issueId: issue.id, taskId: task.id, statusTo: task.status });
@@ -341,7 +409,11 @@ export function splitTask(repoRoot: string, issueIdValue: string, taskId: string
   const original = issue.tasks.find((task) => task.id === taskId);
   const originalStatus = original?.status;
   if (!original) throw new Error(`task not found: ${issueIdValue}/${taskId}`);
-  if (['running', 'done', 'verified'].includes(original.status)) throw new Error(`cannot split task from status ${original.status}`);
+  assertIssueExecutionActive(issue, 'split_task');
+  const originalState = effectiveTaskState(repoRoot, issue, original);
+  if (originalState.terminal || originalState.inactive) throw new Error(`cannot split task from effective status ${originalState.effectiveStatus}`);
+  if (originalState.activeRunIds.length > 0) throw new Error(`cancel active Run(s) ${originalState.activeRunIds.join(', ')} before splitting this Task`);
+  if (['verified'].includes(original.status)) throw new Error(`cannot split task from status ${original.status}`);
   const now = new Date().toISOString();
   const replacements: ControllerTask[] = [];
   for (const draft of drafts) {
@@ -366,7 +438,7 @@ export function splitTask(repoRoot: string, issueIdValue: string, taskId: string
   issue.tasks.push(...replacements);
   validateTaskGraph(issue.tasks);
   issue.updatedAt = now;
-  refreshReadiness(issue);
+  refreshReadiness(repoRoot, issue);
   const written = writeIssue(repoRoot, issue);
   tryAppendControllerWorklogEvent(repoRoot, { category: 'task', action: 'task_split', summary: `Split ${taskId} into ${replacements.map((task) => task.id).join(', ')}.`, issueId: issue.id, taskId, statusFrom: originalStatus, statusTo: 'superseded', details: { replacements: replacements.map((task) => task.id) } });
   return written;
@@ -376,7 +448,10 @@ export function supersedeTask(repoRoot: string, issueIdValue: string, taskId: st
   const issue = getIssue(repoRoot, issueIdValue);
   const task = issue.tasks.find((entry) => entry.id === taskId);
   if (!task) throw new Error(`task not found: ${issueIdValue}/${taskId}`);
-  if (task.status === 'running') throw new Error('cancel the active Run before superseding this Task');
+  assertIssueExecutionActive(issue, 'supersede_task');
+  const state = effectiveTaskState(repoRoot, issue, task);
+  if (state.terminal || state.inactive) throw new Error(`cannot supersede Task from effective status ${state.effectiveStatus}`);
+  if (state.activeRunIds.length > 0) throw new Error(`cancel active Run(s) ${state.activeRunIds.join(', ')} before superseding this Task`);
   for (const replacement of replacementTaskIds) {
     if (!issue.tasks.some((entry) => entry.id === replacement)) throw new Error(`replacement task not found: ${replacement}`);
   }
@@ -384,8 +459,17 @@ export function supersedeTask(repoRoot: string, issueIdValue: string, taskId: st
   task.status = 'superseded';
   task.supersededBy = normalizeStrings(replacementTaskIds);
   task.updatedAt = now;
+  if (task.supersededBy.length > 0) {
+    for (const downstream of issue.tasks) {
+      if (!downstream.dependsOn.includes(task.id)) continue;
+      downstream.dependsOn = Array.from(new Set(
+        downstream.dependsOn.flatMap((dependency) => dependency === task.id ? task.supersededBy! : [dependency]),
+      ));
+      downstream.updatedAt = now;
+    }
+  }
   issue.updatedAt = now;
-  refreshReadiness(issue);
+  refreshReadiness(repoRoot, issue);
   const written = writeIssue(repoRoot, issue);
   tryAppendControllerWorklogEvent(repoRoot, { category: 'task', action: 'task_superseded', summary: `Superseded ${taskId}.`, issueId: issue.id, taskId, statusTo: 'superseded', details: { replacementTaskIds } });
   return written;
@@ -395,11 +479,14 @@ export function setTaskDependencies(repoRoot: string, issueIdValue: string, task
   const issue = getIssue(repoRoot, issueIdValue);
   const task = issue.tasks.find((entry) => entry.id === taskId);
   if (!task) throw new Error(`task not found: ${issueIdValue}/${taskId}`);
+  assertIssueExecutionActive(issue, 'set_task_dependencies');
+  const state = effectiveTaskState(repoRoot, issue, task);
+  if (state.terminal || state.inactive) throw new Error(`cannot change dependencies for effective status ${state.effectiveStatus}`);
   task.dependsOn = normalizeStrings(dependsOn);
   validateTaskGraph(issue.tasks);
   task.updatedAt = new Date().toISOString();
   issue.updatedAt = task.updatedAt;
-  refreshReadiness(issue);
+  refreshReadiness(repoRoot, issue);
   const written = writeIssue(repoRoot, issue);
   tryAppendControllerWorklogEvent(repoRoot, { category: 'task', action: 'task_dependencies_changed', summary: `Updated dependencies for ${taskId}.`, issueId: issue.id, taskId, details: { dependsOn: task.dependsOn } });
   return written;
@@ -448,19 +535,36 @@ export function updateTask(repoRoot: string, issueIdValue: string, taskId: strin
   runId?: string;
   github?: GitHubIssueLink;
   verification?: TaskVerification;
+  transition?: 'normal' | 'run_sync' | 'retry' | 'restore';
 }): ControllerIssue {
   const issue = getIssue(repoRoot, issueIdValue);
   const task = issue.tasks.find((entry) => entry.id === taskId);
   if (!task) throw new Error(`task not found: ${issueIdValue}/${taskId}`);
   const previousStatus = task.status;
-  if (patch.status) task.status = patch.status;
+  const previousState = resolveEffectiveTaskState({ issue, task, runs: readTaskRunEvidence(repoRoot, task) });
+  if (patch.status && patch.status !== previousStatus) {
+    const executableTarget = !['done', 'cancelled', 'superseded'].includes(patch.status);
+    if ((task.supersededBy?.length ?? 0) > 0 && patch.status !== 'superseded') {
+      throw new Error(`cannot move superseded Task ${task.id} to ${patch.status}; use an explicit replacement/restore operation`);
+    }
+    if (previousState.issueLifecycleStatus !== 'active' && executableTarget) {
+      throw new Error(`cannot move Task ${task.id} to ${patch.status} while parent Issue is ${previousState.issueLifecycleStatus}`);
+    }
+    if (['done', 'cancelled', 'superseded'].includes(previousStatus) && patch.transition !== 'restore') {
+      throw new Error(`explicit terminal Task ${task.id} cannot transition from ${previousStatus} to ${patch.status} without restore/reopen`);
+    }
+    if (patch.transition === 'run_sync' && (previousState.terminal || previousState.inactive)) {
+      throw new Error(`Run reconciliation cannot override effective terminal state ${previousState.effectiveStatus}`);
+    }
+    task.status = patch.status;
+  }
   if (patch.note?.trim()) task.notes.push(patch.note.trim());
   if (patch.runId?.trim() && !task.runIds.includes(patch.runId.trim())) task.runIds.push(patch.runId.trim());
   if (patch.github !== undefined) task.github = patch.github;
   if (patch.verification !== undefined) task.verification = patch.verification;
   task.updatedAt = new Date().toISOString();
   issue.updatedAt = task.updatedAt;
-  refreshReadiness(issue);
+  refreshReadiness(repoRoot, issue);
   const written = writeIssue(repoRoot, issue);
   if (patch.status && patch.status !== previousStatus) {
     tryAppendControllerWorklogEvent(repoRoot, { category: 'task', action: 'task_status_changed', summary: `${task.id} moved from ${previousStatus} to ${task.status}.`, issueId: issue.id, taskId: task.id, statusFrom: previousStatus, statusTo: task.status, details: { title: task.title } });
@@ -479,29 +583,38 @@ function finding(code: string, level: 'blocker' | 'warning', message: string, ta
 export function inspectIssueReadiness(repoRoot: string, issueIdValue: string): IssueReadiness {
   const issue = getIssue(repoRoot, issueIdValue);
   const findings: IssueReadinessFinding[] = [];
+  const lifecycle = resolveIssueLifecycleStatus(issue);
+  const states = resolveIssueTaskStates(issue, readIssueRunEvidence(repoRoot, issue));
+  if (lifecycle !== 'active') findings.push(finding('ISSUE_TERMINAL', 'blocker', `Issue lifecycle is ${lifecycle}; Tasks cannot be launched.`));
   if (!issue.summary.trim()) findings.push(finding('ISSUE_SUMMARY_MISSING', 'blocker', 'Issue summary is required before launch.'));
   if (issue.goals.length === 0) findings.push(finding('ISSUE_GOALS_MISSING', 'warning', 'Issue has no explicit goals.'));
   if (issue.acceptanceCriteria.length === 0) findings.push(finding('ISSUE_ACCEPTANCE_MISSING', 'blocker', 'Issue-level acceptance criteria are required.'));
-  const launchRelevantTasks = issue.tasks.filter((task) => !['done', 'cancelled', 'superseded'].includes(task.status));
-  if (launchRelevantTasks.length === 0 && issue.status !== 'done') findings.push(finding('NO_ACTIVE_TASKS', 'blocker', 'Issue has no active Tasks.'));
+  const launchRelevantTasks = issue.tasks.filter((task) => {
+    const state = states.get(task.id)!;
+    return !state.terminal && !state.inactive;
+  });
+  if (launchRelevantTasks.length === 0 && lifecycle === 'active') findings.push(finding('NO_ACTIVE_TASKS', 'blocker', 'Issue has no active Tasks.'));
   for (const task of launchRelevantTasks) {
+    const state = states.get(task.id)!;
+    if (state.multipleActiveRuns) findings.push(finding('MULTIPLE_ACTIVE_RUNS', 'blocker', `Task has multiple active Run records: ${state.activeRunIds.join(', ')}. Resolve them before launch.`, task.id));
+    else if (state.activeRunIds.length > 0 && !state.activeRunId) findings.push(finding('STALE_ACTIVE_RUN', 'blocker', `Task has stale active Run evidence: ${state.activeRunIds.join(', ')}. Refresh or cancel it before launch.`, task.id));
     if (!task.objective.trim()) findings.push(finding('TASK_OBJECTIVE_MISSING', 'blocker', 'Task objective is required.', task.id));
     if (task.allowedPaths.length === 0) findings.push(finding('TASK_SCOPE_MISSING', task.risk === 'high' ? 'blocker' : 'warning', 'Task has no allowed path scope.', task.id));
     if (task.acceptanceCriteria.length === 0) findings.push(finding('TASK_ACCEPTANCE_MISSING', 'blocker', 'Task acceptance criteria are required.', task.id));
     if (task.checks.length === 0) findings.push(finding('TASK_CHECKS_MISSING', task.risk === 'high' ? 'blocker' : 'warning', 'Task has no named verification checks.', task.id));
     if (task.risk === 'high' && task.recommendedAgent === 'github-copilot') findings.push(finding('HIGH_RISK_CLOUD_AGENT', 'warning', 'High-risk Task is assigned to a GitHub cloud session; require explicit review before merge.', task.id));
+    const dependencies = resolveTaskDependencies(issue, task, states);
+    for (const dependencyId of dependencies.cancelledTaskIds) findings.push(finding('CANCELLED_DEPENDENCY', 'blocker', `Task depends on cancelled/inactive Task ${dependencyId}. Repair the dependency before launch.`, task.id));
+    for (const dependencyId of dependencies.missingTaskIds) findings.push(finding('MISSING_DEPENDENCY', 'blocker', `Task dependency ${dependencyId} does not exist.`, task.id));
+    for (const migration of dependencies.supersededMigrations) findings.push(finding('STALE_SUPERSEDED_DEPENDENCY', 'blocker', `Task still points at superseded Task ${migration.dependencyTaskId}; migrate to ${migration.replacementTaskIds.join(', ')}.`, task.id));
   }
   try { validateTaskGraph(issue.tasks); } catch (error) { findings.push(finding('TASK_GRAPH_INVALID', 'blocker', error instanceof Error ? error.message : String(error))); }
-  for (const task of launchRelevantTasks) {
-    for (const dependencyId of task.dependsOn) {
-      const dependency = issue.tasks.find((entry) => entry.id === dependencyId);
-      if (dependency?.status === 'cancelled') findings.push(finding('CANCELLED_DEPENDENCY', 'blocker', `Task depends on cancelled Task ${dependencyId}. Repair or replace the dependency before launch.`, task.id));
-      if (dependency?.status === 'superseded' && (dependency.supersededBy?.length ?? 0) > 0) findings.push(finding('STALE_SUPERSEDED_DEPENDENCY', 'warning', `Task still points at superseded Task ${dependencyId}; replace it with ${dependency.supersededBy?.join(', ')}.`, task.id));
-    }
-  }
-  const readyTasks = issue.tasks.filter((task) => task.status === 'ready');
-  const hasInFlightOrReview = issue.tasks.some((task) => ['running', 'review', 'integrated', 'verifying', 'verified'].includes(task.status));
-  if (readyTasks.length === 0 && !hasInFlightOrReview && issue.status !== 'done') findings.push(finding('NO_READY_TASKS', 'blocker', 'Issue has no dispatchable Task. Resolve dependencies, review pending work, or close the Issue.'));
+  const readyTasks = launchRelevantTasks.filter((task) => {
+    const state = states.get(task.id)!;
+    return state.dispatchable && resolveTaskDependencies(issue, task, states).ready;
+  });
+  const hasInFlightOrReview = launchRelevantTasks.some((task) => ['queued', 'running', 'waiting_for_user', 'review', 'integrated', 'verifying', 'verified'].includes(states.get(task.id)!.effectiveStatus));
+  if (readyTasks.length === 0 && !hasInFlightOrReview && lifecycle === 'active') findings.push(finding('NO_READY_TASKS', 'blocker', 'Issue has no dispatchable Task. Resolve dependencies, explicitly retry failed work, review pending work, or close the Issue.'));
   const agents: Record<ControllerAgent, number> = { codex: 0, claude: 0, 'github-copilot': 0 };
   for (const task of readyTasks) agents[task.recommendedAgent] += 1;
   const blockers = findings.filter((entry) => entry.level === 'blocker');
@@ -576,6 +689,7 @@ export function recordTaskVerification(repoRoot: string, issueIdValue: string, t
 export function projectBoard(repoRoot: string): {
   issues: Array<Record<string, unknown>>;
   counts: Record<string, number>;
+  declaredCounts: Record<string, number>;
   archivedCounts: Record<string, number>;
   readyTasks: Array<Record<string, string>>;
   currentIssueId?: string;
@@ -583,43 +697,71 @@ export function projectBoard(repoRoot: string): {
 } {
   const issues = listIssues(repoRoot);
   const projectState = loadControllerProjectState(repoRoot);
-  const activeIssues = issues.filter((issue) => !issue.archivedAt && !['done', 'cancelled'].includes(issue.status));
+  const activeIssues = issues.filter((issue) => resolveIssueLifecycleStatus(issue) === 'active');
   const queueIssueId = projectState.currentIssueId && activeIssues.some((issue) => issue.id === projectState.currentIssueId)
     ? projectState.currentIssueId
     : activeIssues.length === 1 ? activeIssues[0].id : undefined;
   const counts: Record<string, number> = {};
+  const declaredCounts: Record<string, number> = {};
   const archivedCounts: Record<string, number> = {};
   const readyTasks: Array<Record<string, string>> = [];
+  const statesByIssue = new Map<string, Map<string, ReturnType<typeof resolveEffectiveTaskState>>>();
   for (const issue of issues) {
+    const states = resolveIssueTaskStates(issue, readIssueRunEvidence(repoRoot, issue));
+    statesByIssue.set(issue.id, states);
     const targetCounts = issue.archivedAt ? archivedCounts : counts;
     for (const task of issue.tasks) {
-      targetCounts[task.status] = (targetCounts[task.status] ?? 0) + 1;
-      if (issue.id === queueIssueId && task.status === 'ready') {
-        readyTasks.push({ issueId: issue.id, taskId: task.id, title: task.title, agent: task.recommendedAgent });
+      const state = states.get(task.id)!;
+      targetCounts[state.effectiveStatus] = (targetCounts[state.effectiveStatus] ?? 0) + 1;
+      declaredCounts[state.declaredStatus] = (declaredCounts[state.declaredStatus] ?? 0) + 1;
+      if (issue.id === queueIssueId && state.dispatchable && resolveTaskDependencies(issue, task, states).ready) {
+        readyTasks.push({ issueId: issue.id, taskId: task.id, title: task.title, agent: task.recommendedAgent, effectiveStatus: state.effectiveStatus });
       }
     }
   }
   return {
-    issues: issues.map((issue) => ({
-      id: issue.id,
-      title: issue.title,
-      kind: issue.kind,
-      status: issue.status,
-      github: issue.github,
-      archivedAt: issue.archivedAt,
-      updatedAt: issue.updatedAt,
-      isCurrent: issue.id === queueIssueId,
-      tasks: issue.tasks.map((task) => ({
-        id: task.id,
-        title: task.title,
-        status: task.status,
-        dependsOn: task.dependsOn,
-        agent: task.recommendedAgent,
-        runIds: task.runIds,
-        github: task.github,
-      })),
-    })),
+    issues: issues.map((issue) => {
+      const states = statesByIssue.get(issue.id)!;
+      return {
+        id: issue.id,
+        title: issue.title,
+        kind: issue.kind,
+        status: issue.status,
+        lifecycleStatus: resolveIssueLifecycleStatus(issue),
+        github: issue.github,
+        archivedAt: issue.archivedAt,
+        updatedAt: issue.updatedAt,
+        isCurrent: issue.id === queueIssueId,
+        tasks: issue.tasks.map((task) => {
+          const state = states.get(task.id)!;
+          return {
+            id: task.id,
+            title: task.title,
+            status: task.status,
+            declaredStatus: state.declaredStatus,
+            effectiveStatus: state.effectiveStatus,
+            statusReason: state.reason,
+            latestRunStatus: state.latestRunStatus,
+            activeRunId: state.activeRunId,
+            activeRunStatus: state.activeRunStatus,
+            activeRunIds: state.activeRunIds,
+            multipleActiveRuns: state.multipleActiveRuns,
+            verificationStatus: state.verificationStatus,
+            dispatchable: state.dispatchable,
+            retryable: state.retryable,
+            requiresExplicitRetry: state.requiresExplicitRetry,
+            dependsOn: task.dependsOn,
+            dependencyState: resolveTaskDependencies(issue, task, states),
+            supersededBy: task.supersededBy,
+            agent: task.recommendedAgent,
+            runIds: task.runIds,
+            github: task.github,
+          };
+        }),
+      };
+    }),
     counts,
+    declaredCounts,
     archivedCounts,
     readyTasks,
     currentIssueId: queueIssueId,

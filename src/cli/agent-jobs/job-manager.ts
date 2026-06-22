@@ -19,6 +19,8 @@ import {
   startGitHubAgentSession,
 } from "../github/session";
 import { getIssue, updateTask } from "../controller/issue-store";
+import { readTaskRunEvidence } from "../controller/run-evidence";
+import { assertTaskDispatchable, resolveEffectiveTaskState } from "../controller/task-status-resolver";
 import type { ControllerAgent, ControllerTask } from "../controller/types";
 import { tryAppendControllerWorklogEvent } from "../controller/worklog";
 import {
@@ -276,6 +278,7 @@ export interface StartTaskJobOptions {
   baseRef?: string;
   model?: string;
   createPullRequest?: boolean;
+  retryFromRunId?: string;
 }
 
 function baseMeta(
@@ -337,8 +340,7 @@ export function startTaskJob(opts: StartTaskJobOptions): AgentJobMeta {
   const issue = getIssue(opts.repoRoot, opts.issueId);
   const task = issue.tasks.find((entry) => entry.id === opts.taskId);
   if (!task) throw new Error(`task not found: ${opts.issueId}/${opts.taskId}`);
-  if (task.status !== "ready" && task.status !== "changes_requested")
-    throw new Error(`task is not dispatchable from status ${task.status}`);
+  assertTaskDispatchable(issue, task, readTaskRunEvidence(opts.repoRoot, task), { retryFromRunId: opts.retryFromRunId });
   const agent = opts.agent ?? task.recommendedAgent;
   const provider = agent === "github-copilot" ? "github" : "local";
   const runId = `RUN-${sanitize(opts.issueId)}-${sanitize(opts.taskId)}-${Date.now()}-${shortId()}`;
@@ -455,11 +457,12 @@ export function startTaskJob(opts: StartTaskJobOptions): AgentJobMeta {
           meta.status === "succeeded"
             ? "review"
             : ["failed", "cancelled", "unknown"].includes(meta.status)
-              ? "ready"
+              ? "blocked"
               : meta.status === "waiting_for_user"
                 ? "blocked"
                 : "running",
         runId,
+        transition: "run_sync",
         note: `Dispatched ${runId} to GitHub Copilot cloud session ${session.id}.`,
       });
       return meta;
@@ -474,9 +477,10 @@ export function startTaskJob(opts: StartTaskJobOptions): AgentJobMeta {
         message: meta.error,
       });
       updateTask(opts.repoRoot, issue.id, task.id, {
-        status: "ready",
+        status: "blocked",
         runId,
-        note: `${runId} failed to start and remains recorded as an attempt; Task returned to ready: ${meta.error}`,
+        transition: "run_sync",
+        note: `${runId} failed to start and remains recorded as an attempt; explicit retry is required: ${meta.error}`,
       });
       return meta;
     }
@@ -532,6 +536,7 @@ export function startTaskJob(opts: StartTaskJobOptions): AgentJobMeta {
   updateTask(opts.repoRoot, issue.id, task.id, {
     status: "running",
     runId,
+    transition: "run_sync",
     note: `Dispatched ${runId} to ${meta.agent}.`,
   });
   return meta;
@@ -555,53 +560,6 @@ function mapGitHubState(state: string): AgentJobStatus {
       return "running";
     default:
       return "unknown";
-  }
-}
-
-function syncTaskStatus(repoRoot: string, meta: AgentJobMeta): void {
-  try {
-    const issue = getIssue(repoRoot, meta.issueId);
-    const task = issue.tasks.find((entry) => entry.id === meta.taskId);
-    const targetStatus =
-      meta.status === "succeeded"
-        ? "review"
-        : ["failed", "unknown", "cancelled"].includes(meta.status)
-          ? "ready"
-          : meta.status === "waiting_for_user"
-            ? "blocked"
-            : undefined;
-    const terminalReviewStates = [
-      "integrated",
-      "verifying",
-      "verified",
-      "done",
-    ];
-    const mayAdvanceToReview =
-      task &&
-      targetStatus === "review" &&
-      !terminalReviewStates.includes(task.status);
-    const mayMarkAttention =
-      task &&
-      targetStatus !== "review" &&
-      !["verified", "done"].includes(task.status);
-    if (
-      task &&
-      targetStatus &&
-      task.status !== targetStatus &&
-      (mayAdvanceToReview || mayMarkAttention)
-    ) {
-      updateTask(repoRoot, meta.issueId, meta.taskId, {
-        status: targetStatus,
-        note:
-          targetStatus === "review"
-            ? `${meta.runId} finished and is ready for review.`
-            : targetStatus === "ready"
-              ? `${meta.runId} ended as ${meta.status}; the attempt remains in history and the Task returned to ready.`
-              : `${meta.runId} requires attention: ${meta.error ?? meta.status}`,
-      });
-    }
-  } catch (_error) {
-    // Keep Run inspection available even if Issue state was manually changed or removed.
   }
 }
 
@@ -715,7 +673,6 @@ export function getAgentJob(
       writeJson(path, meta);
     }
   }
-  syncTaskStatus(repoRoot, meta);
   const tail = (relativePath: string): string => {
     const absolute = join(repoRoot, relativePath);
     if (!existsSync(absolute)) return "";
@@ -760,7 +717,7 @@ export function listAgentJobs(repoRoot: string, limit = 50): AgentJobMeta[] {
     )
     .map((entry) => getAgentJob(repoRoot, entry.name))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-    .slice(0, Math.min(Math.max(limit, 1), 200))
+    .slice(0, Math.min(Math.max(limit, 1), 5000))
     .map(({ stdoutTail: _stdout, stderrTail: _stderr, ...meta }) => meta);
 }
 
@@ -858,12 +815,20 @@ export function cancelAgentJob(repoRoot: string, runId: string): AgentJobMeta {
     message: "Local Run cancelled.",
   });
   try {
-    updateTask(repoRoot, meta.issueId, meta.taskId, {
-      status: "ready",
-      note: `${runId} cancelled; the Task itself remains open and returned to ready.`,
-    });
+    const issue = getIssue(repoRoot, meta.issueId);
+    const task = issue.tasks.find((entry) => entry.id === meta.taskId);
+    if (task) {
+      const state = resolveEffectiveTaskState({ issue, task, runs: readTaskRunEvidence(repoRoot, task) });
+      if (!state.terminal && !state.inactive && (task.supersededBy?.length ?? 0) === 0) {
+        updateTask(repoRoot, meta.issueId, meta.taskId, {
+          status: "blocked",
+          transition: "run_sync",
+          note: `${runId} cancelled; explicit retry is required before another Run can be created.`,
+        });
+      }
+    }
   } catch (_error) {
-    /* ignore */
+    /* Task may have been removed or explicitly terminated; the Run remains cancelled evidence. */
   }
   return meta;
 }
@@ -881,9 +846,23 @@ export function retryAgentJob(
   ) {
     throw new Error(`run status is not retryable: ${previous.status}`);
   }
+  const issue = getIssue(repoRoot, previous.issueId);
+  const task = issue.tasks.find((entry) => entry.id === previous.taskId);
+  if (!task) throw new Error(`task not found: ${previous.issueId}/${previous.taskId}`);
+  const state = resolveEffectiveTaskState({ issue, task, runs: readTaskRunEvidence(repoRoot, task) });
+  if (state.terminal || state.inactive || (task.supersededBy?.length ?? 0) > 0) {
+    throw new Error(`Task cannot be retried from effective state ${state.effectiveStatus}`);
+  }
+  if (state.activeRunIds.length > 0) {
+    throw new Error(`Task still has active Run evidence ${state.activeRunIds.join(", ")}; cancel or resolve it before retry`);
+  }
+  if (state.latestRunId !== previous.runId) {
+    throw new Error(`Run ${previous.runId} is historical evidence and is not the current retry source`);
+  }
   updateTask(repoRoot, previous.issueId, previous.taskId, {
     status: "ready",
-    note: `Retry requested from ${previous.runId}.`,
+    transition: "retry",
+    note: `Explicit retry requested from ${previous.runId}.`,
   });
   const timeoutMs = normalizeAgentTimeoutMs(options.timeoutMs, {
     defaultMs: Math.max(previous.timeoutMs ?? 0, DEFAULT_AGENT_TIMEOUT_MS),
@@ -895,6 +874,7 @@ export function retryAgentJob(
     taskId: previous.taskId,
     agent: previous.agent,
     timeoutMs,
+    retryFromRunId: previous.runId,
     isolate: options.isolate,
     githubRepo: previous.github
       ? `${previous.github.owner}/${previous.github.repo}`

@@ -1,8 +1,10 @@
 import { getAgentJobEvents, listAgentJobs } from "../agent-jobs/job-manager";
 import type { AgentJobMeta } from "../agent-jobs/types";
 import { getIssue, listIssues } from "./issue-store";
+import { readIssueRunEvidence, readTaskRunEvidence } from "./run-evidence";
 import { loadControllerProjectState } from "./project-state";
 import type { ControllerIssue, ControllerTask, TaskStatus } from "./types";
+import { resolveEffectiveTaskState, resolveIssueTaskStates, resolveTaskDependencies } from "./task-status-resolver";
 import {
   listControllerWorklogEvents,
   type ControllerWorklogEvent,
@@ -39,6 +41,10 @@ export interface TaskProgressSnapshot {
   objective: string;
   status: TaskStatus;
   effectiveStatus: string;
+  statusReason: string;
+  issueLifecycleStatus: string;
+  requiresExplicitRetry: boolean;
+  retryable: boolean;
   percent: number;
   completion: TaskCompletionEvidence;
   latestRunId?: string;
@@ -137,12 +143,8 @@ function latestRun(task: ControllerTask, byId: Map<string, AgentJobMeta>): Agent
   return undefined;
 }
 
-function effectiveStatus(task: ControllerTask, run?: AgentJobMeta): string {
-  if (run?.status === "running" || run?.status === "queued") return run.status;
-  if (run?.status === "waiting_for_user") return "needs_attention";
-  if (run && FAILED_RUNS.has(run.status) && task.status === "ready") return "retry_ready";
-  if (run && FAILED_RUNS.has(run.status) && !["done", "verified", "cancelled", "superseded"].includes(task.status)) return "run_failed";
-  return task.status;
+function effectiveStatus(issue: ControllerIssue, task: ControllerTask, runs: AgentJobMeta[]): string {
+  return resolveEffectiveTaskState({ issue, task, runs }).effectiveStatus;
 }
 
 function taskVerification(task: ControllerTask): TaskProgressSnapshot["verification"] {
@@ -222,12 +224,17 @@ function completionEvidence(task: ControllerTask, run?: AgentJobMeta): TaskCompl
   };
 }
 
-function taskProgress(issue: ControllerIssue, task: ControllerTask, byId: Map<string, AgentJobMeta>): TaskProgressSnapshot {
-  const run = latestRun(task, byId);
-  const unresolvedDependencies = task.dependsOn.filter((id) => {
-    const dependency = issue.tasks.find((candidate) => candidate.id === id);
-    return dependency && dependency.status !== "done";
-  });
+function taskProgress(
+  issue: ControllerIssue,
+  task: ControllerTask,
+  runs: AgentJobMeta[],
+  states: ReadonlyMap<string, ReturnType<typeof resolveEffectiveTaskState>>,
+): TaskProgressSnapshot {
+  const state = states.get(task.id) ?? resolveEffectiveTaskState({ issue, task, runs });
+  const run = state.latestRunId
+    ? runs.find((entry) => entry.runId === state.latestRunId)
+    : undefined;
+  const dependencies = resolveTaskDependencies(issue, task, states);
   const completion = completionEvidence(task, run);
   return {
     issueId: issue.id,
@@ -235,36 +242,49 @@ function taskProgress(issue: ControllerIssue, task: ControllerTask, byId: Map<st
     title: task.title,
     objective: task.objective,
     status: task.status,
-    effectiveStatus: effectiveStatus(task, run),
+    effectiveStatus: state.effectiveStatus,
+    statusReason: state.reason,
+    issueLifecycleStatus: state.issueLifecycleStatus,
+    requiresExplicitRetry: state.requiresExplicitRetry,
+    retryable: state.retryable,
     percent: Math.round((completion.completedGates / completion.totalGates) * 100),
     completion,
-    latestRunId: run?.runId,
-    latestRunStatus: run?.status,
+    latestRunId: state.latestRunId,
+    latestRunStatus: state.latestRunStatus,
     currentActivity: run?.progress?.currentActivity ?? task.notes.at(-1),
     lastActivityAt: run?.progress?.lastActivityAt ?? run?.finishedAt ?? run?.createdAt ?? task.updatedAt,
     elapsedMs: run?.timing?.elapsedMs,
     runCount: task.runIds.length,
     notesCount: task.notes.length,
-    blockedBy: unresolvedDependencies,
+    blockedBy: [
+      ...dependencies.pendingTaskIds,
+      ...dependencies.cancelledTaskIds,
+      ...dependencies.missingTaskIds,
+      ...dependencies.supersededMigrations.map((entry) => entry.dependencyTaskId),
+    ],
     risk: task.risk,
     agent: task.recommendedAgent,
-    verification: taskVerification(task),
+    verification: state.verificationStatus,
     githubUrl: task.github?.url,
   };
 }
 
-function issueProgress(issue: ControllerIssue, byId: Map<string, AgentJobMeta>, currentIssueId?: string): IssueProgressSnapshot {
-  const tasks = issue.tasks.map((task) => taskProgress(issue, task, byId));
-  const counted = tasks.filter((task) => !["cancelled", "superseded"].includes(task.status));
+function issueProgress(repoRoot: string, issue: ControllerIssue, currentIssueId?: string): IssueProgressSnapshot {
+  const runsByTask = readIssueRunEvidence(repoRoot, issue);
+  const states = resolveIssueTaskStates(issue, runsByTask);
+  const tasks = issue.tasks.map((task) =>
+    taskProgress(issue, task, [...(runsByTask.get(task.id) ?? [])], states),
+  );
+  const counted = tasks.filter((task) => !["cancelled", "superseded", "cancelled_by_parent", "archived_by_parent", "inactive_by_parent"].includes(task.effectiveStatus));
   const completedGates = counted.reduce((sum, task) => sum + task.completion.completedGates, 0);
   const totalGates = counted.reduce((sum, task) => sum + task.completion.totalGates, 0);
-  const taskCounts = issue.tasks.reduce<Record<string, number>>((result, task) => {
-    result[task.status] = (result[task.status] ?? 0) + 1;
+  const taskCounts = tasks.reduce<Record<string, number>>((result, task) => {
+    result[task.effectiveStatus] = (result[task.effectiveStatus] ?? 0) + 1;
     return result;
   }, {});
-  const attention = tasks.filter((task) => ["blocked", "changes_requested", "launch_blocked", "run_failed", "retry_ready"].includes(task.effectiveStatus));
+  const attention = tasks.filter((task) => ["blocked", "changes_requested", "launch_blocked", "waiting_for_user"].includes(task.effectiveStatus));
   const currentTask = tasks
-    .filter((task) => ["running", "queued", "needs_attention", "review", "integrated", "verifying", "verified", "retry_ready"].includes(task.effectiveStatus))
+    .filter((task) => ["running", "queued", "waiting_for_user", "review", "integrated", "verifying", "verified"].includes(task.effectiveStatus))
     .sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt))[0];
   return {
     id: issue.id,
@@ -274,9 +294,9 @@ function issueProgress(issue: ControllerIssue, byId: Map<string, AgentJobMeta>, 
     percent: totalGates ? Math.round((completedGates / totalGates) * 100) : issue.status === "done" ? 100 : 0,
     completedGates,
     totalGates,
-    completedTasks: counted.filter((task) => task.status === "done").length,
-    actionableTaskCount: counted.filter((task) => ["ready", "changes_requested", "review", "integrated", "verifying", "verified"].includes(task.status)).length,
-    activeTaskCount: counted.filter((task) => !TERMINAL_TASKS.has(task.status)).length,
+    completedTasks: counted.filter((task) => task.effectiveStatus === "done").length,
+    actionableTaskCount: counted.filter((task) => ["ready", "changes_requested", "review", "integrated", "verifying", "verified"].includes(task.effectiveStatus)).length,
+    activeTaskCount: counted.filter((task) => !["done", "cancelled", "superseded", "cancelled_by_parent", "archived_by_parent", "inactive_by_parent"].includes(task.effectiveStatus)).length,
     totalTasks: counted.length,
     taskCounts,
     attentionCount: attention.length,
@@ -294,13 +314,12 @@ export function getProjectProgress(repoRoot: string): ProjectProgressSnapshot {
   const allIssues = listIssues(repoRoot);
   const state = loadControllerProjectState(repoRoot);
   const runs = listAgentJobs(repoRoot, 1000);
-  const byId = runById(runs);
-  const views = allIssues.map((issue) => issueProgress(issue, byId, state.currentIssueId));
+  const views = allIssues.map((issue) => issueProgress(repoRoot, issue, state.currentIssueId));
   const issues = views.filter((issue) => !issue.archivedAt);
   const archivedIssues = views.filter((issue) => Boolean(issue.archivedAt));
   const totals: Record<string, number> = {};
-  for (const issue of allIssues) for (const task of issue.tasks) totals[task.status] = (totals[task.status] ?? 0) + 1;
-  const countedTasks = issues.flatMap((issue) => issue.tasks).filter((task) => !["cancelled", "superseded"].includes(task.status));
+  for (const issue of views) for (const task of issue.tasks) totals[task.effectiveStatus] = (totals[task.effectiveStatus] ?? 0) + 1;
+  const countedTasks = issues.flatMap((issue) => issue.tasks).filter((task) => !["cancelled", "superseded", "cancelled_by_parent", "archived_by_parent", "inactive_by_parent"].includes(task.effectiveStatus));
   const completedGates = countedTasks.reduce((sum, task) => sum + task.completion.completedGates, 0);
   const totalGates = countedTasks.reduce((sum, task) => sum + task.completion.totalGates, 0);
   const completed = allIssues.flatMap((issue) => issue.tasks).filter((task) => task.status === "done");
@@ -309,18 +328,26 @@ export function getProjectProgress(repoRoot: string): ProjectProgressSnapshot {
   const cycleTimes = completed.map((task) => Date.parse(task.updatedAt) - Date.parse(task.createdAt)).filter((value) => Number.isFinite(value) && value >= 0);
   const attention: ProgressAttentionItem[] = [];
 
+  const viewByIssue = new Map(views.map((issue) => [issue.id, issue]));
   for (const issue of allIssues.filter((entry) => !entry.archivedAt)) {
+    const issueView = viewByIssue.get(issue.id);
+    if (!issueView) continue;
     for (const task of issue.tasks) {
-      const run = latestRun(task, byId);
-      if (run && ["failed", "unknown"].includes(run.status) && !["done", "cancelled", "superseded"].includes(task.status)) {
-        attention.push({ severity: task.status === "ready" ? "warning" : "critical", type: "failed_run", message: task.status === "ready" ? `${run.runId} failed; Task is retryable.` : run.error || run.progress?.currentActivity || `Run ${run.status}`, issueId: issue.id, taskId: task.id, runId: run.runId, at: run.finishedAt ?? run.createdAt });
+      const taskView = issueView.tasks.find((entry) => entry.taskId === task.id);
+      if (!taskView || ["done", "cancelled", "superseded", "cancelled_by_parent", "archived_by_parent", "inactive_by_parent"].includes(taskView.effectiveStatus)) continue;
+      const taskRuns = readTaskRunEvidence(repoRoot, task);
+      const run = taskView.latestRunId
+        ? taskRuns.find((entry) => entry.runId === taskView.latestRunId)
+        : undefined;
+      if (taskView.requiresExplicitRetry && run) {
+        attention.push({ severity: "warning", type: "failed_run", message: `${run.runId} ended as ${run.status}; explicit retry is required.`, issueId: issue.id, taskId: task.id, runId: run.runId, at: run.finishedAt ?? run.createdAt });
       }
       if (run && ACTIVE_RUNS.has(run.status) && run.lastHeartbeatAt && now - Date.parse(run.lastHeartbeatAt) > 10 * 60_000) {
         attention.push({ severity: "warning", type: "stale_run", message: "Run has not emitted a heartbeat for more than 10 minutes.", issueId: issue.id, taskId: task.id, runId: run.runId, at: run.lastHeartbeatAt });
       }
-      if (task.status === "blocked" || task.status === "launch_blocked") attention.push({ severity: task.status === "blocked" ? "critical" : "warning", type: "blocked_task", message: task.notes.at(-1) || `${task.title} is ${task.status}.`, issueId: issue.id, taskId: task.id, at: task.updatedAt });
-      if (task.status === "changes_requested") attention.push({ severity: "warning", type: "changes_requested", message: task.notes.at(-1) || `${task.title} requires changes.`, issueId: issue.id, taskId: task.id, at: task.updatedAt });
-      if (task.status === "verified") attention.push({ severity: "warning", type: "approval", message: `${task.title} passed verification and is waiting for explicit acceptance.`, issueId: issue.id, taskId: task.id, at: task.updatedAt });
+      if (taskView.effectiveStatus === "blocked" || taskView.effectiveStatus === "launch_blocked" || taskView.effectiveStatus === "waiting_for_user") attention.push({ severity: taskView.effectiveStatus === "blocked" ? "critical" : "warning", type: "blocked_task", message: task.notes.at(-1) || `${task.title} is ${taskView.effectiveStatus}.`, issueId: issue.id, taskId: task.id, at: task.updatedAt });
+      if (taskView.effectiveStatus === "changes_requested") attention.push({ severity: "warning", type: "changes_requested", message: task.notes.at(-1) || `${task.title} requires changes.`, issueId: issue.id, taskId: task.id, at: task.updatedAt });
+      if (taskView.effectiveStatus === "verified") attention.push({ severity: "warning", type: "approval", message: `${task.title} passed verification and is waiting for explicit acceptance.`, issueId: issue.id, taskId: task.id, at: task.updatedAt });
     }
   }
   attention.sort((a, b) => b.at.localeCompare(a.at));
@@ -334,7 +361,7 @@ export function getProjectProgress(repoRoot: string): ProjectProgressSnapshot {
     archivedIssueCount: archivedIssues.length,
     taskCount: allIssues.reduce((sum, issue) => sum + issue.tasks.length, 0),
     activeRunCount: runs.filter((run) => ACTIVE_RUNS.has(run.status)).length,
-    completedTaskCount: completed.length,
+    completedTaskCount: countedTasks.filter((task) => task.effectiveStatus === "done").length,
     currentIssueId: state.currentIssueId,
     totals,
     throughput: {
@@ -416,21 +443,32 @@ export function getControllerTimeline(
     .slice(0, Math.max(1, Math.min(filter.limit ?? 200, 5000)));
 }
 
-export function getTaskProgressDetail(repoRoot: string, issueId: string, taskId: string): {
-  issue: Pick<ControllerIssue, "id" | "title" | "status" | "github" | "archivedAt">;
-  task: ControllerTask;
-  progress: TaskProgressSnapshot;
-  runs: AgentJobMeta[];
-  timeline: ControllerTimelineEvent[];
-} {
+export function getTaskProgressDetail(repoRoot: string, issueId: string, taskId: string) {
   const issue = getIssue(repoRoot, issueId);
   const task = issue.tasks.find((entry) => entry.id === taskId);
   if (!task) throw new Error(`task not found: ${issueId}/${taskId}`);
-  const runs = listAgentJobs(repoRoot, 1000).filter((run) => run.issueId === issueId && run.taskId === taskId);
+  const runsByTask = readIssueRunEvidence(repoRoot, issue);
+  const runs = [...(runsByTask.get(task.id) ?? [])];
+  const states = resolveIssueTaskStates(issue, runsByTask);
+  const state = states.get(task.id)!;
+  const progress = taskProgress(issue, task, runs, states);
   return {
-    issue: { id: issue.id, title: issue.title, status: issue.status, github: issue.github, archivedAt: issue.archivedAt },
-    task,
-    progress: taskProgress(issue, task, runById(runs)),
+    issue: {
+      id: issue.id,
+      title: issue.title,
+      status: issue.status,
+      lifecycleStatus: state.issueLifecycleStatus,
+      github: issue.github,
+      archivedAt: issue.archivedAt,
+    },
+    task: {
+      ...task,
+      declaredStatus: state.declaredStatus,
+      effectiveStatus: state.effectiveStatus,
+      effectiveState: state,
+      dependencyState: resolveTaskDependencies(issue, task, states),
+    },
+    progress,
     runs,
     timeline: getControllerTimeline(repoRoot, { issueId, taskId, limit: 300 }),
   };

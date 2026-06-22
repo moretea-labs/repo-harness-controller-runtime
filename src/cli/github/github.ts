@@ -3,6 +3,8 @@ import { dirname, join } from 'path';
 import { runProcess } from '../../effects/process-runner';
 import { getIssue, updateIssue, updateTask } from '../controller/issue-store';
 import type { ControllerIssue, ControllerTask, GitHubIssueLink } from '../controller/types';
+import { readTaskRunEvidence } from '../controller/run-evidence';
+import { resolveEffectiveTaskState, resolveIssueLifecycleStatus } from '../controller/task-status-resolver';
 
 export interface GitHubRepositoryInfo {
   nameWithOwner: string;
@@ -91,7 +93,7 @@ export function getGitHubStatus(repoRoot: string, explicitRepo?: string): GitHub
   };
 }
 
-function issueBody(issue: ControllerIssue): string {
+function issueBody(repoRoot: string, issue: ControllerIssue): string {
   return [
     `<!-- repo-harness:${issue.id} -->`,
     issue.summary || 'No summary provided.',
@@ -106,8 +108,13 @@ function issueBody(issue: ControllerIssue): string {
     ...(issue.acceptanceCriteria.length ? issue.acceptanceCriteria.map((item) => `- [ ] ${item}`) : ['- [ ] Define acceptance criteria.']),
     '',
     '## Controller Tasks',
-    ...(issue.tasks.filter((task) => task.status !== 'superseded').length
-      ? issue.tasks.filter((task) => task.status !== 'superseded').map((task) => `- [ ] **${task.id}** — ${task.title} (\`${task.status}\`, \`${task.recommendedAgent}\`)`)
+    ...(issue.tasks.filter((task) => resolveEffectiveTaskState({ issue, task, runs: readTaskRunEvidence(repoRoot, task) }).effectiveStatus !== 'superseded').length
+      ? issue.tasks
+          .filter((task) => resolveEffectiveTaskState({ issue, task, runs: readTaskRunEvidence(repoRoot, task) }).effectiveStatus !== 'superseded')
+          .map((task) => {
+            const state = resolveEffectiveTaskState({ issue, task, runs: readTaskRunEvidence(repoRoot, task) });
+            return `- [ ] **${task.id}** — ${task.title} (declared: \`${state.declaredStatus}\`, effective: \`${state.effectiveStatus}\`, run: \`${state.latestRunStatus ?? 'none'}\`, \`${task.recommendedAgent}\`)`;
+          })
       : ['- No tasks planned.']),
     '',
     `Local source: \`tasks/issues/${issue.id}-${issue.slug}.issue.md\``,
@@ -200,7 +207,7 @@ export function publishIssueToGitHub(repoRoot: string, issueId: string, options:
   let issue = getIssue(repoRoot, issueId);
   const repository = resolveGitHubRepository(repoRoot, options.repo ?? (issue.github ? `${issue.github.owner}/${issue.github.repo}` : undefined));
   const labels = Array.from(new Set(['repo-harness', issue.kind, ...(options.labels ?? [])].filter(Boolean)));
-  const parentBody = bodyFile(repoRoot, `${issue.id}-parent`, issueBody(issue));
+  const parentBody = bodyFile(repoRoot, `${issue.id}-parent`, issueBody(repoRoot, issue));
   try {
     let parent = issue.github
       ? updateGitHubIssue(repoRoot, repository, issue.github, issue.title, parentBody)
@@ -209,7 +216,7 @@ export function publishIssueToGitHub(repoRoot: string, issueId: string, options:
     issue = updateIssue(repoRoot, issue.id, { github: parent });
 
     if (options.includeTasks) {
-      for (const task of issue.tasks.filter((entry) => entry.status !== 'superseded')) {
+      for (const task of issue.tasks.filter((entry) => resolveEffectiveTaskState({ issue, task: entry, runs: readTaskRunEvidence(repoRoot, entry) }).effectiveStatus !== 'superseded')) {
         const taskFile = bodyFile(repoRoot, `${issue.id}-${task.id}`, taskBody(issue, task, parent.url));
         try {
           let taskLink = task.github
@@ -236,7 +243,8 @@ export function refreshGitHubIssue(repoRoot: string, issueId: string): { issue: 
   if (!result.ok) throw new Error(`failed to refresh GitHub issue: ${result.error || result.stderr}`);
   const remote = parseJson<Record<string, unknown>>(result.stdout, 'gh issue view');
   const state = String(remote.state ?? '').toUpperCase();
-  const nextStatus = state === 'CLOSED' && issue.status !== 'done' ? 'review' : issue.status;
+  const lifecycle = resolveIssueLifecycleStatus(issue);
+  const nextStatus = state === 'CLOSED' && lifecycle === 'active' ? 'review' : issue.status;
   const updated = updateIssue(repoRoot, issue.id, {
     status: nextStatus,
     github: { ...issue.github, url: String(remote.url ?? issue.github.url), syncedAt: new Date().toISOString() },

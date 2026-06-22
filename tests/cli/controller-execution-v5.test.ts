@@ -5,6 +5,7 @@ import { join } from "path";
 import {
   archiveIssue,
   createIssue,
+  getIssue,
   inspectIssueReadiness,
   setTaskDependencies,
   splitTask,
@@ -122,7 +123,7 @@ describe("Controller V5 execution and closure", () => {
     expect(readiness.blockers.some((entry) => entry.code === "CANCELLED_DEPENDENCY")).toBe(true);
   });
 
-  test("safe reconciliation rewires superseded dependencies and restores failed attempts to retryable", () => {
+  test("safe reconciliation rewires superseded dependencies without auto-retrying failed attempts", () => {
     const root = repo();
     const issue = createIssue(root, {
       title: "Reconcile flow",
@@ -140,9 +141,11 @@ describe("Controller V5 execution and closure", () => {
     const result = reconcileProjectGovernance(root);
     expect(result.changed).toBe(true);
     expect(result.changes.some((entry) => entry.action === "repair_dependency")).toBe(true);
-    expect(result.changes.some((entry) => entry.action === "restore_retryable")).toBe(true);
+    expect(result.changes.some((entry) => entry.action === "restore_retryable")).toBe(false);
+    expect(getIssue(root, issue.id).tasks.find((entry) => entry.id === "T3")?.status).toBe("blocked");
     const governance = inspectProjectGovernance(root);
-    expect(governance.findings.some((entry) => entry.code === "FAILED_RUN_BLOCKED_TASK")).toBe(false);
+    expect(governance.findings.some((entry) => entry.code === "FAILED_RUN_BLOCKED_TASK")).toBe(true);
+    expect(governance.executionQueue.some((entry) => entry.taskId === "T3" && entry.action === "retry")).toBe(true);
   });
 
   test("progress is calculated from five evidence gates instead of lifecycle guesses", () => {

@@ -31,6 +31,8 @@ import {
   setTaskDependencies,
   updateTask,
 } from "../controller/issue-store";
+import { readTaskRunEvidence } from "../controller/run-evidence";
+import { resolveEffectiveTaskState } from "../controller/task-status-resolver";
 import {
   getControllerTimeline,
   getProjectProgress,
@@ -481,7 +483,8 @@ export async function startLocalBridgeServer(
       const issue = getIssue(options.repoRoot, request.params.issueId);
       const task = issue.tasks.find((entry) => entry.id === request.params.taskId);
       if (!task) throw new Error("task not found");
-      if (task.status === "running") throw new Error("cancel the active Run before cancelling the Task");
+      const state = resolveEffectiveTaskState({ issue, task, runs: readTaskRunEvidence(options.repoRoot, task) });
+      if (state.activeRunIds.length > 0) throw new Error(`cancel active Run(s) ${state.activeRunIds.join(", ")} before cancelling the Task`);
       response.json(updateTask(options.repoRoot, request.params.issueId, request.params.taskId, { status: "cancelled", note: queryString(request.body?.note) ?? "Task cancelled from the local Controller." }));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
