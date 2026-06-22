@@ -38,7 +38,7 @@ describe('v8.1 MCP repository routing', () => {
         path: 'cross-repo-link.txt',
       });
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain('symlink escapes repository root');
+      expect(result.content[0].text).toContain('path escapes repository root');
     } finally {
       fixture.cleanup();
     }
