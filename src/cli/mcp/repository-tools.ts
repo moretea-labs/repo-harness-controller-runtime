@@ -10,6 +10,7 @@ import {
   updateRepository,
   validateRepository,
 } from '../repositories/registry';
+import { buildControllerWorkbench } from '../repositories/workbench';
 import type { McpToolDefinition } from './tools';
 
 export interface RepositoryToolResult {
@@ -72,6 +73,10 @@ export const repositoryToolDefinitions: McpToolDefinition[] = [
   definition('repository_remove', 'Soft-remove a repository while retaining audit history.', {
     repo_id: repoId,
   }, ['repo_id'], true),
+  definition('repository_workbench', 'Return global or repository-filtered Workbench state.', {
+    repo_id: repoId,
+    include_removed: { type: 'boolean' },
+  }),
 ];
 
 function result(value: Record<string, unknown>): RepositoryToolResult {
@@ -107,21 +112,12 @@ export function callRepositoryTool(
         return result({ repository, migration: bindRepositoryEntities(repository) });
       }
       case 'repository_list':
-        return result({
-          repositories: listRepositories(controllerHome, {
-            includeRemoved: args.include_removed === true,
-          }).map(repositorySummary),
-        });
+        return result({ repositories: listRepositories(controllerHome, { includeRemoved: args.include_removed === true }).map(repositorySummary) });
       case 'repository_get':
-        return result({ repository: getRepository(repoIdValue, controllerHome, {
-          includeRemoved: args.include_removed === true,
-        }) });
+        return result({ repository: getRepository(repoIdValue, controllerHome, { includeRemoved: args.include_removed === true }) });
       case 'repository_validate': {
         const repository = getRepository(repoIdValue, controllerHome, { includeRemoved: true });
-        return result({
-          validation: validateRepository(repoIdValue, controllerHome),
-          migration: bindRepositoryEntities(repository),
-        });
+        return result({ validation: validateRepository(repoIdValue, controllerHome), migration: bindRepositoryEntities(repository) });
       }
       case 'repository_refresh': {
         const repository = refreshRepository(repoIdValue, controllerHome);
@@ -137,6 +133,11 @@ export function callRepositoryTool(
         return result({ repository: disableRepository(repoIdValue, controllerHome) });
       case 'repository_remove':
         return result({ repository: removeRepository(repoIdValue, controllerHome) });
+      case 'repository_workbench':
+        return result({ workbench: buildControllerWorkbench(controllerHome, {
+          repoId: repoIdValue || undefined,
+          includeRemoved: args.include_removed === true,
+        }) });
       default:
         return failure(new Error(`UNKNOWN_REPOSITORY_TOOL: ${name}`));
     }
