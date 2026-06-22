@@ -25,6 +25,7 @@ import {
   archiveIssue,
   getIssue,
   inspectIssueReadiness,
+  inspectTaskReadiness,
   projectBoard,
   restoreIssue,
   recordTaskVerification,
@@ -68,7 +69,14 @@ import {
 } from "../editing/edit-session";
 import { localBridgeDashboardHtml } from "./dashboard";
 import type { LocalBridgeJobRequest } from "./types";
-import { CONTROLLER_TOOL_SURFACE } from "../controller/runtime-config";
+import {
+  CONTROLLER_SCHEMA_VERSION,
+  CONTROLLER_TOOL_SURFACE,
+  CONTROLLER_TOOL_SURFACE_VERSION,
+  controllerToolSurfaceFingerprint,
+} from "../controller/runtime-config";
+import { taskExecutionPolicy, taskWriteScopesConflict } from "../controller/execution-policy";
+import { continueTaskAfterSuccessfulRun } from "../controller/execution-completion";
 import { getMcpPolicy } from "../mcp/policy";
 import { loadMcpLocalConfig, loadMcpRuntimeState } from "../mcp/auth";
 
@@ -168,15 +176,25 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
   const mcpConfig = loadMcpLocalConfig(repoRoot);
   const mcpRuntime = loadMcpRuntimeState(repoRoot);
   const runtimeSurface = mcpRuntime?.server?.toolSurface;
+  const runtimeSchemaVersion = mcpRuntime?.server?.schemaVersion;
+  const runtimeSurfaceVersion = mcpRuntime?.server?.toolSurfaceVersion;
+  const runtimeFingerprint = mcpRuntime?.server?.toolSurfaceFingerprint;
+  const expectedFingerprint = controllerToolSurfaceFingerprint();
   const runtimeProfile = mcpRuntime?.server?.profile;
   const connectorHealthy =
     mcpRuntime?.server?.healthy === true &&
     runtimeSurface === CONTROLLER_TOOL_SURFACE &&
+    runtimeSchemaVersion === CONTROLLER_SCHEMA_VERSION &&
+    runtimeSurfaceVersion === CONTROLLER_TOOL_SURFACE_VERSION &&
+    runtimeFingerprint === expectedFingerprint &&
     runtimeProfile === "controller";
   return {
     generatedAt: new Date().toISOString(),
     repoRoot,
     toolSurface: CONTROLLER_TOOL_SURFACE,
+    schemaVersion: CONTROLLER_SCHEMA_VERSION,
+    toolSurfaceVersion: CONTROLLER_TOOL_SURFACE_VERSION,
+    toolSurfaceFingerprint: expectedFingerprint,
     connector: {
       configuredServerName: mcpConfig?.chatgpt?.serverName,
       publicEndpoint:
@@ -184,13 +202,17 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
       runtimeStatus: mcpRuntime?.status ?? "not_started",
       runtimeProfile,
       runtimeSurface,
+      runtimeSchemaVersion,
+      runtimeSurfaceVersion,
+      runtimeFingerprint,
+      expectedFingerprint,
       toolCount: mcpRuntime?.server?.toolCount,
       healthy: connectorHealthy,
       needsReconnect: mcpRuntime?.tunnel?.connectorNeedsReconnect === true,
       mismatch:
         mcpRuntime?.server?.healthMismatch ??
         (mcpRuntime && !connectorHealthy
-          ? `expected controller / ${CONTROLLER_TOOL_SURFACE}`
+          ? `expected controller / ${CONTROLLER_TOOL_SURFACE} / schema ${CONTROLLER_SCHEMA_VERSION} / surface ${CONTROLLER_TOOL_SURFACE_VERSION} / ${expectedFingerprint}`
           : undefined),
     },
     timeoutPolicy: localBridgeTimeoutPolicy(repoRoot),
@@ -244,6 +266,9 @@ export async function startLocalBridgeServer(
       repoRoot: options.repoRoot,
       localOnly: true,
       toolSurface: CONTROLLER_TOOL_SURFACE,
+      schemaVersion: CONTROLLER_SCHEMA_VERSION,
+      toolSurfaceVersion: CONTROLLER_TOOL_SURFACE_VERSION,
+      toolSurfaceFingerprint: controllerToolSurfaceFingerprint(),
       timeoutPolicy: localBridgeTimeoutPolicy(options.repoRoot),
       features: [
         "project-progress",
@@ -339,21 +364,33 @@ export async function startLocalBridgeServer(
       response.status(400).json({ error: errorMessage(error) });
     }
   });
-  app.post("/api/issues/:issueId/launch", (request, response) => {
+  app.post("/api/tasks/launch-ready", (request, response) => {
     try {
-      const readiness = inspectIssueReadiness(options.repoRoot, request.params.issueId);
-      if (!readiness.ready) {
-        response.status(409).json({ error: "Issue has no readiness-approved Tasks.", readiness });
-        return;
+      const board = projectBoard(options.repoRoot);
+      const maxParallel = Math.max(1, Math.min(Number(request.body?.maxParallel ?? 2), 4));
+      const selected: Array<{ issueId: string; taskId: string }> = [];
+      const selectedTasks: Array<ReturnType<typeof getIssue>["tasks"][number]> = [];
+      const skipped: Array<{ issueId: string; taskId: string; reason: string }> = [];
+      for (const candidate of board.queueableTasks) {
+        if (selected.length >= maxParallel) break;
+        const issueId = String(candidate.issueId ?? "");
+        const taskId = String(candidate.taskId ?? "");
+        const issue = getIssue(options.repoRoot, issueId);
+        const task = issue.tasks.find((entry) => entry.id === taskId);
+        if (!task) continue;
+        if (selectedTasks.some((entry) => taskWriteScopesConflict(entry, task))) {
+          skipped.push({ issueId, taskId, reason: "allowed path scope overlaps another selected Task" });
+          continue;
+        }
+        selected.push({ issueId, taskId });
+        selectedTasks.push(task);
       }
-      saveControllerProjectState(options.repoRoot, { currentIssueId: request.params.issueId }, "local-ui");
-      const maxParallel = Math.max(1, Math.min(Number(request.body?.maxParallel ?? readiness.suggestedMaxParallel), readiness.readyTaskIds.length));
-      const jobs = readiness.readyTaskIds.slice(0, maxParallel).map((taskId) => {
+      const jobs = selected.map(({ issueId, taskId }) => {
         const job = submitLocalBridgeJob(options.repoRoot, {
           action: "launch-task",
           requestedBy: "local-ui",
           payload: {
-            issueId: request.params.issueId,
+            issueId,
             taskId,
             timeoutMs: typeof request.body?.timeoutMs === "number" ? request.body.timeoutMs : undefined,
             isolate: typeof request.body?.isolate === "boolean" ? request.body.isolate : undefined,
@@ -362,7 +399,53 @@ export async function startLocalBridgeServer(
         if (job.status === "approved") asyncExecute(options.repoRoot, job.jobId);
         return job;
       });
-      response.status(202).json({ readiness, jobs });
+      response.status(202).json({
+        jobs,
+        skipped,
+        currentFocus: loadControllerProjectState(options.repoRoot).currentIssueId,
+        focusIsInformational: true,
+      });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/issues/:issueId/launch", (request, response) => {
+    try {
+      const readiness = inspectIssueReadiness(options.repoRoot, request.params.issueId);
+      if (!readiness.queueable) {
+        response.status(409).json({ error: "Issue has no queueable Tasks.", readiness });
+        return;
+      }
+      saveControllerProjectState(options.repoRoot, { currentIssueId: request.params.issueId }, "local-ui");
+      const issue = getIssue(options.repoRoot, request.params.issueId);
+      const maxParallel = Math.max(1, Math.min(Number(request.body?.maxParallel ?? readiness.suggestedMaxParallel), readiness.queueableTaskIds.length));
+      const selected = [] as typeof issue.tasks;
+      const skipped: Array<{ taskId: string; reason: string }> = [];
+      for (const taskId of readiness.queueableTaskIds) {
+        if (selected.length >= maxParallel) break;
+        const task = issue.tasks.find((entry) => entry.id === taskId);
+        if (!task) continue;
+        if (selected.some((entry) => taskWriteScopesConflict(entry, task))) {
+          skipped.push({ taskId, reason: "allowed path scope overlaps another selected Task" });
+          continue;
+        }
+        selected.push(task);
+      }
+      const jobs = selected.map((task) => {
+        const job = submitLocalBridgeJob(options.repoRoot, {
+          action: "launch-task",
+          requestedBy: "local-ui",
+          payload: {
+            issueId: request.params.issueId,
+            taskId: task.id,
+            timeoutMs: typeof request.body?.timeoutMs === "number" ? request.body.timeoutMs : undefined,
+            isolate: typeof request.body?.isolate === "boolean" ? request.body.isolate : undefined,
+          },
+        });
+        if (job.status === "approved") asyncExecute(options.repoRoot, job.jobId);
+        return job;
+      });
+      response.status(202).json({ readiness, jobs, skipped });
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
@@ -383,9 +466,9 @@ export async function startLocalBridgeServer(
   });
   app.post("/api/issues/:issueId/tasks/:taskId/launch", (request, response) => {
     try {
-      const readiness = inspectIssueReadiness(options.repoRoot, request.params.issueId);
-      if (!readiness.readyTaskIds.includes(request.params.taskId)) {
-        response.status(409).json({ error: "Task is not readiness-approved for launch.", readiness });
+      const readiness = inspectTaskReadiness(options.repoRoot, request.params.issueId, request.params.taskId);
+      if (!readiness.queueable) {
+        response.status(409).json({ error: "Task has non-approval launch blockers.", readiness });
         return;
       }
       saveControllerProjectState(options.repoRoot, { currentIssueId: request.params.issueId }, "local-ui");
@@ -410,41 +493,51 @@ export async function startLocalBridgeServer(
       const issue = getIssue(options.repoRoot, request.params.issueId);
       const task = issue.tasks.find((entry) => entry.id === request.params.taskId);
       if (!task) throw new Error("task not found");
-      if (!["review", "integrated", "verifying"].includes(task.status)) throw new Error(`Task is not ready for Verification Gate from ${task.status}`);
-      if (request.body?.confirmAcceptance !== true) throw new Error("explicit human acceptance-criteria confirmation is required");
-      if (task.checks.length === 0) throw new Error("Task has no named checks; define checks before verification");
+      if (task.status === "done" || task.status === "verified") {
+        response.json(issue);
+        return;
+      }
+      const policy = taskExecutionPolicy(task);
       const latestRunId = task.runIds.at(-1);
-      if (!latestRunId) throw new Error("verification requires a linked implementation Run");
-      const run = getAgentJob(options.repoRoot, latestRunId);
-      if (run.status !== "succeeded") throw new Error(`verification requires a succeeded Run (current: ${run.status})`);
-      if (run.provider === "local" && run.worktree !== options.repoRoot && !run.integratedSessionId) throw new Error("integrate the isolated local Run before verification");
-      if (run.provider === "github" && run.github?.createPullRequest !== false && !run.github?.pullRequestUrl) throw new Error("GitHub verification requires the linked pull request");
-      updateTask(options.repoRoot, issue.id, task.id, { status: "verifying", note: "Named checks started from the local Controller." });
+      if (latestRunId) {
+        const run = getAgentJob(options.repoRoot, latestRunId);
+        if (run.status !== "succeeded") throw new Error(`verification requires a succeeded Run (current: ${run.status})`);
+        if (run.provider === "local" && run.worktree !== options.repoRoot && !run.integratedSessionId) throw new Error("integrate the isolated local Run before verification");
+        if (run.provider === "github" && run.github?.createPullRequest !== false && !run.github?.pullRequestUrl) throw new Error("GitHub verification requires the linked pull request");
+        continueTaskAfterSuccessfulRun(options.repoRoot, run);
+        response.json(getIssue(options.repoRoot, issue.id));
+        return;
+      }
+
+      // Manual evidence-only verification remains available for Tasks that do not
+      // require a Run or Diff. Missing named checks never block launch or this path.
       const checkResults = task.checks.map((checkId) => {
         try {
           const result = runControllerCheck(options.repoRoot, checkId);
-          const summary = result.ok
-            ? `Passed with persisted evidence ${result.artifactPath}: ${result.command.join(" ")}`
-            : `Failed with persisted evidence ${result.artifactPath} (${result.status}${result.timedOut ? ", timeout" : ""}): ${(result.stderr || result.stdout).slice(0, 500)}`;
-          return { checkId, ok: result.ok, summary };
+          return {
+            checkId,
+            ok: result.ok,
+            summary: `${result.ok ? "Passed" : "Failed"} with persisted evidence ${result.artifactPath}`,
+          };
         } catch (error) {
           return { checkId, ok: false, summary: errorMessage(error) };
         }
       });
+      const confirmAcceptance = request.body?.confirmAcceptance === true;
+      if (policy.requiresAcceptanceEvidence && !confirmAcceptance) {
+        throw new Error(`${policy.executionClass} requires explicit acceptance evidence when no successful Run is linked`);
+      }
       const at = new Date().toISOString();
-      const verification = {
-        runId: latestRunId,
+      response.json(recordTaskVerification(options.repoRoot, issue.id, task.id, {
         reviewedDiffHash: typeof request.body?.reviewedDiffHash === "string" ? request.body.reviewedDiffHash : undefined,
         reviewer: queryString(request.body?.reviewer) ?? "local-controller-human",
         checkResults,
-        acceptanceResults: task.acceptanceCriteria.map((criterion) => ({
-          criterion,
-          ok: true,
-          evidence: `Explicitly confirmed in the local Controller at ${at}.`,
-        })),
+        commandEvidence: [],
+        acceptanceResults: confirmAcceptance
+          ? task.acceptanceCriteria.map((criterion) => ({ criterion, ok: true, evidence: `Explicitly confirmed in the local Controller at ${at}.` }))
+          : [],
         verifiedAt: at,
-      };
-      response.json(recordTaskVerification(options.repoRoot, issue.id, task.id, verification));
+      }));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }

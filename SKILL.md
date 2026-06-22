@@ -29,6 +29,10 @@ The skill should not carry the whole workflow contract in prose. It should:
 3. choose the correct path
 4. rely on the repo contract, migration scripts, and tests for enforcement
 
+## Controller V7 execution model
+
+Treat repo-harness as a capability bridge, not as the authority that decides whether capable agents may work. Evaluate launchability per Task. Missing named checks, unrelated blocked Tasks, multiple active Issues, and current focus are advisory, not global gates. Scale verification and approval to actual risk; keep hard blocks only for path/scope violations, overlapping writes, destructive or remote operations, real check failures, and high-risk data changes. Quick Agent sessions are ephemeral by default. After a successful Run, continue automatically into applicable checks, evidence, completion, or explicit acceptance.
+
 ## When to use
 
 - install or refresh the CLI+hooks workflow in an existing repo

@@ -2,6 +2,10 @@
 
 This repository self-hosts the `repo-harness` contract; the former `repo-harness-skill` and `project-initializer` names have been fully removed and are no longer recognized by any tooling. Claude and Codex should follow the same repo-local workflow surface.
 
+## Controller V7 execution model
+
+Treat repo-harness as a capability bridge, not as the authority that decides whether capable agents may work. Evaluate launchability per Task. Missing named checks, unrelated blocked Tasks, multiple active Issues, and current focus are advisory, not global gates. Scale verification and approval to actual risk; keep hard blocks only for path/scope violations, overlapping writes, destructive or remote operations, real check failures, and high-risk data changes. Quick Agent sessions are ephemeral by default. After a successful Run, continue automatically into applicable checks, evidence, completion, or explicit acceptance.
+
 ## Canonical Workflow Files
 
 - `tasks/current.md` for the tracked current-status snapshot derived from workflow artifacts

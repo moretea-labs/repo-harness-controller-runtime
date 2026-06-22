@@ -1,7 +1,7 @@
 import { appendFileSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join, relative } from "path";
 import { spawn } from "child_process";
-import { updateTask } from "../controller/issue-store";
+import { getIssue, removeEphemeralIssue, updateTask } from "../controller/issue-store";
 import type {
   AgentJobEvent,
   AgentJobMeta,
@@ -79,6 +79,18 @@ const phaseFloor: Record<AgentProgressPhase, number> = {
   failed: 100,
 };
 
+const phaseCeiling: Record<AgentProgressPhase, number> = {
+  queued: 4,
+  starting: 14,
+  inspecting: 41,
+  editing: 71,
+  testing: 89,
+  finalizing: 99,
+  waiting: 95,
+  completed: 100,
+  failed: 100,
+};
+
 function updateProgress(
   phase: AgentProgressPhase,
   activity: string,
@@ -89,10 +101,11 @@ function updateProgress(
     readFileSync(config.metaPath, "utf-8"),
   ) as AgentJobMeta;
   const previous = current.progress;
-  const nextPercent = Math.max(
-    previous?.percent ?? 0,
-    Math.min(99, percent ?? phaseFloor[phase]),
-  );
+  const basePercent = Math.min(99, percent ?? phaseFloor[phase]);
+  const samePhaseIncrement = previous?.phase === phase
+    ? Math.min(phaseCeiling[phase], (previous.percent ?? phaseFloor[phase]) + 1)
+    : basePercent;
+  const nextPercent = Math.max(previous?.percent ?? 0, basePercent, samePhaseIncrement);
   const progress: AgentJobProgress = {
     phase,
     percent: phase === "completed" || phase === "failed" ? 100 : nextPercent,
@@ -212,7 +225,7 @@ function codexActivity(line: string):
 function genericActivity(
   line: string,
 ):
-  | { phase: AgentProgressPhase; message: string; percent?: number }
+  | { phase: AgentProgressPhase; message: string; percent?: number; data?: Record<string, unknown> }
   | undefined {
   const text = compact(line);
   if (!text) return undefined;
@@ -603,6 +616,38 @@ if (ok && config.autoIntegrate && finalMeta.executionMode === "worktree") {
     } catch (_error) {
       /* ignore */
     }
+  }
+}
+
+let continuationStatus: string | undefined;
+if (ok) {
+  try {
+    const { continueTaskAfterSuccessfulRun } = await import("../controller/execution-completion");
+    const latestMeta = JSON.parse(readFileSync(config.metaPath, "utf-8")) as AgentJobMeta;
+    const continuation = continueTaskAfterSuccessfulRun(latestMeta.repoRoot, latestMeta);
+    continuationStatus = continuation.status;
+    if (continuation.continued) {
+      event("run_verified", `Controller continued Task lifecycle to ${continuation.status}.`, {
+        status: continuation.status,
+        checkCount: continuation.checkCount,
+      });
+    } else if (continuation.reason) {
+      event("run_waiting", continuation.reason);
+    }
+  } catch (continuationError) {
+    event(
+      "run_waiting",
+      `Run succeeded but automatic Task continuation failed: ${continuationError instanceof Error ? continuationError.message : String(continuationError)}`,
+    );
+  }
+}
+
+if (!ok || continuationStatus === "done") {
+  try {
+    const issue = getIssue(finalMeta.repoRoot, finalMeta.issueId);
+    if (issue.ephemeral) removeEphemeralIssue(finalMeta.repoRoot, issue.id);
+  } catch (_error) {
+    // Ephemeral Quick Agent metadata is best-effort; Run logs remain durable.
   }
 }
 

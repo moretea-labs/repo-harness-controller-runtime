@@ -1,6 +1,6 @@
 {
   "name": "repo-harness",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Installs, migrates, audits, and repairs repo-local agentic development harnesses",
   "license": "MIT",
   "repository": {
@@ -26,6 +26,7 @@
     "docs/repo-harness-v5-file-manifest.sha256",
     "docs/repo-harness-direct-change-v6.md",
     "docs/repo-harness-v6-verification.md",
+    "docs/repo-harness-execution-first-v7.md",
     "docs/repo-harness-v6-file-manifest.sha256",
     "README.zh-CN.md",
     "install.sh",

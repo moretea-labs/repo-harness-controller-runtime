@@ -27,6 +27,8 @@ export interface LaunchTaskPayload {
   baseRef?: string;
   model?: string;
   createPullRequest?: boolean;
+  approveRisk?: boolean;
+  approveDestructive?: boolean;
 }
 
 export interface QuickAgentSessionPayload {
@@ -42,6 +44,7 @@ export interface QuickAgentSessionPayload {
   isolate?: boolean;
   executionMode?: LocalExecutionPreference;
   timeoutMs?: number;
+  ephemeral?: boolean;
 }
 
 export interface RunCheckPayload {
@@ -70,7 +73,8 @@ export interface LocalBridgeJobEvent {
     | "job_dispatched"
     | "job_succeeded"
     | "job_failed"
-    | "job_cancelled";
+    | "job_cancelled"
+    | "job_cleaned";
   message?: string;
   data?: Record<string, unknown>;
 }
@@ -93,6 +97,8 @@ export interface LocalBridgeJob {
   taskId?: string;
   result?: Record<string, unknown>;
   error?: string;
+  ephemeral?: boolean;
+  cleanupAt?: string;
 }
 
 export interface LocalBridgeConfig {

@@ -507,7 +507,7 @@ printf '%s\n' '{"type":"turn.completed"}'
     }).then((response) => response.json());
     expect(snapshot.repoRoot).toBe(root);
     expect(snapshot.board).toBeDefined();
-    expect(snapshot.toolSurface).toBe("controller-direct-change-v6");
+    expect(snapshot.toolSurface).toBe("controller-execution-first-v7");
     expect(snapshot.timeoutPolicy).toEqual({
       defaultTimeoutMs: 3_600_000,
       maxTimeoutMs: 43_200_000,

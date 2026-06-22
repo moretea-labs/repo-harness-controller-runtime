@@ -80,7 +80,7 @@ is_workflow_surface_path() {
 edit_plan_gate_mode() {
   local mode="${REPO_HARNESS_EDIT_PLAN_GATE:-}"
   if [[ -z "$mode" ]]; then
-    mode="$(workflow_policy_get '.guards.edit_plan_gate' 'enforce')"
+    mode="$(workflow_policy_get '.guards.edit_plan_gate' 'advice')"
   fi
   printf '%s' "$mode"
 }
@@ -88,7 +88,7 @@ edit_plan_gate_mode() {
 # Edit-layer plan gate: the deterministic enforcement point for "no
 # implementation edits without an approved plan". The prompt layer only
 # advises (natural-language intent guessing is unreliable); this gate keys
-# off path + plan state. Modes: enforce (default) | advice | off, via
+# off path + plan state. Modes: advice (default) | enforce | off, via
 # REPO_HARNESS_EDIT_PLAN_GATE or policy .guards.edit_plan_gate.
 run_edit_plan_gate() {
   local mode gate_plan gate_status

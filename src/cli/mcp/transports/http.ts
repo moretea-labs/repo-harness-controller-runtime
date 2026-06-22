@@ -19,7 +19,13 @@ import {
 import { createMcpOAuthProvider, McpOAuthTokenStore } from '../oauth';
 import { resolveMcpRepoRoot } from '../repo';
 import { buildMcpToolDefinitions } from '../tools';
-import { CONTROLLER_TOOL_SURFACE, repositoryIdentity } from '../../controller/runtime-config';
+import {
+  CONTROLLER_SCHEMA_VERSION,
+  CONTROLLER_TOOL_SURFACE,
+  CONTROLLER_TOOL_SURFACE_VERSION,
+  controllerToolSurfaceFingerprint,
+  repositoryIdentity,
+} from '../../controller/runtime-config';
 
 export interface McpHttpOptions extends McpServerOptions {
   host?: string;
@@ -310,6 +316,11 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   const toolContext = createMcpToolContext({ ...opts, repo: repoRoot });
   const toolDefinitions = buildMcpToolDefinitions(toolContext.policy, { enableChatgptBrowser: opts.enableChatgptBrowser === true });
   const toolSurface = toolContext.policy.profile === 'controller' ? CONTROLLER_TOOL_SURFACE : `${toolContext.policy.profile}-legacy-v1`;
+  const toolSurfaceSchemaVersion = toolContext.policy.profile === 'controller' ? CONTROLLER_SCHEMA_VERSION : 1;
+  const toolSurfaceVersion = toolContext.policy.profile === 'controller' ? CONTROLLER_TOOL_SURFACE_VERSION : 1;
+  const toolSurfaceFingerprint = toolContext.policy.profile === 'controller'
+    ? controllerToolSurfaceFingerprint()
+    : undefined;
   const repoId = repositoryIdentity(repoRoot);
   const startedAt = new Date().toISOString();
   const app = express();
@@ -317,12 +328,18 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
 
   app.get('/health', (_req, res) => {
     res.setHeader('x-repo-harness-tool-surface', toolSurface);
+    res.setHeader('x-repo-harness-tool-surface-version', String(toolSurfaceVersion));
+    res.setHeader('x-repo-harness-schema-version', String(toolSurfaceSchemaVersion));
+    if (toolSurfaceFingerprint) res.setHeader('x-repo-harness-tool-surface-fingerprint', toolSurfaceFingerprint);
     res.json({
       status: 'ok',
       server: 'repo-harness-mcp',
-      version: '1.2.0',
+      version: '1.3.0',
       profile: toolContext.policy.profile,
       toolSurface,
+      schemaVersion: toolSurfaceSchemaVersion,
+      toolSurfaceVersion,
+      toolSurfaceFingerprint,
       toolCount: toolDefinitions.length,
       repoId,
       startedAt,
@@ -382,7 +399,13 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
     });
   }
 
-  app.use('/mcp', (_req, res, next) => { res.setHeader('x-repo-harness-tool-surface', toolSurface); next(); });
+  app.use('/mcp', (_req, res, next) => {
+    res.setHeader('x-repo-harness-tool-surface', toolSurface);
+    res.setHeader('x-repo-harness-tool-surface-version', String(toolSurfaceVersion));
+    res.setHeader('x-repo-harness-schema-version', String(toolSurfaceSchemaVersion));
+    if (toolSurfaceFingerprint) res.setHeader('x-repo-harness-tool-surface-fingerprint', toolSurfaceFingerprint);
+    next();
+  });
   app.post('/mcp', requireMcpHttpAuth(authMode, authToken, oauthProvider, configuredPublicOrigin), express.raw({ type: '*/*', limit: '1mb' }), (req, res) => {
     handleMcpPost(req, res, { ...opts, repo: repoRoot }, transports).catch((error: unknown) => {
       if (!res.headersSent) res.status(500).json({ error: error instanceof Error ? error.message : String(error) });

@@ -17,7 +17,7 @@ export interface ControllerProjectState {
 function defaultState(): ControllerProjectState {
   return {
     schemaVersion: 1,
-    issueCreationMode: "focus_only",
+    issueCreationMode: "open",
     showArchivedByDefault: false,
     updatedAt: new Date().toISOString(),
   };
@@ -39,7 +39,7 @@ export function loadControllerProjectState(repoRoot: string): ControllerProjectS
         : undefined,
       issueCreationMode: ["open", "focus_only", "paused"].includes(parsed.issueCreationMode ?? "")
         ? parsed.issueCreationMode as IssueCreationMode
-        : "focus_only",
+        : "open",
       showArchivedByDefault: parsed.showArchivedByDefault === true,
       updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : new Date().toISOString(),
     };

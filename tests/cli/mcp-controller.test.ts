@@ -104,7 +104,7 @@ describe("MCP controller profile", () => {
         "controller_capabilities",
       );
       expect(capabilities.value.toolSurface).toBe(
-        "controller-direct-change-v6",
+        "controller-execution-first-v7",
       );
       expect(capabilities.value.expectedTools).toContain("launch_issue");
       expect(capabilities.value.expectedTools).toContain("submit_local_job");

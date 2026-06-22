@@ -1,8 +1,16 @@
 import { createHash } from 'crypto';
 import { realpathSync } from 'fs';
 
-export const CONTROLLER_TOOL_SURFACE = 'controller-direct-change-v6';
-export const CONTROLLER_SCHEMA_VERSION = 8;
+export const CONTROLLER_TOOL_SURFACE = 'controller-execution-first-v7';
+export const CONTROLLER_SCHEMA_VERSION = 9;
+export const CONTROLLER_TOOL_SURFACE_VERSION = 7;
+
+export function controllerToolSurfaceFingerprint(): string {
+  return createHash('sha256')
+    .update(`${CONTROLLER_TOOL_SURFACE}:${CONTROLLER_SCHEMA_VERSION}:${CONTROLLER_TOOL_SURFACE_VERSION}`)
+    .digest('hex')
+    .slice(0, 16);
+}
 
 export const MIN_AGENT_TIMEOUT_MS = 5_000;
 export const DEFAULT_AGENT_TIMEOUT_MS = 60 * 60 * 1000;

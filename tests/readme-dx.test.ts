@@ -164,9 +164,9 @@ describe("README DX contract", () => {
           : "docs/images/repo-harness-gptpro.png";
 
       expect(localized).toContain(expectedHeroImage);
-      expect(localized).toContain("1.2.0");
-      expect(localized).toContain("repo-harness@1.2.0");
-      expect(localized).toContain("repo-harness@1.2.0+template@1.2.0");
+      expect(localized).toContain("1.3.0");
+      expect(localized).toContain("repo-harness@1.3.0");
+      expect(localized).toContain("repo-harness@1.3.0+template@1.3.0");
       expect(localized).toContain("repo-harness update");
       expect(localized).toContain("repo-harness adopt");
       expect(localized).toContain("repo-harness docs list");

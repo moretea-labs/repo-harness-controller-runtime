@@ -26,7 +26,7 @@ The corresponding MCP tools are `get_github_plugin_status` and `configure_github
 
 ## Verify the loaded tool surface
 
-After connecting ChatGPT, call `controller_capabilities`. It should report `controller-direct-change-v6` and list direct-change evidence, Issue Launcher, GitHub session, Run inspection, and Verification Gate tools. If ChatGPT only shows legacy planning tools, refresh or recreate the connector so it reloads the MCP tool schema.
+After connecting ChatGPT, call `controller_capabilities`. It should report `controller-execution-first-v7` and list direct-change evidence, Issue Launcher, GitHub session, Run inspection, and Verification Gate tools. If ChatGPT only shows legacy planning tools, refresh or recreate the connector so it reloads the MCP tool schema.
 
 ## What “GitHub session” means
 

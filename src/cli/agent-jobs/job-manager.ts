@@ -18,11 +18,13 @@ import {
   getGitHubAgentSessionLog,
   startGitHubAgentSession,
 } from "../github/session";
-import { getIssue, updateTask } from "../controller/issue-store";
+import { getIssue, inspectTaskReadiness, removeEphemeralIssue, updateTask } from "../controller/issue-store";
 import { readTaskRunEvidence } from "../controller/run-evidence";
-import { assertTaskDispatchable, resolveEffectiveTaskState } from "../controller/task-status-resolver";
+import { resolveEffectiveTaskState } from "../controller/task-status-resolver";
 import type { ControllerAgent, ControllerTask } from "../controller/types";
 import { tryAppendControllerWorklogEvent } from "../controller/worklog";
+import { continueTaskAfterSuccessfulRun } from "../controller/execution-completion";
+import { executionScopesConflict, taskExecutionPolicy } from "../controller/execution-policy";
 import {
   DEFAULT_AGENT_TIMEOUT_MS,
   MAX_AGENT_TIMEOUT_MS,
@@ -137,6 +139,102 @@ function activeLocalRuns(repoRoot: string): AgentJobMeta[] {
         ["queued", "running"].includes(entry.status) &&
         (isAlive(entry.workerPid) || entry.status === "queued"),
     );
+}
+
+function activeRuns(repoRoot: string): AgentJobMeta[] {
+  const root = join(repoRoot, JOB_ROOT);
+  if (!existsSync(root)) return [];
+  return readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && existsSync(join(root, entry.name, "meta.json")))
+    .map((entry) => {
+      try {
+        return readJson<AgentJobMeta>(join(root, entry.name, "meta.json"));
+      } catch (_error) {
+        return undefined;
+      }
+    })
+    .filter((entry): entry is AgentJobMeta => Boolean(entry))
+    .filter((entry) => ["queued", "running", "waiting_for_user"].includes(entry.status));
+}
+
+function assertNoTaskScopeConflict(
+  repoRoot: string,
+  issueId: string,
+  task: ControllerTask,
+): void {
+  const policy = taskExecutionPolicy(task);
+  if (policy.executionClass === "read_only" || task.allowedPaths.length === 0) return;
+  for (const run of activeRuns(repoRoot)) {
+    if (run.issueId === issueId && run.taskId === task.id) continue;
+    let otherScope = run.executionClass && run.allowedPaths
+      ? { executionClass: run.executionClass, allowedPaths: run.allowedPaths }
+      : undefined;
+    if (!otherScope) {
+      try {
+        const otherTask = getIssue(repoRoot, run.issueId).tasks.find((entry) => entry.id === run.taskId);
+        if (otherTask) {
+          otherScope = {
+            executionClass: taskExecutionPolicy(otherTask).executionClass,
+            allowedPaths: otherTask.allowedPaths,
+          };
+        }
+      } catch (_error) {
+        continue;
+      }
+    }
+    if (!otherScope || !executionScopesConflict(
+      { executionClass: policy.executionClass, allowedPaths: task.allowedPaths },
+      otherScope,
+    )) continue;
+    throw new Error(
+      `task-local launch blocked by concurrent path conflict with ${run.issueId}/${run.taskId} (${run.runId})`,
+    );
+  }
+}
+
+function cleanupEphemeralIssueAfterRun(repoRoot: string, issueId: string): void {
+  try {
+    const issue = getIssue(repoRoot, issueId);
+    if (issue.ephemeral) removeEphemeralIssue(repoRoot, issue.id);
+  } catch (_error) {
+    // Ephemeral cleanup is idempotent. Durable Run evidence is retained.
+  }
+}
+
+function reconcileLatestTerminalRun(repoRoot: string, meta: AgentJobMeta): void {
+  if (!["succeeded", "failed", "cancelled", "unknown"].includes(meta.status)) return;
+  try {
+    const issue = getIssue(repoRoot, meta.issueId);
+    const task = issue.tasks.find((entry) => entry.id === meta.taskId);
+    if (!task) return;
+    const state = resolveEffectiveTaskState({ issue, task, runs: readTaskRunEvidence(repoRoot, task) });
+    if (state.latestRunId !== meta.runId) return;
+    if (["done", "cancelled", "superseded"].includes(task.status)) return;
+
+    if (meta.status === "succeeded") {
+      if (!["review", "integrated", "verifying", "verified"].includes(task.status)) {
+        updateTask(repoRoot, issue.id, task.id, {
+          status: "review",
+          runId: meta.runId,
+          transition: "run_sync",
+          note: `${meta.runId} succeeded and entered task-local continuation.`,
+        });
+      }
+      const continuation = continueTaskAfterSuccessfulRun(repoRoot, meta);
+      if (continuation.status === "done") cleanupEphemeralIssueAfterRun(repoRoot, issue.id);
+      return;
+    }
+
+    updateTask(repoRoot, issue.id, task.id, {
+      status: "blocked",
+      runId: meta.runId,
+      transition: "run_sync",
+      note: `${meta.runId} ended as ${meta.status}; explicit retry is required.${meta.error ? ` ${meta.error}` : ""}`,
+    });
+    cleanupEphemeralIssueAfterRun(repoRoot, issue.id);
+  } catch (_error) {
+    // Run evidence remains authoritative if Issue metadata changed concurrently.
+  }
 }
 
 function resolveExecutionMode(
@@ -279,6 +377,8 @@ export interface StartTaskJobOptions {
   model?: string;
   createPullRequest?: boolean;
   retryFromRunId?: string;
+  approveRisk?: boolean;
+  approveDestructive?: boolean;
 }
 
 function baseMeta(
@@ -308,6 +408,8 @@ function baseMeta(
     agent: opts.agent ?? task.recommendedAgent,
     provider,
     executionMode,
+    executionClass: taskExecutionPolicy(task).executionClass,
+    allowedPaths: [...task.allowedPaths],
     status: "queued",
     repoRoot: opts.repoRoot,
     worktree: isolation.path,
@@ -319,6 +421,7 @@ function baseMeta(
     resultPath: relative(opts.repoRoot, paths.resultPath).replace(/\\/g, "/"),
     eventsPath: relative(opts.repoRoot, paths.eventsPath).replace(/\\/g, "/"),
     timeoutMs: opts.timeoutMs,
+    startupDeadlineAt: new Date(Date.now() + 30_000).toISOString(),
     autoIntegrate: executionMode === "worktree",
     progress: {
       phase: "queued",
@@ -340,7 +443,15 @@ export function startTaskJob(opts: StartTaskJobOptions): AgentJobMeta {
   const issue = getIssue(opts.repoRoot, opts.issueId);
   const task = issue.tasks.find((entry) => entry.id === opts.taskId);
   if (!task) throw new Error(`task not found: ${opts.issueId}/${opts.taskId}`);
-  assertTaskDispatchable(issue, task, readTaskRunEvidence(opts.repoRoot, task), { retryFromRunId: opts.retryFromRunId });
+  const readiness = inspectTaskReadiness(opts.repoRoot, opts.issueId, opts.taskId, {
+    approveRisk: opts.approveRisk,
+    approveDestructive: opts.approveDestructive,
+    retryFromRunId: opts.retryFromRunId,
+  });
+  if (!readiness.ready) {
+    throw new Error(`task-local launch blocked: ${readiness.blockers.map((entry) => `${entry.code}: ${entry.message}`).join('; ')}`);
+  }
+  assertNoTaskScopeConflict(opts.repoRoot, opts.issueId, task);
   const agent = opts.agent ?? task.recommendedAgent;
   const provider = agent === "github-copilot" ? "github" : "local";
   const runId = `RUN-${sanitize(opts.issueId)}-${sanitize(opts.taskId)}-${Date.now()}-${shortId()}`;
@@ -465,6 +576,7 @@ export function startTaskJob(opts: StartTaskJobOptions): AgentJobMeta {
         transition: "run_sync",
         note: `Dispatched ${runId} to GitHub Copilot cloud session ${session.id}.`,
       });
+      if (meta.status === "succeeded") continueTaskAfterSuccessfulRun(opts.repoRoot, meta);
       return meta;
     } catch (error) {
       meta.status = "failed";
@@ -635,6 +747,20 @@ export function getAgentJob(
             pullRequestUrl: meta.github.pullRequestUrl,
           },
         });
+        if (["succeeded", "failed", "cancelled", "unknown"].includes(meta.status)) {
+          reconcileLatestTerminalRun(repoRoot, meta);
+        } else {
+          try {
+            updateTask(repoRoot, meta.issueId, meta.taskId, {
+              status: meta.status === "waiting_for_user" ? "blocked" : "running",
+              runId: meta.runId,
+              transition: "run_sync",
+              note: `GitHub Run ${meta.runId} synchronized to ${meta.status}.`,
+            });
+          } catch (_error) {
+            /* Run evidence remains authoritative if task metadata changed concurrently. */
+          }
+        }
       }
     } catch (error) {
       meta.error = error instanceof Error ? error.message : String(error);
@@ -658,19 +784,36 @@ export function getAgentJob(
       meta.error = result.error;
       meta.finishedAt = result.finishedAt;
       writeJson(path, meta);
-      if (previous !== meta.status)
+      if (previous !== meta.status) {
         appendAgentJobEvent(repoRoot, runId, {
           type: result.ok ? "run_succeeded" : "run_failed",
           message: result.ok
             ? "Local worker finished."
             : (result.error ?? `exit ${result.exitCode}`),
         });
+        reconcileLatestTerminalRun(repoRoot, meta);
+      }
+    } else if (
+      meta.status === "queued" &&
+      meta.startupDeadlineAt &&
+      Date.now() > Date.parse(meta.startupDeadlineAt) &&
+      !isAlive(meta.workerPid)
+    ) {
+      meta.status = "unknown";
+      meta.error = meta.error ?? "worker did not start before the startup deadline";
+      meta.finishedAt = meta.finishedAt ?? new Date().toISOString();
+      writeJson(path, meta);
+      appendAgentJobEvent(repoRoot, runId, { type: "run_failed", message: meta.error });
+      reconcileLatestTerminalRun(repoRoot, meta);
     } else if (meta.status === "running" && !isAlive(meta.workerPid)) {
       meta.status = "unknown";
       meta.error =
         meta.error ??
         "worker process is no longer running and no result file was produced";
+      meta.finishedAt = meta.finishedAt ?? new Date().toISOString();
       writeJson(path, meta);
+      appendAgentJobEvent(repoRoot, runId, { type: "run_failed", message: meta.error });
+      reconcileLatestTerminalRun(repoRoot, meta);
     }
   }
   const tail = (relativePath: string): string => {
@@ -744,6 +887,7 @@ export function getAgentJobLog(
   repoRoot: string,
   runId: string,
   follow = false,
+  maxBytes = 256 * 1024,
 ): {
   runId: string;
   provider: string;
@@ -771,7 +915,8 @@ export function getAgentJobLog(
   const readLog = (relativePath: string): string => {
     const absolute = join(repoRoot, relativePath);
     if (!existsSync(absolute)) return "";
-    return readFileSync(absolute, "utf-8").slice(-4 * 1024 * 1024);
+    const bounded = Math.max(4 * 1024, Math.min(maxBytes, 1024 * 1024));
+    return readFileSync(absolute, "utf-8").slice(-bounded);
   };
   return {
     runId,
@@ -875,6 +1020,8 @@ export function retryAgentJob(
     agent: previous.agent,
     timeoutMs,
     retryFromRunId: previous.runId,
+    approveRisk: true,
+    approveDestructive: previous.status === "cancelled" ? false : undefined,
     isolate: options.isolate,
     githubRepo: previous.github
       ? `${previous.github.owner}/${previous.github.repo}`

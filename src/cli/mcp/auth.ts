@@ -56,6 +56,9 @@ export interface McpRuntimeState {
     lastExit?: string;
     profile?: string;
     toolSurface?: string;
+    schemaVersion?: number;
+    toolSurfaceVersion?: number;
+    toolSurfaceFingerprint?: string;
     toolCount?: number;
     repoId?: string;
     defaultTimeoutMs?: number;

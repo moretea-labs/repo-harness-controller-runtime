@@ -24,6 +24,20 @@ Repository: `https://github.com/Ancienttwo/repo-harness`
 
 [English](README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [Français](README.fr.md) | [Español](README.es.md)
 
+## Controller V7: Execution First, Risk Adaptive, Task Local
+
+repo-harness V7 removes Issue-wide workflow ceremony from the execution path. The Controller is a bridge for local capabilities and evidence; Task-local state and real safety boundaries decide whether work can run.
+
+- `inspect_task_readiness`, `dispatch_task`, `launch_issue`, and cross-project dispatch all evaluate one Task at a time. Unrelated blocked Tasks, multiple active Issues, and current focus do not block independent work.
+- Missing named checks are warnings. Checks become completion evidence and execute automatically after a successful Run when the Task declares them.
+- Read-only, low-risk, medium-risk, high-risk, and destructive Tasks receive progressively stronger verification and approval requirements. Read-only and low-risk work no longer pays a five-stage acceptance tax.
+- Successful Runs automatically continue into applicable checks, verification, auto-completion, or human acceptance. Startup deadlocks and contradictory Job/Run terminal timestamps are reconciled.
+- Quick Agent sessions are ephemeral by default and stay out of the durable Issue board; terminal sessions clean their temporary Issue metadata while retaining Run evidence.
+- Real hard boundaries remain: sensitive/out-of-scope paths, overlapping writes, irreversible Git actions, remote publication, real check failures, and high-risk data mutations.
+- Repository glob semantics, targeted reads, progress, snapshot/log size, Connector surface drift, and reported command evidence are normalized.
+
+The MCP surface is `controller-execution-first-v7`, schema `9`, surface version `7`. See [V7 Execution First](docs/repo-harness-execution-first-v7.md).
+
 ## Controller V6: Direct Change First
 
 repo-harness V6 makes actual repository changes the default result for known, bounded work. Creating an Issue is no longer the first step for a small documentation, configuration, or code change.
@@ -93,7 +107,7 @@ active plan, contract, review, checks, or handoff, the source artifacts win.
 ## What's New
 
 Release notes live in [`docs/CHANGELOG.md`](docs/CHANGELOG.md). The current line
-is `1.2.0`.
+is `1.3.0`.
 
 ## How It Works
 
@@ -124,11 +138,11 @@ line with the action, the classified intent facts, and derived strings. The
 shell keeps no duplicate classifier or fallback decision table — when the
 engine is unreachable the prompt layer degrades to a one-shot advisory.
 
-Prompt-layer plan/spec/contract gates are advisory routing. Hard enforcement
-lives at the edit boundary: `pre-edit-guard.sh` blocks implementation edits
-unless the active plan is Approved/Executing (policy
-`.guards.edit_plan_gate`: enforce | advice | off). Done-claim gates keep
-blocking because they verify file-backed completion evidence, not language.
+Prompt-layer plan/spec/contract gates are advisory routing. At the edit
+boundary, `pre-edit-guard.sh` keeps path/scope and private-surface safety hard,
+while plan-state guidance defaults to `advice` (policy
+`.guards.edit_plan_gate`: advice | enforce | off). Done-claim gates block only
+when real file-backed completion evidence is failed or missing.
 
 The core invariant is that durable truth lives in the repo, not in a chat
 thread. Hooks are accelerators and guardrails; the authority remains the
@@ -427,7 +441,7 @@ implementation under `assets/hooks/` or a repo-pinned `.ai/hooks/` copy.
 | Route                      | Matcher      | Scripts                                            | Function                                                                                                       |
 | -------------------------- | ------------ | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
 | `SessionStart.default`     | all sessions | `session-start-context.sh`, `security-sentinel.sh` | Injects prior handoff, sprint status, and read-only config-security findings before work starts.               |
-| `PreToolUse.edit`          | `Edit        | Write`                                             | `worktree-guard.sh`, `pre-edit-guard.sh`                                                                       | Enforces worktree policy and plan/contract readiness before implementation edits.                               |
+| `PreToolUse.edit`          | `Edit        | Write`                                             | `worktree-guard.sh`, `pre-edit-guard.sh`                                                                       | Enforces worktree/path safety; plan readiness is advisory by default and may be explicitly enforced.                               |
 | `PreToolUse.subagent`      | `Task        | Agent                                              | SendUserMessage`                                                                                               | `subagent-return-channel-guard.sh`                                                                              | Keeps delegated work returning through the parent session instead of leaking completion claims. |
 | `PostToolUse.edit`         | `Edit        | Write`                                             | `post-edit-guard.sh`                                                                                           | Records edit traces, refreshes handoff/task status, and queues architecture drift when controlled files change. |
 | `PostToolUse.bash`         | `Bash`       | `post-bash.sh`                                     | Observes command results and captures verification evidence without replacing the command runner.              |
@@ -502,8 +516,8 @@ Most common guards:
 
 ## Current Release
 
-- npm package: `repo-harness@1.2.0`
-- Generated workflow stamp: `repo-harness@1.2.0+template@1.2.0`
+- npm package: `repo-harness@1.3.0`
+- Generated workflow stamp: `repo-harness@1.3.0+template@1.3.0`
 - GitHub repository: `Ancienttwo/repo-harness`
 - Release history: [`docs/CHANGELOG.md`](docs/CHANGELOG.md)
 

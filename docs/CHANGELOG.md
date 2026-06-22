@@ -4,6 +4,23 @@ All notable changes to this skill are documented here.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-06-22
+
+### Added
+
+- Added a shared Task-local execution policy for launch, verification, approval, automatic continuation, and completion.
+- Added read-only and destructive risk classes, ephemeral Quick Agent Issues, startup-deadlock detection, reported command evidence, compact snapshots, and explicit Connector surface drift metadata.
+- Added regression coverage for Task-local readiness, no-check launch, dynamic risk gates, dependency migration, ephemeral cleanup, startup timeout, concurrent scope conflicts, repository glob semantics, and dynamic progress.
+
+### Changed
+
+- Issue readiness is now an aggregate view; unrelated blocked Tasks, multiple active Issues, and current focus no longer block independent execution.
+- Named checks are completion evidence instead of a universal launch prerequisite. Validation and human approval are dynamically reduced for read-only and low-risk work and strengthened only for high-risk/destructive work.
+- Successful Runs continue automatically through applicable checks and completion, while real check failures remain authoritative.
+- Quick Agent sessions are ephemeral by default and no longer pollute the durable Issue board.
+- Job/Run terminal status, `finishedAt`, dependency state, repository search/read policy, progress calculation, log bounds, and `project_snapshot` size are reconciled.
+- Versioned the Controller surface as `controller-execution-first-v7`, schema `9`, surface version `7`, and package line as `1.3.0`.
+
 ## [1.2.0] - 2026-06-21
 
 ### Added

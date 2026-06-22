@@ -914,9 +914,9 @@ ARCHITECTURE_INDEX_EOF
     "source_of_truth": "transient host planning bridge only; plans/ and .ai/harness/active-plan remain authoritative"
   },
   "guards": {
-    "edit_plan_gate": "enforce",
+    "edit_plan_gate": "advice",
     "edit_plan_gate_modes": ["enforce", "advice", "off"],
-    "rule": "pre-edit-guard blocks implementation edits (non-workflow paths) unless an active plan is Approved/Executing; prompt-layer plan gates are advisory routing only"
+    "rule": "pre-edit-guard advises when implementation lacks an active plan; execution remains available unless a real safety boundary blocks it"
   },
   "sidecar_research": {
     "default": true,

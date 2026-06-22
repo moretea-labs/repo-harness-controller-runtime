@@ -281,11 +281,32 @@ export function resolveTaskDependencies(
 
     if (state.effectiveStatus === "superseded") {
       const replacements = [...(dependency.supersededBy ?? [])];
-      if (replacements.length > 0) {
-        supersededMigrations.push({ dependencyTaskId: dependencyId, replacementTaskIds: replacements });
-        migratedDependsOn.push(...replacements);
+      if (replacements.length === 0) {
+        missingTaskIds.push(dependencyId);
+        continue;
       }
-      // The old superseded Task itself never remains a blocker.
+      supersededMigrations.push({ dependencyTaskId: dependencyId, replacementTaskIds: replacements });
+      migratedDependsOn.push(...replacements);
+      // Replacement states are authoritative immediately. The stale dependency ID is only a migration warning.
+      for (const replacementId of replacements) {
+        const replacement = issue.tasks.find((candidate) => candidate.id === replacementId);
+        const replacementState = states.get(replacementId);
+        if (!replacement || !replacementState) {
+          missingTaskIds.push(replacementId);
+          continue;
+        }
+        if (replacementState.dependencySatisfied) continue;
+        if (
+          replacementState.effectiveStatus === "cancelled" ||
+          replacementState.effectiveStatus === "cancelled_by_parent" ||
+          replacementState.effectiveStatus === "archived_by_parent" ||
+          replacementState.effectiveStatus === "inactive_by_parent"
+        ) {
+          cancelledTaskIds.push(replacementId);
+        } else {
+          pendingTaskIds.push(replacementId);
+        }
+      }
       continue;
     }
 
@@ -307,8 +328,7 @@ export function resolveTaskDependencies(
     ready:
       pendingTaskIds.length === 0 &&
       cancelledTaskIds.length === 0 &&
-      missingTaskIds.length === 0 &&
-      supersededMigrations.length === 0,
+      missingTaskIds.length === 0,
     pendingTaskIds,
     cancelledTaskIds,
     missingTaskIds,

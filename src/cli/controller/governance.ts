@@ -125,8 +125,8 @@ export function inspectProjectGovernance(repoRoot: string): ProjectGovernanceSna
     findings.push({
       id: findingId("CURRENT_ISSUE_MISSING"),
       code: "CURRENT_ISSUE_MISSING",
-      severity: "critical",
-      message: `${active.length} active Issues exist but no current execution focus is selected.`,
+      severity: "info",
+      message: `${active.length} active Issues exist without a selected focus. Focus is informational and does not block independent Tasks.`,
       recommendedAction: "set_focus",
       autoFixable: false,
     });
@@ -135,8 +135,8 @@ export function inspectProjectGovernance(repoRoot: string): ProjectGovernanceSna
     findings.push({
       id: findingId("CURRENT_ISSUE_TERMINAL", focus.id),
       code: "CURRENT_ISSUE_TERMINAL",
-      severity: "critical",
-      message: `Current Issue ${focus.id} is terminal or archived and cannot drive execution.`,
+      severity: "warning",
+      message: `Current Issue ${focus.id} is terminal or archived. Clear it for navigation clarity; execution of other Tasks is unaffected.`,
       issueId: focus.id,
       recommendedAction: "set_focus",
       autoFixable: true,
@@ -146,8 +146,8 @@ export function inspectProjectGovernance(repoRoot: string): ProjectGovernanceSna
     findings.push({
       id: findingId("MULTIPLE_ACTIVE_ISSUES"),
       code: "MULTIPLE_ACTIVE_ISSUES",
-      severity: "warning",
-      message: `${active.length} active Issues are mixed together. Only the current Issue should drive the execution queue.`,
+      severity: "info",
+      message: `${active.length} active Issues exist. Independent non-conflicting Tasks may execute across all of them.`,
       recommendedAction: "set_focus",
       autoFixable: false,
     });
@@ -313,22 +313,18 @@ export function inspectProjectGovernance(repoRoot: string): ProjectGovernanceSna
     }
   }
 
-  const queueIssue = focus && !focus.archivedAt && !ISSUE_TERMINAL.has(focus.status)
-    ? focus
-    : active.length === 1 ? active[0] : undefined;
-  const executionQueue = queueIssue
-    ? (() => {
-        const states = resolveIssueTaskStates(queueIssue, readIssueRunEvidence(repoRoot, queueIssue));
-        return queueIssue.tasks
-          .filter((task) => {
-            const state = states.get(task.id)!;
-            const dependencies = resolveTaskDependencies(queueIssue, task, states);
-            return !state.terminal && !state.inactive && state.activeRunIds.length === 0 && dependencies.ready;
-          })
-          .map((task) => taskQueueItem(queueIssue, task, states.get(task.id)!))
-          .filter((entry): entry is ExecutionQueueItem => Boolean(entry));
-      })()
-    : [];
+  const queueIssue = focus && !focus.archivedAt && !ISSUE_TERMINAL.has(focus.status) ? focus : undefined;
+  const executionQueue = active.flatMap((issue) => {
+    const states = resolveIssueTaskStates(issue, readIssueRunEvidence(repoRoot, issue));
+    return issue.tasks
+      .filter((task) => {
+        const state = states.get(task.id)!;
+        const dependencies = resolveTaskDependencies(issue, task, states);
+        return !state.terminal && !state.inactive && state.activeRunIds.length === 0 && dependencies.ready;
+      })
+      .map((task) => taskQueueItem(issue, task, states.get(task.id)!))
+      .filter((entry): entry is ExecutionQueueItem => Boolean(entry));
+  });
 
   const counts = findings.reduce<Record<string, number>>((result, entry) => {
     result[entry.severity] = (result[entry.severity] ?? 0) + 1;
@@ -339,8 +335,8 @@ export function inspectProjectGovernance(repoRoot: string): ProjectGovernanceSna
   return {
     generatedAt: new Date().toISOString(),
     health,
-    currentIssueId: queueIssue?.id,
-    currentIssueTitle: queueIssue?.title,
+    currentIssueId: state.currentIssueId,
+    currentIssueTitle: focus?.title,
     activeIssueCount: active.length,
     archivedIssueCount: archived.length,
     executionQueue,

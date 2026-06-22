@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import { resolve } from 'path';
 import { getAgentJob, getAgentJobEvents, getAgentJobLog, listAgentJobs } from '../agent-jobs/job-manager';
 import { archiveIssue, getIssue, inspectIssueReadiness, projectBoard, restoreIssue } from '../controller/issue-store';
+import { taskWriteScopesConflict } from '../controller/execution-policy';
 import { getControllerTimeline, getProjectProgress } from '../controller/progress';
 import { exportControllerWorklog, parseWorklogCategory } from '../controller/worklog';
 import { inspectProjectGovernance, reconcileProjectGovernance } from '../controller/governance';
@@ -149,9 +150,9 @@ export function buildControllerCommand(): Command {
     .option('--parallel', 'Parallel work is required')
     .option('--long-checks', 'Long-running verification is required')
     .option('--dependencies', 'A durable Task dependency graph is required')
-    .option('--risk <risk>', 'low, medium, or high', 'low')
+    .option('--risk <risk>', 'readonly, low, medium, high, or destructive', 'low')
     .option('--json', 'Output JSON')
-    .action((description: string, opts: { path?: string[]; expectedFiles?: string; expectedLines?: string; investigation?: boolean; parallel?: boolean; longChecks?: boolean; dependencies?: boolean; risk?: 'low' | 'medium' | 'high'; json?: boolean }) => {
+    .action((description: string, opts: { path?: string[]; expectedFiles?: string; expectedLines?: string; investigation?: boolean; parallel?: boolean; longChecks?: boolean; dependencies?: boolean; risk?: 'readonly' | 'low' | 'medium' | 'high' | 'destructive'; json?: boolean }) => {
       const result = assessWorkMode({
         description,
         knownPaths: opts.path,
@@ -264,7 +265,7 @@ export function buildControllerCommand(): Command {
     .action((opts: { repo?: string; json?: boolean }) => output(reconcileProjectGovernance(repoRoot(opts.repo)), opts.json === true));
 
   command.command('focus')
-    .description('Select the one active Issue that drives execution')
+    .description('Select an informational primary Issue without blocking other Tasks')
     .argument('<issue-id>', 'Controller Issue ID')
     .option('--repo <path>', 'Repository root')
     .option('--json', 'Output JSON')
@@ -276,7 +277,7 @@ export function buildControllerCommand(): Command {
     });
 
   command.command('launch')
-    .description('Launch readiness-approved Tasks from one Issue through the local approval bridge')
+    .description('Queue Task-local launch candidates from one Issue through the risk-adaptive approval bridge')
     .argument('<issue-id>', 'Controller Issue ID')
     .option('--repo <path>', 'Repository root')
     .option('--max-parallel <count>', 'Maximum Tasks to launch', '1')
@@ -285,18 +286,31 @@ export function buildControllerCommand(): Command {
     .action((issueId: string, opts: { repo?: string; maxParallel?: string; timeoutMs?: string; json?: boolean }) => {
       const root = repoRoot(opts.repo);
       const readiness = inspectIssueReadiness(root, issueId);
-      if (!readiness.ready) throw new Error(`Issue has no readiness-approved Tasks: ${readiness.blockers.map((entry) => entry.code).join(', ') || 'no ready Tasks'}`);
+      if (!readiness.queueable) throw new Error(`Issue has no queueable Tasks: ${[...readiness.blockers, ...readiness.taskBlockers].map((entry) => entry.code).join(', ') || 'no queueable Tasks'}`);
       saveControllerProjectState(root, { currentIssueId: issueId }, 'controller-cli');
-      const count = Math.max(1, Math.min(Number(opts.maxParallel ?? 1), readiness.readyTaskIds.length));
-      const jobs = readiness.readyTaskIds.slice(0, count).map((taskId) => {
+      const issue = getIssue(root, issueId);
+      const count = Math.max(1, Math.min(Number(opts.maxParallel ?? 1), readiness.queueableTaskIds.length));
+      const selected = [] as typeof issue.tasks;
+      const skipped: Array<{ taskId: string; reason: string }> = [];
+      for (const taskId of readiness.queueableTaskIds) {
+        if (selected.length >= count) break;
+        const task = issue.tasks.find((entry) => entry.id === taskId);
+        if (!task) continue;
+        if (selected.some((entry) => taskWriteScopesConflict(entry, task))) {
+          skipped.push({ taskId, reason: 'allowed path scope overlaps another selected Task' });
+          continue;
+        }
+        selected.push(task);
+      }
+      const jobs = selected.map((task) => {
         const job = submitLocalBridgeJob(root, {
           action: 'launch-task',
           requestedBy: 'controller-cli',
-          payload: { issueId, taskId, timeoutMs: opts.timeoutMs ? Number(opts.timeoutMs) : undefined },
+          payload: { issueId, taskId: task.id, timeoutMs: opts.timeoutMs ? Number(opts.timeoutMs) : undefined },
         });
         return job.status === 'approved' ? executeLocalBridgeJob(root, job.jobId) : job;
       });
-      output({ readiness, jobs }, opts.json === true);
+      output({ readiness, jobs, skipped }, opts.json === true);
     });
 
   command.command('archive')

@@ -3,6 +3,7 @@ import type { AgentJobMeta } from "../agent-jobs/types";
 import { getIssue, listIssues } from "./issue-store";
 import { readIssueRunEvidence, readTaskRunEvidence } from "./run-evidence";
 import { loadControllerProjectState } from "./project-state";
+import { taskExecutionPolicy, verificationEvidencePassed } from "./execution-policy";
 import type { ControllerIssue, ControllerTask, TaskStatus } from "./types";
 import { resolveEffectiveTaskState, resolveIssueTaskStates, resolveTaskDependencies } from "./task-status-resolver";
 import {
@@ -159,59 +160,54 @@ function gate(label: string, state: EvidenceGateState, evidence?: string): Evide
 }
 
 function completionEvidence(task: ControllerTask, run?: AgentJobMeta): TaskCompletionEvidence {
+  const policy = taskExecutionPolicy(task);
   const execution = !run
     ? gate("Implementation Run", "pending")
     : ["queued", "running", "waiting_for_user"].includes(run.status)
-      ? gate("Implementation Run", "in_progress", run.runId)
+      ? gate("Implementation Run", "in_progress", `${run.runId}: ${run.progress?.percent ?? 0}%`)
       : run.status === "succeeded"
         ? gate("Implementation Run", "passed", run.runId)
         : gate("Implementation Run", "failed", `${run.runId}: ${run.status}`);
 
   let integration: EvidenceGate;
-  if (!run || run.status !== "succeeded") integration = gate("Change Integration", "pending");
+  if (policy.executionClass === "read_only") integration = gate("Change Integration", "not_required", "Read-only Task has no change integration gate.");
+  else if (!run || run.status !== "succeeded") integration = gate("Change Integration", "pending");
   else if (run.provider === "github") {
-    if (run.github?.createPullRequest === false) {
-      integration = gate("Change Integration", "not_required", "Cloud Run did not require a pull request.");
-    } else if (run.github?.pullRequestUrl && ["verified", "done"].includes(task.status)) {
-      integration = gate("Change Integration", "passed", run.github.pullRequestUrl);
-    } else if (run.github?.pullRequestUrl) {
-      integration = gate("Change Integration", "in_progress", run.github.pullRequestUrl);
-    } else {
-      integration = gate("Change Integration", "pending", "Cloud Run is awaiting a pull request.");
-    }
-  }
-  else if (run.worktree === run.repoRoot) integration = gate("Change Integration", "not_required", "Run used the current workspace.");
+    if (run.github?.createPullRequest === false) integration = gate("Change Integration", "not_required", "Cloud Run did not require a pull request.");
+    else if (run.github?.pullRequestUrl) integration = gate("Change Integration", ["verified", "done"].includes(task.status) ? "passed" : "in_progress", run.github.pullRequestUrl);
+    else integration = gate("Change Integration", "pending", "Cloud Run is awaiting a pull request.");
+  } else if (run.worktree === run.repoRoot) integration = gate("Change Integration", "not_required", "Run used the current workspace.");
   else if (run.integratedSessionId) integration = gate("Change Integration", "passed", run.integratedSessionId);
   else if (run.autoIntegrationError) integration = gate("Change Integration", "failed", run.autoIntegrationError);
   else integration = gate("Change Integration", "pending", "Successful isolated Run is awaiting integration.");
 
   const verification = task.verification;
-  const declaredChecksPassed = verification && (task.checks.length > 0
-    ? task.checks.every((checkId) => verification.checkResults.some((entry) => entry.checkId === checkId && entry.ok))
-    : verification.checkResults.length > 0 && verification.checkResults.every((entry) => entry.ok));
-  const checks = !verification
-    ? gate("Named Checks", "pending")
-    : declaredChecksPassed
-      ? gate("Named Checks", "passed", `${verification.checkResults.length} persisted check result(s) passed.`)
-      : gate("Named Checks", "failed", "One or more declared checks are missing or failed.");
-  const declaredAcceptancePassed = verification && (task.acceptanceCriteria.length === 0
-    ? true
-    : task.acceptanceCriteria.every((criterion) => verification.acceptanceResults.some((entry) => entry.criterion === criterion && entry.ok)));
-  const acceptance = !verification
-    ? gate("Acceptance Criteria", "pending")
-    : task.acceptanceCriteria.length === 0
-      ? gate("Acceptance Criteria", "not_required", "No Task-level acceptance criteria were declared.")
-      : declaredAcceptancePassed
-        ? gate("Acceptance Criteria", "passed", `${verification.acceptanceResults.length} criterion result(s) recorded.`)
-        : gate("Acceptance Criteria", "failed", "One or more declared acceptance criteria are missing or failed.");
-  const closure = task.status === "done"
-    ? gate("Human Acceptance", "passed", "Task accepted and closed.")
-    : task.status === "verified"
-      ? gate("Human Acceptance", "in_progress", "Verification passed; explicit acceptance is still required.")
-      : gate("Human Acceptance", "pending");
+  const verificationOutcome = verification ? verificationEvidencePassed(task, verification, policy) : undefined;
+  const checks = !policy.requiresAnyVerificationEvidence && task.checks.length === 0
+    ? gate("Verification Evidence", "not_required", "This risk class does not require named checks.")
+    : !verification
+      ? gate("Verification Evidence", "pending")
+      : verificationOutcome?.checksOk && verificationOutcome.hasEvidence
+        ? gate("Verification Evidence", "passed", `${verification.checkResults.length} named check(s), ${(verification.commandEvidence ?? []).length} command evidence item(s).`)
+        : gate("Verification Evidence", "failed", verificationOutcome?.reasons.join(" "));
+  const acceptance = !policy.requiresAcceptanceEvidence || task.acceptanceCriteria.length === 0
+    ? gate("Acceptance Evidence", "not_required", "No acceptance evidence gate is required for this Task class.")
+    : !verification
+      ? gate("Acceptance Evidence", "pending")
+      : verificationOutcome?.acceptanceOk
+        ? gate("Acceptance Evidence", "passed", `${verification.acceptanceResults.length} criterion result(s) recorded.`)
+        : gate("Acceptance Evidence", "failed", "One or more declared acceptance criteria are missing or failed.");
+  const closure = !policy.requiresHumanAcceptance
+    ? gate("Human Acceptance", "not_required", "This Task class auto-completes after required evidence passes.")
+    : task.status === "done"
+      ? gate("Human Acceptance", "passed", "Task accepted and closed.")
+      : task.status === "verified"
+        ? gate("Human Acceptance", "in_progress", "Verification passed; explicit acceptance remains required.")
+        : gate("Human Acceptance", "pending");
 
   const gates = [execution, integration, checks, acceptance, closure];
-  const completedGates = gates.filter((entry) => entry.state === "passed" || entry.state === "not_required").length;
+  const requiredGates = gates.filter((entry) => entry.state !== "not_required");
+  const completedGates = requiredGates.filter((entry) => entry.state === "passed").length;
   return {
     execution,
     integration,
@@ -219,11 +215,30 @@ function completionEvidence(task: ControllerTask, run?: AgentJobMeta): TaskCompl
     acceptance,
     closure,
     completedGates,
-    totalGates: gates.length,
-    summary: `${completedGates}/${gates.length} evidence gates complete`,
+    totalGates: Math.max(1, requiredGates.length),
+    summary: `${completedGates}/${Math.max(1, requiredGates.length)} applicable evidence gates complete (${policy.executionClass})`,
   };
 }
 
+function dynamicTaskPercent(
+  task: ControllerTask,
+  effectiveStatus: string,
+  run: AgentJobMeta | undefined,
+  completion: TaskCompletionEvidence,
+): number {
+  if (effectiveStatus === "done") return 100;
+  const applicable = Math.max(1, completion.totalGates);
+  let fractional = completion.completedGates;
+  if (completion.execution.state === "in_progress") fractional += Math.max(0.02, Math.min(0.98, (run?.progress?.percent ?? 5) / 100));
+  else if (completion.integration.state === "in_progress") fractional += 0.65;
+  else if (completion.checks.state === "in_progress") fractional += 0.7;
+  else if (completion.acceptance.state === "in_progress") fractional += 0.8;
+  else if (completion.closure.state === "in_progress") fractional += 0.9;
+  let percent = Math.round((fractional / applicable) * 100);
+  if (["blocked", "changes_requested", "launch_blocked"].includes(effectiveStatus)) percent = Math.min(percent, 94);
+  if (task.status === "verified") percent = Math.max(percent, 96);
+  return Math.max(0, Math.min(99, percent));
+}
 function taskProgress(
   issue: ControllerIssue,
   task: ControllerTask,
@@ -247,7 +262,7 @@ function taskProgress(
     issueLifecycleStatus: state.issueLifecycleStatus,
     requiresExplicitRetry: state.requiresExplicitRetry,
     retryable: state.retryable,
-    percent: Math.round((completion.completedGates / completion.totalGates) * 100),
+    percent: dynamicTaskPercent(task, state.effectiveStatus, run, completion),
     completion,
     latestRunId: state.latestRunId,
     latestRunStatus: state.latestRunStatus,
@@ -291,7 +306,11 @@ function issueProgress(repoRoot: string, issue: ControllerIssue, currentIssueId?
     title: issue.title,
     kind: issue.kind,
     status: issue.status,
-    percent: totalGates ? Math.round((completedGates / totalGates) * 100) : issue.status === "done" ? 100 : 0,
+    percent: counted.length
+      ? Math.round(counted.reduce((sum, task) => sum + task.percent, 0) / counted.length)
+      : issue.status === "done"
+        ? 100
+        : 0,
     completedGates,
     totalGates,
     completedTasks: counted.filter((task) => task.effectiveStatus === "done").length,
@@ -313,7 +332,7 @@ export function getProjectProgress(repoRoot: string): ProjectProgressSnapshot {
   const now = Date.now();
   const allIssues = listIssues(repoRoot);
   const state = loadControllerProjectState(repoRoot);
-  const runs = listAgentJobs(repoRoot, 1000);
+  const runs = listAgentJobs(repoRoot, 5000);
   const views = allIssues.map((issue) => issueProgress(repoRoot, issue, state.currentIssueId));
   const issues = views.filter((issue) => !issue.archivedAt);
   const archivedIssues = views.filter((issue) => Boolean(issue.archivedAt));
@@ -353,7 +372,9 @@ export function getProjectProgress(repoRoot: string): ProjectProgressSnapshot {
   attention.sort((a, b) => b.at.localeCompare(a.at));
   return {
     generatedAt: new Date().toISOString(),
-    overallPercent: totalGates ? Math.round((completedGates / totalGates) * 100) : 0,
+    overallPercent: countedTasks.length
+      ? Math.round(countedTasks.reduce((sum, task) => sum + task.percent, 0) / countedTasks.length)
+      : 0,
     completedGates,
     totalGates,
     issueCount: allIssues.length,

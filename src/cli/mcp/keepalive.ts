@@ -13,7 +13,13 @@ import type { McpServerOptions } from './server';
 import { loadLocalBridgeConfig } from '../local-bridge/job-store';
 import { startLocalBridgeServer, type LocalBridgeServerHandle } from '../local-bridge/server';
 import { resolveMcpRepoRoot } from './repo';
-import { CONTROLLER_TOOL_SURFACE, repositoryIdentity } from '../controller/runtime-config';
+import {
+  CONTROLLER_SCHEMA_VERSION,
+  CONTROLLER_TOOL_SURFACE,
+  CONTROLLER_TOOL_SURFACE_VERSION,
+  controllerToolSurfaceFingerprint,
+  repositoryIdentity,
+} from '../controller/runtime-config';
 
 export interface McpKeepaliveOptions extends McpServerOptions {
   repo?: string;
@@ -220,18 +226,26 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
   const port = rawOpts.port ?? localConfig?.server?.port ?? 8765;
   const profile = rawOpts.profile ?? localConfig?.profile ?? 'controller';
   const expectedToolSurface = profile === 'controller' ? CONTROLLER_TOOL_SURFACE : `${profile}-legacy-v1`;
+  const expectedSchemaVersion = profile === 'controller' ? CONTROLLER_SCHEMA_VERSION : 1;
+  const expectedToolSurfaceVersion = profile === 'controller' ? CONTROLLER_TOOL_SURFACE_VERSION : 1;
+  const expectedToolSurfaceFingerprint = profile === 'controller' ? controllerToolSurfaceFingerprint() : undefined;
   const expectedRepoId = repositoryIdentity(repoRoot);
   const previousRuntime = loadMcpRuntimeState(repoRoot);
   const existingHealth = await jsonHealth(localHealthUrl(host, port));
   if (existingHealth?.status === 'ok') {
-    const existingMatches = existingHealth.toolSurface === expectedToolSurface && existingHealth.profile === profile && existingHealth.repoId === expectedRepoId;
+    const existingMatches = existingHealth.toolSurface === expectedToolSurface
+      && existingHealth.schemaVersion === expectedSchemaVersion
+      && existingHealth.toolSurfaceVersion === expectedToolSurfaceVersion
+      && (expectedToolSurfaceFingerprint === undefined || existingHealth.toolSurfaceFingerprint === expectedToolSurfaceFingerprint)
+      && existingHealth.profile === profile
+      && existingHealth.repoId === expectedRepoId;
     const previousPid = previousRuntime?.server.pid;
     if (isPidAlive(previousPid) && existingHealth.server === 'repo-harness-mcp') {
       console.error(`[repo-harness mcp keepalive] Replacing previous repo-harness MCP process ${previousPid}.`);
       await stopPid(previousPid as number);
       await sleep(250);
     } else if (!existingMatches) {
-      throw new Error(`port ${port} is occupied by an incompatible MCP server (surface=${String(existingHealth.toolSurface ?? 'unknown')}, profile=${String(existingHealth.profile ?? 'unknown')}). Stop the old process or choose another port.`);
+      throw new Error(`port ${port} is occupied by an incompatible MCP server (surface=${String(existingHealth.toolSurface ?? 'unknown')}, schema=${String(existingHealth.schemaVersion ?? 'unknown')}, version=${String(existingHealth.toolSurfaceVersion ?? 'unknown')}, fingerprint=${String(existingHealth.toolSurfaceFingerprint ?? 'unknown')}, profile=${String(existingHealth.profile ?? 'unknown')}). Stop the old process or choose another port.`);
     } else {
       throw new Error(`port ${port} already has a compatible repo-harness MCP server, but it is not owned by this keepalive process. Stop it before starting a new supervisor.`);
     }
@@ -330,6 +344,9 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
     const mismatch = localHealth?.status === 'ok'
       ? [
         localHealth.toolSurface === expectedToolSurface ? null : `tool surface ${String(localHealth.toolSurface ?? 'missing')} != ${expectedToolSurface}`,
+        localHealth.schemaVersion === expectedSchemaVersion ? null : `schema ${String(localHealth.schemaVersion ?? 'missing')} != ${expectedSchemaVersion}`,
+        localHealth.toolSurfaceVersion === expectedToolSurfaceVersion ? null : `surface version ${String(localHealth.toolSurfaceVersion ?? 'missing')} != ${expectedToolSurfaceVersion}`,
+        expectedToolSurfaceFingerprint === undefined || localHealth.toolSurfaceFingerprint === expectedToolSurfaceFingerprint ? null : `surface fingerprint ${String(localHealth.toolSurfaceFingerprint ?? 'missing')} != ${expectedToolSurfaceFingerprint}`,
         localHealth.profile === profile ? null : `profile ${String(localHealth.profile ?? 'missing')} != ${profile}`,
         localHealth.repoId === expectedRepoId ? null : `repository identity ${String(localHealth.repoId ?? 'missing')} != ${expectedRepoId}`,
       ].filter(Boolean).join('; ')
@@ -337,6 +354,9 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
     runtime.server.healthy = localHealth?.status === 'ok' && mismatch.length === 0;
     runtime.server.profile = typeof localHealth?.profile === 'string' ? localHealth.profile : undefined;
     runtime.server.toolSurface = typeof localHealth?.toolSurface === 'string' ? localHealth.toolSurface : undefined;
+    runtime.server.schemaVersion = typeof localHealth?.schemaVersion === 'number' ? localHealth.schemaVersion : undefined;
+    runtime.server.toolSurfaceVersion = typeof localHealth?.toolSurfaceVersion === 'number' ? localHealth.toolSurfaceVersion : undefined;
+    runtime.server.toolSurfaceFingerprint = typeof localHealth?.toolSurfaceFingerprint === 'string' ? localHealth.toolSurfaceFingerprint : undefined;
     runtime.server.toolCount = typeof localHealth?.toolCount === 'number' ? localHealth.toolCount : undefined;
     runtime.server.repoId = typeof localHealth?.repoId === 'string' ? localHealth.repoId : undefined;
     const runner = localHealth?.runner && typeof localHealth.runner === 'object' ? localHealth.runner as Record<string, unknown> : undefined;

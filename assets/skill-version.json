@@ -1,6 +1,6 @@
 {
-  "version": "1.2.0",
-  "templateVersion": "1.2.0",
+  "version": "1.3.0",
+  "templateVersion": "1.3.0",
   "skillName": "repo-harness",
   "contractId": "tasks-first-harness-v1",
   "compatibility": {
@@ -171,6 +171,10 @@
     {
       "version": "1.2.0",
       "description": "Promotes bounded direct edits to a first-class workflow with request-mode assessment, persisted patch evidence, named-check verification, file-change dashboards, and Issue-free completion for known small changes."
+    },
+    {
+      "version": "1.3.0",
+      "description": "Replaces Issue-wide execution gates with Task-local readiness, risk-adaptive verification, automatic Run continuation, ephemeral Quick Agent sessions, bounded context surfaces, and explicit runtime evidence."
     }
   ],
   "generatedProjectStamp": {

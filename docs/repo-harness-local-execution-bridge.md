@@ -128,7 +128,7 @@ The controller MCP surface includes direct-change tools plus the V5 complex-work
 `controller_capabilities` reports:
 
 ```text
-controller-direct-change-v6
+controller-execution-first-v7
 ```
 
 When ChatGPT can call the action, `submit_local_job` creates the same persistent Job used by the visual UI. When a platform policy blocks the action, open the local controller and launch the existing Task from its card or use Quick Agent Session.
@@ -202,6 +202,6 @@ Values outside the configured range are rejected. They are never silently replac
 
 ## Connector diagnostics
 
-The page displays the MCP runtime profile, tool-surface fingerprint, tool count, tunnel reconnect state, and whether the active service matches `controller-direct-change-v6`. A warning means the local execution bridge can still be used, but ChatGPT may be holding an obsolete Planner tool snapshot.
+The page displays the MCP runtime profile, tool-surface fingerprint, tool count, tunnel reconnect state, and whether the active service matches `controller-execution-first-v7`. A warning means the local execution bridge can still be used, but ChatGPT may be holding an obsolete Planner tool snapshot.
 
-Use the versioned default Connector name `repo-harness-controller-v6`, restart keepalive from the updated installation, and recreate or rescan the ChatGPT Connector when the warning persists. Ordinary repository source is readable in the `controller` profile; credentials, secrets, Git internals, runtime security files, lockfiles, and CI workflows remain denied.
+Use the versioned default Connector name `repo-harness-controller-v7`, restart keepalive from the updated installation, and recreate or rescan the ChatGPT Connector when the warning persists. Ordinary repository source is readable in the `controller` profile; credentials, secrets, Git internals, runtime security files, lockfiles, and CI workflows remain denied.

@@ -74,7 +74,7 @@ export function createMcpToolContext(opts: McpServerOptions): McpToolContext {
 export function createRepoHarnessMcpServer(opts: McpServerOptions): Server {
   const ctx = createMcpToolContext(opts);
   const server = new Server(
-    { name: 'repo-harness-mcp', version: '1.2.0' },
+    { name: 'repo-harness-mcp', version: '1.3.0' },
     {
       capabilities: { tools: {} },
       instructions: mcpServerInstructions(ctx.policy.profile),

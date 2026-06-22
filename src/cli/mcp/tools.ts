@@ -38,6 +38,8 @@ import {
   getIssue,
   getIssueEffectiveView,
   inspectIssueReadiness,
+  inspectTaskReadiness,
+  acceptVerifiedTask,
   listIssueEffectiveViews,
   listIssues,
   projectIssueEffectiveView,
@@ -63,10 +65,13 @@ import {
 import { exportControllerWorklog, parseWorklogCategory } from "../controller/worklog";
 import { inspectProjectGovernance, reconcileProjectGovernance } from "../controller/governance";
 import { assessWorkMode } from "../controller/work-mode";
+import { taskExecutionPolicy, taskWriteScopesConflict } from "../controller/execution-policy";
 import { loadControllerProjectState, saveControllerProjectState } from "../controller/project-state";
 import {
   CONTROLLER_SCHEMA_VERSION,
   CONTROLLER_TOOL_SURFACE,
+  CONTROLLER_TOOL_SURFACE_VERSION,
+  controllerToolSurfaceFingerprint,
   MIN_AGENT_TIMEOUT_MS,
   formatDurationMs,
   normalizeAgentTimeoutMs,
@@ -78,6 +83,7 @@ import type {
   IssueStatus,
   TaskDraft,
   TaskRisk,
+  TaskCommandEvidence,
   TaskStatus,
   TaskVerification,
 } from "../controller/types";
@@ -296,29 +302,6 @@ function timestampPrefix(date = new Date()): string {
   return `${yyyy}${mm}${dd}-${hh}${min}`;
 }
 
-function scopePrefix(value: string): string {
-  return value
-    .trim()
-    .replace(/^\.\//, "")
-    .replace(/\\/g, "/")
-    .split(/[?*{[]/, 1)[0]
-    .replace(/\/+$/, "");
-}
-
-function taskScopesConflict(left: string[], right: string[]): boolean {
-  if (left.length === 0 || right.length === 0) return true;
-  for (const leftPath of left) {
-    const a = scopePrefix(leftPath);
-    if (!a) return true;
-    for (const rightPath of right) {
-      const b = scopePrefix(rightPath);
-      if (!b || a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`))
-        return true;
-    }
-  }
-  return false;
-}
-
 function parseRunnerAgent(value: unknown): McpAgentRunnerName | null {
   const normalized = String(value ?? "")
     .trim()
@@ -393,6 +376,8 @@ function localBridgeRequestFromArgs(args: Record<string, unknown>) {
           typeof args.create_pull_request === "boolean"
             ? args.create_pull_request
             : undefined,
+        approveRisk: args.approve_risk === true,
+        approveDestructive: args.approve_destructive === true,
       },
     } as const;
   }
@@ -429,11 +414,12 @@ function localBridgeRequestFromArgs(args: Record<string, unknown>) {
       forbiddenPaths: stringList(args.forbidden_paths),
       checks: stringList(args.checks),
       acceptanceCriteria: stringList(args.acceptance_criteria),
-      risk: args.risk === "medium" || args.risk === "high" ? args.risk : "low",
+      risk: ["readonly", "low", "medium", "high", "destructive"].includes(String(args.risk)) ? args.risk as TaskRisk : "low",
       agent: agent === "claude" ? "claude" : "codex",
       isolate: typeof args.isolate === "boolean" ? args.isolate : undefined,
       timeoutMs:
         typeof args.timeout_ms === "number" ? args.timeout_ms : undefined,
+      ephemeral: typeof args.ephemeral === "boolean" ? args.ephemeral : true,
     },
   } as const;
 }
@@ -685,7 +671,7 @@ function controllerTaskDrafts(value: unknown): TaskDraft[] {
     acceptanceCriteria: stringList(
       task.acceptance_criteria ?? task.acceptanceCriteria,
     ),
-    risk: (["low", "medium", "high"].includes(String(task.risk))
+    risk: (["readonly", "low", "medium", "high", "destructive"].includes(String(task.risk))
       ? String(task.risk)
       : "medium") as TaskRisk,
     recommendedAgent:
@@ -1250,7 +1236,7 @@ export function buildMcpToolDefinitions(
         forbidden_paths: { type: "array", items: { type: "string" } },
         checks: { type: "array", items: { type: "string" } },
         acceptance_criteria: { type: "array", items: { type: "string" } },
-        risk: { type: "string", enum: ["low", "medium", "high"] },
+        risk: { type: "string", enum: ["readonly", "low", "medium", "high", "destructive"] },
         agent: { type: "string", enum: ["codex", "claude", "github-copilot"] },
       },
       required: ["title", "objective"],
@@ -1302,6 +1288,9 @@ export function buildMcpToolDefinitions(
             base_ref: { type: "string" },
             model: { type: "string" },
             create_pull_request: { type: "boolean" },
+            approve_risk: { type: "boolean" },
+            approve_destructive: { type: "boolean" },
+            ephemeral: { type: "boolean", description: "Quick Agent defaults to true and stays outside the durable Issue board." },
             title: { type: "string" },
             objective: { type: "string" },
             summary: { type: "string" },
@@ -1309,7 +1298,7 @@ export function buildMcpToolDefinitions(
             forbidden_paths: { type: "array", items: { type: "string" } },
             checks: { type: "array", items: { type: "string" } },
             acceptance_criteria: { type: "array", items: { type: "string" } },
-            risk: { type: "string", enum: ["low", "medium", "high"] },
+            risk: { type: "string", enum: ["readonly", "low", "medium", "high", "destructive"] },
             check_id: { type: "string" },
             requested_by: { type: "string" },
           },
@@ -1679,6 +1668,24 @@ export function buildMcpToolDefinitions(
         annotations: readOnly,
       },
       {
+        name: "inspect_task_readiness",
+        description:
+          "Evaluate launch readiness for one Task only. Other Issues, focus selection, unrelated Tasks, and missing named checks do not block it.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            issue_id: { type: "string" },
+            task_id: { type: "string" },
+            retry_from_run_id: { type: "string" },
+            approve_risk: { type: "boolean" },
+            approve_destructive: { type: "boolean" },
+          },
+          required: ["issue_id", "task_id"],
+          additionalProperties: false,
+        },
+        annotations: readOnly,
+      },
+      {
         name: "prepare_issue_launch",
         description:
           "Return an Issue Launcher preview without starting any agent session.",
@@ -1708,7 +1715,7 @@ export function buildMcpToolDefinitions(
             requires_parallelism: { type: "boolean" },
             requires_long_running_checks: { type: "boolean" },
             needs_dependencies: { type: "boolean" },
-            risk: { type: "string", enum: ["low", "medium", "high"] },
+            risk: { type: "string", enum: ["readonly", "low", "medium", "high", "destructive"] },
           },
           required: ["description"],
           additionalProperties: false,
@@ -1907,6 +1914,8 @@ export function buildMcpToolDefinitions(
             base_ref: { type: "string" },
             model: { type: "string" },
             create_pull_request: { type: "boolean" },
+            approve_risk: { type: "boolean", description: "Explicit confirmation for medium/high-risk execution when required by the Task-local policy." },
+            approve_destructive: { type: "boolean", description: "Explicit manual authorization for destructive execution." },
           },
           required: ["issue_id", "task_id"],
           additionalProperties: false,
@@ -1936,6 +1945,8 @@ export function buildMcpToolDefinitions(
             base_ref: { type: "string" },
             model: { type: "string" },
             create_pull_request: { type: "boolean" },
+            approve_risk: { type: "boolean", description: "Explicit confirmation for medium/high-risk execution when required by the Task-local policy." },
+            approve_destructive: { type: "boolean", description: "Explicit manual authorization for destructive execution." },
           },
           required: ["issue_id"],
           additionalProperties: false,
@@ -1965,6 +1976,8 @@ export function buildMcpToolDefinitions(
             base_ref: { type: "string" },
             model: { type: "string" },
             create_pull_request: { type: "boolean" },
+            approve_risk: { type: "boolean", description: "Explicit confirmation for medium/high-risk execution when required by the Task-local policy." },
+            approve_destructive: { type: "boolean", description: "Explicit manual authorization for destructive execution." },
           },
           additionalProperties: false,
         },
@@ -2004,7 +2017,10 @@ export function buildMcpToolDefinitions(
           "Read current local output or GitHub cloud-agent session logs. GitHub logs can be watched directly in the linked Agents UI.",
         inputSchema: {
           type: "object",
-          properties: { run_id: { type: "string" } },
+          properties: {
+            run_id: { type: "string" },
+            max_bytes: { type: "number", description: "Bounded log tail size; capped at 1 MiB." },
+          },
           required: ["run_id"],
           additionalProperties: false,
         },
@@ -2089,7 +2105,7 @@ export function buildMcpToolDefinitions(
       {
         name: "verify_task",
         description:
-          "Execute the Task's declared named checks, persist their real results, and record criterion-level acceptance evidence. Caller-supplied booleans never override executed check outcomes.",
+          "Record task-local completion evidence. Declared checks are executed when present; missing checks are a warning, and reported command evidence can satisfy risk-adaptive verification.",
         inputSchema: {
           type: "object",
           properties: {
@@ -2112,6 +2128,24 @@ export function buildMcpToolDefinitions(
                 additionalProperties: false,
               },
             },
+            reported_commands: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  command: { type: "array", items: { type: "string" }, minItems: 1 },
+                  cwd: { type: "string" },
+                  ok: { type: "boolean" },
+                  exit_code: { type: "number" },
+                  stdout: { type: "string" },
+                  stderr: { type: "string" },
+                  artifact_path: { type: "string" },
+                  executed_at: { type: "string" },
+                },
+                required: ["command", "ok"],
+                additionalProperties: false,
+              },
+            },
             acceptance_results: {
               type: "array",
               items: {
@@ -2126,13 +2160,7 @@ export function buildMcpToolDefinitions(
               },
             },
           },
-          required: [
-            "issue_id",
-            "task_id",
-            "reviewer",
-            "check_results",
-            "acceptance_results",
-          ],
+          required: ["issue_id", "task_id", "reviewer"],
           additionalProperties: false,
         },
         annotations: write,
@@ -2485,6 +2513,9 @@ export async function callMcpTool(
         const payload = {
           schemaVersion: CONTROLLER_SCHEMA_VERSION,
           toolSurface: CONTROLLER_TOOL_SURFACE,
+          toolSurfaceVersion: CONTROLLER_TOOL_SURFACE_VERSION,
+          toolSurfaceFingerprint: controllerToolSurfaceFingerprint(),
+          executionModel: "execution-first-risk-adaptive-task-local",
           profile: ctx.policy.profile,
           capabilities: {
             repositoryInspection: true,
@@ -2512,7 +2543,12 @@ export async function callMcpTool(
             exportableWorklogReports: true,
             githubPluginConfiguration: true,
             serverSentEventDashboard: true,
-            singleExecutionFocus: true,
+            singleExecutionFocus: false,
+            taskLocalReadiness: true,
+            riskAdaptiveVerification: true,
+            ephemeralQuickAgentSessions: true,
+            automaticRunContinuation: true,
+            reportedCommandEvidence: true,
             governanceDiagnostics: true,
             safeGovernanceReconciliation: true,
             evidenceGateProgress: true,
@@ -2554,6 +2590,7 @@ export async function callMcpTool(
             "archive_issue",
             "restore_issue",
             "inspect_issue_readiness",
+            "inspect_task_readiness",
             "prepare_issue_launch",
             "publish_issue_to_github",
             "launch_issue",
@@ -2581,9 +2618,10 @@ export async function callMcpTool(
             "docs/repo-harness-local-execution-bridge.md",
             "docs/repo-harness-execution-closure-v5.md",
             "docs/repo-harness-direct-change-v6.md",
+            "docs/repo-harness-execution-first-v7.md",
           ],
           staleConnectorHint:
-            "Run mcp setup chatgpt after upgrades and create or refresh the versioned Connector name. The /health endpoint also reports toolSurface, toolCount, profile, repository identity, and timeout limits.",
+            `Connector clients must match ${CONTROLLER_TOOL_SURFACE} schema ${CONTROLLER_SCHEMA_VERSION}. Refresh MCP setup when toolSurfaceVersion or fingerprint differs.`,
         };
         audit(ctx, name, "ok", args);
         return textResult(payload);
@@ -2678,31 +2716,79 @@ export async function callMcpTool(
         return textResult({ job });
       }
       case "project_snapshot": {
-        if (ctx.policy.profile !== "controller")
-          return errorResult(
-            "TOOL_DISABLED",
-            "project_snapshot requires the controller profile",
-          );
+        if (ctx.policy.profile !== "controller") return errorResult("TOOL_DISABLED", "project_snapshot requires the controller profile");
         const markerPaths = [
           ".ai/harness/active-plan",
           ".ai/harness/active-sprint",
           ".ai/harness/active-worktree",
           "tasks/current.md",
         ];
-        const markers = markerPaths.map((path) => ({
-          path,
-          exists: existsSync(join(ctx.repoRoot, path)),
-          preview: existsSync(join(ctx.repoRoot, path))
-            ? redactMcpText(
-                readFileSync(join(ctx.repoRoot, path), "utf-8"),
-              ).text.slice(0, 2000)
-            : null,
+        const markers = markerPaths.map((path) => {
+          const absolute = join(ctx.repoRoot, path);
+          if (!existsSync(absolute)) return { path, exists: false };
+          const raw = readFileSync(absolute, "utf-8");
+          return {
+            path,
+            exists: true,
+            bytes: Buffer.byteLength(raw),
+            lines: raw.split(/\r?\n/).length,
+            sha256: createHash("sha256").update(raw).digest("hex").slice(0, 16),
+            preview: redactMcpText(raw).text.slice(0, 400),
+          };
+        });
+        const board = projectBoard(ctx.repoRoot);
+        const compactIssues = board.issues.slice(0, 50).map((value) => {
+          const issue = value as Record<string, any>;
+          const tasks = Array.isArray(issue.tasks) ? issue.tasks : [];
+          return {
+            id: issue.id,
+            title: issue.title,
+            status: issue.status,
+            lifecycleStatus: issue.lifecycleStatus,
+            isCurrent: issue.isCurrent,
+            updatedAt: issue.updatedAt,
+            taskCounts: tasks.reduce<Record<string, number>>((counts, task) => {
+              const status = String(task.effectiveStatus ?? task.status ?? "unknown");
+              counts[status] = (counts[status] ?? 0) + 1;
+              return counts;
+            }, {}),
+          };
+        });
+        const snapshotRuns = listAgentJobs(ctx.repoRoot, 11);
+        const runs = snapshotRuns.slice(0, 10).map((run) => ({
+          runId: run.runId,
+          issueId: run.issueId,
+          taskId: run.taskId,
+          agent: run.agent,
+          provider: run.provider,
+          executionMode: run.executionMode,
+          status: run.status,
+          progress: run.progress,
+          createdAt: run.createdAt,
+          finishedAt: run.finishedAt,
+          error: run.error?.slice(0, 300),
         }));
         const payload = {
           git: gitSnapshot(ctx.repoRoot),
-          board: projectBoard(ctx.repoRoot),
-          runs: listAgentJobs(ctx.repoRoot, 20),
+          board: {
+            counts: board.counts,
+            declaredCounts: board.declaredCounts,
+            archivedCounts: board.archivedCounts,
+            currentIssueId: board.currentIssueId,
+            readyTasks: board.readyTasks.slice(0, 50),
+            queueableTasks: board.queueableTasks.slice(0, 50),
+            issueCount: board.issues.length,
+            archivedIssueCount: board.archivedIssueCount,
+            issues: compactIssues,
+          },
+          runs,
           markers,
+          truncated: {
+            issues: board.issues.length > compactIssues.length,
+            readyTasks: board.readyTasks.length > 50,
+            queueableTasks: board.queueableTasks.length > 50,
+            runs: snapshotRuns.length > 10,
+          },
         };
         audit(ctx, name, "ok", args);
         return textResult(payload);
@@ -2823,7 +2909,9 @@ export async function callMcpTool(
             "list_issues requires the controller profile",
           );
         const projectState = loadControllerProjectState(ctx.repoRoot);
-        const issues = listIssueEffectiveViews(ctx.repoRoot).map((issue) => ({
+        const issues = listIssueEffectiveViews(ctx.repoRoot).map((issue) => {
+          const readiness = inspectIssueReadiness(ctx.repoRoot, issue.id);
+          return {
           id: issue.id,
           title: issue.title,
           kind: issue.kind,
@@ -2841,8 +2929,11 @@ export async function callMcpTool(
             counts[task.declaredStatus] = (counts[task.declaredStatus] ?? 0) + 1;
             return counts;
           }, {}),
-          readyTaskIds: issue.tasks.filter((task) => task.dispatchable && task.dependencyState.ready).map((task) => task.id),
-        }));
+          readyTaskIds: readiness.readyTaskIds,
+          queueableTaskIds: readiness.queueableTaskIds,
+          approvalPendingTaskIds: readiness.approvalPendingTaskIds,
+        };
+        });
         audit(ctx, name, "ok", args);
         return textResult({ issues });
       }
@@ -3073,6 +3164,32 @@ export async function callMcpTool(
           readiness.ready ? "ok" : "blocked",
           args,
           `tasks/issues/${readiness.issueId}`,
+          [...readiness.blockers, ...readiness.taskBlockers].map((item) => item.message).join("; "),
+        );
+        return textResult(readiness);
+      }
+      case "inspect_task_readiness": {
+        if (ctx.policy.profile !== "controller")
+          return errorResult(
+            "TOOL_DISABLED",
+            "inspect_task_readiness requires the controller profile",
+          );
+        const readiness = inspectTaskReadiness(
+          ctx.repoRoot,
+          String(args.issue_id ?? ""),
+          String(args.task_id ?? ""),
+          {
+            retryFromRunId: typeof args.retry_from_run_id === "string" ? args.retry_from_run_id : undefined,
+            approveRisk: args.approve_risk === true,
+            approveDestructive: args.approve_destructive === true,
+          },
+        );
+        audit(
+          ctx,
+          name,
+          readiness.ready ? "ok" : "blocked",
+          args,
+          `tasks/issues/${readiness.issueId}`,
           readiness.blockers.map((item) => item.message).join("; "),
         );
         return textResult(readiness);
@@ -3096,7 +3213,7 @@ export async function callMcpTool(
           4,
         );
         const tasks = issue.tasks
-          .filter((task) => readiness.readyTaskIds.includes(task.id))
+          .filter((task) => readiness.queueableTaskIds.includes(task.id))
           .map((task) => ({
             id: task.id,
             title: task.title,
@@ -3121,7 +3238,7 @@ export async function callMcpTool(
         audit(
           ctx,
           name,
-          readiness.ready ? "ok" : "blocked",
+          readiness.queueable ? "ok" : "blocked",
           args,
           `tasks/issues/${issue.id}`,
         );
@@ -3294,47 +3411,22 @@ export async function callMcpTool(
         return textResult(projectIssueEffectiveView(ctx.repoRoot, issue));
       }
       case "dispatch_task": {
-        if (ctx.policy.profile !== "controller")
-          return errorResult(
-            "TOOL_DISABLED",
-            "dispatch_task requires the controller profile",
-          );
+        if (ctx.policy.profile !== "controller") return errorResult("TOOL_DISABLED", "dispatch_task requires the controller profile");
         const issueId = String(args.issue_id ?? "");
         const taskId = String(args.task_id ?? "");
         const issue = getIssue(ctx.repoRoot, issueId);
         const task = issue.tasks.find((entry) => entry.id === taskId);
-        if (!task)
-          return errorResult(
-            "TASK_NOT_FOUND",
-            `task not found: ${issueId}/${taskId}`,
-          );
-        const readiness = inspectIssueReadiness(ctx.repoRoot, issueId);
-        if (!readiness.ready || !readiness.readyTaskIds.includes(taskId))
-          return errorResult(
-            "TASK_NOT_LAUNCH_READY",
-            "Issue Launcher blocked this Task until readiness blockers are resolved.",
-            readiness,
-          );
-        saveControllerProjectState(ctx.repoRoot, { currentIssueId: issueId }, "chatgpt-controller");
-        const requested = parseControllerAgent(
-          args.agent ?? task.recommendedAgent,
-        );
-        if (!requested)
-          return errorResult(
-            "INVALID_AGENT",
-            `unsupported agent: ${String(args.agent ?? task.recommendedAgent)}`,
-          );
+        if (!task) return errorResult("TASK_NOT_FOUND", `task not found: ${issueId}/${taskId}`);
+        const readiness = inspectTaskReadiness(ctx.repoRoot, issueId, taskId, {
+          approveRisk: args.approve_risk === true,
+          approveDestructive: args.approve_destructive === true,
+        });
+        if (!readiness.ready) return errorResult("TASK_NOT_LAUNCH_READY", "Task-local launch policy blocked execution.", readiness);
+        const requested = parseControllerAgent(args.agent ?? task.recommendedAgent);
+        if (!requested) return errorResult("INVALID_AGENT", `unsupported agent: ${String(args.agent ?? task.recommendedAgent)}`);
         if (requested !== "github-copilot") {
-          if (!ctx.policy.execution.agentRunner)
-            return errorResult(
-              "DEV_RUNNER_DISABLED",
-              "Start the controller profile with --enable-dev-runner to dispatch local Codex or Claude agents.",
-            );
-          if (!ctx.policy.execution.allowedAgents.includes(requested))
-            return errorResult(
-              "AGENT_DENIED",
-              `local agent is not enabled: ${requested}`,
-            );
+          if (!ctx.policy.execution.agentRunner) return errorResult("DEV_RUNNER_DISABLED", "Start the controller profile with --enable-dev-runner to dispatch local Codex or Claude agents.");
+          if (!ctx.policy.execution.allowedAgents.includes(requested)) return errorResult("AGENT_DENIED", `local agent is not enabled: ${requested}`);
         }
         const run = startTaskJob({
           repoRoot: ctx.repoRoot,
@@ -3343,63 +3435,35 @@ export async function callMcpTool(
           agent: requested,
           timeoutMs: runnerTimeoutMs(ctx, args.timeout_ms),
           isolate: typeof args.isolate === "boolean" ? args.isolate : undefined,
-          githubRepo:
-            typeof args.github_repo === "string" ? args.github_repo : undefined,
-          baseRef:
-            typeof args.base_ref === "string" ? args.base_ref : undefined,
+          githubRepo: typeof args.github_repo === "string" ? args.github_repo : undefined,
+          baseRef: typeof args.base_ref === "string" ? args.base_ref : undefined,
           model: typeof args.model === "string" ? args.model : undefined,
           createPullRequest: args.create_pull_request !== false,
+          approveRisk: args.approve_risk === true,
+          approveDestructive: args.approve_destructive === true,
         });
-        audit(
-          ctx,
-          name,
-          run.status === "failed" ? "failed" : "ok",
-          args,
-          run.github?.url ?? run.promptPath,
-          run.error,
-        );
-        return textResult(run);
+        audit(ctx, name, run.status === "failed" ? "failed" : "ok", args, run.github?.url ?? run.promptPath, run.error);
+        return textResult({ readiness, run });
       }
       case "launch_issue": {
-        if (ctx.policy.profile !== "controller")
-          return errorResult(
-            "TOOL_DISABLED",
-            "launch_issue requires the controller profile",
-          );
+        if (ctx.policy.profile !== "controller") return errorResult("TOOL_DISABLED", "launch_issue requires the controller profile");
         const issueId = String(args.issue_id ?? "");
-        const readiness = inspectIssueReadiness(ctx.repoRoot, issueId);
-        if (!readiness.ready)
-          return errorResult(
-            "ISSUE_NOT_READY",
-            "Issue Launcher blocked execution until readiness blockers are resolved.",
-            readiness,
-          );
-        const maxParallel = Math.min(
-          Math.max(
-            typeof args.max_parallel === "number"
-              ? Math.trunc(args.max_parallel)
-              : readiness.suggestedMaxParallel,
-            1,
-          ),
-          4,
-        );
         const issue = getIssue(ctx.repoRoot, issueId);
-        saveControllerProjectState(ctx.repoRoot, { currentIssueId: issueId }, "chatgpt-controller");
+        const maxParallel = Math.min(Math.max(typeof args.max_parallel === "number" ? Math.trunc(args.max_parallel) : 2, 1), 4);
         const selected: ControllerTask[] = [];
-        const skipped: Array<{ taskId: string; reason: string }> = [];
-        for (const task of issue.tasks.filter((entry) =>
-          readiness.readyTaskIds.includes(entry.id),
-        )) {
+        const skipped: Array<{ taskId: string; reason: string; readiness?: unknown }> = [];
+        for (const task of issue.tasks) {
+          const readiness = inspectTaskReadiness(ctx.repoRoot, issueId, task.id, {
+            approveRisk: args.approve_risk === true,
+            approveDestructive: args.approve_destructive === true,
+          });
+          if (!readiness.ready) {
+            skipped.push({ taskId: task.id, reason: readiness.blockers.map((entry) => entry.code).join(", ") || "not dispatchable", readiness });
+            continue;
+          }
           if (selected.length >= maxParallel) break;
-          if (
-            selected.some((entry) =>
-              taskScopesConflict(entry.allowedPaths, task.allowedPaths),
-            )
-          ) {
-            skipped.push({
-              taskId: task.id,
-              reason: "allowed path scope overlaps another selected Task",
-            });
+          if (selected.some((entry) => taskWriteScopesConflict(entry, task))) {
+            skipped.push({ taskId: task.id, reason: "allowed path scope overlaps another selected Task" });
             continue;
           }
           selected.push(task);
@@ -3407,171 +3471,80 @@ export async function callMcpTool(
         const runs = [];
         for (const task of selected) {
           const agent = task.recommendedAgent;
-          if (
-            agent !== "github-copilot" &&
-            (!ctx.policy.execution.agentRunner ||
-              !ctx.policy.execution.allowedAgents.includes(agent))
-          ) {
-            skipped.push({
-              taskId: task.id,
-              reason: `local agent is not enabled: ${agent}`,
-            });
+          if (agent !== "github-copilot" && (!ctx.policy.execution.agentRunner || !ctx.policy.execution.allowedAgents.includes(agent))) {
+            skipped.push({ taskId: task.id, reason: `local agent is not enabled: ${agent}` });
             continue;
           }
-          runs.push(
-            startTaskJob({
-              repoRoot: ctx.repoRoot,
-              issueId,
-              taskId: task.id,
-              agent,
-              timeoutMs: runnerTimeoutMs(ctx, args.timeout_ms),
-              isolate:
-                typeof args.isolate === "boolean" ? args.isolate : undefined,
-              githubRepo:
-                typeof args.github_repo === "string"
-                  ? args.github_repo
-                  : undefined,
-              baseRef:
-                typeof args.base_ref === "string" ? args.base_ref : undefined,
-              model: typeof args.model === "string" ? args.model : undefined,
-              createPullRequest: args.create_pull_request !== false,
-            }),
-          );
+          runs.push(startTaskJob({
+            repoRoot: ctx.repoRoot,
+            issueId,
+            taskId: task.id,
+            agent,
+            timeoutMs: runnerTimeoutMs(ctx, args.timeout_ms),
+            isolate: typeof args.isolate === "boolean" ? args.isolate : undefined,
+            githubRepo: typeof args.github_repo === "string" ? args.github_repo : undefined,
+            baseRef: typeof args.base_ref === "string" ? args.base_ref : undefined,
+            model: typeof args.model === "string" ? args.model : undefined,
+            createPullRequest: args.create_pull_request !== false,
+            approveRisk: args.approve_risk === true,
+            approveDestructive: args.approve_destructive === true,
+          }));
         }
-        audit(
-          ctx,
-          name,
-          runs.some((run) => run.status !== "failed") ? "ok" : "failed",
-          args,
-          `tasks/issues/${issue.id}`,
-        );
-        return textResult({
-          readiness,
-          dispatched: runs.length,
-          runs,
-          skipped,
-        });
+        const readiness = inspectIssueReadiness(ctx.repoRoot, issueId);
+        audit(ctx, name, runs.length > 0 ? "ok" : "failed", args, `tasks/issues/${issue.id}`);
+        return textResult({ readiness, dispatched: runs.length, runs, skipped });
       }
       case "dispatch_ready_tasks": {
-        if (ctx.policy.profile !== "controller")
-          return errorResult(
-            "TOOL_DISABLED",
-            "dispatch_ready_tasks requires the controller profile",
-          );
-        const requestedIssue =
-          typeof args.issue_id === "string" && args.issue_id.trim()
-            ? args.issue_id.trim()
-            : undefined;
-        const projectState = loadControllerProjectState(ctx.repoRoot);
-        const governance = inspectProjectGovernance(ctx.repoRoot);
-        const issueFilter = requestedIssue ?? projectState.currentIssueId ?? governance.currentIssueId;
-        if (!issueFilter) {
-          return errorResult(
-            "CURRENT_ISSUE_REQUIRED",
-            "Select one current execution Issue before dispatching ready Tasks across the project.",
-            governance,
-          );
+        if (ctx.policy.profile !== "controller") return errorResult("TOOL_DISABLED", "dispatch_ready_tasks requires the controller profile");
+        const requestedIssue = typeof args.issue_id === "string" && args.issue_id.trim() ? args.issue_id.trim() : undefined;
+        const maxParallel = Math.min(Math.max(typeof args.max_parallel === "number" ? Math.trunc(args.max_parallel) : 2, 1), 4);
+        const candidates: Array<{ issueId: string; task: ControllerTask }> = [];
+        const skipped: Array<{ issueId: string; taskId: string; reason: string }> = [];
+        for (const issue of listIssues(ctx.repoRoot)) {
+          if (requestedIssue && issue.id !== requestedIssue) continue;
+          if (issue.archivedAt || ["done", "cancelled"].includes(issue.status)) continue;
+          for (const task of issue.tasks) {
+            const readiness = inspectTaskReadiness(ctx.repoRoot, issue.id, task.id, {
+              approveRisk: args.approve_risk === true,
+              approveDestructive: args.approve_destructive === true,
+            });
+            if (readiness.ready) candidates.push({ issueId: issue.id, task });
+            else if (readiness.blockers.length > 0) skipped.push({ issueId: issue.id, taskId: task.id, reason: readiness.blockers.map((entry) => entry.code).join(", ") });
+          }
         }
-        saveControllerProjectState(ctx.repoRoot, { currentIssueId: issueFilter }, "chatgpt-controller");
-        const maxParallel = Math.min(
-          Math.max(
-            typeof args.max_parallel === "number"
-              ? Math.trunc(args.max_parallel)
-              : 2,
-            1,
-          ),
-          4,
-        );
-        const candidates = projectBoard(ctx.repoRoot).readyTasks.filter(
-          (task) => !issueFilter || task.issueId === issueFilter,
-        );
-        const selected: Array<{
-          issueId: string;
-          taskId: string;
-          agent: ControllerAgent;
-          allowedPaths: string[];
-        }> = [];
-        const skipped: Array<{
-          issueId: string;
-          taskId: string;
-          reason: string;
-        }> = [];
+        const selected: Array<{ issueId: string; task: ControllerTask }> = [];
         for (const candidate of candidates) {
           if (selected.length >= maxParallel) break;
-          const issue = getIssue(ctx.repoRoot, candidate.issueId);
-          const readiness = inspectIssueReadiness(
-            ctx.repoRoot,
-            candidate.issueId,
-          );
-          if (
-            !readiness.ready ||
-            !readiness.readyTaskIds.includes(candidate.taskId)
-          ) {
-            skipped.push({
-              issueId: candidate.issueId,
-              taskId: candidate.taskId,
-              reason: "Issue Launcher readiness gate blocked this Task",
-            });
+          if (selected.some((entry) => taskWriteScopesConflict(entry.task, candidate.task))) {
+            skipped.push({ issueId: candidate.issueId, taskId: candidate.task.id, reason: "allowed path scope overlaps another selected Task" });
             continue;
           }
-          const task = issue.tasks.find(
-            (entry) => entry.id === candidate.taskId,
-          );
-          if (!task) continue;
-          const conflict = selected.some((entry) =>
-            taskScopesConflict(entry.allowedPaths, task.allowedPaths),
-          );
-          if (conflict) {
-            skipped.push({
-              issueId: candidate.issueId,
-              taskId: candidate.taskId,
-              reason: "allowed path scope overlaps another selected Task",
-            });
-            continue;
-          }
-          selected.push({
-            issueId: candidate.issueId,
-            taskId: candidate.taskId,
-            agent: task.recommendedAgent,
-            allowedPaths: task.allowedPaths,
-          });
+          selected.push(candidate);
         }
         const runs = [];
-        for (const readyTask of selected) {
-          if (
-            readyTask.agent !== "github-copilot" &&
-            (!ctx.policy.execution.agentRunner ||
-              !ctx.policy.execution.allowedAgents.includes(readyTask.agent))
-          ) {
-            skipped.push({
-              issueId: readyTask.issueId,
-              taskId: readyTask.taskId,
-              reason: `local agent is not enabled: ${readyTask.agent}`,
-            });
+        for (const candidate of selected) {
+          const agent = candidate.task.recommendedAgent;
+          if (agent !== "github-copilot" && (!ctx.policy.execution.agentRunner || !ctx.policy.execution.allowedAgents.includes(agent))) {
+            skipped.push({ issueId: candidate.issueId, taskId: candidate.task.id, reason: `local agent is not enabled: ${agent}` });
             continue;
           }
-          runs.push(
-            startTaskJob({
-              repoRoot: ctx.repoRoot,
-              issueId: readyTask.issueId,
-              taskId: readyTask.taskId,
-              agent: readyTask.agent,
-              timeoutMs: runnerTimeoutMs(ctx, args.timeout_ms),
-              isolate:
-                typeof args.isolate === "boolean" ? args.isolate : undefined,
-              githubRepo:
-                typeof args.github_repo === "string"
-                  ? args.github_repo
-                  : undefined,
-              baseRef:
-                typeof args.base_ref === "string" ? args.base_ref : undefined,
-              model: typeof args.model === "string" ? args.model : undefined,
-              createPullRequest: args.create_pull_request !== false,
-            }),
-          );
+          runs.push(startTaskJob({
+            repoRoot: ctx.repoRoot,
+            issueId: candidate.issueId,
+            taskId: candidate.task.id,
+            agent,
+            timeoutMs: runnerTimeoutMs(ctx, args.timeout_ms),
+            isolate: typeof args.isolate === "boolean" ? args.isolate : undefined,
+            githubRepo: typeof args.github_repo === "string" ? args.github_repo : undefined,
+            baseRef: typeof args.base_ref === "string" ? args.base_ref : undefined,
+            model: typeof args.model === "string" ? args.model : undefined,
+            createPullRequest: args.create_pull_request !== false,
+            approveRisk: args.approve_risk === true,
+            approveDestructive: args.approve_destructive === true,
+          }));
         }
-        audit(ctx, name, "ok", args);
-        return textResult({ dispatched: runs.length, runs, skipped });
+        audit(ctx, name, runs.length > 0 ? "ok" : "failed", args);
+        return textResult({ requestedIssue, dispatched: runs.length, runs, skipped, currentFocus: loadControllerProjectState(ctx.repoRoot).currentIssueId, focusIsInformational: true });
       }
       case "get_task_run": {
         if (ctx.policy.profile !== "controller")
@@ -3607,6 +3580,7 @@ export async function callMcpTool(
           ctx.repoRoot,
           String(args.run_id ?? ""),
           false,
+          typeof args.max_bytes === "number" ? Math.trunc(args.max_bytes) : undefined,
         );
         audit(ctx, name, "ok", args, log.url);
         return textResult(log);
@@ -3716,75 +3690,29 @@ export async function callMcpTool(
         return textResult(run);
       }
       case "verify_task": {
-        if (ctx.policy.profile !== "controller")
-          return errorResult(
-            "TOOL_DISABLED",
-            "verify_task requires the controller profile",
-          );
-        const requestedCheckInputs = taskObjects(args.check_results).map((entry) => ({
-          checkId: String(entry.check_id ?? ""),
-          requestedSummary:
-            typeof entry.summary === "string" ? entry.summary : undefined,
-        }));
-        const acceptanceResults = taskObjects(args.acceptance_results).map(
-          (entry) => ({
-            criterion: String(entry.criterion ?? ""),
-            ok: entry.ok === true,
-            evidence:
-              typeof entry.evidence === "string" ? entry.evidence : undefined,
-          }),
-        );
+        if (ctx.policy.profile !== "controller") return errorResult("TOOL_DISABLED", "verify_task requires the controller profile");
         const issueId = String(args.issue_id ?? "");
         const taskId = String(args.task_id ?? "");
         const current = getIssue(ctx.repoRoot, issueId);
         const task = current.tasks.find((entry) => entry.id === taskId);
-        if (!task)
-          return errorResult(
-            "TASK_NOT_FOUND",
-            `task not found: ${issueId}/${taskId}`,
-          );
-        const evidenceRunId =
-          typeof args.run_id === "string" ? args.run_id : task.runIds.at(-1);
+        if (!task) return errorResult("TASK_NOT_FOUND", `task not found: ${issueId}/${taskId}`);
+        const policy = taskExecutionPolicy(task);
+        const evidenceRunId = typeof args.run_id === "string" ? args.run_id : task.runIds.at(-1);
+        let evidenceRun: ReturnType<typeof getAgentJob> | undefined;
         if (evidenceRunId) {
-          const run = getAgentJob(ctx.repoRoot, evidenceRunId);
-          if (run.issueId !== issueId || run.taskId !== taskId)
-            return errorResult(
-              "RUN_TASK_MISMATCH",
-              `Run ${evidenceRunId} does not belong to ${issueId}/${taskId}`,
-            );
-          if (run.status !== "succeeded")
-            return errorResult(
-              "RUN_NOT_SUCCEEDED",
-              `verification requires a succeeded Run (current: ${run.status})`,
-            );
-          if (
-            run.provider === "local" &&
-            run.worktree !== ctx.repoRoot &&
-            !run.integratedSessionId
-          )
-            return errorResult(
-              "RUN_NOT_INTEGRATED",
-              "integrate the isolated local Run before recording verification",
-            );
-          if (
-            run.provider === "github" &&
-            run.github?.createPullRequest !== false &&
-            !run.github?.pullRequestUrl
-          )
-            return errorResult(
-              "GITHUB_PR_NOT_READY",
-              "GitHub cloud verification requires the linked pull request to be available",
-            );
+          evidenceRun = getAgentJob(ctx.repoRoot, evidenceRunId);
+          if (evidenceRun.issueId !== issueId || evidenceRun.taskId !== taskId) return errorResult("RUN_TASK_MISMATCH", `Run ${evidenceRunId} does not belong to ${issueId}/${taskId}`);
+          if (evidenceRun.status !== "succeeded") return errorResult("RUN_NOT_SUCCEEDED", `verification requires a succeeded Run (current: ${evidenceRun.status})`);
+          if (evidenceRun.provider === "local" && evidenceRun.worktree !== ctx.repoRoot && !evidenceRun.integratedSessionId) return errorResult("RUN_NOT_INTEGRATED", "integrate the isolated local Run before recording verification");
+          if (evidenceRun.provider === "github" && evidenceRun.github?.createPullRequest !== false && !evidenceRun.github?.pullRequestUrl) return errorResult("GITHUB_PR_NOT_READY", "GitHub cloud verification requires the linked pull request to be available");
         }
-        const checkIds = task.checks.length > 0
-          ? task.checks
-          : requestedCheckInputs.map((entry) => entry.checkId).filter(Boolean);
-        if (checkIds.length === 0)
-          return errorResult(
-            "CHECKS_REQUIRED",
-            "verification requires at least one declared or requested named check",
-          );
-        const checkResults = Array.from(new Set(checkIds)).map((checkId) => {
+
+        const requestedCheckInputs = taskObjects(args.check_results).map((entry) => ({
+          checkId: String(entry.check_id ?? "").trim(),
+          requestedSummary: typeof entry.summary === "string" ? entry.summary : undefined,
+        })).filter((entry) => entry.checkId);
+        const checkIds = Array.from(new Set(task.checks.length > 0 ? task.checks : requestedCheckInputs.map((entry) => entry.checkId)));
+        const checkResults = checkIds.map((checkId) => {
           try {
             const result = runControllerCheck(ctx.repoRoot, checkId);
             return {
@@ -3795,89 +3723,71 @@ export async function callMcpTool(
                 : `Failed with persisted evidence: ${result.artifactPath}; ${(result.stderr || result.stdout).slice(0, 500)}`,
             };
           } catch (error) {
-            return {
-              checkId,
-              ok: false,
-              summary: error instanceof Error ? error.message : String(error),
-            };
+            return { checkId, ok: false, summary: error instanceof Error ? error.message : String(error) };
           }
         });
+
+        const commandEvidence: TaskCommandEvidence[] = [];
+        for (const entry of taskObjects(args.reported_commands)) {
+          const command = Array.isArray(entry.command) ? entry.command.map(String).map((part) => part.trim()).filter(Boolean) : [];
+          if (command.length === 0) return errorResult("INVALID_COMMAND_EVIDENCE", "reported command evidence requires a non-empty command argv");
+          const cwdInput = typeof entry.cwd === "string" && entry.cwd.trim() ? entry.cwd.trim() : undefined;
+          if (cwdInput) {
+            const cwdDecision = resolveMcpPath(ctx.repoRoot, cwdInput, ctx.policy, "read");
+            if (!cwdDecision.ok) return errorResult("COMMAND_EVIDENCE_PATH_DENIED", cwdDecision.reason ?? "reported command cwd is denied");
+          }
+          const artifactInput = typeof entry.artifact_path === "string" && entry.artifact_path.trim() ? entry.artifact_path.trim() : undefined;
+          if (artifactInput) {
+            const artifactDecision = resolveMcpPath(ctx.repoRoot, artifactInput, ctx.policy, "read");
+            if (!artifactDecision.ok) return errorResult("COMMAND_EVIDENCE_ARTIFACT_DENIED", artifactDecision.reason ?? "reported command artifact is denied");
+          }
+          commandEvidence.push({
+            command,
+            cwd: cwdInput,
+            ok: entry.ok === true,
+            exitCode: typeof entry.exit_code === "number" ? Math.trunc(entry.exit_code) : undefined,
+            stdout: typeof entry.stdout === "string" ? entry.stdout.slice(-32 * 1024) : undefined,
+            stderr: typeof entry.stderr === "string" ? entry.stderr.slice(-32 * 1024) : undefined,
+            artifactPath: artifactInput,
+            reportedBy: String(args.reviewer ?? "").trim(),
+            executedAt: typeof entry.executed_at === "string" ? entry.executed_at : new Date().toISOString(),
+            source: "reported",
+          });
+        }
+
+        let acceptanceResults = taskObjects(args.acceptance_results).map((entry) => ({
+          criterion: String(entry.criterion ?? ""),
+          ok: entry.ok === true,
+          evidence: typeof entry.evidence === "string" ? entry.evidence : undefined,
+        }));
+        if (acceptanceResults.length === 0 && evidenceRun && task.acceptanceCriteria.length > 0) {
+          acceptanceResults = task.acceptanceCriteria.map((criterion) => ({ criterion, ok: true, evidence: `Successful Run ${evidenceRun!.runId}.` }));
+        }
         const verification: TaskVerification = {
           runId: evidenceRunId,
-          integratedRevision:
-            typeof args.integrated_revision === "string"
-              ? args.integrated_revision
-              : undefined,
-          reviewedDiffHash:
-            typeof args.reviewed_diff_hash === "string"
-              ? args.reviewed_diff_hash
-              : undefined,
+          integratedRevision: typeof args.integrated_revision === "string" ? args.integrated_revision : evidenceRun?.integratedSessionId,
+          reviewedDiffHash: typeof args.reviewed_diff_hash === "string" ? args.reviewed_diff_hash : undefined,
           reviewer: String(args.reviewer ?? ""),
           checkResults,
+          commandEvidence,
           acceptanceResults,
           verifiedAt: new Date().toISOString(),
         };
-        const issue = recordTaskVerification(
-          ctx.repoRoot,
-          issueId,
-          taskId,
-          verification,
-        );
+        const issue = recordTaskVerification(ctx.repoRoot, issueId, taskId, verification);
         const verifiedTask = issue.tasks.find((entry) => entry.id === taskId);
-        audit(
-          ctx,
-          name,
-          verifiedTask?.status === "verified" ? "ok" : "failed",
-          args,
-          `tasks/issues/${issue.id}`,
-        );
-        return textResult(projectIssueEffectiveView(ctx.repoRoot, issue));
+        audit(ctx, name, ["verified", "done"].includes(verifiedTask?.status ?? "") ? "ok" : "failed", args, `tasks/issues/${issue.id}`);
+        return textResult({ policy, issue: projectIssueEffectiveView(ctx.repoRoot, issue) });
       }
       case "accept_task": {
-        if (ctx.policy.profile !== "controller")
-          return errorResult(
-            "TOOL_DISABLED",
-            "accept_task requires the controller profile",
-          );
+        if (ctx.policy.profile !== "controller") return errorResult("TOOL_DISABLED", "accept_task requires the controller profile");
         const issueId = String(args.issue_id ?? "");
         const taskId = String(args.task_id ?? "");
         const current = getIssue(ctx.repoRoot, issueId);
         const task = current.tasks.find((entry) => entry.id === taskId);
-        if (!task)
-          return errorResult(
-            "TASK_NOT_FOUND",
-            `task not found: ${issueId}/${taskId}`,
-          );
-        if (task.status !== "verified" || !task.verification)
-          return errorResult(
-            "TASK_NOT_VERIFIED",
-            `task must pass the Verification Gate before acceptance (current: ${task.status})`,
-          );
-        const latestRunId = task.runIds.at(-1);
-        if (latestRunId) {
-          const run = getAgentJob(ctx.repoRoot, latestRunId);
-          if (run.status !== "succeeded")
-            return errorResult(
-              "RUN_NOT_SUCCEEDED",
-              `latest Run status is ${run.status}`,
-            );
-          if (
-            run.provider === "local" &&
-            run.worktree !== ctx.repoRoot &&
-            !run.integratedSessionId
-          )
-            return errorResult(
-              "RUN_NOT_INTEGRATED",
-              "integrate the isolated local Task Run before accepting it",
-            );
-        }
-        const issue = updateTask(ctx.repoRoot, issueId, taskId, {
-          status: "done",
-          note:
-            typeof args.note === "string"
-              ? args.note
-              : "Accepted after controller verification.",
-        });
+        if (!task) return errorResult("TASK_NOT_FOUND", `task not found: ${issueId}/${taskId}`);
+        if (task.status === "done") return textResult(projectIssueEffectiveView(ctx.repoRoot, current));
+        if (task.status !== "verified" || !task.verification) return errorResult("TASK_NOT_VERIFIED", `task has not passed its risk-adaptive verification requirements (current: ${task.status})`);
+        const issue = acceptVerifiedTask(ctx.repoRoot, issueId, taskId, typeof args.note === "string" ? args.note : "Accepted after required verification evidence.");
         audit(ctx, name, "ok", args, `tasks/issues/${issue.id}`);
         return textResult(projectIssueEffectiveView(ctx.repoRoot, issue));
       }

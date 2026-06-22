@@ -23,23 +23,42 @@ function escapeRegex(value: string): string {
 }
 
 export function globMatches(pattern: string, relativePath: string): boolean {
-  if (pattern === '**') return true;
+  const normalizedPattern = toPosixPath(pattern.trim()).replace(/^\.\/+/, '').replace(/\/{2,}/g, '/');
+  const normalizedPath = toPosixPath(relativePath).replace(/^\.\/+/, '').replace(/\/{2,}/g, '/').replace(/\/$/, '');
+  if (normalizedPattern === '**' || normalizedPattern === '**/*') return true;
   let expression = '';
-  for (let index = 0; index < pattern.length; index += 1) {
-    const char = pattern[index];
-    const next = pattern[index + 1];
+  for (let index = 0; index < normalizedPattern.length; index += 1) {
+    const char = normalizedPattern[index];
+    const next = normalizedPattern[index + 1];
     if (char === '*' && next === '*') {
-      expression += '.*';
-      index += 1;
+      const after = normalizedPattern[index + 2];
+      if (after === '/') {
+        // Globstar directory prefixes match zero or more path segments.
+        expression += '(?:.*/)?';
+        index += 2;
+      } else {
+        expression += '.*';
+        index += 1;
+      }
     } else if (char === '*') {
       expression += '[^/]*';
+    } else if (char === '?') {
+      expression += '[^/]';
+    } else if (char === '{') {
+      const close = normalizedPattern.indexOf('}', index + 1);
+      if (close > index) {
+        const alternatives = normalizedPattern.slice(index + 1, close).split(',').map((part) => escapeRegex(part));
+        expression += `(?:${alternatives.join('|')})`;
+        index = close;
+      } else {
+        expression += '\\{';
+      }
     } else {
       expression += escapeRegex(char);
     }
   }
-  return new RegExp(`^${expression}$`).test(relativePath);
+  return new RegExp(`^${expression}/?$`).test(normalizedPath);
 }
-
 function anyGlobMatches(patterns: string[], relativePath: string): boolean {
   return patterns.some((pattern) => globMatches(pattern, relativePath));
 }

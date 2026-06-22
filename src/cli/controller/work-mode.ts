@@ -1,3 +1,5 @@
+import type { TaskRisk } from './types';
+
 export type WorkMode = 'direct_edit' | 'quick_agent' | 'issue_task';
 
 export interface WorkModeAssessmentInput {
@@ -9,7 +11,7 @@ export interface WorkModeAssessmentInput {
   requiresParallelism?: boolean;
   requiresLongRunningChecks?: boolean;
   needsDependencies?: boolean;
-  risk?: 'low' | 'medium' | 'high';
+  risk?: TaskRisk;
 }
 
 export interface WorkModeAssessment {
@@ -37,6 +39,7 @@ export function assessWorkMode(input: WorkModeAssessmentInput): WorkModeAssessme
     input.requiresLongRunningChecks === true ||
     input.needsDependencies === true ||
     risk === 'high' ||
+    risk === 'destructive' ||
     expectedFiles > 8 ||
     expectedChangedLines > 1200 ||
     paths.some((path) => PROTECTED_PATH.test(path));
@@ -47,6 +50,7 @@ export function assessWorkMode(input: WorkModeAssessmentInput): WorkModeAssessme
     if (input.requiresLongRunningChecks) reasons.push('The work has long-running verification or environment dependencies.');
     if (input.needsDependencies) reasons.push('The work needs a durable dependency graph.');
     if (risk === 'high') reasons.push('The declared risk is high.');
+    if (risk === 'destructive') reasons.push('The request contains destructive or irreversible operations.');
     if (expectedFiles > 8 || expectedChangedLines > 1200) reasons.push('The estimated change is too broad for one bounded edit session.');
     if (paths.some((path) => PROTECTED_PATH.test(path))) reasons.push('The request touches a protected or release-sensitive path.');
     return {
@@ -59,7 +63,7 @@ export function assessWorkMode(input: WorkModeAssessmentInput): WorkModeAssessme
   }
 
   const direct =
-    paths.length > 0 &&
+    (risk === 'readonly' || paths.length > 0) &&
     paths.length <= 5 &&
     expectedFiles <= 5 &&
     expectedChangedLines <= 500;

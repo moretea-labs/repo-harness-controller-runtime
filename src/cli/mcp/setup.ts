@@ -36,7 +36,7 @@ const REQUIRED_CODEX_TOOLS = [
 
 const CHATGPT_MCP_ENDPOINT_PLACEHOLDER = "<https-tunnel-url>/mcp";
 const CHATGPT_NAMED_TUNNEL_HOST_PLACEHOLDER = "<named-tunnel-host>";
-const DEFAULT_CHATGPT_MCP_SERVER_NAME = "repo-harness-controller-v6";
+const DEFAULT_CHATGPT_MCP_SERVER_NAME = "repo-harness-controller-v7";
 const LEGACY_DEFAULT_SERVER_NAMES = new Set([
   "repo-harness",
   "repo-harness-controller-v1",
@@ -44,6 +44,7 @@ const LEGACY_DEFAULT_SERVER_NAMES = new Set([
   "repo-harness-controller-v3",
   "repo-harness-controller-v4",
   "repo-harness-controller-v5",
+  "repo-harness-controller-v6",
 ]);
 const ENDPOINT_ERROR =
   "expected a public HTTPS URL exactly ending in /mcp with no username, password, query, or fragment";

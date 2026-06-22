@@ -3702,7 +3702,7 @@ describe("Hook runtime behavior", () => {
     }
   });
 
-  test("pre-edit-guard: edit plan gate blocks implementation edits by plan state", () => {
+  test("pre-edit-guard: plan state is advisory by default and enforce remains opt-in", () => {
     const cwd = tmpWorkspace("pre-edit-plan-gate");
     try {
       initGitRepo(cwd);
@@ -3711,39 +3711,45 @@ describe("Hook runtime behavior", () => {
       mkdirSync(join(cwd, "plans"), { recursive: true });
       writeFileSync(join(cwd, "docs/spec.md"), "# Product Spec\n");
 
-      // No active plan: implementation paths block, workflow surfaces pass.
+      // No active plan: default policy advises without blocking execution.
       const noPlanRes = runHook("pre-edit-guard.sh", cwd, {
         stdin: JSON.stringify({ tool_input: { file_path: "src/app.ts" } }),
       });
-      expect(noPlanRes.status).toBe(2);
-      expect(noPlanRes.stderr).toContain("[PlanStatusGuard]");
+      expect(noPlanRes.status).toBe(0);
+      expect(noPlanRes.stdout).toContain("[PlanStatusGuard] Advisory");
 
       const workflowRes = runHook("pre-edit-guard.sh", cwd, {
         stdin: JSON.stringify({ tool_input: { file_path: "tasks/todos.md" } }),
       });
       expect(workflowRes.status).toBe(0);
 
-      // Advice mode warns without blocking.
-      const adviceRes = runHook("pre-edit-guard.sh", cwd, {
+      // Repositories may still explicitly opt into enforcement.
+      const enforceRes = runHook("pre-edit-guard.sh", cwd, {
         stdin: JSON.stringify({ tool_input: { file_path: "src/app.ts" } }),
-        env: { REPO_HARNESS_EDIT_PLAN_GATE: "advice" },
+        env: { REPO_HARNESS_EDIT_PLAN_GATE: "enforce" },
       });
-      expect(adviceRes.status).toBe(0);
-      expect(adviceRes.stdout).toContain("[PlanStatusGuard] Advisory");
+      expect(enforceRes.status).toBe(2);
+      expect(enforceRes.stderr).toContain("[PlanStatusGuard]");
 
-      // Draft plan still blocks; Approved plan passes.
+      // Draft plan advises by default and blocks only under explicit enforcement.
       const planPath = "plans/plan-20260610-1000-gate.md";
       writeFileSync(join(cwd, planPath), "# Plan: gate\n\n> **Status**: Draft\n");
       writeActivePlan(cwd, planPath);
-      const draftRes = runHook("pre-edit-guard.sh", cwd, {
+      const draftAdvice = runHook("pre-edit-guard.sh", cwd, {
         stdin: JSON.stringify({ tool_input: { file_path: "src/app.ts" } }),
       });
-      expect(draftRes.status).toBe(2);
-      expect(draftRes.stderr).toContain("[PlanStatusGuard]");
+      expect(draftAdvice.status).toBe(0);
+      expect(draftAdvice.stdout).toContain("[PlanStatusGuard] Advisory");
+      const draftEnforced = runHook("pre-edit-guard.sh", cwd, {
+        stdin: JSON.stringify({ tool_input: { file_path: "src/app.ts" } }),
+        env: { REPO_HARNESS_EDIT_PLAN_GATE: "enforce" },
+      });
+      expect(draftEnforced.status).toBe(2);
 
       writeFileSync(join(cwd, planPath), "# Plan: gate\n\n> **Status**: Approved\n");
       const approvedRes = runHook("pre-edit-guard.sh", cwd, {
         stdin: JSON.stringify({ tool_input: { file_path: "src/app.ts" } }),
+        env: { REPO_HARNESS_EDIT_PLAN_GATE: "enforce" },
       });
       expect(approvedRes.status).toBe(0);
     } finally {

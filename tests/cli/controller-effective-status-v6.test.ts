@@ -145,7 +145,7 @@ describe("Controller v6 effective Task state", () => {
     const parent = issue(old, "in_progress", { tasks: [old, replacementA, replacementB, downstream] });
     const states = resolveIssueTaskStates(parent);
     const dependencies = resolveTaskDependencies(parent, downstream, states);
-    expect(dependencies.pendingTaskIds).toEqual([]);
+    expect(dependencies.pendingTaskIds).toEqual(["T3"]);
     expect(dependencies.cancelledTaskIds).toEqual([]);
     expect(dependencies.supersededMigrations).toEqual([
       { dependencyTaskId: "T1", replacementTaskIds: ["T2", "T3"] },

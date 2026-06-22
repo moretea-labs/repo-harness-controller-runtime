@@ -22,6 +22,20 @@ handoff、检查结果和 review evidence 写回项目文件，让下一个 agen
 
 仓库地址：`https://github.com/Ancienttwo/repo-harness`
 
+## Controller V7：执行优先、风险自适应、Task 局部判断
+
+repo-harness V7 将 Issue 级流程仪式从执行链路中移除。Controller 只负责接入本地能力、持久 Run 和证据；是否可以执行，由单个 Task 的真实状态与必要安全边界决定。
+
+- `inspect_task_readiness`、`dispatch_task`、`launch_issue` 和跨项目派发都按单个 Task 判断；其他 Task 被阻塞、存在多个 active Issue、current focus 指向哪里，都不会阻止无冲突工作。
+- 缺少 named checks 只产生 warning。检查主要是 Run 成功后的完成证据，并在 Task 声明后自动执行。
+- 只读、低风险、中风险、高风险和破坏性操作按风险逐级增加验证与审批；只读和低风险任务不再强制经历完整五阶段验收。
+- Run 成功后自动续跑到适用检查、验证、自动完成或人工验收；启动卡死以及 Job/Run 的终态时间矛盾会被收敛。
+- Quick Agent 默认 ephemeral，不进入正式 Issue 看板；终态后清理临时 Issue 元数据，但保留 Run 证据。
+- 真正的硬边界继续保留：敏感/越界路径、并发写冲突、不可逆 Git 操作、远程发布、真实检查失败和高风险数据变更。
+- repository glob、定向读取、动态进度、snapshot/log 体积、Connector surface 漂移和 reported command evidence 已统一。
+
+MCP surface 为 `controller-execution-first-v7`，schema `9`，surface version `7`。详见 [V7 执行优先模型](docs/repo-harness-execution-first-v7.md)。
+
 ## Controller V6：直接变更优先
 
 repo-harness V6 把“项目文件真正发生变化”设为已知小型工作的默认结果。修改文档、配置或明确的小范围代码时，不再先创建 Issue。
@@ -84,7 +98,7 @@ review、checks 或 handoff 冲突，以 source artifacts 为准。
 
 ## What's New
 
-Release notes 见 [`docs/CHANGELOG.md`](docs/CHANGELOG.md)，当前版本线是 `1.2.0`。
+Release notes 见 [`docs/CHANGELOG.md`](docs/CHANGELOG.md)，当前版本线是 `1.3.0`。
 
 ## 工作原理
 
@@ -383,7 +397,7 @@ implementation under `assets/hooks/` or a repo-pinned `.ai/hooks/` copy.
 | Route                      | Matcher      | Scripts                                            | Function                                                                                                       |
 | -------------------------- | ------------ | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
 | `SessionStart.default`     | all sessions | `session-start-context.sh`, `security-sentinel.sh` | Injects prior handoff, sprint status, and read-only config-security findings before work starts.               |
-| `PreToolUse.edit`          | `Edit        | Write`                                             | `worktree-guard.sh`, `pre-edit-guard.sh`                                                                       | Enforces worktree policy and plan/contract readiness before implementation edits.                               |
+| `PreToolUse.edit`          | `Edit        | Write`                                             | `worktree-guard.sh`, `pre-edit-guard.sh`                                                                       | Enforces worktree/path safety; plan readiness is advisory by default and may be explicitly enforced.                               |
 | `PreToolUse.subagent`      | `Task        | Agent                                              | SendUserMessage`                                                                                               | `subagent-return-channel-guard.sh`                                                                              | Keeps delegated work returning through the parent session instead of leaking completion claims. |
 | `PostToolUse.edit`         | `Edit        | Write`                                             | `post-edit-guard.sh`                                                                                           | Records edit traces, refreshes handoff/task status, and queues architecture drift when controlled files change. |
 | `PostToolUse.bash`         | `Bash`       | `post-bash.sh`                                     | Observes command results and captures verification evidence without replacing the command runner.              |
@@ -452,8 +466,8 @@ hook block 工作时，先看 terminal 里的结构化输出。核心字段是
 
 ## 当前 Release
 
-- npm package：`repo-harness@1.2.0`
-- Generated workflow stamp：`repo-harness@1.2.0+template@1.2.0`
+- npm package：`repo-harness@1.3.0`
+- Generated workflow stamp：`repo-harness@1.3.0+template@1.3.0`
 - GitHub repository：`Ancienttwo/repo-harness`
 - Release history：[`docs/CHANGELOG.md`](docs/CHANGELOG.md)
 

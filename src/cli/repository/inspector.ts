@@ -65,37 +65,68 @@ export function searchRepository(repoRoot: string, policy: McpPolicy, opts: Sear
   query: string;
   results: Array<{ path: string; line: number; text: string }>;
   scannedFiles: number;
+  policyDeniedFiles: number;
+  skippedLargeFiles: number;
+  skippedBinaryFiles: number;
   truncated: boolean;
+  truncationReason?: "max_results" | "max_files";
 } {
   const query = opts.query;
   if (!query.trim()) throw new Error('search query is required');
   const maxResults = Math.min(Math.max(opts.maxResults ?? 100, 1), 500);
   const maxFiles = Math.min(Math.max(opts.maxFiles ?? 5000, 1), 20_000);
   const includes = opts.includeGlobs ?? [];
-  const excludes = [...DEFAULT_EXCLUDES, ...(opts.excludeGlobs ?? [])];
+  // Explicit include globs opt into a targeted scan; MCP read policy remains the single authority.
+  const excludes = [...(includes.length === 0 ? DEFAULT_EXCLUDES : []), ...(opts.excludeGlobs ?? [])];
   const files: string[] = [];
   walk(repoRoot, '', maxFiles, excludes, files);
   const needle = opts.caseSensitive ? query : query.toLowerCase();
   const results: Array<{ path: string; line: number; text: string }> = [];
   let scannedFiles = 0;
+  let policyDeniedFiles = 0;
+  let skippedLargeFiles = 0;
+  let skippedBinaryFiles = 0;
   for (const path of files) {
     if (results.length >= maxResults) break;
     if (!isIncluded(path, includes) || isExcluded(path, excludes)) continue;
     const decision = resolveMcpPath(repoRoot, path, policy, 'read');
-    if (!decision.ok || !decision.absolutePath) continue;
+    if (!decision.ok || !decision.absolutePath) {
+      policyDeniedFiles += 1;
+      continue;
+    }
     const size = statSync(decision.absolutePath).size;
-    if (size > policy.maxFileBytes) continue;
+    if (size > policy.maxFileBytes) {
+      skippedLargeFiles += 1;
+      continue;
+    }
     const bytes = readFileSync(decision.absolutePath);
-    if (binary(bytes)) continue;
+    if (binary(bytes)) {
+      skippedBinaryFiles += 1;
+      continue;
+    }
     scannedFiles += 1;
     const raw = bytes.toString('utf-8');
-  const lines = raw.split(/\r?\n/);
+    const lines = raw.split(/\r?\n/);
     for (let index = 0; index < lines.length && results.length < maxResults; index += 1) {
       const haystack = opts.caseSensitive ? lines[index] : lines[index].toLowerCase();
       if (haystack.includes(needle)) results.push({ path, line: index + 1, text: lines[index].slice(0, 500) });
     }
   }
-  return { query, results, scannedFiles, truncated: results.length >= maxResults || files.length >= maxFiles };
+  const truncationReason = results.length >= maxResults
+    ? 'max_results' as const
+    : files.length >= maxFiles
+      ? 'max_files' as const
+      : undefined;
+  return {
+    query,
+    results,
+    scannedFiles,
+    policyDeniedFiles,
+    skippedLargeFiles,
+    skippedBinaryFiles,
+    truncated: Boolean(truncationReason),
+    truncationReason,
+  };
 }
 
 export function readRepositoryRange(repoRoot: string, policy: McpPolicy, path: string, startLine = 1, endLine = startLine + 199): {

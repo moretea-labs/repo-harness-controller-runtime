@@ -8,8 +8,8 @@ import {
   writeFileSync,
 } from "fs";
 import { dirname, join } from "path";
-import { startTaskJob } from "../agent-jobs/job-manager";
-import { createIssue, getIssue } from "../controller/issue-store";
+import { cancelAgentJob, getAgentJob, startTaskJob } from "../agent-jobs/job-manager";
+import { createIssue, getIssue, removeEphemeralIssue } from "../controller/issue-store";
 import { runControllerCheck } from "../controller/check-runner";
 import {
   DEFAULT_AGENT_TIMEOUT_MS,
@@ -18,6 +18,7 @@ import {
 } from "../controller/runtime-config";
 import { loadMcpLocalConfig } from "../mcp/auth";
 import type { ControllerAgent, ControllerTask } from "../controller/types";
+import { taskExecutionPolicy } from "../controller/execution-policy";
 import { tryAppendControllerWorklogEvent } from "../controller/worklog";
 import type {
   LaunchTaskPayload,
@@ -108,7 +109,7 @@ export function loadLocalBridgeConfig(repoRoot: string): LocalBridgeConfig {
   if (!existsSync(path)) return { version: 1 };
   try {
     const parsed = readJson<LocalBridgeConfig>(path);
-    return { version: 1, ...parsed };
+    return { ...parsed, version: 1 };
   } catch (_error) {
     return { version: 1 };
   }
@@ -148,8 +149,7 @@ function resolvedJobTimeout(repoRoot: string, value: unknown): number {
 }
 
 function taskApproval(task: ControllerTask): LocalBridgeApproval {
-  if (task.risk === "high" || task.allowedPaths.length === 0) return "confirm";
-  return "auto";
+  return taskExecutionPolicy(task).approval;
 }
 
 function stricterApproval(
@@ -181,10 +181,24 @@ function defaultApproval(
     return taskApproval(task);
   }
   const input = payload as QuickAgentSessionPayload;
-  return input.risk === "high" ||
-    normalizeStringList(input.allowedPaths).length === 0
-    ? "confirm"
-    : "auto";
+  const synthetic: ControllerTask = {
+    id: "QUICK",
+    title: input.title || "Quick Agent",
+    objective: input.objective || "Execute a quick agent session.",
+    status: "ready",
+    dependsOn: [],
+    allowedPaths: normalizeStringList(input.allowedPaths),
+    forbiddenPaths: normalizeStringList(input.forbiddenPaths),
+    checks: normalizeStringList(input.checks),
+    acceptanceCriteria: normalizeStringList(input.acceptanceCriteria),
+    risk: input.risk ?? "low",
+    recommendedAgent: input.agent ?? "codex",
+    notes: [],
+    runIds: [],
+    createdAt: now(),
+    updatedAt: now(),
+  };
+  return taskApproval(synthetic);
 }
 
 function assertApproval(value: string): asserts value is LocalBridgeApproval {
@@ -224,6 +238,7 @@ export function submitLocalBridgeJob(
     status: approval === "auto" ? "approved" : "pending_approval",
     createdAt,
     updatedAt: createdAt,
+    ...(request.action === "quick-agent-session" && (request.payload as QuickAgentSessionPayload).ephemeral !== false ? { ephemeral: true } : {}),
     ...(approval === "auto" ? { approvedAt: createdAt } : {}),
   };
   writeJson(metaPath(repoRoot, job.jobId), job);
@@ -239,34 +254,81 @@ export function submitLocalBridgeJob(
   return job;
 }
 
-export function getLocalBridgeJob(
-  repoRoot: string,
-  jobId: string,
-): LocalBridgeJob {
+function readLocalBridgeJob(repoRoot: string, jobId: string): LocalBridgeJob {
   const path = metaPath(repoRoot, jobId);
-  if (!existsSync(path))
-    throw new Error(`local bridge job not found: ${jobId}`);
+  if (!existsSync(path)) throw new Error(`local bridge job not found: ${jobId}`);
   return readJson<LocalBridgeJob>(path);
 }
 
-export function listLocalBridgeJobs(
-  repoRoot: string,
-  limit = 100,
-): LocalBridgeJob[] {
+function cleanupEphemeralJob(repoRoot: string, job: LocalBridgeJob): void {
+  if (!job.ephemeral || !job.issueId || job.cleanupAt) return;
+  try {
+    removeEphemeralIssue(repoRoot, job.issueId);
+  } catch (_error) {
+    // Cleanup is best-effort and idempotent; Run evidence remains durable.
+  }
+  job.cleanupAt = now();
+  appendEvent(repoRoot, job.jobId, {
+    type: "job_cleaned",
+    message: `Ephemeral Quick Agent metadata for ${job.issueId} was cleaned.`,
+  });
+}
+
+function refreshLocalBridgeJob(repoRoot: string, job: LocalBridgeJob): LocalBridgeJob {
+  if (!job.runId || !["dispatched", "running"].includes(job.status)) return job;
+  try {
+    const run = getAgentJob(repoRoot, job.runId);
+    const previous = job.status;
+    if (["queued", "running", "waiting_for_user"].includes(run.status)) {
+      job.status = run.status === "queued" ? "dispatched" : "running";
+      delete job.finishedAt;
+    } else {
+      job.status = run.status === "succeeded"
+        ? "succeeded"
+        : run.status === "cancelled"
+          ? "cancelled"
+          : "failed";
+      job.finishedAt = run.finishedAt ?? now();
+      job.error = run.status === "succeeded" ? undefined : run.error ?? `Run ended as ${run.status}`;
+      job.result = {
+        ...(job.result ?? {}),
+        runId: run.runId,
+        runStatus: run.status,
+        exitCode: run.exitCode,
+        integratedSessionId: run.integratedSessionId,
+      };
+      cleanupEphemeralJob(repoRoot, job);
+    }
+    if (previous !== job.status) {
+      appendEvent(repoRoot, job.jobId, {
+        type: job.status === "succeeded" ? "job_succeeded" : job.status === "cancelled" ? "job_cancelled" : job.status === "failed" ? "job_failed" : "job_started",
+        message: `Linked Run ${run.runId} moved Local Job to ${job.status}.`,
+        data: { runStatus: run.status },
+      });
+    }
+    return saveJob(repoRoot, job);
+  } catch (error) {
+    job.status = "failed";
+    job.error = error instanceof Error ? error.message : String(error);
+    job.finishedAt = now();
+    cleanupEphemeralJob(repoRoot, job);
+    return saveJob(repoRoot, job);
+  }
+}
+
+export function getLocalBridgeJob(repoRoot: string, jobId: string): LocalBridgeJob {
+  return refreshLocalBridgeJob(repoRoot, readLocalBridgeJob(repoRoot, jobId));
+}
+
+export function listLocalBridgeJobs(repoRoot: string, limit = 100): LocalBridgeJob[] {
   const root = join(repoRoot, JOB_ROOT);
   if (!existsSync(root)) return [];
   return readdirSync(root, { withFileTypes: true })
-    .filter(
-      (entry) =>
-        entry.isDirectory() && existsSync(join(root, entry.name, "job.json")),
-    )
-    .map((entry) =>
-      readJson<LocalBridgeJob>(join(root, entry.name, "job.json")),
-    )
+    .filter((entry) => entry.isDirectory() && existsSync(join(root, entry.name, "job.json")))
+    .map((entry) => refreshLocalBridgeJob(repoRoot, readJson<LocalBridgeJob>(join(root, entry.name, "job.json"))))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
     .slice(0, Math.max(1, Math.min(limit, 500)));
 }
-
 export function getLocalBridgeJobEvents(
   repoRoot: string,
   jobId: string,
@@ -311,13 +373,16 @@ export function cancelLocalBridgeJob(
   jobId: string,
 ): LocalBridgeJob {
   const job = getLocalBridgeJob(repoRoot, jobId);
-  if (["succeeded", "failed", "cancelled", "dispatched"].includes(job.status))
-    return job;
+  if (["succeeded", "failed", "cancelled"].includes(job.status)) return job;
+  if (job.runId) {
+    try { cancelAgentJob(repoRoot, job.runId); } catch (_error) { /* remote sessions may require provider UI */ }
+  }
   job.status = "cancelled";
   job.finishedAt = now();
+  cleanupEphemeralJob(repoRoot, job);
   appendEvent(repoRoot, job.jobId, {
     type: "job_cancelled",
-    message: "Cancelled before execution.",
+    message: job.runId ? `Cancelled linked Run ${job.runId}.` : "Cancelled before execution.",
   });
   return saveJob(repoRoot, job);
 }
@@ -352,12 +417,14 @@ function executeLaunchTask(
     baseRef: payload.baseRef,
     model: payload.model,
     createPullRequest: payload.createPullRequest,
+    approveRisk: job.approval !== "auto" || payload.approveRisk === true,
+    approveDestructive: (job.approval === "manual-only" && Boolean(job.approvedAt)) || payload.approveDestructive === true,
   });
   job.runId = run.runId;
   job.issueId = payload.issueId;
   job.taskId = payload.taskId;
   job.status = "dispatched";
-  job.finishedAt = now();
+  delete job.finishedAt;
   job.result = {
     runId: run.runId,
     provider: run.provider,
@@ -386,6 +453,8 @@ function executeQuickSession(
     title,
     kind: "investigation",
     allowWhileFocused: true,
+    ephemeral: payload.ephemeral !== false,
+    ephemeralOwnerJobId: job.jobId,
     summary: payload.summary?.trim() || objective,
     goals: [objective],
     nonGoals: [
@@ -418,12 +487,14 @@ function executeQuickSession(
     agent: payload.agent ?? "codex",
     timeoutMs: resolvedJobTimeout(repoRoot, payload.timeoutMs),
     isolate: resolvedIsolation(payload),
+    approveRisk: job.approval !== "auto",
+    approveDestructive: job.approval === "manual-only" && Boolean(job.approvedAt),
   });
   job.runId = run.runId;
   job.issueId = issue.id;
   job.taskId = task.id;
   job.status = "dispatched";
-  job.finishedAt = now();
+  delete job.finishedAt;
   job.result = {
     issueId: issue.id,
     taskId: task.id,
@@ -492,6 +563,7 @@ export function executeLocalBridgeJob(
     job.status = "failed";
     job.error = error instanceof Error ? error.message : String(error);
     job.finishedAt = now();
+    cleanupEphemeralJob(repoRoot, job);
     appendEvent(repoRoot, job.jobId, {
       type: "job_failed",
       message: job.error,

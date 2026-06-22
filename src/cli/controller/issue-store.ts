@@ -13,9 +13,10 @@ import type {
   TaskDraft,
   TaskStatus,
   TaskVerification,
+  TaskReadiness,
 } from './types';
 import { loadControllerProjectState, saveControllerProjectState } from './project-state';
-import { readIssueRunEvidence, readTaskRunEvidence } from './run-evidence';
+import { readActiveRunEvidence, readIssueRunEvidence, readTaskRunEvidence } from './run-evidence';
 import {
   resolveEffectiveTaskState,
   resolveIssueLifecycleStatus,
@@ -23,8 +24,10 @@ import {
   resolveTaskDependencies,
 } from './task-status-resolver';
 import { tryAppendControllerWorklogEvent } from './worklog';
+import { executionScopesConflict, taskExecutionPolicy, verificationEvidencePassed } from './execution-policy';
 
 const ISSUE_ROOT = 'tasks/issues';
+const EPHEMERAL_ISSUE_ROOT = '.ai/harness/ephemeral-issues';
 
 function slugify(value: string): string {
   return value.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64) || 'issue';
@@ -43,18 +46,28 @@ function normalizeStrings(value: unknown): string[] {
   return Array.from(new Set(value.map((entry) => String(entry).trim()).filter(Boolean)));
 }
 
-function issueFiles(repoRoot: string): string[] {
-  const root = join(repoRoot, ISSUE_ROOT);
-  if (!existsSync(root)) return [];
-  return readdirSync(root).filter((name) => name.endsWith('.issue.json')).sort();
+function issueRoot(issue?: Pick<ControllerIssue, 'ephemeral'>): string {
+  return issue?.ephemeral ? EPHEMERAL_ISSUE_ROOT : ISSUE_ROOT;
 }
 
-function issuePath(repoRoot: string, issue: Pick<ControllerIssue, 'id' | 'slug'>): string {
-  return join(repoRoot, ISSUE_ROOT, `${issue.id}-${issue.slug}.issue.json`);
+function issueFiles(repoRoot: string, includeEphemeral = false): Array<{ root: string; name: string }> {
+  const roots = includeEphemeral ? [ISSUE_ROOT, EPHEMERAL_ISSUE_ROOT] : [ISSUE_ROOT];
+  return roots.flatMap((root) => {
+    const absolute = join(repoRoot, root);
+    if (!existsSync(absolute)) return [];
+    return readdirSync(absolute)
+      .filter((name) => name.endsWith('.issue.json'))
+      .sort()
+      .map((name) => ({ root, name }));
+  });
 }
 
-function markdownPath(repoRoot: string, issue: Pick<ControllerIssue, 'id' | 'slug'>): string {
-  return join(repoRoot, ISSUE_ROOT, `${issue.id}-${issue.slug}.issue.md`);
+function issuePath(repoRoot: string, issue: Pick<ControllerIssue, 'id' | 'slug' | 'ephemeral'>): string {
+  return join(repoRoot, issueRoot(issue), `${issue.id}-${issue.slug}.issue.json`);
+}
+
+function markdownPath(repoRoot: string, issue: Pick<ControllerIssue, 'id' | 'slug' | 'ephemeral'>): string {
+  return join(repoRoot, issueRoot(issue), `${issue.id}-${issue.slug}.issue.md`);
 }
 
 function renderGitHubLink(link?: GitHubIssueLink): string[] {
@@ -90,7 +103,7 @@ function renderIssueMarkdown(issue: ControllerIssue): string {
     `status: ${JSON.stringify(issue.status)}`,
     `updated_at: ${JSON.stringify(issue.updatedAt)}`,
     ...(issue.archivedAt ? [`archived_at: ${JSON.stringify(issue.archivedAt)}`] : []),
-    'source: "repo-harness-controller-v6"',
+    'source: "repo-harness-controller-v7"',
     '---',
     '',
     `# ${issue.title}`,
@@ -124,9 +137,9 @@ function renderIssueMarkdown(issue: ControllerIssue): string {
 }
 
 function writeIssue(repoRoot: string, issue: ControllerIssue): ControllerIssue {
-  const root = join(repoRoot, ISSUE_ROOT);
+  const root = join(repoRoot, issueRoot(issue));
   mkdirSync(root, { recursive: true });
-  issue.schemaVersion = 3;
+  issue.schemaVersion = 4;
   const expectedJson = issuePath(repoRoot, issue);
   const expectedMarkdown = markdownPath(repoRoot, issue);
   for (const name of readdirSync(root)) {
@@ -155,14 +168,14 @@ function normalizeLoadedIssue(issue: ControllerIssue): ControllerIssue {
   return issue;
 }
 
-export function listIssues(repoRoot: string): ControllerIssue[] {
-  return issueFiles(repoRoot)
-    .map((name) => normalizeLoadedIssue(JSON.parse(readFileSync(join(repoRoot, ISSUE_ROOT, name), 'utf-8')) as ControllerIssue))
+export function listIssues(repoRoot: string, options: { includeEphemeral?: boolean } = {}): ControllerIssue[] {
+  return issueFiles(repoRoot, options.includeEphemeral ?? false)
+    .map(({ root, name }) => normalizeLoadedIssue(JSON.parse(readFileSync(join(repoRoot, root, name), 'utf-8')) as ControllerIssue))
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
 export function getIssue(repoRoot: string, id: string): ControllerIssue {
-  const issue = listIssues(repoRoot).find((entry) => entry.id === id);
+  const issue = listIssues(repoRoot, { includeEphemeral: true }).find((entry) => entry.id === id);
   if (!issue) throw new Error(`issue not found: ${id}`);
   return issue;
 }
@@ -273,8 +286,103 @@ function buildTasks(drafts: TaskDraft[], now = new Date().toISOString()): Contro
   return tasks;
 }
 
+function buildTaskReadiness(
+  repoRoot: string,
+  issue: ControllerIssue,
+  task: ControllerTask,
+  states: ReadonlyMap<string, ReturnType<typeof resolveEffectiveTaskState>>,
+  options: { approveRisk?: boolean; approveDestructive?: boolean; retryFromRunId?: string } = {},
+): TaskReadiness {
+  const blockers: IssueReadinessFinding[] = [];
+  const warnings: IssueReadinessFinding[] = [];
+  const lifecycle = resolveIssueLifecycleStatus(issue);
+  const state = states.get(task.id) ?? effectiveTaskState(repoRoot, issue, task);
+  const policy = taskExecutionPolicy(task);
+  const add = (code: string, level: 'blocker' | 'warning', message: string): void => {
+    (level === 'blocker' ? blockers : warnings).push(finding(code, level, message, task.id));
+  };
+
+  if (lifecycle !== 'active') add('ISSUE_INACTIVE', 'blocker', `Parent Issue lifecycle is ${lifecycle}.`);
+  if (!task.objective.trim()) add('TASK_OBJECTIVE_MISSING', 'blocker', 'Task objective is required.');
+  for (const message of policy.warnings) add('TASK_POLICY_WARNING', 'warning', message);
+  if (task.risk === 'high' && task.recommendedAgent === 'github-copilot') {
+    add('HIGH_RISK_CLOUD_AGENT', 'warning', 'High-risk cloud execution requires explicit review before merge.');
+  }
+  if (state.multipleActiveRuns) add('MULTIPLE_ACTIVE_RUNS', 'blocker', `Task has multiple active Runs: ${state.activeRunIds.join(', ')}.`);
+  else if (state.activeRunIds.length > 0) add('ACTIVE_RUN_CONFLICT', 'blocker', `Task already has active Run evidence: ${state.activeRunIds.join(', ')}.`);
+
+  if (policy.executionClass !== 'read_only' && task.allowedPaths.length > 0) {
+    for (const run of readActiveRunEvidence(repoRoot)) {
+      if (run.issueId === issue.id && run.taskId === task.id) continue;
+      if (!run.executionClass || !run.allowedPaths) continue;
+      if (!executionScopesConflict(
+        { executionClass: policy.executionClass, allowedPaths: task.allowedPaths },
+        { executionClass: run.executionClass, allowedPaths: run.allowedPaths },
+      )) continue;
+      add('ACTIVE_SCOPE_CONFLICT', 'blocker', `Declared write scope overlaps active Run ${run.runId} (${run.issueId}/${run.taskId}).`);
+    }
+  }
+
+  const retryAuthorized = state.requiresExplicitRetry && state.retryable && options.retryFromRunId === state.latestRunId;
+  if (state.requiresExplicitRetry && !retryAuthorized) {
+    add('EXPLICIT_RETRY_REQUIRED', 'blocker', `Latest Run ${state.latestRunId ?? 'unknown'} requires an explicit retry.`);
+  } else if (!state.dispatchable && !retryAuthorized) {
+    add('TASK_NOT_DISPATCHABLE', 'blocker', `Effective status ${state.effectiveStatus} is not dispatchable: ${state.reason}`);
+  }
+
+  const dependencies = resolveTaskDependencies(issue, task, states);
+  for (const id of dependencies.pendingTaskIds) add('PENDING_DEPENDENCY', 'blocker', `Dependency ${id} is not complete.`);
+  for (const id of dependencies.cancelledTaskIds) add('CANCELLED_DEPENDENCY', 'blocker', `Dependency ${id} is cancelled or inactive.`);
+  for (const id of dependencies.missingTaskIds) add('MISSING_DEPENDENCY', 'blocker', `Dependency ${id} does not exist.`);
+  for (const migration of dependencies.supersededMigrations) {
+    add('SUPERSEDED_DEPENDENCY_MIGRATION', 'warning', `Dependency ${migration.dependencyTaskId} was superseded by ${migration.replacementTaskIds.join(', ')}; replacement states are authoritative.`);
+  }
+
+  if (policy.requiresScopedPaths && task.allowedPaths.length === 0) {
+    add('TASK_SCOPE_REQUIRED', 'blocker', `${policy.executionClass} requires an explicit allowed path scope.`);
+  }
+  if (policy.approval === 'confirm' && !options.approveRisk) {
+    add('RISK_CONFIRMATION_REQUIRED', 'blocker', `${policy.executionClass} requires explicit risk confirmation.`);
+  }
+  if (policy.approval === 'manual-only' && !options.approveDestructive) {
+    add('DESTRUCTIVE_APPROVAL_REQUIRED', 'blocker', 'Destructive execution requires explicit manual approval.');
+  }
+
+  const approvalBlockerCodes = new Set(['RISK_CONFIRMATION_REQUIRED', 'DESTRUCTIVE_APPROVAL_REQUIRED']);
+  const nonApprovalBlockers = blockers.filter((entry) => !approvalBlockerCodes.has(entry.code));
+  const approvalSatisfied = !blockers.some((entry) => approvalBlockerCodes.has(entry.code));
+  const score = Math.max(0, 100 - blockers.length * 25 - warnings.length * 3);
+  return {
+    issueId: issue.id,
+    taskId: task.id,
+    ready: blockers.length === 0,
+    queueable: nonApprovalBlockers.length === 0,
+    approvalSatisfied,
+    score,
+    blockers,
+    warnings,
+    approval: policy.approval,
+    executionClass: policy.executionClass,
+    effectiveStatus: state.effectiveStatus,
+    requiresExplicitRetry: state.requiresExplicitRetry,
+    retryable: state.retryable,
+  };
+}
+
+export function inspectTaskReadiness(
+  repoRoot: string,
+  issueIdValue: string,
+  taskId: string,
+  options: { approveRisk?: boolean; approveDestructive?: boolean; retryFromRunId?: string } = {},
+): TaskReadiness {
+  const issue = getIssue(repoRoot, issueIdValue);
+  const task = issue.tasks.find((entry) => entry.id === taskId);
+  if (!task) throw new Error(`task not found: ${issueIdValue}/${taskId}`);
+  const states = resolveIssueTaskStates(issue, readIssueRunEvidence(repoRoot, issue));
+  return buildTaskReadiness(repoRoot, issue, task, states, options);
+}
+
 function refreshReadiness(repoRoot: string, issue: ControllerIssue): void {
-  // Explicit parent lifecycle is never inferred away by child state.
   if (issue.archivedAt || issue.status === 'cancelled') return;
 
   const states = resolveIssueTaskStates(issue, readIssueRunEvidence(repoRoot, issue));
@@ -282,10 +390,17 @@ function refreshReadiness(repoRoot: string, issue: ControllerIssue): void {
     const state = states.get(task.id)!;
     if (state.terminal || state.inactive || state.requiresExplicitRetry || state.activeRunIds.length > 0) continue;
     if (!['planned', 'ready', 'launch_blocked'].includes(task.status)) continue;
-    const dependencies = resolveTaskDependencies(issue, task, states);
-    task.status = dependencies.cancelledTaskIds.length > 0 || dependencies.missingTaskIds.length > 0
-      ? 'launch_blocked'
-      : dependencies.ready ? 'ready' : 'planned';
+    const readiness = buildTaskReadiness(repoRoot, issue, task, states, {
+      // Readiness status reflects executable work, while high-risk confirmation is supplied at dispatch time.
+      approveRisk: true,
+      approveDestructive: false,
+    });
+    const nonApprovalBlockers = readiness.blockers.filter((entry) => entry.code !== 'DESTRUCTIVE_APPROVAL_REQUIRED');
+    task.status = nonApprovalBlockers.length === 0
+      ? 'ready'
+      : nonApprovalBlockers.some((entry) => ['CANCELLED_DEPENDENCY', 'MISSING_DEPENDENCY', 'TASK_SCOPE_REQUIRED'].includes(entry.code))
+        ? 'launch_blocked'
+        : 'planned';
   }
 
   const refreshedStates = resolveIssueTaskStates(issue, readIssueRunEvidence(repoRoot, issue));
@@ -294,11 +409,12 @@ function refreshReadiness(repoRoot: string, issue: ControllerIssue): void {
     return !state.terminal && !state.inactive;
   });
   if (issue.tasks.length > 0 && issue.tasks.every((task) => refreshedStates.get(task.id)?.effectiveStatus === 'done')) issue.status = 'done';
-  else if (active.some((task) => ['running', 'review', 'integrated', 'verifying', 'changes_requested', 'verified', 'done'].includes(refreshedStates.get(task.id)!.effectiveStatus))) issue.status = 'in_progress';
-  else if (active.some((task) => refreshedStates.get(task.id)!.effectiveStatus === 'launch_blocked')) issue.status = 'launch_blocked';
-  else if (active.length > 0) issue.status = 'planned';
+  else if (active.some((task) => ['queued', 'running', 'waiting_for_user', 'review', 'integrated', 'verifying', 'changes_requested', 'verified', 'done'].includes(refreshedStates.get(task.id)!.effectiveStatus))) issue.status = 'in_progress';
+  else {
+    const executable = active.some((task) => buildTaskReadiness(repoRoot, issue, task, refreshedStates, { approveRisk: true, approveDestructive: true }).ready);
+    issue.status = executable || active.length > 0 ? 'planned' : 'launch_blocked';
+  }
 }
-
 export function createIssue(repoRoot: string, input: {
   title: string;
   kind?: IssueKind;
@@ -311,6 +427,8 @@ export function createIssue(repoRoot: string, input: {
   allowWhileFocused?: boolean;
   allowDuplicate?: boolean;
   allowWhenPaused?: boolean;
+  ephemeral?: boolean;
+  ephemeralOwnerJobId?: string;
 }): ControllerIssue {
   const title = input.title.trim();
   if (!title) throw new Error('issue title is required');
@@ -319,27 +437,19 @@ export function createIssue(repoRoot: string, input: {
   const normalizedTitle = title.toLowerCase().replace(/[^a-z0-9\u3400-\u9fff]+/g, '');
   const duplicate = existingIssues.find((entry) => !entry.archivedAt && !['done', 'cancelled'].includes(entry.status)
     && entry.title.toLowerCase().replace(/[^a-z0-9\u3400-\u9fff]+/g, '') === normalizedTitle);
-  if (duplicate && !input.allowDuplicate) {
-    throw new Error(`an active Issue with the same title already exists: ${duplicate.id}; append a Task or explicitly allow a duplicate`);
-  }
-  if (projectState.issueCreationMode === 'paused' && !input.allowWhenPaused) {
+  // Duplicate and focus signals are governance hints, not execution gates.
+  const duplicateHint = !input.ephemeral && duplicate && !input.allowDuplicate ? duplicate.id : undefined;
+  if (!input.ephemeral && projectState.issueCreationMode === 'paused' && !input.allowWhenPaused) {
     throw new Error('Issue creation is paused; resume the creation policy or explicitly override it');
   }
   const activeExisting = existingIssues.filter((entry) => !entry.archivedAt && !['done', 'cancelled'].includes(entry.status));
   const focused = projectState.currentIssueId
     ? activeExisting.find((entry) => entry.id === projectState.currentIssueId)
     : undefined;
-  if (projectState.issueCreationMode === 'focus_only' && !input.allowWhileFocused) {
-    if (focused) {
-      throw new Error(`current execution focus ${focused.id} is still active; append or split a Task there instead of creating another Issue`);
-    }
-    if (activeExisting.length > 0) {
-      throw new Error(`${activeExisting.length} active Issue(s) already exist without a selected current focus; select and converge one before creating another Issue`);
-    }
-  }
+  // focus_only is retained as a UI preference only. Multiple active Issues do not block creation or execution.
   const now = new Date().toISOString();
   const issue: ControllerIssue = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     id: issueId(),
     title,
     slug: slugify(title),
@@ -351,6 +461,7 @@ export function createIssue(repoRoot: string, input: {
     acceptanceCriteria: normalizeStrings(input.acceptanceCriteria),
     relatedArtifacts: normalizeStrings(input.relatedArtifacts),
     tasks: buildTasks(input.tasks ?? [], now),
+    ...(input.ephemeral ? { ephemeral: true, ephemeralOwnerJobId: input.ephemeralOwnerJobId?.trim() || undefined } : {}),
     createdAt: now,
     updatedAt: now,
   };
@@ -367,9 +478,12 @@ export function createIssue(repoRoot: string, input: {
       taskCount: issue.tasks.length,
       creationPolicy: projectState.issueCreationMode,
       policyOverride: Boolean(input.allowWhileFocused || input.allowWhenPaused || input.allowDuplicate),
+      ephemeral: Boolean(input.ephemeral),
+      duplicateHint,
+      focusIsInformational: true,
     },
   });
-  if (!focused && activeExisting.length === 0 && !['done', 'cancelled'].includes(issue.status)) {
+  if (!input.ephemeral && !focused && activeExisting.length === 0 && !['done', 'cancelled'].includes(issue.status)) {
     saveControllerProjectState(repoRoot, { currentIssueId: issue.id }, 'issue-creation-policy');
   }
   return written;
@@ -582,56 +696,73 @@ function finding(code: string, level: 'blocker' | 'warning', message: string, ta
 
 export function inspectIssueReadiness(repoRoot: string, issueIdValue: string): IssueReadiness {
   const issue = getIssue(repoRoot, issueIdValue);
-  const findings: IssueReadinessFinding[] = [];
   const lifecycle = resolveIssueLifecycleStatus(issue);
   const states = resolveIssueTaskStates(issue, readIssueRunEvidence(repoRoot, issue));
-  if (lifecycle !== 'active') findings.push(finding('ISSUE_TERMINAL', 'blocker', `Issue lifecycle is ${lifecycle}; Tasks cannot be launched.`));
-  if (!issue.summary.trim()) findings.push(finding('ISSUE_SUMMARY_MISSING', 'blocker', 'Issue summary is required before launch.'));
-  if (issue.goals.length === 0) findings.push(finding('ISSUE_GOALS_MISSING', 'warning', 'Issue has no explicit goals.'));
-  if (issue.acceptanceCriteria.length === 0) findings.push(finding('ISSUE_ACCEPTANCE_MISSING', 'blocker', 'Issue-level acceptance criteria are required.'));
-  const launchRelevantTasks = issue.tasks.filter((task) => {
-    const state = states.get(task.id)!;
-    return !state.terminal && !state.inactive;
-  });
-  if (launchRelevantTasks.length === 0 && lifecycle === 'active') findings.push(finding('NO_ACTIVE_TASKS', 'blocker', 'Issue has no active Tasks.'));
-  for (const task of launchRelevantTasks) {
-    const state = states.get(task.id)!;
-    if (state.multipleActiveRuns) findings.push(finding('MULTIPLE_ACTIVE_RUNS', 'blocker', `Task has multiple active Run records: ${state.activeRunIds.join(', ')}. Resolve them before launch.`, task.id));
-    else if (state.activeRunIds.length > 0 && !state.activeRunId) findings.push(finding('STALE_ACTIVE_RUN', 'blocker', `Task has stale active Run evidence: ${state.activeRunIds.join(', ')}. Refresh or cancel it before launch.`, task.id));
-    if (!task.objective.trim()) findings.push(finding('TASK_OBJECTIVE_MISSING', 'blocker', 'Task objective is required.', task.id));
-    if (task.allowedPaths.length === 0) findings.push(finding('TASK_SCOPE_MISSING', task.risk === 'high' ? 'blocker' : 'warning', 'Task has no allowed path scope.', task.id));
-    if (task.acceptanceCriteria.length === 0) findings.push(finding('TASK_ACCEPTANCE_MISSING', 'blocker', 'Task acceptance criteria are required.', task.id));
-    if (task.checks.length === 0) findings.push(finding('TASK_CHECKS_MISSING', task.risk === 'high' ? 'blocker' : 'warning', 'Task has no named verification checks.', task.id));
-    if (task.risk === 'high' && task.recommendedAgent === 'github-copilot') findings.push(finding('HIGH_RISK_CLOUD_AGENT', 'warning', 'High-risk Task is assigned to a GitHub cloud session; require explicit review before merge.', task.id));
-    const dependencies = resolveTaskDependencies(issue, task, states);
-    for (const dependencyId of dependencies.cancelledTaskIds) findings.push(finding('CANCELLED_DEPENDENCY', 'blocker', `Task depends on cancelled/inactive Task ${dependencyId}. Repair the dependency before launch.`, task.id));
-    for (const dependencyId of dependencies.missingTaskIds) findings.push(finding('MISSING_DEPENDENCY', 'blocker', `Task dependency ${dependencyId} does not exist.`, task.id));
-    for (const migration of dependencies.supersededMigrations) findings.push(finding('STALE_SUPERSEDED_DEPENDENCY', 'blocker', `Task still points at superseded Task ${migration.dependencyTaskId}; migrate to ${migration.replacementTaskIds.join(', ')}.`, task.id));
+  const issueFindings: IssueReadinessFinding[] = [];
+  if (lifecycle !== 'active') issueFindings.push(finding('ISSUE_INACTIVE', 'blocker', `Issue lifecycle is ${lifecycle}.`));
+  if (!issue.summary.trim()) issueFindings.push(finding('ISSUE_SUMMARY_MISSING', 'warning', 'Issue summary is absent; Task execution remains allowed.'));
+  if (issue.goals.length === 0) issueFindings.push(finding('ISSUE_GOALS_MISSING', 'warning', 'Issue has no explicit goals.'));
+  if (issue.acceptanceCriteria.length === 0) issueFindings.push(finding('ISSUE_ACCEPTANCE_MISSING', 'warning', 'Issue-level acceptance criteria are absent; Task-local evidence is authoritative.'));
+  try { validateTaskGraph(issue.tasks); } catch (error) {
+    issueFindings.push(finding(
+      'TASK_GRAPH_INVALID',
+      'warning',
+      `${error instanceof Error ? error.message : String(error)} Task-local dependency findings remain authoritative for launch.`,
+    ));
   }
-  try { validateTaskGraph(issue.tasks); } catch (error) { findings.push(finding('TASK_GRAPH_INVALID', 'blocker', error instanceof Error ? error.message : String(error))); }
-  const readyTasks = launchRelevantTasks.filter((task) => {
-    const state = states.get(task.id)!;
-    return state.dispatchable && resolveTaskDependencies(issue, task, states).ready;
-  });
-  const hasInFlightOrReview = launchRelevantTasks.some((task) => ['queued', 'running', 'waiting_for_user', 'review', 'integrated', 'verifying', 'verified'].includes(states.get(task.id)!.effectiveStatus));
-  if (readyTasks.length === 0 && !hasInFlightOrReview && lifecycle === 'active') findings.push(finding('NO_READY_TASKS', 'blocker', 'Issue has no dispatchable Task. Resolve dependencies, explicitly retry failed work, review pending work, or close the Issue.'));
+
+  const taskReadiness = issue.tasks
+    .filter((task) => {
+      const state = states.get(task.id)!;
+      return !state.terminal && !state.inactive;
+    })
+    .map((task) => buildTaskReadiness(repoRoot, issue, task, states));
+  const readyTasks = taskReadiness.filter((entry) => entry.ready);
+  const queueableTasks = taskReadiness.filter((entry) => entry.queueable);
   const agents: Record<ControllerAgent, number> = { codex: 0, claude: 0, 'github-copilot': 0 };
-  for (const task of readyTasks) agents[task.recommendedAgent] += 1;
-  const blockers = findings.filter((entry) => entry.level === 'blocker');
-  const warnings = findings.filter((entry) => entry.level === 'warning');
-  const score = blockers.some((entry) => entry.code === 'NO_READY_TASKS')
-    ? Math.min(60, Math.max(0, 100 - blockers.length * 20 - warnings.length * 5))
-    : Math.max(0, 100 - blockers.length * 20 - warnings.length * 5);
+  for (const entry of queueableTasks) {
+    const task = issue.tasks.find((candidate) => candidate.id === entry.taskId)!;
+    agents[task.recommendedAgent] += 1;
+  }
+  const taskBlockers = taskReadiness.flatMap((entry) => entry.blockers);
+  const taskWarnings = taskReadiness.flatMap((entry) => entry.warnings);
+  const issueBlockers = issueFindings.filter((entry) => entry.level === 'blocker');
+  // Global blockers are reserved for Issue-wide conditions. Task blockers remain local.
+  const blockers = issueBlockers;
+  const warnings = [...issueFindings.filter((entry) => entry.level === 'warning'), ...taskWarnings];
+  const score = taskReadiness.length === 0
+    ? Math.max(0, 100 - issueBlockers.length * 30 - warnings.length * 3)
+    : Math.round(taskReadiness.reduce((sum, entry) => sum + entry.score, 0) / taskReadiness.length);
   return {
     issueId: issue.id,
     score,
-    ready: blockers.length === 0 && readyTasks.length > 0,
+    // Issue readiness is an aggregate view only; Task-local readiness remains authoritative.
+    ready: issueBlockers.length === 0 && readyTasks.length > 0,
+    queueable: issueBlockers.length === 0 && queueableTasks.length > 0,
     blockers,
+    taskBlockers,
     warnings,
-    readyTaskIds: readyTasks.map((task) => task.id),
-    suggestedMaxParallel: Math.max(1, Math.min(3, readyTasks.length)),
+    readyTaskIds: readyTasks.map((entry) => entry.taskId),
+    queueableTaskIds: queueableTasks.map((entry) => entry.taskId),
+    approvalPendingTaskIds: queueableTasks.filter((entry) => !entry.approvalSatisfied).map((entry) => entry.taskId),
+    blockedTaskIds: taskReadiness.filter((entry) => !entry.queueable).map((entry) => entry.taskId),
+    taskReadiness,
+    suggestedMaxParallel: Math.max(1, Math.min(3, queueableTasks.length || 1)),
     agents,
   };
+}
+export function removeEphemeralIssue(repoRoot: string, issueIdValue: string): boolean {
+  const issue = getIssue(repoRoot, issueIdValue);
+  if (!issue.ephemeral) throw new Error(`refusing to remove durable Issue ${issueIdValue}`);
+  rmSync(issuePath(repoRoot, issue), { force: true });
+  rmSync(markdownPath(repoRoot, issue), { force: true });
+  tryAppendControllerWorklogEvent(repoRoot, {
+    category: 'issue',
+    action: 'ephemeral_issue_cleaned',
+    summary: `Cleaned ephemeral Issue ${issue.id}.`,
+    issueId: issue.id,
+  });
+  return true;
 }
 
 export function archiveIssue(repoRoot: string, issueIdValue: string): ControllerIssue {
@@ -662,7 +793,8 @@ export function acceptVerifiedTask(repoRoot: string, issueIdValue: string, taskI
   const issue = getIssue(repoRoot, issueIdValue);
   const task = issue.tasks.find((entry) => entry.id === taskId);
   if (!task) throw new Error(`task not found: ${issueIdValue}/${taskId}`);
-  if (task.status !== 'verified' || !task.verification) throw new Error(`task must pass the Verification Gate before acceptance (current: ${task.status})`);
+  if (task.status === 'done') return issue;
+  if (task.status !== 'verified' || !task.verification) throw new Error(`task must have passed required verification before acceptance (current: ${task.status})`);
   return updateTask(repoRoot, issueIdValue, taskId, { status: 'done', note });
 }
 
@@ -670,19 +802,33 @@ export function recordTaskVerification(repoRoot: string, issueIdValue: string, t
   const issue = getIssue(repoRoot, issueIdValue);
   const task = issue.tasks.find((entry) => entry.id === taskId);
   if (!task) throw new Error(`task not found: ${issueIdValue}/${taskId}`);
-  if (!['review', 'integrated', 'verifying'].includes(task.status)) throw new Error(`task cannot be verified from status ${task.status}`);
+  const taskState = effectiveTaskState(repoRoot, issue, task);
+  if (taskState.terminal || taskState.inactive) throw new Error(`task cannot be verified from effective status ${taskState.effectiveStatus}`);
+  if (taskState.activeRunIds.length > 0) throw new Error(`task cannot be verified while Run(s) are active: ${taskState.activeRunIds.join(', ')}`);
+  if (!['planned', 'ready', 'launch_blocked', 'review', 'integrated', 'verifying', 'changes_requested', 'verified'].includes(task.status)) {
+    throw new Error(`task cannot be verified from status ${task.status}`);
+  }
   if (!verification.reviewer.trim()) throw new Error('verification reviewer is required');
   if (verification.checkResults.some((entry) => !entry.checkId.trim())) throw new Error('verification check IDs cannot be empty');
-  const checksOk = task.checks.length > 0
-    ? task.checks.every((checkId) => verification.checkResults.some((entry) => entry.checkId === checkId && entry.ok))
-    : verification.checkResults.length > 0 && verification.checkResults.every((entry) => entry.ok);
-  const acceptanceOk = task.acceptanceCriteria.length === 0
-    ? true
-    : task.acceptanceCriteria.every((criterion) => verification.acceptanceResults.some((entry) => entry.criterion === criterion && entry.ok));
+  if ((verification.commandEvidence ?? []).some((entry) => entry.command.length === 0 || entry.command.some((part) => !part.trim()))) {
+    throw new Error('reported command evidence must contain a non-empty argv');
+  }
+  const policy = taskExecutionPolicy(task);
+  if (policy.requiresScopedPaths && task.allowedPaths.length === 0) {
+    throw new Error(`${policy.executionClass} cannot be verified without an explicit allowed path scope`);
+  }
+  const outcome = verificationEvidencePassed(task, verification, policy);
+  const successful = outcome.ok;
+  const autoComplete = successful && policy.autoCompleteAfterSuccessfulRun && !policy.requiresHumanAcceptance;
+  verification.autoCompleted = autoComplete;
   return updateTask(repoRoot, issueIdValue, taskId, {
-    status: checksOk && acceptanceOk ? 'verified' : 'changes_requested',
+    status: successful ? (autoComplete ? 'done' : 'verified') : 'changes_requested',
     verification,
-    note: checksOk && acceptanceOk ? 'Verification gate passed.' : 'Verification gate failed; changes requested.',
+    note: successful
+      ? autoComplete
+        ? `Verification evidence passed and ${policy.executionClass} policy auto-completed the Task.`
+        : 'Required verification evidence passed; explicit acceptance remains required.'
+      : `Verification evidence is incomplete or failed: ${outcome.reasons.join(' ')}`,
   });
 }
 
@@ -692,20 +838,19 @@ export function projectBoard(repoRoot: string): {
   declaredCounts: Record<string, number>;
   archivedCounts: Record<string, number>;
   readyTasks: Array<Record<string, string>>;
+  queueableTasks: Array<Record<string, string>>;
   currentIssueId?: string;
   archivedIssueCount: number;
 } {
   const issues = listIssues(repoRoot);
   const projectState = loadControllerProjectState(repoRoot);
-  const activeIssues = issues.filter((issue) => resolveIssueLifecycleStatus(issue) === 'active');
-  const queueIssueId = projectState.currentIssueId && activeIssues.some((issue) => issue.id === projectState.currentIssueId)
-    ? projectState.currentIssueId
-    : activeIssues.length === 1 ? activeIssues[0].id : undefined;
   const counts: Record<string, number> = {};
   const declaredCounts: Record<string, number> = {};
   const archivedCounts: Record<string, number> = {};
   const readyTasks: Array<Record<string, string>> = [];
+  const queueableTasks: Array<Record<string, string>> = [];
   const statesByIssue = new Map<string, Map<string, ReturnType<typeof resolveEffectiveTaskState>>>();
+  const readinessByTask = new Map<string, TaskReadiness>();
   for (const issue of issues) {
     const states = resolveIssueTaskStates(issue, readIssueRunEvidence(repoRoot, issue));
     statesByIssue.set(issue.id, states);
@@ -714,9 +859,19 @@ export function projectBoard(repoRoot: string): {
       const state = states.get(task.id)!;
       targetCounts[state.effectiveStatus] = (targetCounts[state.effectiveStatus] ?? 0) + 1;
       declaredCounts[state.declaredStatus] = (declaredCounts[state.declaredStatus] ?? 0) + 1;
-      if (issue.id === queueIssueId && state.dispatchable && resolveTaskDependencies(issue, task, states).ready) {
-        readyTasks.push({ issueId: issue.id, taskId: task.id, title: task.title, agent: task.recommendedAgent, effectiveStatus: state.effectiveStatus });
-      }
+      const readiness = buildTaskReadiness(repoRoot, issue, task, states);
+      readinessByTask.set(`${issue.id}/${task.id}`, readiness);
+      const boardTask = {
+        issueId: issue.id,
+        taskId: task.id,
+        title: task.title,
+        agent: task.recommendedAgent,
+        effectiveStatus: state.effectiveStatus,
+        executionClass: readiness.executionClass,
+        approval: readiness.approval,
+      };
+      if (readiness.queueable) queueableTasks.push(boardTask);
+      if (readiness.ready) readyTasks.push(boardTask);
     }
   }
   return {
@@ -731,9 +886,10 @@ export function projectBoard(repoRoot: string): {
         github: issue.github,
         archivedAt: issue.archivedAt,
         updatedAt: issue.updatedAt,
-        isCurrent: issue.id === queueIssueId,
+        isCurrent: issue.id === projectState.currentIssueId,
         tasks: issue.tasks.map((task) => {
           const state = states.get(task.id)!;
+          const readiness = readinessByTask.get(`${issue.id}/${task.id}`)!;
           return {
             id: task.id,
             title: task.title,
@@ -747,7 +903,9 @@ export function projectBoard(repoRoot: string): {
             activeRunIds: state.activeRunIds,
             multipleActiveRuns: state.multipleActiveRuns,
             verificationStatus: state.verificationStatus,
-            dispatchable: state.dispatchable,
+            dispatchable: readiness.ready,
+            queueable: readiness.queueable,
+            readiness,
             retryable: state.retryable,
             requiresExplicitRetry: state.requiresExplicitRetry,
             dependsOn: task.dependsOn,
@@ -763,8 +921,10 @@ export function projectBoard(repoRoot: string): {
     counts,
     declaredCounts,
     archivedCounts,
+    // Every active Issue contributes independent Tasks. Current focus is informational only.
     readyTasks,
-    currentIssueId: queueIssueId,
+    queueableTasks,
+    currentIssueId: projectState.currentIssueId,
     archivedIssueCount: issues.filter((issue) => Boolean(issue.archivedAt)).length,
   };
 }
