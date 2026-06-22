@@ -7,6 +7,7 @@ import {
   createMcpToolContext as createMultiRepositoryToolContext,
   type McpServerOptions,
 } from './multi-repository';
+import { callRepositoryTool, repositoryToolDefinitions } from './repository-tools';
 
 export type { McpServerOptions } from './multi-repository';
 export { buildMultiRepositoryToolDefinitions, callMultiRepositoryTool } from './multi-repository';
@@ -24,11 +25,13 @@ export function createRepoHarnessMcpServer(opts: McpServerOptions): Server {
     { capabilities: { tools: {} }, instructions: mcpServerInstructions(ctx.policy.profile) },
   );
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: buildMultiRepositoryToolDefinitions(ctx),
+    tools: repositoryToolDefinitions.concat(buildMultiRepositoryToolDefinitions(ctx)),
   }));
   server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name: string; arguments?: unknown } }) => {
     const name = request.params.name;
     const args = (request.params.arguments ?? {}) as Record<string, unknown>;
+    const repositoryResult = callRepositoryTool(ctx.controllerHome, name, args);
+    if (repositoryResult) return repositoryResult;
     return callMultiRepositoryTool(ctx, name, args);
   });
   return server;
