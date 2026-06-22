@@ -68,7 +68,8 @@
     "prepublishOnly": "bash scripts/check-npm-release.sh",
     "sync:brain-docs": "bash scripts/sync-brain-docs.sh --all",
     "sync:codex-installed": "bash scripts/sync-codex-installed-copies.sh",
-    "check:controller-v8": "bash scripts/verify-controller-v8.sh"
+    "check:controller-v8": "bash scripts/verify-controller-v8.sh",
+    "repo:registry": "bun src/cli/v81-entry.ts repo"
   },
   "devDependencies": {
     "@colbymchenry/codegraph": "1.0.1",
