@@ -1,20 +1,30 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { mcpServerInstructions } from './instructions';
+import { buildMcpToolDefinitions, callMcpTool, type McpToolContext } from './tools';
+import { createLegacyMcpToolContext } from './legacy-context';
 import {
   buildMultiRepositoryToolDefinitions,
   callMultiRepositoryTool,
   createMcpToolContext as createMultiRepositoryToolContext,
   type McpServerOptions,
+  type MultiRepositoryMcpToolContext,
 } from './multi-repository';
 import { callRepositoryTool, repositoryToolDefinitions } from './repository-tools';
 
 export type { McpServerOptions } from './multi-repository';
 export { buildMultiRepositoryToolDefinitions, callMultiRepositoryTool } from './multi-repository';
 
-export function createMcpToolContext(opts: McpServerOptions) {
+type ServerToolContext = McpToolContext | MultiRepositoryMcpToolContext;
+
+function isMultiRepositoryContext(ctx: ServerToolContext): ctx is MultiRepositoryMcpToolContext {
+  return 'controllerHome' in ctx;
+}
+
+export function createMcpToolContext(opts: McpServerOptions): ServerToolContext {
   const profile = opts.profile ?? 'controller';
-  const repo = profile === 'controller' && opts.repo?.trim() === '.' ? undefined : opts.repo;
+  if (profile !== 'controller') return createLegacyMcpToolContext(opts);
+  const repo = opts.repo?.trim() === '.' ? undefined : opts.repo;
   return createMultiRepositoryToolContext({ ...opts, repo });
 }
 
@@ -25,14 +35,19 @@ export function createRepoHarnessMcpServer(opts: McpServerOptions): Server {
     { capabilities: { tools: {} }, instructions: mcpServerInstructions(ctx.policy.profile) },
   );
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: repositoryToolDefinitions.concat(buildMultiRepositoryToolDefinitions(ctx)),
+    tools: isMultiRepositoryContext(ctx)
+      ? repositoryToolDefinitions.concat(buildMultiRepositoryToolDefinitions(ctx))
+      : buildMcpToolDefinitions(ctx.policy, { enableChatgptBrowser: ctx.enableChatgptBrowser === true }),
   }));
   server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name: string; arguments?: unknown } }) => {
     const name = request.params.name;
     const args = (request.params.arguments ?? {}) as Record<string, unknown>;
-    const repositoryResult = callRepositoryTool(ctx.controllerHome, name, args);
-    if (repositoryResult) return repositoryResult;
-    return callMultiRepositoryTool(ctx, name, args);
+    if (isMultiRepositoryContext(ctx)) {
+      const repositoryResult = callRepositoryTool(ctx.controllerHome, name, args);
+      if (repositoryResult) return repositoryResult;
+      return callMultiRepositoryTool(ctx, name, args);
+    }
+    return callMcpTool(ctx, name, args);
   });
   return server;
 }
