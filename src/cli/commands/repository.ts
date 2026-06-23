@@ -14,6 +14,7 @@ import {
   validateRepository,
 } from '../repositories/registry';
 import { ensureRepositoryRuntimeStorage } from '../repositories/runtime-storage';
+import { runRepositoryRollout } from '../repositories/rollout';
 import type { RepositoryRecord } from '../repositories/types';
 import { buildControllerWorkbench } from '../repositories/workbench';
 import { createUmbrellaIssue, getUmbrellaIssue, listUmbrellaIssues, updateUmbrellaTask } from '../repositories/umbrella';
@@ -83,6 +84,43 @@ export function buildRepositoryCommand(): Command {
     .action((repoId: string, opts: { controllerHome?: string; json?: boolean }) => {
       const repository = refreshRepository(repoId, opts.controllerHome);
       output(initializeRepository(repository, opts.controllerHome), opts.json === true);
+    });
+
+  common(command.command('rollout').description('Apply the latest repo-harness workflow to registered repositories and restart configured MCP controllers')
+    .option('--repo-id <repo-id>', 'Restrict rollout to one repository', (value, previous: string[]) => [...previous, value], [])
+    .option('--all', 'Include disabled repositories')
+    .option('--dry-run', 'Show the repositories that would be updated without applying changes')
+    .option('--skip-adopt', 'Skip repo-local harness refresh')
+    .option('--skip-restart', 'Skip MCP/controller restart')
+    .option('--skip-codex-setup', 'Skip repo-harness mcp setup codex during restart')
+    .option('--skip-public-check', 'Skip public endpoint verification during restart')
+    .option('--skip-tools-smoke', 'Skip authenticated MCP tools smoke check during restart')
+    .option('--skip-github-plugin', 'Skip GitHub plugin refresh during restart'))
+    .action(async (opts: {
+      controllerHome?: string;
+      repoId?: string[];
+      all?: boolean;
+      dryRun?: boolean;
+      skipAdopt?: boolean;
+      skipRestart?: boolean;
+      skipCodexSetup?: boolean;
+      skipPublicCheck?: boolean;
+      skipToolsSmoke?: boolean;
+      skipGithubPlugin?: boolean;
+      json?: boolean;
+    }) => {
+      output(await runRepositoryRollout({
+        controllerHome: opts.controllerHome,
+        repoIds: opts.repoId ?? [],
+        includeDisabled: opts.all === true,
+        dryRun: opts.dryRun === true,
+        skipAdopt: opts.skipAdopt === true,
+        skipRestart: opts.skipRestart === true,
+        skipCodexSetup: opts.skipCodexSetup === true,
+        skipPublicCheck: opts.skipPublicCheck === true,
+        skipToolsSmoke: opts.skipToolsSmoke === true,
+        skipGithubPlugin: opts.skipGithubPlugin === true,
+      }), opts.json === true);
     });
 
   common(command.command('disable').description('Disable new execution while retaining history')

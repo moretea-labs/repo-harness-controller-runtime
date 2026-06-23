@@ -38,11 +38,6 @@ report_issue() {
   issues=$((issues + 1))
 }
 
-report_warning() {
-  local message="$1"
-  echo "[workflow] WARN: $message"
-}
-
 resolve_json_runtime() {
   if command -v node >/dev/null 2>&1; then
     printf 'node'
@@ -421,23 +416,23 @@ check_handoff_resume_pair() {
   [[ -f "$handoff_file" || -f "$resume_file" ]] || return 0
 
   if [[ -f "$handoff_file" && ! -f "$resume_file" ]]; then
-    report_warning "Handoff current exists but resume packet is missing: $resume_file"
+    report_issue "Handoff current exists but resume packet is missing: $resume_file"
     return 0
   fi
 
   if [[ ! -f "$handoff_file" && -f "$resume_file" ]]; then
-    report_warning "Resume packet exists but handoff current is missing: $handoff_file"
+    report_issue "Resume packet exists but handoff current is missing: $handoff_file"
     return 0
   fi
 
   handoff_mtime="$(file_mtime "$handoff_file")"
   resume_mtime="$(file_mtime "$resume_file")"
   if [[ "$resume_mtime" =~ ^[0-9]+$ && "$handoff_mtime" =~ ^[0-9]+$ && "$resume_mtime" -lt "$handoff_mtime" ]]; then
-    report_warning "Resume packet is older than handoff current: $resume_file < $handoff_file"
+    report_issue "Resume packet is older than handoff current: $resume_file < $handoff_file"
   fi
 
   if handoff_declares_no_active_plan "$handoff_file" && resume_references_plan "$resume_file"; then
-    report_warning "Handoff current declares no active plan but resume packet references a historical plan: $resume_file"
+    report_issue "Handoff current declares no active plan but resume packet references a historical plan: $resume_file"
   fi
 }
 
@@ -450,7 +445,7 @@ check_current_resume_freshness() {
   current_mtime="$(file_mtime "$current_file")"
   resume_mtime="$(file_mtime "$resume_file")"
   if [[ "$current_mtime" =~ ^[0-9]+$ && "$resume_mtime" =~ ^[0-9]+$ && "$resume_mtime" -lt "$current_mtime" ]]; then
-    report_warning "Resume packet is older than current status snapshot: $resume_file < $current_file. Refresh it when recovery context is needed."
+    report_issue "Resume packet is older than current status snapshot: $resume_file < $current_file. Run scripts/prepare-handoff.sh --reason <reason> or scripts/codex-handoff-resume.sh."
   fi
 }
 
@@ -633,14 +628,7 @@ check_required_dir() {
     return 0
   fi
 
-  case "$path" in
-    .ai/harness/runs|.ai/harness/worktrees|.ai/harness/jobs|.ai/harness/local-jobs|.ai/harness/controller|.ai/harness/edit-sessions)
-      report_warning "Runtime directory will be created on first use: $path"
-      ;;
-    *)
-      report_issue "Missing required directory: $path"
-      ;;
-  esac
+  report_issue "Missing required directory: $path"
 }
 
 check_helper_runtime_files() {

@@ -22,6 +22,14 @@ repo-harness controller github status --json
 
 The canonical configuration is stored on each repository's Controller Registry record. Legacy `.repo-harness/plugins/github.json` files are still read for compatibility and absorbed into the registry on first use. No credential is stored in either place; authentication remains in the local `gh` CLI. `manual` and `checkpoint` are policy labels; both require an explicit publish or refresh action, so no hidden background network write can block local Task progress.
 
+When controller code or repo-harness workflow scripts change, roll the update out across every registered repository with one command:
+
+```bash
+repo-harness repo rollout
+```
+
+That command refreshes the repo-local harness for each enabled registered repository, then restarts only the repositories that already have MCP/controller config under `.repo-harness/mcp.local.json`, so running ChatGPT Connector sessions pick up the new code immediately without force-enabling MCP on unrelated repos.
+
 The corresponding MCP tools are `get_github_plugin_status` and `configure_github_plugin`. Existing low-level GitHub tools remain available for compatibility.
 
 ## Verify the loaded tool surface

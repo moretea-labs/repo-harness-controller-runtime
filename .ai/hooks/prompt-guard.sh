@@ -7,11 +7,10 @@
 # single-line verdict JSON (action + intent facts + derived strings).
 #
 # Prompt-layer plan/spec/contract gates are advisory: they explain the next
-# workflow step and exit 0. Hard enforcement lives in the PreToolUse edit
-# layer (pre-edit-guard.sh), which blocks implementation edits determinist-
-# ically by path + plan state instead of guessing at natural language.
-# Done-claim gates stay blocking: they verify file-backed evidence, not
-# language.
+# workflow step and exit 0. PreToolUse keeps path/scope and private-surface
+# safety authoritative while plan-state guidance defaults to advisory.
+# Done-claim gates stay blocking only when they verify real failed or missing
+# evidence rather than workflow ceremony.
 
 set -eo pipefail
 
@@ -874,7 +873,7 @@ if [[ "$PG_ENGINE_STATE" != "ok" ]]; then
     echo "[PromptGuard] Refresh the CLI with: bun add -g repo-harness@latest && repo-harness install. Fallback: npx -y repo-harness install."
   else
     echo "[PromptGuard] Advisory: prompt-guard decision engine is unavailable (repo-harness CLI or bun not found); prompt intent gates are degraded to advisory for this prompt."
-    echo "[PromptGuard] Edit-layer guards still enforce plan and contract scope. Install the repo-harness CLI to restore prompt decisions."
+    echo "[PromptGuard] Edit-layer plan guidance remains advisory; path, conflict, destructive, remote, and evidence guards remain authoritative. Install the repo-harness CLI to restore richer prompt decisions."
   fi
   emit_workflow_file_guards
   exit 0

@@ -207,15 +207,6 @@ if [[ ! -x "scripts/architecture-queue.sh" ]]; then
   exit 0
 fi
 
-if [[ "$mode" != "off" ]] && { ! command -v bun >/dev/null 2>&1 || [[ ! -f "scripts/capability-resolver.ts" ]]; }; then
-  if [[ "$mode" == "strict" ]]; then
-    echo "[ArchitectureSync] strict gate failed: missing bun or scripts/capability-resolver.ts" >&2
-    exit 1
-  fi
-  echo "[ArchitectureSync] WARN: missing bun or scripts/capability-resolver.ts; skipping advisory index and freshness checks" >&2
-  exit 0
-fi
-
 if ! bash scripts/architecture-queue.sh reindex --check >/dev/null; then
   echo "[ArchitectureSync] architecture request index is stale; run bash scripts/architecture-queue.sh reindex" >&2
   exit 1
@@ -227,6 +218,15 @@ if [[ "$mode" == "off" ]]; then
     text) echo "[ArchitectureSync] mode=off changed_capabilities=0 blocking=0" ;;
     *) echo "check-architecture-sync: unsupported --format: $format" >&2; exit 2 ;;
   esac
+  exit 0
+fi
+
+if ! command -v bun >/dev/null 2>&1 || [[ ! -f "scripts/capability-resolver.ts" ]]; then
+  if [[ "$mode" == "strict" ]]; then
+    echo "[ArchitectureSync] strict gate failed: missing bun or scripts/capability-resolver.ts" >&2
+    exit 1
+  fi
+  echo "[ArchitectureSync] WARN: missing bun or scripts/capability-resolver.ts; skipping advisory freshness gate" >&2
   exit 0
 fi
 

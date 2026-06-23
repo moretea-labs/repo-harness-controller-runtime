@@ -59,17 +59,18 @@
     "check:release": "bash scripts/check-npm-release.sh",
     "check:release-published": "bash scripts/check-release-published.sh",
     "smoke:tarball-install": "bash scripts/check-tarball-install-smoke.sh",
-    "check:brain-manifest": "bash scripts/check-brain-manifest.sh",
-    "check:context-files": "bash scripts/check-context-files.sh",
-    "check:deploy-sql": "bash scripts/check-deploy-sql-order.sh",
-    "check:architecture-sync": "bash scripts/check-architecture-sync.sh",
-    "check:task-sync": "bash scripts/check-task-sync.sh",
-    "check:task-workflow": "bash scripts/check-task-workflow.sh --strict",
+    "check:brain-manifest": "repo-harness run check-brain-manifest",
+    "check:context-files": "repo-harness run check-context-files",
+    "check:deploy-sql": "repo-harness run check-deploy-sql-order",
+    "check:architecture-sync": "repo-harness run check-architecture-sync",
+    "check:task-sync": "repo-harness run check-task-sync",
+    "check:task-workflow": "repo-harness run check-task-workflow --strict",
     "prepublishOnly": "bash scripts/check-npm-release.sh",
-    "sync:brain-docs": "bash scripts/sync-brain-docs.sh --all",
+    "sync:brain-docs": "repo-harness run sync-brain-docs --all",
     "sync:codex-installed": "bash scripts/sync-codex-installed-copies.sh",
     "check:controller-v8": "bash scripts/verify-controller-v8.sh",
-    "repo:registry": "bun src/cli/v81-entry.ts repo"
+    "repo:registry": "bun src/cli/v81-entry.ts repo",
+    "repo:rollout": "bash scripts/rollout-all-registered-repos.sh"
   },
   "devDependencies": {
     "@colbymchenry/codegraph": "1.0.1",
@@ -82,5 +83,6 @@
     "@modelcontextprotocol/sdk": "^1.28.0",
     "commander": "^14.0.3",
     "express": "^5.2.1"
-  }
+  },
+  "private": true
 }
