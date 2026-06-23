@@ -1,1 +1,0 @@
-export { localBridgeDashboardHtml } from "./dashboard";
