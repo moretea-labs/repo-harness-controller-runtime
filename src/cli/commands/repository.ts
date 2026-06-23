@@ -74,13 +74,12 @@ export function buildRepositoryCommand(): Command {
     });
 
   common(command.command('command')
-    .description('Execute one repository-scoped local command with risk classification, approval tokens, Git snapshots, and audit evidence')
+    .description('Preview or confirm one repository-scoped local command with Git snapshots and audit evidence')
     .argument('<repo-id>', 'Stable repository ID')
-    .requiredOption('--cmd <command>', 'Command to execute inside the selected repository')
+    .requiredOption('--cmd <command>', 'Command to inspect or execute inside the selected repository')
     .option('--checkout-id <checkout-id>', 'Select a registered checkout')
     .option('--cwd <path>', 'Repository-relative working directory', '.')
-    .option('--user-authorized', 'The user explicitly requested this exact state-changing command')
-    .option('--confirm-token <token>', 'Execute a previously previewed plan after explicit confirmation')
+    .option('--confirm-token <token>', 'Confirm the exact plan returned by the latest preview')
     .option('--dry-run', 'Classify and preview without executing')
     .option('--timeout-ms <milliseconds>', 'Execution timeout', (value) => Number.parseInt(value, 10))
     .option('--max-output-bytes <bytes>', 'Maximum captured output', (value) => Number.parseInt(value, 10)))
@@ -89,7 +88,6 @@ export function buildRepositoryCommand(): Command {
       checkoutId?: string;
       cmd: string;
       cwd?: string;
-      userAuthorized?: boolean;
       confirmToken?: string;
       dryRun?: boolean;
       timeoutMs?: number;
@@ -102,11 +100,6 @@ export function buildRepositoryCommand(): Command {
         controllerHome: opts.controllerHome,
         allowSoleRepository: false,
       });
-      const authorization = opts.confirmToken
-        ? 'confirmed_plan' as const
-        : opts.userAuthorized
-          ? 'explicit_user_request' as const
-          : undefined;
       const result = withControllerLock(
         opts.controllerHome ?? '',
         { scope: 'repository', repoId: repository.repoId },
@@ -114,7 +107,7 @@ export function buildRepositoryCommand(): Command {
         () => executeRepositoryCommand(opts.controllerHome ?? '', repository, {
           command: opts.cmd,
           cwd: opts.cwd,
-          authorization,
+          authorization: opts.confirmToken ? 'confirmed_plan' : undefined,
           approvalToken: opts.confirmToken,
           dryRun: opts.dryRun === true,
           timeoutMs: opts.timeoutMs,
