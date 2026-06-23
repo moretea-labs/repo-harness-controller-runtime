@@ -3,7 +3,12 @@ import { spawnSync } from 'child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { buildMcpRestartKeepaliveArgs, defaultMcpRestartLogPath } from '../../src/cli/mcp/restart';
+import {
+  buildMcpRestartKeepaliveArgs,
+  defaultMcpRestartLogPath,
+  isRepoLaunchAgentPlist,
+  parseLaunchAgentLabel,
+} from '../../src/cli/mcp/restart';
 
 const ROOT = join(import.meta.dir, '../..');
 const CLI = join(ROOT, 'src/cli/index.ts');
@@ -124,5 +129,25 @@ describe('mcp command', () => {
 
   test('uses a deterministic default restart log path inside repo-local logs', () => {
     expect(defaultMcpRestartLogPath('/tmp/example-repo')).toBe('/tmp/example-repo/.ai/local/logs/repo-harness-mcp.log');
+  });
+
+  test('recognizes repo-local launchd plists for MCP keepalive', () => {
+    const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.greyson.yaozhunshi.repo-harness-mcp</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/greyson/DevProjects/yaozhunshi/.ai/local/repo-harness-mcp-launch.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/greyson/DevProjects/yaozhunshi</string>
+</dict>
+</plist>`;
+    expect(parseLaunchAgentLabel(plist)).toBe('com.greyson.yaozhunshi.repo-harness-mcp');
+    expect(isRepoLaunchAgentPlist(plist, '/Users/greyson/DevProjects/yaozhunshi')).toBe(true);
+    expect(isRepoLaunchAgentPlist(plist, '/Users/greyson/DevProjects/other-repo')).toBe(false);
   });
 });

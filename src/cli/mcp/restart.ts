@@ -1,5 +1,5 @@
 import { spawn } from 'child_process';
-import { closeSync, mkdirSync, openSync, readFileSync } from 'fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync } from 'fs';
 import { dirname, join, relative, resolve } from 'path';
 import { runProcess } from '../../effects/process-runner';
 import {
@@ -87,6 +87,11 @@ interface GitHubPluginSummary {
   ready: boolean | 'skipped';
 }
 
+interface RepoLaunchAgent {
+  label: string;
+  plistPath: string;
+}
+
 export function defaultMcpRestartLogPath(repoRoot: string): string {
   return join(repoRoot, '.ai', 'local', 'logs', 'repo-harness-mcp.log');
 }
@@ -148,6 +153,51 @@ function processMatchesRepoHarness(commandLine: string, repoRoot: string): boole
   return commandLine.includes('repo-harness')
     || commandLine.includes('/src/cli/index.ts')
     || commandLine.includes('/src/cli/hook-entry.ts');
+}
+
+function launchctlDomain(): string {
+  const uid = typeof process.getuid === 'function'
+    ? process.getuid()
+    : Number(runProcess('id', ['-u'], { timeoutMs: 2_000, maxOutputBytes: 1024 }).stdout.trim());
+  if (!Number.isInteger(uid) || uid < 0) {
+    throw new Error('Unable to resolve current uid for launchctl.');
+  }
+  return `gui/${uid}`;
+}
+
+export function parseLaunchAgentLabel(plistText: string): string | undefined {
+  const match = /<key>\s*Label\s*<\/key>\s*<string>([^<]+)<\/string>/i.exec(plistText);
+  return match?.[1]?.trim() || undefined;
+}
+
+export function isRepoLaunchAgentPlist(plistText: string, repoRoot: string): boolean {
+  if (!plistText.includes(repoRoot)) return false;
+  return plistText.includes('repo-harness-mcp-launch.sh')
+    || (plistText.includes('repo-harness') && plistText.includes('keepalive'));
+}
+
+function findRepoLaunchAgents(repoRoot: string): RepoLaunchAgent[] {
+  const home = process.env.HOME?.trim();
+  if (!home) return [];
+  const launchAgentsDir = join(home, 'Library', 'LaunchAgents');
+  if (!existsSync(launchAgentsDir)) return [];
+
+  const agents: RepoLaunchAgent[] = [];
+  for (const entry of readdirSync(launchAgentsDir)) {
+    if (!entry.endsWith('.plist')) continue;
+    const plistPath = join(launchAgentsDir, entry);
+    let plistText = '';
+    try {
+      plistText = readFileSync(plistPath, 'utf-8');
+    } catch (_error) {
+      continue;
+    }
+    if (!isRepoLaunchAgentPlist(plistText, repoRoot)) continue;
+    const label = parseLaunchAgentLabel(plistText);
+    if (!label) continue;
+    agents.push({ label, plistPath });
+  }
+  return agents;
 }
 
 async function sleep(ms: number): Promise<void> {
@@ -239,6 +289,18 @@ function resolveRestartConfig(repoRoot: string, explicitLogFile?: string): Resol
   };
 }
 
+function runLaunchctl(args: string[]): { ok: boolean; stdout: string; stderr: string } {
+  const result = runProcess('launchctl', args, {
+    timeoutMs: 10_000,
+    maxOutputBytes: 256 * 1024,
+  });
+  return {
+    ok: result.ok,
+    stdout: result.stdout,
+    stderr: result.stderr,
+  };
+}
+
 function readLogTail(path: string, maxChars = 4000): string {
   try {
     const text = readFileSync(path, 'utf-8');
@@ -306,10 +368,69 @@ function collectRepoHarnessPids(repoRoot: string, runtime: McpRuntimeState | nul
   return Array.from(pids);
 }
 
+function collectKeepalivePids(repoRoot: string): number[] {
+  const ps = runProcess('ps', ['ax', '-o', 'pid=', '-o', 'command='], {
+    timeoutMs: 5_000,
+    maxOutputBytes: 512 * 1024,
+  });
+  if (!ps.ok) return [];
+
+  const pids: number[] = [];
+  for (const line of ps.stdout.split('\n')) {
+    const match = /^\s*(\d+)\s+(.*)$/.exec(line);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    const commandLine = match[2];
+    if (!Number.isInteger(pid) || pid === process.pid) continue;
+    if (!processMatchesRepoHarness(commandLine, repoRoot)) continue;
+    if (commandLine.includes('mcp keepalive')) pids.push(pid);
+  }
+  return pids;
+}
+
 async function stopRepoHarnessProcesses(repoRoot: string, runtime: McpRuntimeState | null): Promise<number[]> {
   const pids = collectRepoHarnessPids(repoRoot, runtime);
   for (const pid of pids) await stopPid(pid);
   return pids;
+}
+
+function bootoutRepoLaunchAgents(agents: RepoLaunchAgent[]): string[] {
+  const lines: string[] = [];
+  if (agents.length === 0) return lines;
+  const domain = launchctlDomain();
+  for (const agent of agents) {
+    const result = runLaunchctl(['bootout', domain, agent.plistPath]);
+    if (!result.ok) {
+      const detail = (result.stderr || result.stdout).trim();
+      if (!/not loaded|no such process|service could not be found|could not find service|input\/output error/i.test(detail)) {
+        throw new Error(`launchctl bootout failed for ${agent.label}: ${detail || 'unknown error'}`);
+      }
+    }
+    lines.push(`[repo-harness restart] launchd bootout: ${agent.label}`);
+  }
+  return lines;
+}
+
+function bootstrapRepoLaunchAgents(agents: RepoLaunchAgent[]): string[] {
+  const lines: string[] = [];
+  if (agents.length === 0) return lines;
+  const domain = launchctlDomain();
+  for (const agent of agents) {
+    const bootstrap = runLaunchctl(['bootstrap', domain, agent.plistPath]);
+    if (!bootstrap.ok) {
+      const detail = (bootstrap.stderr || bootstrap.stdout).trim();
+      throw new Error(`launchctl bootstrap failed for ${agent.label}: ${detail || 'unknown error'}`);
+    }
+    const kickstart = runLaunchctl(['kickstart', '-k', `${domain}/${agent.label}`]);
+    if (!kickstart.ok) {
+      const detail = (kickstart.stderr || kickstart.stdout).trim();
+      if (!/timed out|service could not be found|could not find service|no such process|operation now in progress/i.test(detail)) {
+        throw new Error(`launchctl kickstart failed for ${agent.label}: ${detail || 'unknown error'}`);
+      }
+    }
+    lines.push(`[repo-harness restart] launchd restart: ${agent.label}`);
+  }
+  return lines;
 }
 
 function spawnDetached(command: string, args: string[], cwd: string, stdoutPath: string, stderrPath: string): number {
@@ -554,6 +675,7 @@ function configureGitHubPlugin(
 export async function runMcpRestart(opts: McpRestartOptions): Promise<McpSetupResult> {
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? '.');
   const runtimeBefore = loadMcpRuntimeState(repoRoot);
+  const launchAgents = findRepoLaunchAgents(repoRoot);
 
   const chatgptSetup = runMcpSetupChatgpt({ repo: repoRoot });
   const config = resolveRestartConfig(repoRoot, opts.logFile);
@@ -581,6 +703,7 @@ export async function runMcpRestart(opts: McpRestartOptions): Promise<McpSetupRe
     lines.push(`[repo-harness restart] GitHub plugin: enabled=${String(github.enabled)} sync_mode=${github.syncMode} include_tasks=${String(github.includeTasks)}`);
   }
 
+  lines.push(...bootoutRepoLaunchAgents(launchAgents));
   const stoppedPids = await stopRepoHarnessProcesses(repoRoot, runtimeBefore);
   lines.push(
     stoppedPids.length > 0
@@ -588,13 +711,21 @@ export async function runMcpRestart(opts: McpRestartOptions): Promise<McpSetupRe
       : '[repo-harness restart] no old repo-local MCP processes found',
   );
 
-  const cli = resolveSelfCliInvocation();
-  const keepaliveArgs = [...cli.args, ...buildMcpRestartKeepaliveArgs(config)];
-  const keepalivePid = spawnDetached(cli.command, keepaliveArgs, repoRoot, config.stdoutLogPath, config.stderrLogPath);
-  lines.push(`[repo-harness restart] keepalive_pid=${keepalivePid}`);
+  let keepalivePid: number | undefined;
+  if (launchAgents.length > 0) {
+    lines.push(...bootstrapRepoLaunchAgents(launchAgents));
+  } else {
+    const cli = resolveSelfCliInvocation();
+    const keepaliveArgs = [...cli.args, ...buildMcpRestartKeepaliveArgs(config)];
+    keepalivePid = spawnDetached(cli.command, keepaliveArgs, repoRoot, config.stdoutLogPath, config.stderrLogPath);
+    lines.push(`[repo-harness restart] keepalive_pid=${keepalivePid}`);
+  }
 
   const localHealth = await waitForMcpHealth(config);
   await waitForLocalController(config);
+  if (keepalivePid === undefined) {
+    keepalivePid = collectKeepalivePids(repoRoot)[0];
+  }
 
   const toolsSmoke = opts.skipToolsSmoke === true ? undefined : await runToolsSmoke(config);
   const publicCheck = opts.skipPublicCheck === true ? undefined : await verifyPublicSurface(config);
@@ -617,7 +748,7 @@ export async function runMcpRestart(opts: McpRestartOptions): Promise<McpSetupRe
     lines.push(`  public_tool_surface: ${publicCheck.toolSurface}`);
   }
   lines.push(`  chatgpt_server_name: ${doctor.chatgpt?.serverName ?? config.defaultServerName}`);
-  lines.push(`  keepalive_pid: ${keepalivePid}`);
+  lines.push(`  keepalive_pid: ${keepalivePid ?? 'launchd-managed'}`);
   lines.push(`  log_file: ${config.stderrLogPath}`);
   lines.push('');
   lines.push('Next ChatGPT step:');
