@@ -7,9 +7,6 @@ on:
       - main
       - codex/**
 
-permissions:
-  contents: write
-
 jobs:
   test:
     name: Test
@@ -35,49 +32,8 @@ jobs:
         with:
           bun-version: 1.3.10
 
-      - name: Repair stale package contract assertion
-        if: github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          path = Path('tests/bootstrap-files.test.ts')
-          content = path.read_text()
-          updated = content.replace(
-              'expect(pkg.version).toBe("1.3.0");',
-              'expect(pkg.version).toBe("1.4.0");',
-          )
-          if updated == content:
-              raise SystemExit(0)
-          path.write_text(updated)
-          PY
-          if git diff --quiet -- tests/bootstrap-files.test.ts; then
-            exit 0
-          fi
-          FILE_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/contents/tests/bootstrap-files.test.ts?ref=${GITHUB_HEAD_REF}" --jq .sha)"
-          CONTENT="$(base64 -w0 tests/bootstrap-files.test.ts)"
-          gh api --method PUT "repos/${GITHUB_REPOSITORY}/contents/tests/bootstrap-files.test.ts" \
-            -f message='test: align package version contract with v1.4.0' \
-            -f content="$CONTENT" \
-            -f sha="$FILE_SHA" \
-            -f branch="$GITHUB_HEAD_REF" >/dev/null
-
       - name: CI gate
-        run: |
-          set -o pipefail
-          bun run check:ci 2>&1 | tee ci.log
-
-      - name: Upload CI diagnostic log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ci-gate-log
-          path: |
-            ci.log
-            tests/bootstrap-files.test.ts
-            src/cli/local-bridge/dashboard.ts
-          if-no-files-found: error
+        run: bun run check:ci
 
       - name: Diff hygiene
         run: git diff --check
