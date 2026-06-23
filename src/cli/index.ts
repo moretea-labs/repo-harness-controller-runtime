@@ -22,6 +22,7 @@ import { buildMcpCommand } from './commands/mcp';
 import { buildChatgptCommand } from './commands/chatgpt';
 import { buildRunCommand } from './commands/run';
 import { buildControllerCommand } from './commands/controller';
+import { buildRepositoryCommand } from './commands/repository';
 import { formatSecurityScan, runSecurityScan } from './commands/security';
 import { runGlobalRuntimeSetup } from './commands/global-runtime';
 import { runPromptGuardDecideCli } from './commands/prompt-guard-decision';
@@ -53,6 +54,7 @@ export const SUBCOMMANDS = [
   'mcp',
   'chatgpt',
   'controller',
+  'repo',
 ] as const;
 export type Subcommand = (typeof SUBCOMMANDS)[number];
 
@@ -523,6 +525,7 @@ export function buildProgram(): Command {
   program.addCommand(buildChatgptCommand());
   program.addCommand(buildRunCommand());
   program.addCommand(buildControllerCommand());
+  program.addCommand(buildRepositoryCommand());
   program
     .command('prompt-guard-decide', { hidden: true })
     .description('Internal prompt-guard intent/state decision engine')
