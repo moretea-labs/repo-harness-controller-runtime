@@ -25,7 +25,19 @@ export function repositoryControllerRoot(controllerHome: string, repoId: string)
 
 export function ensureRepositoryControllerLayout(controllerHome: string, repoId: string): string {
   const root = repositoryControllerRoot(controllerHome, repoId);
-  for (const child of ['', 'runs', 'worktrees', 'artifacts', 'locks', 'indexes', 'jobs']) {
+  for (const child of [
+    '',
+    'runs',
+    'jobs',
+    'worktrees',
+    'artifacts',
+    'locks',
+    'indexes',
+    'edit-sessions',
+    'controller',
+    'local-bridge',
+    'ephemeral-issues',
+  ]) {
     mkdirSync(join(root, child), { recursive: true });
   }
   return root;
