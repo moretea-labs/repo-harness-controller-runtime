@@ -1,1 +1,1 @@
-export { localBridgeDashboardHtml } from "./dashboard-render";
+export { localBridgeDashboardHtml } from "./dashboard";
