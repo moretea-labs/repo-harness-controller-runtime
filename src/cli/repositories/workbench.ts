@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { getRepositoryFocus, listRepositories, repositorySummary, validateRepository } from './registry';
+import { ensureRepositoryRuntimeStorage } from './runtime-storage';
 import type { RepositoryRecord } from './types';
 
 export interface WorkbenchRunSummary {
@@ -98,12 +99,14 @@ export function buildControllerWorkbench(
     .filter((record) => !options.repoId || record.repoId === options.repoId);
   if (options.repoId && records.length === 0) throw new Error(`repository not found: ${options.repoId}`);
   const repositories = records.map((record) => {
+    const runtimeStorage = ensureRepositoryRuntimeStorage(record, controllerHome);
     const issues = listIssues(record.canonicalRoot);
     const runs = listRuns(record);
     const activeRuns = runs.filter((run) => ['queued', 'running', 'waiting_for_user'].includes(run.status ?? ''));
     return {
       repository: repositorySummary(record),
       health: validateRepository(record.repoId, controllerHome),
+      runtimeStorage,
       counts: {
         issues: issues.length,
         tasks: issues.reduce((total, issue) => total + (Array.isArray(issue.tasks) ? issue.tasks.length : 0), 0),
