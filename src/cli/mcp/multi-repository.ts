@@ -5,6 +5,7 @@ import { DEFAULT_AGENT_TIMEOUT_MS, MAX_AGENT_TIMEOUT_MS, normalizeAgentTimeoutMs
 import type { McpAgentRunnerName } from './types';
 import { ensureControllerHome } from '../repositories/controller-home';
 import { bindRepositoryEntities } from '../repositories/entity-migration';
+import { withControllerLockAsync } from '../repositories/locks';
 import { registerRepository, repositorySummary, resolveRepositorySelection } from '../repositories/registry';
 import { ensureRepositoryRuntimeStorage, type RepositoryRuntimeStorageReport } from '../repositories/runtime-storage';
 import type { RepositoryRecord } from '../repositories/types';
@@ -45,6 +46,24 @@ const EXECUTION_STORAGE_TOOLS = new Set([
   'verify_edit_session',
   'submit_local_bridge_job',
   'execute_local_bridge_job',
+]);
+
+const REPOSITORY_LOCKED_TOOLS = new Set([
+  ...EXECUTION_STORAGE_TOOLS,
+  'create_issue',
+  'update_issue',
+  'plan_issue',
+  'append_task',
+  'split_task',
+  'supersede_task',
+  'set_task_dependencies',
+  'update_task',
+  'record_task_verification',
+  'accept_verified_task',
+  'publish_issue_to_github',
+  'refresh_github_issue',
+  'close_github_issue',
+  'configure_github_plugin',
 ]);
 
 function parseBooleanSetting(value: string | undefined): boolean | undefined {
@@ -161,6 +180,36 @@ function withRepositoryEnvelope(
   };
 }
 
+export function repositoryScopedToolArgs(
+  name: string,
+  input: Record<string, unknown>,
+  repository: RepositoryRecord,
+): Record<string, unknown> {
+  const args = { ...input };
+  delete args.repo_id;
+  delete args.checkout_id;
+
+  const github = repository.github;
+  const githubRepo = github ? `${github.owner}/${github.repo}` : undefined;
+  if (githubRepo && ['github_status', 'publish_issue_to_github'].includes(name) && args.repo === undefined) {
+    args.repo = githubRepo;
+  }
+  if (githubRepo && ['dispatch_task', 'launch_issue', 'dispatch_ready_tasks'].includes(name) && args.github_repo === undefined) {
+    args.github_repo = githubRepo;
+  }
+  if (repository.defaultBranch
+    && ['dispatch_task', 'launch_issue', 'dispatch_ready_tasks'].includes(name)
+    && args.base_ref === undefined) {
+    args.base_ref = repository.defaultBranch;
+  }
+  if (name === 'publish_issue_to_github' && github) {
+    if (args.labels === undefined && github.labels?.length) args.labels = [...github.labels];
+    if (args.project_owner === undefined && github.projectOwner) args.project_owner = github.projectOwner;
+    if (args.project_number === undefined && github.projectNumber !== undefined) args.project_number = github.projectNumber;
+  }
+  return args;
+}
+
 export function createMcpToolContext(opts: McpServerOptions): MultiRepositoryMcpToolContext {
   const controllerHome = ensureControllerHome(opts.controllerHome);
   const explicitRepository = opts.repo?.trim()
@@ -189,10 +238,7 @@ export async function callMultiRepositoryTool(
       controllerHome: ctx.controllerHome,
       allowSoleRepository: true,
     });
-    const scopedArgs = { ...args };
-    delete scopedArgs.repo_id;
-    delete scopedArgs.checkout_id;
-
+    const scopedArgs = repositoryScopedToolArgs(name, args, repository);
     const runtimeStorage = ensureRepositoryRuntimeStorage(repository, ctx.controllerHome);
     if (EXECUTION_STORAGE_TOOLS.has(name) && !runtimeStorage.readyForExecution) {
       throw new Error(`RUNTIME_STORAGE_NOT_READY: ${runtimeStorage.warnings.join('; ')}`);
@@ -211,7 +257,16 @@ export async function callMultiRepositoryTool(
       }),
       enableChatgptBrowser: ctx.enableChatgptBrowser,
     };
-    const result = await callMcpTool(scopedContext, name, scopedArgs) as ToolResult;
+    const invoke = async () => await callMcpTool(scopedContext, name, scopedArgs) as ToolResult;
+    const result = REPOSITORY_LOCKED_TOOLS.has(name)
+      ? await withControllerLockAsync(
+        ctx.controllerHome,
+        { scope: 'repository', repoId: repository.repoId },
+        `mcp:${name}`,
+        invoke,
+        60_000,
+      )
+      : await invoke();
     bindRepositoryEntities(repository);
     return withRepositoryEnvelope(result, repository, runtimeStorage);
   } catch (error) {
