@@ -99,6 +99,10 @@ function localHealthUrl(host: string, port: number): string {
   return `http://${host}:${port}/health`;
 }
 
+function localControllerHealthUrl(host: string, port: number): string {
+  return `http://${host === '::1' ? '[::1]' : host}:${port}/health`;
+}
+
 function oauthResourceUrl(endpoint: string): string {
   return new URL('/.well-known/oauth-protected-resource/mcp', endpoint).toString();
 }
@@ -152,7 +156,7 @@ async function stopChild(child: ChildProcess | undefined, label: string): Promis
   }
 }
 
-function resolveSelfCliInvocation(): { command: string; args: string[] } {
+export function resolveSelfCliInvocation(): { command: string; args: string[] } {
   const scriptPath = process.argv[1];
   if (!scriptPath) throw new Error('cannot resolve repo-harness CLI entrypoint for keepalive');
   const resolvedPath = resolve(scriptPath);
@@ -186,6 +190,14 @@ async function jsonHealth(url: string): Promise<Record<string, unknown> | null> 
   } finally {
     clearTimeout(timeout);
   }
+}
+
+export function isExpectedLocalControllerHealth(payload: Record<string, unknown> | null): boolean {
+  return payload?.status === 'ok'
+    && payload.toolSurface === CONTROLLER_TOOL_SURFACE
+    && payload.schemaVersion === CONTROLLER_SCHEMA_VERSION
+    && payload.toolSurfaceVersion === CONTROLLER_TOOL_SURFACE_VERSION
+    && payload.toolSurfaceFingerprint === controllerToolSurfaceFingerprint();
 }
 
 function attachLineLogging(
@@ -553,6 +565,31 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
     }
   };
 
+  const probeLocalControllerHealth = async (): Promise<boolean> => {
+    if (!localUiEnabled) {
+      runtime.localController = undefined;
+      return true;
+    }
+
+    const endpoint = `http://${localUiHost === '::1' ? '[::1]' : localUiHost}:${localUiPort}/`;
+    const health = await jsonHealth(localControllerHealthUrl(localUiHost, localUiPort));
+    const healthy = isExpectedLocalControllerHealth(health);
+    runtime.localController = healthy
+      ? {
+          endpoint,
+          running: true,
+          ...(localBridge ? { pid: process.pid } : {}),
+          startedAt: runtime.localController?.startedAt ?? nowIso(),
+        }
+      : {
+          endpoint,
+          running: false,
+          ...(localBridge ? { pid: process.pid } : {}),
+          error: `health check failed at ${localControllerHealthUrl(localUiHost, localUiPort)}`,
+        };
+    return healthy;
+  };
+
   const shutdown = async (): Promise<void> => {
     if (stopping) return;
     stopping = true;
@@ -610,6 +647,21 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
         persistRuntime();
         continue;
       }
+    }
+
+    if (!(await probeLocalControllerHealth())) {
+      if (localBridge) {
+        try {
+          await localBridge.close();
+        } catch (_error) {
+          // Ignore close errors; the next start attempt should reconcile the port.
+        }
+        localBridge = undefined;
+      }
+      await startLocalController();
+      await probeLocalControllerHealth();
+      updateStatus();
+      persistRuntime();
     }
 
     const activePublicEndpoint = tunnelMode === 'named'

@@ -12,6 +12,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { spawnSync } from "child_process";
 import { getAgentJob } from "../../src/cli/agent-jobs/job-manager";
+import { CONTROLLER_TOOL_SURFACE } from "../../src/cli/controller/runtime-config";
 import { createIssue, updateTask } from "../../src/cli/controller/issue-store";
 import { beginEditSession, applyEditOperations } from "../../src/cli/editing/edit-session";
 import { getMcpPolicy } from "../../src/cli/mcp/policy";
@@ -402,7 +403,7 @@ printf '%s\n' '{"type":"turn.completed"}'
       headers: { ...headers, "content-type": "application/json" },
       body: JSON.stringify({ confirmAcceptance: true, reviewer: "test-human" }),
     }).then((response) => response.json());
-    expect(verified.tasks[0].status).toBe("verified");
+    expect(verified.tasks[0].status).toBe("done");
     expect(existsSync(join(root, ".ai/harness/checks/controller/latest-focused.json"))).toBe(true);
     const accepted = await fetch(new URL(`/api/issues/${issue.id}/tasks/T1/accept`, handle.url), {
       method: "POST",
@@ -465,7 +466,7 @@ printf '%s\n' '{"type":"turn.completed"}'
     }).then((response) => response.json());
     expect(finalized.status).toBe("finalized");
     const dashboard = await fetch(handle.url).then((response) => response.text());
-    expect(dashboard).toContain("文件变更");
+    expect(dashboard).toContain("开放 Direct Edit");
     expect(dashboard).toContain("Direct Edit");
   });
 
@@ -488,16 +489,18 @@ printf '%s\n' '{"type":"turn.completed"}'
     }).then((response) => response.json());
     expect(snapshot.repoRoot).toBe(root);
     expect(snapshot.board).toBeDefined();
-    expect(snapshot.toolSurface).toBe("controller-execution-first-v7");
+    expect(snapshot.toolSurface).toBe(CONTROLLER_TOOL_SURFACE);
     expect(snapshot.timeoutPolicy).toEqual({
       defaultTimeoutMs: 3_600_000,
       maxTimeoutMs: 43_200_000,
     });
-    const dashboard = await fetch(handle.url).then((response) =>
-      response.text(),
-    );
-    expect(dashboard).toContain("执行中心");
-    expect(dashboard).toContain("治理并收敛");
-    expect(dashboard).toContain("证据门禁");
+    const dashboardResponse = await fetch(handle.url);
+    expect(dashboardResponse.headers.get("cache-control")).toBe("no-store, max-age=0");
+    expect(dashboardResponse.headers.get("pragma")).toBe("no-cache");
+    expect(dashboardResponse.headers.get("expires")).toBe("0");
+    const dashboard = await dashboardResponse.text();
+    expect(dashboard).toContain("repo-harness V8");
+    expect(dashboard).toContain("ChatGPT execution bridge");
+    expect(dashboard).toContain("执行安全状态修复");
   });
 });

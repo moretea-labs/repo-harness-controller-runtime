@@ -265,6 +265,9 @@ export async function startLocalBridgeServer(
   };
 
   app.get("/", (_request, response) => {
+    response.setHeader("Cache-Control", "no-store, max-age=0");
+    response.setHeader("Pragma", "no-cache");
+    response.setHeader("Expires", "0");
     response.type("html").send(localBridgeDashboardHtml(token));
   });
   app.get("/health", (_request, response) => {

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   extractCloudflareQuickTunnelUrl,
   inferMcpTunnelMode,
+  isExpectedLocalControllerHealth,
   normalizeKeepalivePublicEndpoint,
 } from '../../src/cli/mcp/keepalive';
 
@@ -30,5 +31,23 @@ describe('mcp keepalive helpers', () => {
     expect(() => normalizeKeepalivePublicEndpoint('https://repo-harness-mcp.example.com/not-mcp')).toThrow(
       'invalid --public-endpoint',
     );
+  });
+
+  test('recognizes the expected local controller health payload', () => {
+    expect(
+      isExpectedLocalControllerHealth({
+        status: 'ok',
+        toolSurface: 'controller-chatgpt-bridge-v8',
+        schemaVersion: 10,
+        toolSurfaceVersion: 8,
+        toolSurfaceFingerprint: '13b4720825d62e08',
+      }),
+    ).toBe(true);
+    expect(
+      isExpectedLocalControllerHealth({
+        status: 'ok',
+        toolSurface: 'wrong-surface',
+      }),
+    ).toBe(false);
   });
 });

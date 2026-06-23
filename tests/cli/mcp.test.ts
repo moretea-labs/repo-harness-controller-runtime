@@ -3,6 +3,7 @@ import { spawnSync } from 'child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { buildMcpRestartKeepaliveArgs, defaultMcpRestartLogPath } from '../../src/cli/mcp/restart';
 
 const ROOT = join(import.meta.dir, '../..');
 const CLI = join(ROOT, 'src/cli/index.ts');
@@ -20,6 +21,7 @@ describe('mcp command', () => {
     expect(root.status).toBe(0);
     expect(root.stdout).toContain('Run and configure the repo-harness MCP workflow sidecar');
     expect(root.stdout).toContain('serve');
+    expect(root.stdout).toContain('restart');
     expect(root.stdout).toContain('doctor');
     expect(root.stdout).toContain('setup');
 
@@ -32,6 +34,11 @@ describe('mcp command', () => {
     const doctor = runMcp(['doctor', '--help']);
     expect(doctor.status).toBe(0);
     expect(doctor.stdout).toContain('Check repo-harness MCP setup status');
+
+    const restart = runMcp(['restart', '--help']);
+    expect(restart.status).toBe(0);
+    expect(restart.stdout).toContain('--skip-tools-smoke');
+    expect(restart.stdout).toContain('--github-repo <owner/repo>');
 
     const setup = runMcp(['setup', '--help']);
     expect(setup.status).toBe(0);
@@ -81,5 +88,41 @@ describe('mcp command', () => {
     } finally {
       rmSync(repoRoot, { recursive: true, force: true });
     }
+  });
+
+  test('builds restart keepalive args from resolved config', () => {
+    const args = buildMcpRestartKeepaliveArgs({
+      repoRoot: '/tmp/example-repo',
+      host: '127.0.0.1',
+      port: 8765,
+      profile: 'controller',
+      authMode: 'oauth',
+      publicEndpoint: 'https://example.test/mcp',
+      defaultServerName: 'repo-harness-controller-v8',
+      expectedToolSurface: 'controller-chatgpt-bridge-v8',
+      devRunner: true,
+      devRunnerAgents: ['codex', 'claude'],
+      devRunnerTimeoutMs: 3600000,
+      devRunnerMaxTimeoutMs: 43200000,
+      localUiEnabled: true,
+      localUiHost: '127.0.0.1',
+      localUiPort: 8766,
+      localUiAutoOpen: false,
+      tunnelMode: 'named',
+      tunnelName: 'repo-harness-mcp',
+      oauthFile: '.repo-harness/mcp.oauth.json',
+      tokenFile: '.repo-harness/mcp.tokens.json',
+      stdoutLogPath: '/tmp/repo-harness-mcp.log',
+      stderrLogPath: '/tmp/repo-harness-mcp.log',
+    });
+    expect(args).toContain('--enable-dev-runner');
+    expect(args).toContain('--cloudflare-tunnel-name');
+    expect(args).toContain('repo-harness-mcp');
+    expect(args).toContain('--local-ui-port');
+    expect(args).toContain('8766');
+  });
+
+  test('uses a deterministic default restart log path inside repo-local logs', () => {
+    expect(defaultMcpRestartLogPath('/tmp/example-repo')).toBe('/tmp/example-repo/.ai/local/logs/repo-harness-mcp.log');
   });
 });
