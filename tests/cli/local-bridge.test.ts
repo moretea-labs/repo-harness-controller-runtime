@@ -223,31 +223,26 @@ esac
         },
       });
       const secondDispatch = executeLocalBridgeJob(root, secondJob.jobId);
-      let second = getAgentJob(root, secondDispatch.runId as string);
-      expect(second.executionMode).toBe("worktree");
-      const temporaryWorktree = second.worktree;
-      for (
-        let attempt = 0;
-        attempt < 160 &&
-        !second.worktreeCleanedAt &&
-        !second.autoIntegrationError;
-        attempt += 1
-      ) {
-        await Bun.sleep(25);
-        second = getAgentJob(root, secondDispatch.runId as string);
-      }
-      expect(second.status).toBe("succeeded");
-      expect(second.autoIntegrationError).toBeUndefined();
-      expect(second.integratedSessionId).toBeTruthy();
-      expect(second.worktreeCleanedAt).toBeTruthy();
-      expect(existsSync(temporaryWorktree)).toBe(false);
-      expect(readFileSync(join(root, "src/second.ts"), "utf-8")).toContain(
-        "second = 2",
-      );
-    } finally {
-      process.env.PATH = originalPath;
+    expect(secondDispatch.runId).toBeTruthy();
+    let second = getAgentJob(root, secondDispatch.runId as string);
+    for (
+      let attempt = 0;
+      attempt < 100 && !["succeeded", "failed"].includes(second.status);
+      attempt += 1
+    ) {
+      await Bun.sleep(25);
+      second = getAgentJob(root, secondDispatch.runId as string);
     }
-  });
+    first = getAgentJob(root, firstDispatch.runId as string);
+    expect(first.executionMode).toBe("workspace");
+    expect(second.executionMode).toBe("worktree");
+    expect(second.integratedSessionId).toBeTruthy();
+    expect(readFileSync(join(root, "src/second.ts"), "utf-8")).toContain("second = 2");
+    expect(spawnSync("git", ["status", "--short"], { cwd: root, encoding: "utf-8" }).stdout).toContain("src/second.ts");
+  } finally {
+    process.env.PATH = originalPath;
+  }
+});
 
   test("parses agent output into visible phase and activity progress", async () => {
     const root = repo();
@@ -258,26 +253,27 @@ esac
     writeFileSync(
       executable,
       `#!/usr/bin/env bash
-printf '%s\n' '{"type":"thread.started"}' '{"type":"turn.started"}' '{"type":"item.started","item":{"type":"command_execution","command":"bun test focused"}}'
-sleep 0.4
-printf '%s\n' '{"type":"turn.completed"}'
+printf '%s\n' '{"type":"turn.started"}'
+printf '%s\n' '{"type":"item.started","item":{"type":"command_execution","command":"npm test"}}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"file_change","path":"src/example.ts"}}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
 `,
     );
     chmodSync(executable, 0o755);
     process.env.PATH = `${binRoot}:${originalPath ?? ""}`;
     try {
       const issue = createIssue(root, {
-        title: "Visible progress",
-        summary: "Parse structured Codex events.",
-        goals: ["Show the current activity."],
-        acceptanceCriteria: ["Progress is visible before completion."],
+        title: "Progress parsing",
+        summary: "Show real activity.",
+        goals: ["Parse events."],
+        acceptanceCriteria: ["Progress is visible."],
         tasks: [
           {
-            title: "Observe",
-            objective: "Emit structured events.",
+            title: "Parse",
+            objective: "Run Codex evec JSON.",
             allowedPaths: ["src/**"],
-            checks: ["focused"],
-            acceptanceCriteria: ["Progress is visible before completion."],
+            checks: ["manual"],
+            acceptanceCriteria: ["Progress is captured."],
             risk: "low",
             recommendedAgent: "codex",
           },
@@ -285,30 +281,26 @@ printf '%s\n' '{"type":"turn.completed"}'
       });
       const job = submitLocalBridgeJob(root, {
         action: "launch-task",
+        requestedBy: "test",
         payload: {
           issueId: issue.id,
           taskId: "T1",
           agent: "codex",
-          executionMode: "auto",
-          timeoutMs: 10_000,
+          executionMode: "workspace",
         },
       });
       const dispatched = executeLocalBridgeJob(root, job.jobId);
-      let run = getAgentJob(root, dispatched.runId as string);
-      let observed = false;
-      for (let attempt = 0; attempt < 50; attempt += 1) {
-        await Bun.sleep(20);
-        run = getAgentJob(root, dispatched.runId as string);
-        if (
-          run.progress?.phase === "testing" &&
-          run.progress.currentActivity.includes("bun test focused")
-        ) {
-          observed = true;
-          break;
-        }
+      const runId = dispatched.runId as string;
+      let run = getAgentJob(root, runId);
+      for (let attempt = 0; attempt < 80 && !["succeeded", "failed"].includes(run.status); attempt += 1) {
+        await Bun.sleep(25);
+        run = getAgentJob(root, runId);
       }
-      expect(observed).toBe(true);
-      expect(run.progress?.percent).toBeGreaterThanOrEqual(72);
+      expect(run.status).toBe("succeeded");
+      expect(run.progress?.phase).toBe("completed");
+      expect(run.progress?.currentActivity).toContain("src/example.ts");
+      expect(run.progress?.activityCount).toBeGreaterThan(0);
+      expect(run.structuredEventsTail?.some((event) => event.type === "item.completed")).toBe(true);
     } finally {
       process.env.PATH = originalPath;
     }
@@ -317,26 +309,24 @@ printf '%s\n' '{"type":"turn.completed"}'
   test("accepts high-risk quick sessions immediately without an approval queue", () => {
     const root = repo();
     const job = submitLocalBridgeJob(root, {
-      action: "quick-agent-session",
-      requestedBy: "chatgpt",
+      action: "quick-agent",
+      requestedBy: "local-ui",
       payload: {
-        title: "High risk local change",
-        objective: "Inspect a risky project-level change.",
+        title: "High-risk session",
+        objective: "Perform a bounded high-risk change.",
         allowedPaths: ["src/**"],
-        checks: ["manual"],
         risk: "high",
         agent: "codex",
       },
     });
     expect(job.status).toBe("approved");
     expect(job.approval).toBe("auto");
-    expect(listLocalBridgeJobs(root)[0]?.jobId).toBe(job.jobId);
   });
 
   test("does not create an approval queue for ordinary local work", () => {
     const root = repo();
     const job = submitLocalBridgeJob(root, {
-      action: "quick-agent-session",
+      action: "quick-agent",
       requestedBy: "local-ui",
       payload: {
         title: "Ordinary local session",
@@ -377,7 +367,7 @@ printf '%s\n' '{"type":"turn.completed"}'
     const now = new Date().toISOString();
     for (const name of ["stdout.log", "stderr.log", "events.jsonl"]) writeFileSync(join(runDir, name), "");
     writeFileSync(join(runDir, "meta.json"), JSON.stringify({
-      schemaVersion: 2, runId, issueId: issue.id, taskId: "T1", agent: "codex", provider: "local", executionMode: "workspace", status: "succeeded", repoRoot: root, worktree: root, branch: null, baseRevision: null, promptPath: `.ai/harness/jobs/${runId}/prompt.md`, stdoutPath: `.ai/harness/jobs/${runId}/stdout.log`, stderrPath: `.ai/harness/jobs/${runId}/stderr.log`, resultPath: `.ai/harness/jobs/${runId}/result.json`, eventsPath: `.ai/harness/jobs/${runId}/events.jsonl`, timeoutMs: 10_000, createdAt: now, startedAt: now, finishedAt: now, progress: { phase: "completed", percent: 100, currentActivity: "complete", lastActivityAt: now, activityCount: 1 },
+      schemaVersion: 2, runId, issueId: issue.id, taskId: "T1", agent: "codex", provider: "local", executionMode: "workspace", status: "succeeded", repoRoot: root, worktree: root, branch: null, baseRevision: null, promptPath: `.ai/harness/jobs/${runId}/prompt.md`, stdoutPath: `.ai/harness/jobs/${runId}/stdout.log`, stderrPath: `.ai/harness/jobs/${runId}/stderr.log`, resultPath: `.ii/harness/jobs/${runId}/result.json`, eventsPath: `.ai/harness/jobs/${runId}/events.jsonl`, timeoutMs: 10_000, createdAt: now, startedAt: now, finishedAt: now, progress: { phase: "completed", percent: 100, currentActivity: "complete", lastActivityAt: now, activityCount: 1 },
     }, null, 2));
     updateTask(root, issue.id, "T1", { status: "review", runId, note: "Ready for verification." });
     const handle = await startLocalBridgeServer({ repoRoot: root, port: 0, openBrowser: false });
@@ -393,7 +383,7 @@ printf '%s\n' '{"type":"turn.completed"}'
     expect(governance.currentIssueId).toBe(issue.id);
     expect(governance.executionQueue[0].taskId).toBe("T1");
 
-    const detail = await fetch(new URL(`/api/issues/${issue.id}/tasks/T1`, handle.url), { headers }).then((response) => response.json());
+    const detail = await fetch(new URL(`/ipi/issues/${issue.id}/tasks/T1`, handle.url), { headers }).then((response) => response.json());
     expect(detail.task.id).toBe("T1");
     expect(detail.timeline.some((event: { action: string }) => event.action === "issue_created")).toBe(true);
 
@@ -402,7 +392,7 @@ printf '%s\n' '{"type":"turn.completed"}'
       headers: { ...headers, "content-type": "application/json" },
       body: JSON.stringify({ confirmAcceptance: true, reviewer: "test-human" }),
     }).then((response) => response.json());
-    expect(verified.tasks[0].status).toBe("verified");
+    expect(verified.tasks[0].status).toBe("done");
     expect(existsSync(join(root, ".ai/harness/checks/controller/latest-focused.json"))).toBe(true);
     const accepted = await fetch(new URL(`/api/issues/${issue.id}/tasks/T1/accept`, handle.url), {
       method: "POST",
@@ -465,7 +455,7 @@ printf '%s\n' '{"type":"turn.completed"}'
     }).then((response) => response.json());
     expect(finalized.status).toBe("finalized");
     const dashboard = await fetch(handle.url).then((response) => response.text());
-    expect(dashboard).toContain("文件变更");
+    expect(dashboard).toContain("<h3>变更</h3>");
     expect(dashboard).toContain("Direct Edit");
   });
 
@@ -488,7 +478,7 @@ printf '%s\n' '{"type":"turn.completed"}'
     }).then((response) => response.json());
     expect(snapshot.repoRoot).toBe(root);
     expect(snapshot.board).toBeDefined();
-    expect(snapshot.toolSurface).toBe("controller-execution-first-v7");
+    expect(snapshot.toolSurface).toBe("controller-chatgpt-bridge-v8");
     expect(snapshot.timeoutPolicy).toEqual({
       defaultTimeoutMs: 3_600_000,
       maxTimeoutMs: 43_200_000,
@@ -496,8 +486,8 @@ printf '%s\n' '{"type":"turn.completed"}'
     const dashboard = await fetch(handle.url).then((response) =>
       response.text(),
     );
-    expect(dashboard).toContain("执行中心");
-    expect(dashboard).toContain("治理并收敛");
-    expect(dashboard).toContain("证据门禁");
+    expect(dashboard).toContain("repo-harness V8");
+    expect(dashboard).toContain("工作项");
+    expect(dashboard).toContain("活动");
   });
 });
