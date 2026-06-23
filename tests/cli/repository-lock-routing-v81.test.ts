@@ -12,7 +12,7 @@ describe('v8.1 repository lock and remote routing', () => {
     const keyA = { scope: 'repository' as const, repoId: fixture.repoA.repoId };
     const keyB = { scope: 'repository' as const, repoId: fixture.repoB.repoId };
     const lockA = acquireControllerLock(fixture.controllerHome, keyA, 'repo-a-test');
-    let lockB;
+    let lockB: ReturnType<typeof acquireControllerLock> | undefined;
     try {
       expect(() => acquireControllerLock(fixture.controllerHome, keyA, 'same-repo-test'))
         .toThrow('LOCK_HELD');
