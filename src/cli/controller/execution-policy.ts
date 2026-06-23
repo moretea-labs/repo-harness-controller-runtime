@@ -139,9 +139,9 @@ export function taskExecutionPolicy(task: Pick<ControllerTask, 'objective' | 'ti
         requiresDiffEvidence: true,
         requiresAnyVerificationEvidence: task.checks.length > 0,
         requiresAcceptanceEvidence: task.acceptanceCriteria.length > 0,
-        requiresHumanAcceptance: false,
+        requiresHumanAcceptance: true,
         autoRunDeclaredChecks: task.checks.length > 0,
-        autoCompleteAfterSuccessfulRun: true,
+        autoCompleteAfterSuccessfulRun: false,
         warnings,
       };
     case 'destructive_change':
