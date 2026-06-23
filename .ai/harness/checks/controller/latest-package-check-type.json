@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "checkId": "package:check:type",
+  "description": "Run package script check:type",
+  "source": "package-script",
+  "command": [
+    "bun",
+    "run",
+    "check:type"
+  ],
+  "cwd": ".",
+  "ok": false,
+  "status": 1,
+  "timedOut": false,
+  "stdout": "",
+  "stderr": "$ tsc --noEmit\nnode:internal/modules/cjs/loader:1386\n  throw err;\n  ^\n\nError: Cannot find module '../lib/tsc.js'\nRequire stack:\n- /Users/greyson/DevProjects/repo-harness-controller-runtime/node_modules/.bin/tsc\n    at Function._resolveFilename (node:internal/modules/cjs/loader:1383:15)\n    at defaultResolveImpl (node:internal/modules/cjs/loader:1025:19)\n    at resolveForCJSWithHooks (node:internal/modules/cjs/loader:1030:22)\n    at Function._load (node:internal/modules/cjs/loader:1192:37)\n    at TracingChannel.traceSync (node:diagnostics_channel:328:14)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:237:24)\n    at Module.require (node:internal/modules/cjs/loader:1463:12)\n    at require (node:internal/modules/helpers:147:16)\n    at Object.<anonymous> (/Users/greyson/DevProjects/repo-harness-controller-runtime/node_modules/.bin/tsc:2:1)\n    at Module._compile (node:internal/modules/cjs/loader:1706:14) {\n  code: 'MODULE_NOT_FOUND',\n  requireStack: [\n    '/Users/greyson/DevProjects/repo-harness-controller-runtime/node_modules/.bin/tsc'\n  ]\n}\n\nNode.js v22.22.0\nerror: script \"check:type\" exited with code 1\n",
+  "executedAt": "2026-06-23T07:36:18.538Z"
+}

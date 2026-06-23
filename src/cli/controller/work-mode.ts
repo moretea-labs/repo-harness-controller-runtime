@@ -33,26 +33,25 @@ export function assessWorkMode(input: WorkModeAssessmentInput): WorkModeAssessme
   const risk = input.risk ?? 'low';
   const reasons: string[] = [];
 
-  const complex =
-    input.requiresInvestigation === true ||
+  const protectedPathTouched = paths.some((path) => PROTECTED_PATH.test(path));
+  const durableComplex =
     input.requiresParallelism === true ||
     input.requiresLongRunningChecks === true ||
     input.needsDependencies === true ||
     risk === 'high' ||
     risk === 'destructive' ||
-    expectedFiles > 8 ||
-    expectedChangedLines > 1200 ||
-    paths.some((path) => PROTECTED_PATH.test(path));
+    expectedFiles > 12 ||
+    expectedChangedLines > 2000 ||
+    protectedPathTouched;
 
-  if (complex) {
-    if (input.requiresInvestigation) reasons.push('The implementation or root cause is not yet known.');
+  if (durableComplex) {
     if (input.requiresParallelism) reasons.push('The work needs independent parallel Tasks.');
     if (input.requiresLongRunningChecks) reasons.push('The work has long-running verification or environment dependencies.');
     if (input.needsDependencies) reasons.push('The work needs a durable dependency graph.');
     if (risk === 'high') reasons.push('The declared risk is high.');
     if (risk === 'destructive') reasons.push('The request contains destructive or irreversible operations.');
-    if (expectedFiles > 8 || expectedChangedLines > 1200) reasons.push('The estimated change is too broad for one bounded edit session.');
-    if (paths.some((path) => PROTECTED_PATH.test(path))) reasons.push('The request touches a protected or release-sensitive path.');
+    if (expectedFiles > 12 || expectedChangedLines > 2000) reasons.push('The estimated change is too broad for one bounded edit session.');
+    if (protectedPathTouched) reasons.push('The request touches a protected or release-sensitive path.');
     return {
       recommendedMode: 'issue_task',
       confidence: 'high',
@@ -62,26 +61,41 @@ export function assessWorkMode(input: WorkModeAssessmentInput): WorkModeAssessme
     };
   }
 
+  const discoveryRequired = input.requiresInvestigation === true || paths.length === 0;
   const direct =
-    (risk === 'readonly' || paths.length > 0) &&
-    paths.length <= 5 &&
-    expectedFiles <= 5 &&
-    expectedChangedLines <= 500;
+    risk !== 'high' &&
+    risk !== 'destructive' &&
+    paths.length <= 8 &&
+    expectedFiles <= 8 &&
+    expectedChangedLines <= 1000;
 
   if (direct) {
-    reasons.push('The target files are known and the change is bounded.');
+    if (discoveryRequired) {
+      reasons.push('The exact edit locations can be discovered with repository search before opening a bounded edit session.');
+      reasons.push('Investigation alone does not require an Agent when the expected change remains bounded.');
+    } else {
+      reasons.push('The target files are known and the change is bounded.');
+    }
     if (expectedChangedLines > 0) reasons.push(`The estimated change is ${expectedChangedLines} lines across ${Math.max(expectedFiles, paths.length)} file(s).`);
     return {
       recommendedMode: 'direct_edit',
-      confidence: 'high',
+      confidence: discoveryRequired ? 'medium' : 'high',
       reasons,
-      nextTools: ['read_repository_file', 'begin_edit_session', 'apply_patch', 'get_edit_session_diff', 'verify_edit_session', 'finalize_edit_session'],
+      nextTools: [
+        ...(discoveryRequired ? ['search_repository'] : []),
+        'read_repository_file',
+        'begin_edit_session',
+        'apply_patch',
+        'get_edit_session_diff',
+        'verify_edit_session',
+        'finalize_edit_session',
+      ],
       issueRequired: false,
     };
   }
 
-  reasons.push('The request is bounded, but exact file edits are not yet fully specified.');
-  reasons.push('Use one scoped agent session only when direct patch operations cannot be prepared safely.');
+  reasons.push('The request is larger than one preferred direct-edit session but does not need a durable Issue graph.');
+  reasons.push('Use one scoped Agent session only after repository search shows that bounded direct patches are not safe or practical.');
   return {
     recommendedMode: 'quick_agent',
     confidence: 'medium',

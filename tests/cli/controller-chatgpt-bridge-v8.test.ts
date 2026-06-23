@@ -119,6 +119,13 @@ describe("Controller V8 ChatGPT execution bridge", () => {
     expect(dashboard).toContain("活动");
     expect(dashboard).toContain("设置");
     expect(dashboard).toContain("Direct Edit");
+    expect(dashboard).toContain("Agent 输出");
+    expect(dashboard).toContain("查看原始日志");
+    expect(dashboard).toContain("/events");
+    expect(dashboard).toContain("parseAgentOutput");
+    const embeddedScript = dashboard.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+    expect(embeddedScript).toBeDefined();
+    expect(() => new Function(embeddedScript!)).not.toThrow();
     expect(dashboard).not.toContain("Approval Queue");
   });
 });

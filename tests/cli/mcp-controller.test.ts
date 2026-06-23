@@ -359,6 +359,18 @@ describe("MCP controller profile", () => {
       expect(assessment.value.recommendedMode).toBe("direct_edit");
       expect(assessment.value.issueRequired).toBe(false);
 
+      const discoveryAssessment = await jsonTool(ctx, "assess_work_request", {
+        description: "Locate the Controller routing and dashboard files, then implement a bounded update.",
+        expected_files: 6,
+        expected_changed_lines: 500,
+        requires_investigation: true,
+        risk: "medium",
+      });
+      expect(discoveryAssessment.value.recommendedMode).toBe("direct_edit");
+      expect(discoveryAssessment.value.confidence).toBe("medium");
+      expect(discoveryAssessment.value.nextTools[0]).toBe("search_repository");
+      expect(discoveryAssessment.value.issueRequired).toBe(false);
+
       const read = await jsonTool(ctx, "read_repository_file", { path: "src/example.ts" });
       const session = await jsonTool(ctx, "begin_edit_session", {
         purpose: "Update example constant",

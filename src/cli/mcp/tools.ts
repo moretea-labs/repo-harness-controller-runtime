@@ -1667,7 +1667,7 @@ export function buildMcpToolDefinitions(
       {
         name: "assess_work_request",
         description:
-          "Choose direct_edit, quick_agent, or issue_task before creating work. Bounded known-file changes and document edits should normally avoid Issue creation.",
+          "Choose direct_edit, quick_agent, or issue_task before creating work. Prefer repository search plus bounded direct edits for low/medium-risk changes, even when exact files need discovery; use an Agent only when direct patches are not safe or practical.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1689,7 +1689,7 @@ export function buildMcpToolDefinitions(
       {
         name: "create_issue",
         description:
-          "Create a durable Issue only for complex, long-running, investigative, dependency-aware, or parallel work. Use bounded direct edits for known small code, config, and documentation changes.",
+          "Create a durable Issue only for broad, long-running, dependency-aware, parallel, protected-path, or high-risk work. File discovery by itself is not a reason to create an Issue or start an Agent; search first and use bounded direct edits when practical.",
         inputSchema: {
           type: "object",
           properties: {
