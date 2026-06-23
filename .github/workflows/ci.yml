@@ -33,17 +33,7 @@ jobs:
           bun-version: 1.3.10
 
       - name: CI gate
-        run: |
-          set -o pipefail
-          bun run check:ci 2>&1 | tee ci.log
-
-      - name: Upload CI log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ci-gate-log
-          path: ci.log
-          if-no-files-found: error
+        run: bun run check:ci
 
       - name: Diff hygiene
         run: git diff --check
