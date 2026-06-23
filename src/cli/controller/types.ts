@@ -30,6 +30,7 @@ export interface TaskCommandEvidence {
 }
 
 export interface TaskVerification {
+  repoId?: string;
   runId?: string;
   integratedRevision?: string;
   reviewedDiffHash?: string;
@@ -42,6 +43,7 @@ export interface TaskVerification {
 }
 
 export interface ControllerTask {
+  repoId?: string;
   id: string;
   title: string;
   objective: string;
@@ -64,7 +66,8 @@ export interface ControllerTask {
 }
 
 export interface ControllerIssue {
-  schemaVersion: 1 | 2 | 3 | 4 | 5;
+  schemaVersion: 1 | 2 | 3 | 4 | 5 | 6;
+  repoId?: string;
   id: string;
   title: string;
   slug: string;
@@ -85,6 +88,7 @@ export interface ControllerIssue {
 }
 
 export interface TaskDraft {
+  repoId?: string;
   title: string;
   objective: string;
   dependsOn?: string[];

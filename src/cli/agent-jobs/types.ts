@@ -51,7 +51,9 @@ export interface AgentJobEvent {
 }
 
 export interface AgentJobMeta {
-  schemaVersion: 1 | 2;
+  schemaVersion: 1 | 2 | 3;
+  repoId?: string;
+  checkoutId?: string;
   runId: string;
   issueId: string;
   taskId: string;
@@ -62,7 +64,9 @@ export interface AgentJobMeta {
   allowedPaths?: string[];
   status: AgentJobStatus;
   repoRoot: string;
+  executionRoot?: string;
   worktree: string;
+  worktreePath?: string;
   branch: string | null;
   baseRevision: string | null;
   promptPath: string;
