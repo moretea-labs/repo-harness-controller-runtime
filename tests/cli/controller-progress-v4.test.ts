@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
+import { execSync } from "child_process";
 import { join } from "path";
 import { createIssue, updateTask } from "../../src/cli/controller/issue-store";
 import {
@@ -18,6 +19,7 @@ import {
   loadGitHubPluginConfig,
   saveGitHubPluginConfig,
 } from "../../src/cli/github/plugin";
+import { registerRepository } from "../../src/cli/repositories/registry";
 
 const roots: string[] = [];
 
@@ -30,6 +32,7 @@ function repo(): string {
   roots.push(root);
   mkdirSync(join(root, "tasks"), { recursive: true });
   mkdirSync(join(root, ".ai/harness/jobs"), { recursive: true });
+  execSync("git init -q", { cwd: root });
   return root;
 }
 
@@ -151,5 +154,44 @@ describe("Controller V4 progress and worklog", () => {
     expect(loaded.enabled).toBe(true);
     expect(loaded.repository).toBe("owner/repo");
     expect(loaded.projectNumber).toBe(7);
+  });
+
+  test("prefers repository-registry GitHub plugin config and absorbs legacy repo-local config", () => {
+    const root = repo();
+    mkdirSync(join(root, ".repo-harness", "plugins"), { recursive: true });
+    writeFileSync(join(root, ".repo-harness", "plugins", "github.json"), `${JSON.stringify({
+      schemaVersion: 1,
+      enabled: true,
+      repository: "legacy-owner/legacy-repo",
+      syncMode: "checkpoint",
+      includeTasks: false,
+      projectOwner: "legacy-owner",
+      projectNumber: 9,
+    }, null, 2)}\n`);
+
+    registerRepository({
+      path: root,
+    });
+
+    const loaded = loadGitHubPluginConfig(root);
+    expect(loaded.enabled).toBe(true);
+    expect(loaded.repository).toBe("legacy-owner/legacy-repo");
+    expect(loaded.syncMode).toBe("checkpoint");
+    expect(loaded.includeTasks).toBe(false);
+
+    saveGitHubPluginConfig(root, {
+      enabled: true,
+      repository: "team/project",
+      syncMode: "checkpoint",
+      includeTasks: false,
+      projectOwner: "team",
+      projectNumber: 12,
+    });
+
+    const status = getGitHubPluginStatus(root);
+    expect(status.config.repository).toBe("team/project");
+    expect(status.config.syncMode).toBe("checkpoint");
+    expect(status.config.includeTasks).toBe(false);
+    expect(existsSync(join(root, ".repo-harness", "plugins", "github.json"))).toBe(true);
   });
 });

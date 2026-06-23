@@ -4,9 +4,13 @@ export type RepositoryStateStorageStrategy = 'controller-home' | 'repository-loc
 export interface GitHubRepositoryMapping {
   owner: string;
   repo: string;
+  repository?: string;
   projectOwner?: string;
   projectNumber?: number;
   labels?: string[];
+  pluginEnabled?: boolean;
+  syncMode?: 'manual' | 'checkpoint';
+  includeTasks?: boolean;
   issueSyncEnabled?: boolean;
   cloudAgentSupported?: boolean;
   authenticationCapability?: 'unknown' | 'available' | 'unavailable';

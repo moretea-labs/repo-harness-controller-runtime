@@ -31,6 +31,7 @@ import type {
 const REGISTRY_FILE = 'repositories.json';
 const FOCUS_FILE = 'focus.json';
 const LOCAL_CONFIG = '.ai/harness/repository.json';
+const LEGACY_GITHUB_PLUGIN_CONFIG = '.repo-harness/plugins/github.json';
 
 interface RegisterRepositoryInput {
   path: string;
@@ -126,6 +127,35 @@ function readLocalIdentity(canonicalRoot: string): { repoId?: string } {
   }
 }
 
+function readLegacyGitHubPluginConfig(canonicalRoot: string): Partial<RepositoryRecord['github']> | undefined {
+  const path = join(canonicalRoot, LEGACY_GITHUB_PLUGIN_CONFIG);
+  if (!existsSync(path)) return undefined;
+  try {
+    const raw = JSON.parse(readFileSync(path, 'utf-8')) as {
+      enabled?: unknown;
+      repository?: unknown;
+      syncMode?: unknown;
+      includeTasks?: unknown;
+      projectOwner?: unknown;
+      projectNumber?: unknown;
+    };
+    const repository = typeof raw.repository === 'string' && raw.repository.trim() ? raw.repository.trim() : undefined;
+    const [owner, repo] = repository?.includes('/') ? repository.split('/', 2) : [undefined, undefined];
+    return repository && owner && repo ? {
+      owner,
+      repo,
+      repository,
+      pluginEnabled: typeof raw.enabled === 'boolean' ? raw.enabled : undefined,
+      syncMode: raw.syncMode === 'checkpoint' ? 'checkpoint' : 'manual',
+      includeTasks: raw.includeTasks !== false,
+      projectOwner: typeof raw.projectOwner === 'string' && raw.projectOwner.trim() ? raw.projectOwner.trim() : undefined,
+      projectNumber: Number.isInteger(raw.projectNumber) && Number(raw.projectNumber) > 0 ? Number(raw.projectNumber) : undefined,
+    } : undefined;
+  } catch (_error) {
+    return undefined;
+  }
+}
+
 function writeLocalIdentity(record: RepositoryRecord): void {
   const path = join(record.canonicalRoot, LOCAL_CONFIG);
   atomicJson(path, {
@@ -162,6 +192,40 @@ function activeCheckout(record: RepositoryRecord): RepositoryCheckout {
       updatedAt: record.updatedAt,
       lastSeenAt: record.lastSeenAt,
     };
+}
+
+function defaultGitHubMapping(
+  canonicalRemote: string | undefined,
+  existing?: RepositoryRecord['github'],
+  legacy?: Partial<RepositoryRecord['github']>,
+): RepositoryRecord['github'] {
+  if (existing) return existing;
+  if (legacy?.owner && legacy?.repo) {
+    return {
+      owner: legacy.owner,
+      repo: legacy.repo,
+      repository: legacy.repository ?? `${legacy.owner}/${legacy.repo}`,
+      pluginEnabled: legacy.pluginEnabled ?? true,
+      syncMode: legacy.syncMode ?? 'manual',
+      includeTasks: legacy.includeTasks ?? true,
+      labels: legacy.labels,
+      projectOwner: legacy.projectOwner,
+      projectNumber: legacy.projectNumber,
+      issueSyncEnabled: legacy.issueSyncEnabled,
+      cloudAgentSupported: legacy.cloudAgentSupported,
+      authenticationCapability: legacy.authenticationCapability ?? 'unknown',
+    };
+  }
+  const parsed = parseGitHubRemote(canonicalRemote);
+  if (!parsed) return undefined;
+  return {
+    ...parsed,
+    repository: `${parsed.owner}/${parsed.repo}`,
+    pluginEnabled: true,
+    syncMode: 'manual',
+    includeTasks: true,
+    authenticationCapability: 'unknown',
+  };
 }
 
 export function repositorySummary(record: RepositoryRecord): RepositorySummary {
@@ -214,6 +278,7 @@ export function registerRepository(input: RegisterRepositoryInput): RepositoryRe
   const rawRemote = input.remoteUrl?.trim() || git(canonicalRoot, ['config', '--get', 'remote.origin.url']);
   const canonicalRemote = normalizeRemoteUrl(rawRemote);
   const localIdentity = readLocalIdentity(canonicalRoot);
+  const legacyGitHub = readLegacyGitHubPluginConfig(canonicalRoot);
   const repoId = canonicalRemote ? stableRemoteRepoId(canonicalRemote) : localIdentity.repoId || newLocalRepoId();
   const checkoutId = stableCheckoutId(repoId, canonicalRoot);
   const timestamp = now();
@@ -229,7 +294,6 @@ export function registerRepository(input: RegisterRepositoryInput): RepositoryRe
     updatedAt: timestamp,
     lastSeenAt: timestamp,
   };
-  const github = parseGitHubRemote(canonicalRemote);
   const record: RepositoryRecord = {
     schemaVersion: 1,
     repoId,
@@ -243,7 +307,7 @@ export function registerRepository(input: RegisterRepositoryInput): RepositoryRe
     ],
     remoteUrl: rawRemote,
     canonicalRemote,
-    github: existing?.github ?? (github ? { ...github, authenticationCapability: 'unknown' } : undefined),
+    github: defaultGitHubMapping(canonicalRemote, existing?.github, legacyGitHub),
     defaultBranch: input.defaultBranch?.trim() || existing?.defaultBranch || defaultBranch(canonicalRoot),
     repositoryType: input.repositoryType ?? existing?.repositoryType ?? repositoryType(canonicalRoot, rawRemote),
     enabled: input.enabled ?? existing?.enabled ?? true,
@@ -279,6 +343,7 @@ export function updateRepository(repoId: string, patch: UpdateRepositoryInput, c
     enabled,
     disabledAt: enabled ? undefined : previous.disabledAt ?? now(),
     removedAt: enabled ? undefined : previous.removedAt,
+    github: patch.github ?? previous.github,
     updatedAt: now(),
   };
   registry.repositories[index] = next;

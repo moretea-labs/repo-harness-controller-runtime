@@ -12,7 +12,7 @@ Publishing is explicit. repo-harness does not silently overwrite GitHub Issues, 
 
 ## Optional GitHub plugin
 
-GitHub integration is disabled by default. Local Controller files remain authoritative even after the plugin is enabled. Configure it explicitly:
+GitHub integration is repository-scoped. Newly registered GitHub-backed repositories enable the plugin by default, while non-GitHub or not-yet-registered repositories keep local Controller files authoritative until you configure them explicitly:
 
 ```bash
 repo-harness controller github configure --enable \
@@ -20,7 +20,7 @@ repo-harness controller github configure --enable \
 repo-harness controller github status --json
 ```
 
-The configuration is stored at `.repo-harness/plugins/github.json` and contains no credential. Authentication remains in the local `gh` CLI. `manual` and `checkpoint` are policy labels; both require an explicit publish or refresh action, so no hidden background network write can block local Task progress.
+The canonical configuration is stored on each repository's Controller Registry record. Legacy `.repo-harness/plugins/github.json` files are still read for compatibility and absorbed into the registry on first use. No credential is stored in either place; authentication remains in the local `gh` CLI. `manual` and `checkpoint` are policy labels; both require an explicit publish or refresh action, so no hidden background network write can block local Task progress.
 
 The corresponding MCP tools are `get_github_plugin_status` and `configure_github_plugin`. Existing low-level GitHub tools remain available for compatibility.
 

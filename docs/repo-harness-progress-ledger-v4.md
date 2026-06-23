@@ -62,7 +62,7 @@ The UI uses token-protected SSE. It emits full refresh events only when Issue, T
 
 ## Optional GitHub plugin
 
-GitHub support is disabled by default. Configure it with:
+GitHub support is repository-scoped. Newly registered GitHub-backed repositories enable it by default; other repositories can configure it with:
 
 ```bash
 repo-harness controller github configure \
@@ -86,7 +86,7 @@ Local files remain authoritative:
 - Run evidence: `.ai/harness/jobs/`;
 - local worklog: `.ai/harness/controller/`;
 - tracked exported reports: `tasks/reports/`;
-- optional plugin config: `.repo-harness/plugins/github.json`.
+- repository registry GitHub config, with legacy `.repo-harness/plugins/github.json` compatibility.
 
 ## MCP V4 surface
 

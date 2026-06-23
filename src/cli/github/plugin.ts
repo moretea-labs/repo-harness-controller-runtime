@@ -3,6 +3,8 @@ import { dirname, join } from "path";
 import { getGitHubStatus, publishIssueToGitHub, refreshGitHubIssue, closeGitHubIssue } from "./github";
 import type { ControllerIssue } from "../controller/types";
 import { tryAppendControllerWorklogEvent } from "../controller/worklog";
+import { listRepositories, updateRepository } from "../repositories/registry";
+import type { RepositoryRecord } from "../repositories/types";
 
 const CONFIG_PATH = ".repo-harness/plugins/github.json";
 const STATUS_CACHE_TTL_MS = 30_000;
@@ -43,32 +45,108 @@ export function defaultGitHubPluginConfig(): GitHubPluginConfig {
   };
 }
 
-export function loadGitHubPluginConfig(repoRoot: string): GitHubPluginConfig {
+function normalizeGitHubPluginConfig(raw: Partial<GitHubPluginConfig>): GitHubPluginConfig {
+  const repository = typeof raw.repository === "string" && raw.repository.trim()
+    ? raw.repository.trim()
+    : undefined;
+  const projectOwner = typeof raw.projectOwner === "string" && raw.projectOwner.trim()
+    ? raw.projectOwner.trim()
+    : undefined;
+  const projectNumber = Number.isInteger(raw.projectNumber) && Number(raw.projectNumber) > 0
+    ? Number(raw.projectNumber)
+    : undefined;
+  return {
+    schemaVersion: 1,
+    enabled: typeof raw.enabled === "boolean" ? raw.enabled : defaultGitHubPluginConfig().enabled,
+    repository,
+    syncMode: raw.syncMode === "checkpoint" ? "checkpoint" : "manual",
+    includeTasks: raw.includeTasks !== false,
+    projectOwner,
+    projectNumber,
+  };
+}
+
+function loadLegacyGitHubPluginConfig(repoRoot: string): GitHubPluginConfig | undefined {
   const path = join(repoRoot, CONFIG_PATH);
-  if (!existsSync(path)) return defaultGitHubPluginConfig();
+  if (!existsSync(path)) return undefined;
   try {
-    const raw = JSON.parse(readFileSync(path, "utf-8")) as Partial<GitHubPluginConfig>;
-    const repository = typeof raw.repository === "string" && raw.repository.trim()
-      ? raw.repository.trim()
-      : undefined;
-    const projectOwner = typeof raw.projectOwner === "string" && raw.projectOwner.trim()
-      ? raw.projectOwner.trim()
-      : undefined;
-    const projectNumber = Number.isInteger(raw.projectNumber) && Number(raw.projectNumber) > 0
-      ? Number(raw.projectNumber)
-      : undefined;
-    return {
-      schemaVersion: 1,
-      enabled: raw.enabled === true,
-      repository,
-      syncMode: raw.syncMode === "checkpoint" ? "checkpoint" : "manual",
-      includeTasks: raw.includeTasks !== false,
-      projectOwner,
-      projectNumber,
-    };
+    return normalizeGitHubPluginConfig(JSON.parse(readFileSync(path, "utf-8")) as Partial<GitHubPluginConfig>);
   } catch (_error) {
-    return defaultGitHubPluginConfig();
+    return undefined;
   }
+}
+
+function findRepositoryRecord(repoRoot: string): RepositoryRecord | undefined {
+  return listRepositories().find((record) =>
+    record.canonicalRoot === repoRoot
+    || record.localRoot === repoRoot
+    || record.checkouts.some((checkout) => checkout.canonicalRoot === repoRoot || checkout.localRoot === repoRoot));
+}
+
+function configFromRepository(record: RepositoryRecord | undefined): GitHubPluginConfig | undefined {
+  const github = record?.github;
+  if (!github) return undefined;
+  return normalizeGitHubPluginConfig({
+    enabled: github.pluginEnabled ?? true,
+    repository: github.repository ?? (github.owner && github.repo ? `${github.owner}/${github.repo}` : undefined),
+    syncMode: github.syncMode,
+    includeTasks: github.includeTasks,
+    projectOwner: github.projectOwner,
+    projectNumber: github.projectNumber,
+  });
+}
+
+function syncRepositoryGitHubConfig(repoRoot: string, config: GitHubPluginConfig): void {
+  const record = findRepositoryRecord(repoRoot);
+  if (!record) return;
+  const current = record.github;
+  const repository = config.repository?.trim();
+  const effectiveRepository = repository
+    || current?.repository
+    || (current?.owner && current?.repo ? `${current.owner}/${current.repo}` : undefined);
+  if (!effectiveRepository) return;
+  const [owner, repo] = effectiveRepository.includes("/") ? effectiveRepository.split("/", 2) : [current?.owner, current?.repo];
+  if (!owner || !repo) return;
+  updateRepository(record.repoId, {
+    github: {
+      owner,
+      repo,
+      repository: effectiveRepository,
+      labels: current?.labels,
+      projectOwner: config.projectOwner,
+      projectNumber: config.projectNumber,
+      pluginEnabled: config.enabled,
+      syncMode: config.syncMode,
+      includeTasks: config.includeTasks,
+      issueSyncEnabled: current?.issueSyncEnabled,
+      cloudAgentSupported: current?.cloudAgentSupported,
+      authenticationCapability: current?.authenticationCapability ?? "unknown",
+    },
+  });
+}
+
+export function loadGitHubPluginConfig(repoRoot: string): GitHubPluginConfig {
+  const registryConfig = configFromRepository(findRepositoryRecord(repoRoot));
+  const legacyConfig = loadLegacyGitHubPluginConfig(repoRoot);
+  if (registryConfig && legacyConfig) {
+    const merged = normalizeGitHubPluginConfig({
+      ...registryConfig,
+      enabled: legacyConfig.enabled,
+      repository: legacyConfig.repository ?? registryConfig.repository,
+      syncMode: legacyConfig.syncMode,
+      includeTasks: legacyConfig.includeTasks,
+      projectOwner: legacyConfig.projectOwner ?? registryConfig.projectOwner,
+      projectNumber: legacyConfig.projectNumber ?? registryConfig.projectNumber,
+    });
+    syncRepositoryGitHubConfig(repoRoot, merged);
+    return merged;
+  }
+  if (registryConfig) return registryConfig;
+  if (legacyConfig) {
+    syncRepositoryGitHubConfig(repoRoot, legacyConfig);
+    return legacyConfig;
+  }
+  return defaultGitHubPluginConfig();
 }
 
 export type GitHubPluginConfigPatch = Partial<Omit<GitHubPluginConfig, "schemaVersion" | "projectNumber">> & {
@@ -103,6 +181,7 @@ export function saveGitHubPluginConfig(
     projectOwner,
     projectNumber,
   };
+  syncRepositoryGitHubConfig(repoRoot, config);
   const path = join(repoRoot, CONFIG_PATH);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, "utf-8");
