@@ -329,7 +329,7 @@
       "id": "T4",
       "title": "重构开源 README 与完整使用文档",
       "objective": "完善中英文 README、安装、命令、功能、Controller、Grok 反代、Cloudflare 自定义域名、ChatGPT MCP 连接、repoId 固定绑定和故障排查教程；去除内部化叙述。",
-      "status": "running",
+      "status": "done",
       "dependsOn": [
         "T3"
       ],
@@ -487,7 +487,7 @@
       "id": "T6",
       "title": "实施开源元数据与发布安全修复",
       "objective": "根据审计结果修正 package 元数据、LICENSE/NOTICE、公开包清单、gitignore、示例配置和敏感信息泄漏点，保持 Controller 行为兼容。",
-      "status": "blocked",
+      "status": "done",
       "dependsOn": [
         "T2",
         "T3"
@@ -597,7 +597,7 @@
       "id": "T8",
       "title": "清理 Git 跟踪运行文件、残留 Worktree 与版本分支",
       "objective": "在 T6 发布安全修复集成后，审计并解除所有运行日志、Controller 状态、真实 repository binding、jobs、edit sessions、artifacts、local bridge 和临时 worktree 文件的 Git 跟踪；保留本地运行文件但从当前版本树删除。清理仅属于已结束 Run 的残留 worktree 和 controller 临时分支，收敛 main/release/feature 关系，并将当前树中的删除通过普通提交同步到远端。不得改写历史、force push、删除活跃 worktree 或删除未合并的唯一提交。",
-      "status": "running",
+      "status": "blocked",
       "dependsOn": [
         "T6"
       ],
@@ -632,16 +632,17 @@
       "risk": "destructive",
       "recommendedAgent": "codex",
       "notes": [
-        "用户已明确批准执行此前列出的可清理项。仅删除已完整包含在 main 的旧远端分支与已结束、已合并且工作区干净的 controller worktree/临时分支；保留两个含独有打包 CI 提交的 package 分支，以及本地 codex/归档历史分支。"
+        "用户已明确批准执行此前列出的可清理项。仅删除已完整包含在 main 的旧远端分支与已结束、已合并且工作区干净的 controller worktree/临时分支；保留两个含独有打包 CI 提交的 package 分支，以及本地 codex/归档历史分支。",
+        "已执行用户批准的安全清理：远端 feature/v8.1-multi-repository、feature/v8.1-multi-repository-final、feature/v8.1-runtime-storage-isolation、feature/v8.1-runtime-storage-isolation-final、feature/v8.1-runtime-storage-isolation-ready、release/v8.1、v7-1-runtime-efficiency 已删除；本地已切换到 main，并删除当前 feature 本地引用；main 与 release/1.4 均位于 f0c43ce25bd86e6c09203e562686805d717ece71。保留 origin/codex/package-v8.1-full-ready、origin/package/v8.1-full-ready 及两个本地历史归档分支。Worktree 复核发现 t4-273e44ac 与 t6-73bf8513 含大量未提交文件，禁止删除；t4-06febfda 确认干净，但标准 git worktree remove 被上层安全检查拦截，尚未移除，因此 T8 暂时 blocked，不能误报完成。"
       ],
       "runIds": [],
       "createdAt": "2026-06-23T13:27:13.655Z",
-      "updatedAt": "2026-06-24T07:42:49.830Z",
+      "updatedAt": "2026-06-24T08:04:12.279Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     }
   ],
   "createdAt": "2026-06-23T08:46:30.234Z",
-  "updatedAt": "2026-06-24T07:42:49.830Z",
+  "updatedAt": "2026-06-24T08:04:12.279Z",
   "repoId": "repo_123b7cf58b6b17b5cbe46a56",
   "github": {
     "owner": "greysonOuyang",
