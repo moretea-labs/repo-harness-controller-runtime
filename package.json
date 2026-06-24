@@ -21,6 +21,8 @@
     "agents/",
     "assets/",
     "docs/images/",
+    "docs/public-usage-guide.md",
+    "docs/public-usage-guide.zh-CN.md",
     "docs/repo-harness-chatgpt-browser-engine.md",
     "docs/repo-harness-chatgpt-controller.md",
     "docs/repo-harness-chatgpt-mcp-setup.md",

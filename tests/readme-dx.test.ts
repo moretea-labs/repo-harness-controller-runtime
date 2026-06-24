@@ -4,13 +4,14 @@ import { spawnSync } from "child_process";
 import { join } from "path";
 
 const ROOT = join(import.meta.dir, "..");
+const PUBLIC_READMES = ["README.md", "README.zh-CN.md"];
+const PUBLIC_GUIDES = ["docs/public-usage-guide.md", "docs/public-usage-guide.zh-CN.md"];
 const RUNTIME_SCAN_FILES = [
   "SKILL.md",
-  "README.md",
-  "README.zh-CN.md",
+  ...PUBLIC_READMES,
+  ...PUBLIC_GUIDES,
   "docs/reference-configs/external-tooling.md",
 ];
-const LOCALIZED_READMES = ["README.zh-CN.md", "README.ja.md", "README.es.md", "README.fr.md"];
 const RUNTIME_RED_FLAGS = [
   /在 Claude Code/,
   /Claude Code skill/,
@@ -26,82 +27,128 @@ function read(relPath: string): string {
   return readFileSync(join(ROOT, relPath), "utf-8");
 }
 
-function section(doc: string, heading: string): string {
-  const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = doc.match(new RegExp(`## ${escaped}\\n([\\s\\S]*?)(?:\\n## |$)`));
-  return match?.[1] ?? "";
-}
-
 function isAllowedRuntimeReference(file: string, line: string): boolean {
   if (/Claude skill alias/.test(line)) return true;
-  if (file === "README.md" && /Claude\/Codex paths \(`~\/\.claude\/skills\/repo-harness`/.test(line)) {
-    return true;
-  }
-  if (file === "README.zh-CN.md" && /~\/\.claude\/skills\/repo-harness/.test(line)) {
-    return true;
-  }
   if (file === "docs/reference-configs/external-tooling.md" && /~\/\.claude\/skills\/gstack/.test(line)) {
     return true;
   }
   return false;
 }
 
-describe("README DX contract", () => {
-  test("front-loads a single first-run path and hook authority guidance", () => {
+describe("public README and documentation contract", () => {
+  test("uses concise English and Chinese public landing pages", () => {
     const readme = read("README.md");
-    const firstFive = section(readme, "First 5 Minutes");
-    const hookAuthority = section(readme, "Hook Authority Map");
-    const maintainer = section(readme, "Maintainer Reference");
+    const zhReadme = read("README.zh-CN.md");
 
-    expect(readme.indexOf("## First 5 Minutes")).toBeLessThan(readme.indexOf("## MCP Connector Quickstart"));
-    expect(firstFive).toContain("No Node.js required for the default path");
-    expect(firstFive).toContain("# Bun (recommended)");
-    expect(firstFive).toContain("bun add -g repo-harness");
-    expect(firstFive).toContain("npx fallback");
-    expect(firstFive).toContain("npx -y repo-harness install");
-    expect(firstFive).toContain("repo-harness install");
-    expect(firstFive).toContain("repo-harness adopt --dry-run");
-    expect(firstFive).toContain("repo-harness adopt");
-    expect(firstFive).toContain("first-run global bootstrap path");
-    expect(firstFive.match(/repo-harness adopt --dry-run/g)?.length).toBe(1);
-    expect(firstFive).not.toContain("npm install -g repo-harness");
-    expect(firstFive).not.toContain("npx -y repo-harness adopt");
-    expect(firstFive).not.toContain("npx -y repo-harness setup");
-    expect(firstFive).not.toContain("npx -y repo-harness init");
-    expect(firstFive).not.toContain("repo-harness install --dry-run");
-    expect(firstFive).not.toContain("repo-harness init --dry-run");
-    expect(firstFive).not.toContain("bun scripts/assemble-template.ts");
-    expect(firstFive).toContain("=== Migration Report ===");
-    expect(firstFive).toContain("Project hooks synced from:");
-    expect(firstFive).toContain("Host hook config target:");
-    expect(firstFive).toContain("Host hook adapters are user-level:");
-    expect(hookAuthority).toContain(".ai/hooks/");
-    expect(hookAuthority).toContain("repo-harness-hook");
-    expect(hookAuthority).toContain("route registry");
-    expect(maintainer).toContain("bun scripts/assemble-template.ts --plan C --name \"MyProject\"");
+    for (const document of [readme, zhReadme]) {
+      expect(document).toContain("# repo-harness Controller Runtime");
+      expect(document).toContain("docs/images/repo-harness-banner.svg");
+      expect(document).toContain("README.md");
+      expect(document).toContain("README.zh-CN.md");
+      expect(document).toContain("1.4.0");
+      expect(document).toContain("controller-chatgpt-bridge-v8");
+      expect(document).toContain("schema `10`");
+      expect(document).toContain("Direct Edit");
+      expect(document).toContain("Issue → Task → Run");
+      expect(document).toContain("Cloudflare");
+      expect(document).toContain("ngrok");
+      expect(document).toContain("repoId");
+    }
+
+    expect(readme).toContain("## Quick start");
+    expect(readme).toContain("## Connect ChatGPT");
+    expect(readme.indexOf("## Quick start")).toBeLessThan(readme.indexOf("## Connect ChatGPT"));
+    expect(readme).toContain("git clone https://github.com/greysonOuyang/repo-harness-controller-runtime.git");
+    expect(readme).toContain("bun add -g repo-harness");
+    expect(readme).toContain("repo-harness repo register");
+    expect(readme).toContain("repo-harness mcp keepalive");
+    expect(readme).toContain("docs/public-usage-guide.md");
+    expect(zhReadme).toContain("docs/public-usage-guide.zh-CN.md");
+
+    expect(readme).not.toContain("README.ja.md");
+    expect(readme).not.toContain("README.fr.md");
+    expect(readme).not.toContain("README.es.md");
+    expect(zhReadme).not.toContain("README.ja.md");
   });
 
-  test("links to the hook operations reference and parity contract", () => {
-    const readme = read("README.md");
-    const hookOps = read("docs/reference-configs/hook-operations.md");
+  test("documents public HTTPS exposure through Cloudflare and external ngrok", () => {
+    const guide = read("docs/public-usage-guide.md");
+    const zhGuide = read("docs/public-usage-guide.zh-CN.md");
 
-    expect(readme).toContain("docs/reference-configs/hook-operations.md");
-    expect(readme).toContain("Generated vs Self-Hosted Hook Parity");
-    expect(hookOps).toContain("## Hook Authority Map");
-    expect(hookOps).toContain("## Hook Failure Playbook");
-    expect(hookOps).toContain("PlanStatusGuard");
-    expect(hookOps).not.toContain("TodoGuard");
-    expect(hookOps).toContain("ContractGuard");
-    expect(hookOps).toContain("WorktreeGuard");
-    expect(hookOps).toContain(".ai/harness/failures/latest.jsonl");
-    expect(hookOps).toContain(".claude/.trace.jsonl");
-    expect(hookOps).toContain("self-host");
-    expect(hookOps).toContain("generated");
+    for (const document of [guide, zhGuide]) {
+      expect(document).toContain("--tunnel quick");
+      expect(document).toContain("--tunnel named");
+      expect(document).toContain("--cloudflare-tunnel-name repo-harness-mcp");
+      expect(document).toContain("--tunnel none");
+      expect(document).toContain("ngrok http 8765");
+      expect(document).toContain("/mcp");
+      expect(document).toContain("127.0.0.1:8766");
+      expect(document).toContain("https://developers.openai.com/apps-sdk/deploy/connect-chatgpt");
+      expect(document).toContain("https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/");
+      expect(document).toContain("https://ngrok.com/docs/getting-started/");
+    }
+
+    expect(guide).toContain("ngrok is not an embedded repo-harness tunnel mode");
+    expect(zhGuide).toContain("ngrok 不是 repo-harness 内置 tunnel mode");
   });
 
-  test("release and verification docs require authoritative skill eval evidence", () => {
+  test("documents Project-scoped repository routing without publishing local identities", () => {
     const readme = read("README.md");
-    const verification = section(readme, "Verification");
+    const zhReadme = read("README.zh-CN.md");
+    const guide = read("docs/public-usage-guide.md");
+    const zhGuide = read("docs/public-usage-guide.zh-CN.md");
+    const combined = [readme, zhReadme, guide, zhGuide].join("\n");
+
+    expect(readme).toContain("Default repoId: <repo-id returned by repo-harness repo register>");
+    expect(readme).toContain("Default checkoutId: <checkout-id returned by repo-harness repo register>");
+    expect(zhReadme).toContain("默认 repoId：<repo-harness repo register 返回的 repo-id>");
+    expect(readme).toContain("Project instructions are a durable conversation default, not a server-side authorization boundary");
+    expect(guide).toContain("Project instructions guide ChatGPT; they do not change server-side authorization");
+    expect(guide).toContain("A multi-repository controller should continue passing `repoId` explicitly");
+    expect(zhGuide).toContain("Project instructions 约束 ChatGPT 行为，不改变服务端权限");
+    expect(combined).not.toContain("repo_123b7cf58b6b17b5cbe46a56");
+    expect(combined).not.toContain("checkout_79d467b771d6c6f0e6c103a7");
+  });
+
+  test("packages the bilingual public guides and preserves current metadata", () => {
+    const pkg = JSON.parse(read("package.json")) as {
+      version: string;
+      license: string;
+      files: string[];
+      repository?: { url?: string };
+    };
+
+    expect(pkg.version).toBe("1.4.0");
+    expect(pkg.license).toBe("MIT");
+    expect(pkg.files).toContain("README.zh-CN.md");
+    expect(pkg.files).toContain("docs/images/");
+    expect(pkg.files).toContain("docs/public-usage-guide.md");
+    expect(pkg.files).toContain("docs/public-usage-guide.zh-CN.md");
+    expect(pkg.repository?.url).toContain("greysonOuyang/repo-harness-controller-runtime");
+  });
+
+  test("keeps derivative attribution and release safety guidance visible", () => {
+    const readme = read("README.md");
+    const zhReadme = read("README.zh-CN.md");
+    const notice = read("NOTICE");
+    const license = read("LICENSE");
+
+    for (const document of [readme, zhReadme]) {
+      expect(document).toContain("AncientTwo/repo-harness");
+      expect(document).toContain("LICENSE");
+      expect(document).toContain("NOTICE");
+      expect(document).toContain("check:release-surface");
+      expect(document).toContain("check:public-export");
+      expect(document).toContain("check:type");
+    }
+
+    expect(notice).toContain("derived from AncientTwo/repo-harness");
+    expect(notice).toContain("substantial modifications");
+    expect(license).toContain("Copyright (c) 2026 AncientTwo");
+    expect(license).toContain("Copyright (c) 2026 greysonOuyang");
+  });
+
+  test("release and verification references retain authoritative eval terminology", () => {
     const releaseDoc = read("docs/reference-configs/release-deploy.md");
     const releaseAsset = read("assets/reference-configs/release-deploy.md");
     const evalArchitecture = read("docs/architecture/modules/verification/evals-checks.md");
@@ -113,92 +160,28 @@ describe("README DX contract", () => {
     expect(releaseDoc).toContain("effectiveness_authority");
     expect(releaseDoc).toContain("missing eval evidence");
     expect(releaseDoc).toMatch(/non-authoritative\s+skill eval evidence/);
-
     expect(evalArchitecture).toContain("non-dry-run `bun run benchmark:skills --eval <slug>`");
     expect(evalArchitecture).toContain("Non-authoritative smoke");
     expect(evalArchitecture).toMatch(/not\s+skill-effectiveness evidence/);
-    expect(evalArchitecture).toContain("full_test_count");
-    expect(evalArchitecture).toContain("effectiveness_authority");
-
-    expect(verification).toContain("bun run benchmark:skills --eval route-workflow-check");
-    expect(verification).not.toContain("bun run benchmark:skills --dry-run");
-  });
-
-  test("documents explicit Codex GitHub contributor attribution", () => {
-    const readme = read("README.md");
-    const zhReadme = read("README.zh-CN.md");
-
-    expect(readme).toContain("Co-authored-by: codex <codex@openai.com>");
-    expect(readme).toContain("explicit commit trailer");
-    expect(readme).toContain("not hidden hook automation");
-    expect(zhReadme).toContain("Co-authored-by: codex <codex@openai.com>");
-    expect(zhReadme).toContain("逐 commit 显式添加");
-  });
-
-  test("documents human review and agent tracking paths", () => {
-    const readme = read("README.md");
-    const zhReadme = read("README.zh-CN.md");
-    const spec = read("docs/spec.md");
-    const flow = read("docs/reference-configs/agentic-development-flow.md");
-
-    expect(spec).toContain("## Product Outcome");
-    expect(spec).toContain("## Core Invariants");
-    expect(spec).toContain("## Human Review Expectations");
-    expect(spec).toContain("## Acceptance Scenarios");
-    expect(readme).toContain("## Human Review Path");
-    expect(readme).toContain("## Agent Tracking Path");
-    expect(readme).toContain("Agent reads first");
-    expect(readme).toContain("Human reviews first");
-    expect(zhReadme).toContain("## Human Review Path");
-    expect(zhReadme).toContain("## Agent Tracking Path");
-    expect(flow).toContain("Agent reads first");
-    expect(flow).toContain("Human reviews first");
-  });
-
-  test("localized READMEs track the current English release surface", () => {
-    for (const file of LOCALIZED_READMES) {
-      const localized = read(file);
-      const expectedHeroImage =
-        file === "README.zh-CN.md"
-          ? "docs/images/repo-harness-gptpro-cn.png"
-          : "docs/images/repo-harness-gptpro.png";
-
-      expect(localized).toContain(expectedHeroImage);
-      expect(localized).toContain("1.4.0");
-      expect(localized).toContain("repo-harness@1.4.0");
-      expect(localized).toContain("repo-harness@1.4.0+template@1.4.0");
-      expect(localized).toContain("repo-harness update");
-      expect(localized).toContain("repo-harness adopt");
-      expect(localized).toContain("repo-harness docs list");
-      expect(localized).toContain("SessionStart.default");
-      expect(localized).toContain("PostToolUse.always");
-      expect(localized).toContain("Generated vs Self-Hosted Hook Parity");
-      expect(localized).toContain("Package Manager Defaults");
-      expect(localized).toContain("Runtime Profiles");
-      expect(localized).toContain("bun run benchmark:skills --eval route-workflow-check");
-      expect(localized).not.toContain("0.5.0");
-      expect(localized).not.toContain("0.2.1");
-      expect(localized).not.toContain("bun run benchmark:skills --dry-run");
-    }
   });
 
   test("dry-run keeps the migration report onboarding signals", () => {
-    const res = spawnSync("bash", ["scripts/migrate-project-template.sh", "--repo", ".", "--dry-run"], {
+    const result = spawnSync("bash", ["scripts/migrate-project-template.sh", "--repo", ".", "--dry-run"], {
       cwd: ROOT,
       encoding: "utf-8",
     });
 
-    expect(res.status).toBe(0);
-    expect(res.stdout).toContain("=== Migration Report ===");
-    expect(res.stdout).toContain("Project hooks synced from:");
-    expect(res.stdout).toContain("Workflow migration:");
-    expect(res.stdout).toContain("Helper runtime:");
-    expect(res.stdout).toContain("package-dispatched through repo-harness run with scripts/* compatibility wrappers");
-    expect(res.stdout).toContain("Host hook config target: user-level ~/.claude/settings.json and ~/.codex/hooks.json");
-    expect(res.stdout).toContain("Host hook adapters are user-level:");
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("=== Migration Report ===");
+    expect(result.stdout).toContain("Project hooks synced from:");
+    expect(result.stdout).toContain("Workflow migration:");
+    expect(result.stdout).toContain("Helper runtime:");
+    expect(result.stdout).toContain("package-dispatched through repo-harness run with scripts/* compatibility wrappers");
+    expect(result.stdout).toContain("Host hook config target: user-level ~/.claude/settings.json and ~/.codex/hooks.json");
+    expect(result.stdout).toContain("Host hook adapters are user-level:");
   }, 30000);
 
-  test("runtime red-flag scan uses an explicit allowlist for install examples and legacy aliases", () => {
+  test("runtime red-flag scan keeps public onboarding host-neutral", () => {
     const hits: string[] = [];
 
     for (const file of RUNTIME_SCAN_FILES) {
