@@ -4,7 +4,7 @@
   "title": "开源发布治理、版本线与分支整理",
   "slug": "issue",
   "kind": "governance",
-  "status": "in_progress",
+  "status": "planned",
   "summary": "将当前 repo-harness-controller-runtime 从内部演进工作区整理为可公开发布的 MIT 衍生项目：审计本地/远程分支和标签，区分产品版本与 Controller 协议版本，确认上游许可与代码来源，清理私有信息，完善中英文使用/部署/ChatGPT 连接文档与品牌素材，最后形成安全的 GitHub 开源发布路径。",
   "goals": [
     "建立本地与远程分支、标签、提交差异的可审计清单",
@@ -550,7 +550,7 @@
       "id": "T7",
       "title": "安全收敛分支并准备 GitHub 公开发布",
       "objective": "在所有审计和修复通过后，建立明确的发布候选分支/标签，合并经验证改动，生成最终公开发布核对表；任何分支删除必须单独列出并在获得明确批准后执行。",
-      "status": "review",
+      "status": "done",
       "dependsOn": [
         "T4",
         "T5",
@@ -579,11 +579,12 @@
       "notes": [
         "Synced to GitHub: https://github.com/greysonOuyang/repo-harness-controller-runtime/issues/16",
         "ChatGPT 直接执行分支收敛：已刷新 origin/upstream；确认当前候选相对 origin/main 为纯快进；按产品语义版本建立远端 release/1.4，停止使用 release/v8.1 作为新发布线；当前 HEAD 通过 check:release-surface（typecheck、19 tests、public export 393 files），npm registry 确认 repo-harness@1.4.0 尚未发布。下一步提交治理状态并非强制快进 feature、release/1.4 与 main。",
-        "分支收敛已完成并进入 review：1) 当前 feature、release/1.4、main 的本地与 origin 引用全部统一到 b51dfa7af8bc42e954e59c728436ec3a86cc99e8，ahead/behind 均为 0/0；2) 所有远端更新均为经祖先校验后的非强制 fast-forward；3) 旧分叉本地 main 已保存在 archive/local-main-pre-convergence-20260624，未丢失 334 个独有提交；4) check:release-surface 通过 typecheck、19 tests、public export 393 files，npm 确认 1.4.0 未发布；5) 可删除候选但尚未执行：feature/v8.1-multi-repository、feature/v8.1-multi-repository-final、feature/v8.1-runtime-storage-isolation、feature/v8.1-runtime-storage-isolation-final、release/v8.1、v7-1-runtime-efficiency，以及三个已合并 controller 临时 worktree/分支；6) 暂不可删除：origin/codex/package-v8.1-full-ready 与 origin/package/v8.1-full-ready（含未整合的旧 v8.1 打包 CI 提交），本地 codex/v81-current-snapshot-20260623 与 archive/local-main-pre-convergence-20260624（含大量独有历史）。任何删除等待按名称明确批准。"
+        "分支收敛已完成并进入 review：1) 当前 feature、release/1.4、main 的本地与 origin 引用全部统一到 b51dfa7af8bc42e954e59c728436ec3a86cc99e8，ahead/behind 均为 0/0；2) 所有远端更新均为经祖先校验后的非强制 fast-forward；3) 旧分叉本地 main 已保存在 archive/local-main-pre-convergence-20260624，未丢失 334 个独有提交；4) check:release-surface 通过 typecheck、19 tests、public export 393 files，npm 确认 1.4.0 未发布；5) 可删除候选但尚未执行：feature/v8.1-multi-repository、feature/v8.1-multi-repository-final、feature/v8.1-runtime-storage-isolation、feature/v8.1-runtime-storage-isolation-final、release/v8.1、v7-1-runtime-efficiency，以及三个已合并 controller 临时 worktree/分支；6) 暂不可删除：origin/codex/package-v8.1-full-ready 与 origin/package/v8.1-full-ready（含未整合的旧 v8.1 打包 CI 提交），本地 codex/v81-current-snapshot-20260623 与 archive/local-main-pre-convergence-20260624（含大量独有历史）。任何删除等待按名称明确批准。",
+        "Release branch convergence is complete. main, local release/1.4, origin/main, and origin/release/1.4 all point to dbbb86b337dfb52700f08d1c8fef2814d458f877. Safe obsolete remote branches and the local feature branch were removed without force push or history rewrite. Unique packaging and archive branches remain preserved. The release code surface previously passed typecheck, 19 focused tests, and a 393-file public export; dbbb86b changes only durable governance state. npm publish and release tag creation remain explicit manual release actions."
       ],
       "runIds": [],
       "createdAt": "2026-06-23T08:46:30.234Z",
-      "updatedAt": "2026-06-24T07:26:01.253Z",
+      "updatedAt": "2026-06-24T08:34:32.845Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56",
       "github": {
         "owner": "greysonOuyang",
@@ -642,7 +643,7 @@
     }
   ],
   "createdAt": "2026-06-23T08:46:30.234Z",
-  "updatedAt": "2026-06-24T08:04:12.279Z",
+  "updatedAt": "2026-06-24T08:34:32.845Z",
   "repoId": "repo_123b7cf58b6b17b5cbe46a56",
   "github": {
     "owner": "greysonOuyang",
