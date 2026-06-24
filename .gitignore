@@ -98,9 +98,11 @@ _ops/
 .ai/harness/worktrees
 .ai/harness/edit-sessions
 .ai/harness/artifacts
+.ai/harness/backups/
 .ai/harness/local-bridge
 .ai/harness/ephemeral-issues
 .ai/harness/repository.json
 .ai/harness/mcp/
 .ai/harness/checks/controller/latest-*.json
 *.log
+.ai/harness/controller/
