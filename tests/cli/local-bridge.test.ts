@@ -20,6 +20,7 @@ import {
   executeLocalBridgeJob,
   getLocalBridgeJob,
   listLocalBridgeJobs,
+  reconcileLocalBridgeJobs,
   submitLocalBridgeJob,
 } from "../../src/cli/local-bridge/job-store";
 import {
@@ -313,6 +314,97 @@ printf '%s\n' '{"type":"turn.completed"}'
     } finally {
       process.env.PATH = originalPath;
     }
+  });
+
+  test("runs checks without blocking Controller health and deduplicates the same revision", async () => {
+    const root = repo();
+    mkdirSync(join(root, ".repo-harness"), { recursive: true });
+    writeFileSync(join(root, ".repo-harness/checks.json"), JSON.stringify({
+      version: 1,
+      checks: {
+        delayed: {
+          command: [process.execPath, "-e", "setTimeout(() => process.exit(0), 1500)"],
+          timeoutMs: 5_000,
+        },
+      },
+    }));
+    const handle = await startLocalBridgeServer({ repoRoot: root, port: 0, openBrowser: false });
+    servers.push(handle);
+    const headers = {
+      "x-repo-harness-local-token": handle.token,
+      "content-type": "application/json",
+    };
+
+    const startedAt = Date.now();
+    const created = await fetch(new URL("/api/jobs", handle.url), {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        action: "run-check",
+        requestedBy: "test",
+        payload: { checkId: "delayed", timeoutMs: 5_000 },
+      }),
+    }).then((response) => response.json());
+    expect(Date.now() - startedAt).toBeLessThan(1_200);
+    expect(["approved", "running"]).toContain(created.status);
+
+    const health = await fetch(new URL("/health", handle.url)).then((response) => response.json());
+    expect(health.status).toBe("ok");
+
+    const duplicate = submitLocalBridgeJob(root, {
+      action: "run-check",
+      requestedBy: "test",
+      payload: { checkId: "delayed", timeoutMs: 5_000 },
+    });
+    expect(duplicate.jobId).toBe(created.jobId);
+
+    let finished = getLocalBridgeJob(root, created.jobId);
+    for (let attempt = 0; attempt < 120 && finished.status === "running"; attempt += 1) {
+      await Bun.sleep(25);
+      finished = getLocalBridgeJob(root, created.jobId);
+    }
+    expect(finished.status).toBe("succeeded");
+    expect(finished.finishedAt).toBeTruthy();
+    expect(finished.workerPid).toBeUndefined();
+
+    const reused = submitLocalBridgeJob(root, {
+      action: "run-check",
+      requestedBy: "test",
+      payload: { checkId: "delayed", timeoutMs: 5_000 },
+    });
+    expect(reused.jobId).toBe(created.jobId);
+    expect(reused.status).toBe("succeeded");
+  });
+
+  test("reconciles stale running checks after a Controller restart", () => {
+    const root = repo();
+    mkdirSync(join(root, ".repo-harness"), { recursive: true });
+    writeFileSync(join(root, ".repo-harness/checks.json"), JSON.stringify({
+      version: 1,
+      checks: {
+        focused: { command: [process.execPath, "-e", "process.exit(0)"], timeoutMs: 5_000 },
+      },
+    }));
+    const job = submitLocalBridgeJob(root, {
+      action: "run-check",
+      requestedBy: "test",
+      payload: { checkId: "focused", timeoutMs: 5_000 },
+    });
+    const path = join(root, ".ai/harness/local-jobs", job.jobId, "job.json");
+    const stale = JSON.parse(readFileSync(path, "utf-8"));
+    stale.status = "running";
+    stale.startedAt = new Date(Date.now() - 60_000).toISOString();
+    stale.updatedAt = stale.startedAt;
+    stale.deadlineAt = new Date(Date.now() - 1_000).toISOString();
+    stale.ownerPid = 999_999;
+    writeFileSync(path, `${JSON.stringify(stale, null, 2)}\n`);
+
+    const reconciled = reconcileLocalBridgeJobs(root);
+    const refreshed = getLocalBridgeJob(root, job.jobId);
+    expect(reconciled.terminalized).toBe(1);
+    expect(refreshed.status).toBe("timed_out");
+    expect(refreshed.finishedAt).toBeTruthy();
+    expect(refreshed.error).toContain("deadline");
   });
 
   test("accepts high-risk quick sessions immediately without an approval queue", () => {

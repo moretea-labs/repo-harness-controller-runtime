@@ -56,7 +56,7 @@ import {
 } from "../controller/issue-store";
 import {
   listControllerChecks,
-  runControllerCheck,
+  runControllerCheckAsync,
 } from "../controller/check-runner";
 import {
   getControllerTimeline,
@@ -109,6 +109,7 @@ import {
   getLocalBridgeJob,
   getLocalBridgeJobEvents,
   listLocalBridgeJobs,
+  reconcileLocalBridgeJobs,
   submitLocalBridgeJob,
 } from "../local-bridge/job-store";
 import type {
@@ -1245,6 +1246,27 @@ export function buildMcpToolDefinitions(
         annotations: readOnly,
       },
       {
+        name: "controller_context",
+        description:
+          "Return one compact controller start-work context: Git status, current Issue focus, active Runs and Jobs, recommended execution mode, and available checks.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            description: { type: "string" },
+            known_paths: { type: "array", items: { type: "string" } },
+            expected_files: { type: "number" },
+            expected_changed_lines: { type: "number" },
+            requires_investigation: { type: "boolean" },
+            requires_parallelism: { type: "boolean" },
+            requires_long_running_checks: { type: "boolean" },
+            needs_dependencies: { type: "boolean" },
+            risk: { type: "string", enum: ["readonly", "low", "medium", "high", "destructive"] },
+          },
+          additionalProperties: false,
+        },
+        annotations: readOnly,
+      },
+      {
         name: "submit_local_job",
         description:
           "Submit a high-level local Job Ticket. Local work dispatches immediately unless it is explicitly destructive; no ordinary risk approval queue is used.",
@@ -1969,7 +1991,12 @@ export function buildMcpToolDefinitions(
           "Read structured lifecycle events for a local or GitHub cloud Task Run.",
         inputSchema: {
           type: "object",
-          properties: { run_id: { type: "string" }, limit: { type: "number" } },
+          properties: {
+            run_id: { type: "string" },
+            limit: { type: "number" },
+            since_event_index: { type: "number" },
+            include_heartbeats: { type: "boolean" },
+          },
           required: ["run_id"],
           additionalProperties: false,
         },
@@ -2559,7 +2586,9 @@ export async function callMcpTool(
             retryableRunFailures: true,
             issueCreationGuardrails: true,
             persistedCheckEvidence: true,
+            persistedCheckReuse: true,
             directVerification: true,
+            controllerContextAggregation: true,
           },
           runner: {
             enabled: ctx.policy.execution.agentRunner,
@@ -2599,7 +2628,8 @@ export async function callMcpTool(
             "local_bridge_status requires the controller profile",
           );
         const runtime = loadMcpRuntimeState(ctx.repoRoot);
-        const jobs = listLocalBridgeJobs(ctx.repoRoot, 25);
+        const reconciliation = reconcileLocalBridgeJobs(ctx.repoRoot);
+        const jobs = listLocalBridgeJobs(ctx.repoRoot, 12);
         const payload = {
           endpoint:
             runtime?.localController?.endpoint ?? "http://127.0.0.1:8766/",
@@ -2610,9 +2640,94 @@ export async function callMcpTool(
             return counts;
           }, {}),
           approvalQueue: false,
-          recentJobs: jobs,
+          reconciliation,
+          recentJobs: jobs.map((job) => ({
+            jobId: job.jobId,
+            action: job.action,
+            status: job.status,
+            checkId: job.action === "run-check" ? (job.payload as { checkId?: string }).checkId : undefined,
+            runId: job.runId,
+            issueId: job.issueId,
+            taskId: job.taskId,
+            createdAt: job.createdAt,
+            updatedAt: job.updatedAt,
+            finishedAt: job.finishedAt,
+            revision: job.revision,
+            deadlineAt: job.deadlineAt,
+            error: job.error?.slice(0, 300),
+          })),
           fallback:
             "Open the localhost Local Controller to launch work or inspect execution when a ChatGPT write action is unavailable.",
+        };
+        audit(ctx, name, "ok", args);
+        return textResult(payload);
+      }
+      case "controller_context": {
+        if (ctx.policy.profile !== "controller")
+          return errorResult(
+            "TOOL_DISABLED",
+            "controller_context requires the controller profile",
+          );
+        const board = projectBoard(ctx.repoRoot);
+        const runs = listAgentJobs(ctx.repoRoot, 8);
+        const reconciliation = reconcileLocalBridgeJobs(ctx.repoRoot);
+        const jobs = listLocalBridgeJobs(ctx.repoRoot, 8);
+        const checks = listControllerChecks(ctx.repoRoot).map((check) => ({
+          id: check.id,
+          description: check.description,
+          timeoutMs: check.timeoutMs,
+          source: check.source,
+        }));
+        const assessment = typeof args.description === "string" && args.description.trim()
+          ? assessWorkMode({
+              description: String(args.description),
+              knownPaths: stringList(args.known_paths),
+              expectedFiles: typeof args.expected_files === "number" ? args.expected_files : undefined,
+              expectedChangedLines: typeof args.expected_changed_lines === "number" ? args.expected_changed_lines : undefined,
+              requiresInvestigation: args.requires_investigation === true,
+              requiresParallelism: args.requires_parallelism === true,
+              requiresLongRunningChecks: args.requires_long_running_checks === true,
+              needsDependencies: args.needs_dependencies === true,
+              risk: typeof args.risk === "string" ? args.risk as TaskRisk : undefined,
+            })
+          : undefined;
+        const payload = {
+          git: gitSnapshot(ctx.repoRoot),
+          currentIssueId: board.currentIssueId,
+          currentIssue: board.issues.find((issue) => issue.id === board.currentIssueId)
+            ? {
+                id: board.issues.find((issue) => issue.id === board.currentIssueId)?.id,
+                title: board.issues.find((issue) => issue.id === board.currentIssueId)?.title,
+                status: board.issues.find((issue) => issue.id === board.currentIssueId)?.status,
+              }
+            : undefined,
+          readyTasks: board.readyTasks.slice(0, 10),
+          activeRuns: runs.map((run) => ({
+            runId: run.runId,
+            issueId: run.issueId,
+            taskId: run.taskId,
+            status: run.status,
+            agent: run.agent,
+            provider: run.provider,
+            executionMode: run.executionMode,
+            progress: run.progress,
+            lastHeartbeatAt: run.lastHeartbeatAt,
+            error: run.error?.slice(0, 300),
+          })),
+          localBridge: {
+            reconciliation,
+            recentJobs: jobs.map((job) => ({
+              jobId: job.jobId,
+              action: job.action,
+              status: job.status,
+              checkId: job.action === "run-check" ? (job.payload as { checkId?: string }).checkId : undefined,
+              issueId: job.issueId,
+              taskId: job.taskId,
+              updatedAt: job.updatedAt,
+            })),
+          },
+          checks,
+          recommendedExecution: assessment,
         };
         audit(ctx, name, "ok", args);
         return textResult(payload);
@@ -2837,10 +2952,12 @@ export async function callMcpTool(
             "TOOL_DISABLED",
             "run_check requires the controller profile",
           );
-        const result = runControllerCheck(
+        const result = await runControllerCheckAsync(
           ctx.repoRoot,
           String(args.check_id ?? ""),
-          typeof args.timeout_ms === "number" ? args.timeout_ms : undefined,
+          {
+            requestedTimeoutMs: typeof args.timeout_ms === "number" ? args.timeout_ms : undefined,
+          },
         );
         audit(
           ctx,
@@ -3517,9 +3634,17 @@ export async function callMcpTool(
           ctx.repoRoot,
           String(args.run_id ?? ""),
           typeof args.limit === "number" ? Math.trunc(args.limit) : 200,
+          {
+            sinceIndex: typeof args.since_event_index === "number" ? Math.trunc(args.since_event_index) : undefined,
+            includeHeartbeats: args.include_heartbeats === true,
+          },
         );
         audit(ctx, name, "ok", args);
-        return textResult({ events });
+        return textResult({
+          events,
+          nextSinceEventIndex: events.at(-1)?.data?.eventIndex,
+          heartbeatsCollapsed: args.include_heartbeats !== true,
+        });
       }
       case "get_task_run_log": {
         if (ctx.policy.profile !== "controller")
@@ -3663,9 +3788,9 @@ export async function callMcpTool(
           requestedSummary: typeof entry.summary === "string" ? entry.summary : undefined,
         })).filter((entry) => entry.checkId);
         const checkIds = Array.from(new Set(task.checks.length > 0 ? task.checks : requestedCheckInputs.map((entry) => entry.checkId)));
-        const checkResults = checkIds.map((checkId) => {
+        const checkResults = await Promise.all(checkIds.map(async (checkId) => {
           try {
-            const result = runControllerCheck(ctx.repoRoot, checkId);
+            const result = await runControllerCheckAsync(ctx.repoRoot, checkId);
             return {
               checkId,
               ok: result.ok,
@@ -3676,7 +3801,7 @@ export async function callMcpTool(
           } catch (error) {
             return { checkId, ok: false, summary: error instanceof Error ? error.message : String(error) };
           }
-        });
+        }));
 
         const commandEvidence: TaskCommandEvidence[] = [];
         for (const entry of taskObjects(args.reported_commands)) {

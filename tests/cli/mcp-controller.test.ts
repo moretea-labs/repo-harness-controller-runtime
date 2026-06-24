@@ -74,6 +74,7 @@ describe("MCP controller profile", () => {
       );
       expect(names).toContain("controller_capabilities");
       expect(names).toContain("local_bridge_status");
+      expect(names).toContain("controller_context");
       expect(names).toContain("submit_local_job");
       expect(names).not.toContain("approve_local_job");
       expect(names).toContain("create_edit_savepoint");
@@ -113,6 +114,7 @@ describe("MCP controller profile", () => {
       );
       expect(capabilities.value.expectedTools).toContain("launch_issue");
       expect(capabilities.value.expectedTools).toContain("submit_local_job");
+      expect(capabilities.value.expectedTools).toContain("controller_context");
       expect(capabilities.value.expectedTools).toContain("repository_command_preview");
       expect(capabilities.value.expectedTools).toContain("repository_command_execute");
       expect(capabilities.value.expectedTools).toEqual(
@@ -122,6 +124,8 @@ describe("MCP controller profile", () => {
         controllerToolSurfaceFingerprint(controllerExpectedToolNames(overridden)),
       );
       expect(capabilities.value.capabilities.directEditFirstRouting).toBe(true);
+      expect(capabilities.value.capabilities.controllerContextAggregation).toBe(true);
+      expect(capabilities.value.capabilities.persistedCheckReuse).toBe(true);
       expect(capabilities.value.expectedTools).toContain("verify_edit_session");
       const source = await jsonTool(
         { ...ctx, policy: overridden },
@@ -209,6 +213,35 @@ describe("MCP controller profile", () => {
       expect(status.value.approvalQueue).toBe(false);
       expect(status.value.pendingApproval).toBeUndefined();
       expect(status.value.endpoint).toContain("127.0.0.1");
+    });
+  });
+
+  test("returns one compact controller context with execution guidance", async () => {
+    await withController(async (_repoRoot, ctx) => {
+      const created = await jsonTool(ctx, "create_issue", {
+        title: "Compact context",
+        kind: "feature",
+        summary: "Exercise controller_context",
+        tasks: [{
+          title: "Bounded change",
+          objective: "Update one known file",
+          allowed_paths: ["src/**"],
+          checks: ["focused"],
+        }],
+      });
+      expect(created.value.id).toBeTruthy();
+      const context = await jsonTool(ctx, "controller_context", {
+        description: "Update the example constant in one known file.",
+        known_paths: ["src/example.ts"],
+        expected_files: 1,
+        expected_changed_lines: 2,
+        risk: "low",
+      });
+      expect(context.value.git.branch).toBeNull();
+      expect(context.value.currentIssueId).toBe(created.value.id);
+      expect(context.value.readyTasks.length).toBeGreaterThan(0);
+      expect(context.value.checks.some((check: { id: string }) => check.id === "focused")).toBe(true);
+      expect(context.value.recommendedExecution.recommendedMode).toBe("direct_edit");
     });
   });
 
@@ -491,6 +524,87 @@ describe("MCP controller profile", () => {
           issue_id: created.value.id,
         });
         expect(issue.value.tasks[0].status).toBe("review");
+      } finally {
+        process.env.PATH = originalPath;
+        rmSync(binRoot, { recursive: true, force: true });
+      }
+    });
+  });
+
+  test("returns task run events with cursor support and collapsed heartbeats by default", async () => {
+    await withController(async (repoRoot, baseCtx) => {
+      const binRoot = mkdtempSync(
+        join(tmpdir(), "repo-harness-controller-events-bin-"),
+      );
+      const originalPath = process.env.PATH;
+      try {
+        const fakeCodex = join(binRoot, "codex");
+        writeFileSync(
+          fakeCodex,
+          `#!/usr/bin/env bash
+printf '%s\n' '{"type":"thread.started"}'
+printf '%s\n' '{"type":"turn.started"}'
+sleep 0.2
+printf '%s\n' '{"type":"item.started","item":{"type":"command_execution","command":"bun test focused"}}'
+sleep 0.2
+printf '%s\n' '{"type":"turn.completed"}'
+`,
+        );
+        chmodSync(fakeCodex, 0o755);
+        process.env.PATH = `${binRoot}:${originalPath ?? ""}`;
+        const ctx = {
+          ...baseCtx,
+          policy: getMcpPolicy("controller", {
+            repoRoot,
+            devAgentRunner: true,
+            allowedAgents: ["codex"],
+            runnerTimeoutMs: 10_000,
+          }),
+        };
+        const created = await jsonTool(ctx, "create_issue", {
+          title: "Run events",
+          tasks: [
+            {
+              title: "Execute",
+              objective: "Emit run events",
+              allowed_paths: ["src/**"],
+              checks: ["focused"],
+              agent: "codex",
+            },
+          ],
+        });
+        const dispatched = await jsonTool(ctx, "dispatch_task", {
+          issue_id: created.value.id,
+          task_id: "T1",
+          isolate: false,
+          timeout_ms: 10_000,
+        });
+        let run = dispatched.value.run;
+        for (
+          let attempt = 0;
+          attempt < 60 && !["succeeded", "failed"].includes(run.status);
+          attempt += 1
+        ) {
+          await Bun.sleep(25);
+          run = (
+            await jsonTool(ctx, "get_task_run", {
+              run_id: dispatched.value.run.runId,
+            })
+          ).value;
+        }
+        const initial = await jsonTool(ctx, "get_task_run_events", {
+          run_id: dispatched.value.run.runId,
+          limit: 20,
+        });
+        expect(initial.value.events.length).toBeGreaterThan(0);
+        expect(initial.value.heartbeatsCollapsed).toBe(true);
+        const cursor = initial.value.nextSinceEventIndex;
+        const delta = await jsonTool(ctx, "get_task_run_events", {
+          run_id: dispatched.value.run.runId,
+          since_event_index: typeof cursor === "number" ? cursor : -1,
+          limit: 20,
+        });
+        expect(delta.value.events.length).toBe(0);
       } finally {
         process.env.PATH = originalPath;
         rmSync(binRoot, { recursive: true, force: true });

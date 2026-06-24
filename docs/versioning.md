@@ -101,3 +101,39 @@ Public release communication should always state all three of these facts explic
 - package version: for example `1.4.0`
 - controller surface: `controller-chatgpt-bridge-v8`
 - compatibility note: for example `includes the V8.1 multi-repository train without changing the V8 MCP surface`
+
+## Branch governance snapshot on 2026-06-24
+
+Current verified topology after `git fetch --all --prune`:
+
+- `main` is the newest local branch and matches `origin/main` at `1c83448`.
+- `release/1.4` matches `origin/release/1.4` at `dbbb86b`; it currently sits one commit behind `main`.
+- `upstream/main` is a separate lineage and remains audit/reference only. The current divergence is `107 ahead / 384 behind` relative to local `main`, so it should not be treated as a same-line fast-forward target.
+- Local archive branches `archive/local-main-pre-convergence-20260624` and `codex/v81-current-snapshot-20260623` preserve historical evidence and should stay out of normal release flow.
+
+Recommended active branch structure:
+
+1. `main`: only long-lived integration branch for this fork and the default push target.
+2. `release/1.x`: cut only when a public stabilization lane is needed, then fast-forward or merge back to `main` before closeout.
+3. `codex/<task-slug>`: short-lived local implementation branches for direct-edit or bounded controller work.
+4. `controller/<issue-task-run>`: strictly ephemeral execution branches owned by Local Bridge or task worktrees; never treat them as durable release branches.
+5. `archive/<name>`: evidence-preserving branches that are intentionally excluded from normal integration policy.
+
+Remote policy:
+
+1. Keep `origin` as the only writable canonical remote for this fork.
+2. Keep `upstream` fetch-only for comparison, cherry-pick, and governance audit.
+3. Do not create new long-lived remote branches named `release/v8.1`, `package/v8.1-*`, or `controller/*`.
+4. Push `codex/<task-slug>` only when review or collaboration actually needs a remote branch; otherwise keep them local and short-lived.
+
+Current cleanup guidance:
+
+- Safe immediate cleanup candidate: `controller/iss-20260623-dde2e7-t4-06febfda`. It is clean and fully merged into `main`.
+- Hold for manual review, do not auto-delete yet:
+  - `controller/iss-20260623-dde2e7-t4-273e44ac`
+  - `controller/iss-20260623-dde2e7-t6-73bf8513`
+  These two linked worktrees still contain uncommitted tracked and untracked changes, so automated pruning would risk losing unpublished work.
+
+Operational rule:
+
+- Before deleting any `controller/*` branch or linked worktree, verify three conditions: it is fully merged into `main`, the linked worktree is clean, and no active Local Bridge or Agent Run still references it.

@@ -19,7 +19,7 @@ import {
   integrateAgentJob,
   taskRunDiff,
 } from "../agent-jobs/integration";
-import { listControllerChecks, runControllerCheck } from "../controller/check-runner";
+import { listControllerChecks, runControllerCheckAsync } from "../controller/check-runner";
 import {
   acceptVerifiedTask,
   archiveIssue,
@@ -56,6 +56,7 @@ import {
   getLocalBridgeJobEvents,
   listLocalBridgeJobs,
   localBridgeTimeoutPolicy,
+  reconcileLocalBridgeJobs,
   submitLocalBridgeJob,
 } from "./job-store";
 import {
@@ -175,11 +176,11 @@ function queryString(value: unknown): string | undefined {
 
 function controllerStateSignature(repoRoot: string): string {
   const board = projectBoard(repoRoot);
-  const runs = listAgentJobs(repoRoot, 100);
-  const jobs = listLocalBridgeJobs(repoRoot, 100);
+  const runs = listAgentJobs(repoRoot, 30);
+  const jobs = listLocalBridgeJobs(repoRoot, 30);
   const latestWorklog = listControllerWorklogEvents(repoRoot, { limit: 1 })[0];
   const projectState = loadControllerProjectState(repoRoot);
-  const edits = listEditSessions(repoRoot, 100);
+  const edits = listEditSessions(repoRoot, 30);
   return JSON.stringify({
     issues: board.issues.map((issue) => ({
       id: issue.id,
@@ -206,7 +207,7 @@ function controllerStateSignature(repoRoot: string): string {
 }
 
 export function buildLocalControllerSnapshot(repoRoot: string) {
-  const runs = listAgentJobs(repoRoot, 100);
+  const runs = listAgentJobs(repoRoot, 30);
   const mcpConfig = loadMcpLocalConfig(repoRoot);
   const mcpRuntime = loadMcpRuntimeState(repoRoot);
   const expectedPolicy = runtimePolicy(repoRoot, { profile: "controller" });
@@ -263,15 +264,15 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
     projectState: loadControllerProjectState(repoRoot),
     governance: inspectProjectGovernance(repoRoot),
     progress: getProjectProgress(repoRoot),
-    timeline: getControllerTimeline(repoRoot, { limit: 120 }),
+    timeline: getControllerTimeline(repoRoot, { limit: 40 }),
     githubPlugin: getGitHubPluginStatus(repoRoot),
     runs,
     runCounts: runs.reduce<Record<string, number>>((counts, run) => {
       counts[run.status] = (counts[run.status] ?? 0) + 1;
       return counts;
     }, {}),
-    localJobs: listLocalBridgeJobs(repoRoot, 100),
-    editSessions: listEditSessions(repoRoot, 200),
+    localJobs: listLocalBridgeJobs(repoRoot, 30),
+    editSessions: listEditSessions(repoRoot, 30),
     checks: listControllerChecks(repoRoot),
   };
 }
@@ -282,6 +283,7 @@ export async function startLocalBridgeServer(
   const host = options.host ?? "127.0.0.1";
   const requestedPort = options.port ?? 8766;
   assertLoopback(host);
+  reconcileLocalBridgeJobs(options.repoRoot);
   const token = options.token ?? randomBytes(32).toString("base64url");
   const app = express();
   const cookieName = "repo_harness_local_token";
@@ -553,7 +555,7 @@ export async function startLocalBridgeServer(
       response.status(400).json({ error: errorMessage(error) });
     }
   });
-  app.post("/api/issues/:issueId/tasks/:taskId/verify", (request, response) => {
+  app.post("/api/issues/:issueId/tasks/:taskId/verify", async (request, response) => {
     try {
       const issue = getIssue(options.repoRoot, request.params.issueId);
       const task = issue.tasks.find((entry) => entry.id === request.params.taskId);
@@ -576,9 +578,9 @@ export async function startLocalBridgeServer(
 
       // Manual evidence-only verification remains available for Tasks that do not
       // require a Run or Diff. Missing named checks never block launch or this path.
-      const checkResults = task.checks.map((checkId) => {
+      const checkResults = await Promise.all(task.checks.map(async (checkId) => {
         try {
-          const result = runControllerCheck(options.repoRoot, checkId);
+          const result = await runControllerCheckAsync(options.repoRoot, checkId);
           return {
             checkId,
             ok: result.ok,
@@ -587,7 +589,7 @@ export async function startLocalBridgeServer(
         } catch (error) {
           return { checkId, ok: false, summary: errorMessage(error) };
         }
-      });
+      }));
       const confirmAcceptance = request.body?.confirmAcceptance === true;
       if (policy.requiresAcceptanceEvidence && !confirmAcceptance) {
         throw new Error(`${policy.executionClass} requires explicit acceptance evidence when no successful Run is linked`);

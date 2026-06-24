@@ -8,6 +8,9 @@ export type LocalBridgeJobStatus =
   | "running"
   | "dispatched"
   | "succeeded"
+  | "timed_out"
+  | "orphaned"
+  | "stale"
   | "failed"
   | "cancelled";
 
@@ -96,6 +99,10 @@ export interface LocalBridgeJob {
   taskId?: string;
   result?: Record<string, unknown>;
   error?: string;
+  revision?: string;
+  ownerPid?: number;
+  workerPid?: number;
+  deadlineAt?: string;
   ephemeral?: boolean;
   cleanupAt?: string;
 }

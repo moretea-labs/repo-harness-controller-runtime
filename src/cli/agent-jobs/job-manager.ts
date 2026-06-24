@@ -871,15 +871,33 @@ export function getAgentJobEvents(
   repoRoot: string,
   runId: string,
   limit = 200,
+  options: {
+    sinceIndex?: number;
+    includeHeartbeats?: boolean;
+  } = {},
 ): AgentJobEvent[] {
   getAgentJob(repoRoot, runId);
   const path = eventPath(repoRoot, runId);
   if (!existsSync(path)) return [];
-  return readFileSync(path, "utf-8")
+  const events = readFileSync(path, "utf-8")
     .split(/\r?\n/)
     .filter(Boolean)
     .map((line) => readJsonLine<AgentJobEvent>(line))
-    .slice(-Math.min(Math.max(limit, 1), 1000));
+    .map((event, index) => ({ ...event, data: { ...(event.data ?? {}), eventIndex: index } }))
+    .filter((event) => options.sinceIndex === undefined || Number(event.data?.eventIndex) > options.sinceIndex);
+
+  const filtered = options.includeHeartbeats === true
+    ? events
+    : events.filter((event, index, list) => {
+      if (!["run_heartbeat", "log_updated"].includes(event.type)) return true;
+      for (let cursor = index + 1; cursor < list.length; cursor += 1) {
+        if (["run_heartbeat", "log_updated"].includes(list[cursor].type)) continue;
+        return false;
+      }
+      return true;
+    });
+
+  return filtered.slice(-Math.min(Math.max(limit, 1), 1000));
 }
 
 function readJsonLine<T>(line: string): T {
