@@ -597,7 +597,7 @@
       "id": "T8",
       "title": "清理 Git 跟踪运行文件、残留 Worktree 与版本分支",
       "objective": "在 T6 发布安全修复集成后，审计并解除所有运行日志、Controller 状态、真实 repository binding、jobs、edit sessions、artifacts、local bridge 和临时 worktree 文件的 Git 跟踪；保留本地运行文件但从当前版本树删除。清理仅属于已结束 Run 的残留 worktree 和 controller 临时分支，收敛 main/release/feature 关系，并将当前树中的删除通过普通提交同步到远端。不得改写历史、force push、删除活跃 worktree 或删除未合并的唯一提交。",
-      "status": "planned",
+      "status": "running",
       "dependsOn": [
         "T6"
       ],
@@ -631,15 +631,17 @@
       ],
       "risk": "destructive",
       "recommendedAgent": "codex",
-      "notes": [],
+      "notes": [
+        "用户已明确批准执行此前列出的可清理项。仅删除已完整包含在 main 的旧远端分支与已结束、已合并且工作区干净的 controller worktree/临时分支；保留两个含独有打包 CI 提交的 package 分支，以及本地 codex/归档历史分支。"
+      ],
       "runIds": [],
       "createdAt": "2026-06-23T13:27:13.655Z",
-      "updatedAt": "2026-06-23T13:27:13.655Z",
+      "updatedAt": "2026-06-24T07:42:49.830Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     }
   ],
   "createdAt": "2026-06-23T08:46:30.234Z",
-  "updatedAt": "2026-06-24T07:26:01.253Z",
+  "updatedAt": "2026-06-24T07:42:49.830Z",
   "repoId": "repo_123b7cf58b6b17b5cbe46a56",
   "github": {
     "owner": "greysonOuyang",

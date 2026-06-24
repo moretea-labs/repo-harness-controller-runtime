@@ -2,7 +2,7 @@
 id: "ISS-20260623-DDE2E7"
 kind: "governance"
 status: "in_progress"
-updated_at: "2026-06-24T07:26:01.253Z"
+updated_at: "2026-06-24T07:42:49.830Z"
 source: "repo-harness-controller-v8"
 ---
 
@@ -118,7 +118,7 @@ source: "repo-harness-controller-v8"
 
 ### T8 — 清理 Git 跟踪运行文件、残留 Worktree 与版本分支
 
-- Status: `planned`
+- Status: `running`
 - Objective: 在 T6 发布安全修复集成后，审计并解除所有运行日志、Controller 状态、真实 repository binding、jobs、edit sessions、artifacts、local bridge 和临时 worktree 文件的 Git 跟踪；保留本地运行文件但从当前版本树删除。清理仅属于已结束 Run 的残留 worktree 和 controller 临时分支，收敛 main/release/feature 关系，并将当前树中的删除通过普通提交同步到远端。不得改写历史、force push、删除活跃 worktree 或删除未合并的唯一提交。
 - Depends on: `T6`
 - Allowed paths: `.gitignore`, `.npmignore`, `.ai/harness/mcp/audit.log`, `.ai/harness/repository.json`, `.ai/harness/**`, `tasks/reports/**`, `docs/**`, `.github/**`
