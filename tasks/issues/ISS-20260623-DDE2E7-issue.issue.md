@@ -1,8 +1,8 @@
 ---
 id: "ISS-20260623-DDE2E7"
 kind: "governance"
-status: "planned"
-updated_at: "2026-06-23T13:31:21.871Z"
+status: "in_progress"
+updated_at: "2026-06-24T07:20:22.522Z"
 source: "repo-harness-controller-v8"
 ---
 
@@ -78,7 +78,7 @@ source: "repo-harness-controller-v8"
 
 ### T4 — 重构开源 README 与完整使用文档
 
-- Status: `blocked`
+- Status: `running`
 - Objective: 完善中英文 README、安装、命令、功能、Controller、Grok 反代、Cloudflare 自定义域名、ChatGPT MCP 连接、repoId 固定绑定和故障排查教程；去除内部化叙述。
 - Depends on: `T3`
 - Allowed paths: `README.md`, `README.zh-CN.md`, `docs/**`, `examples/**`
@@ -108,7 +108,7 @@ source: "repo-harness-controller-v8"
 
 ### T7 — 安全收敛分支并准备 GitHub 公开发布
 
-- Status: `planned`
+- Status: `running`
 - Objective: 在所有审计和修复通过后，建立明确的发布候选分支/标签，合并经验证改动，生成最终公开发布核对表；任何分支删除必须单独列出并在获得明确批准后执行。
 - Depends on: `T4`, `T5`, `T6`
 - Allowed paths: `tasks/reports/**`, `docs/**`, `.github/**`

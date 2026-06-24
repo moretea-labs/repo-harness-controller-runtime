@@ -4,7 +4,7 @@
   "title": "开源发布治理、版本线与分支整理",
   "slug": "issue",
   "kind": "governance",
-  "status": "planned",
+  "status": "in_progress",
   "summary": "将当前 repo-harness-controller-runtime 从内部演进工作区整理为可公开发布的 MIT 衍生项目：审计本地/远程分支和标签，区分产品版本与 Controller 协议版本，确认上游许可与代码来源，清理私有信息，完善中英文使用/部署/ChatGPT 连接文档与品牌素材，最后形成安全的 GitHub 开源发布路径。",
   "goals": [
     "建立本地与远程分支、标签、提交差异的可审计清单",
@@ -329,7 +329,7 @@
       "id": "T4",
       "title": "重构开源 README 与完整使用文档",
       "objective": "完善中英文 README、安装、命令、功能、Controller、Grok 反代、Cloudflare 自定义域名、ChatGPT MCP 连接、repoId 固定绑定和故障排查教程；去除内部化叙述。",
-      "status": "blocked",
+      "status": "running",
       "dependsOn": [
         "T3"
       ],
@@ -368,14 +368,15 @@
         "另外必须补齐：README 明确产品版本 1.4.0；加入 Derived from AncientTwo/repo-harness 的 MIT attribution；增加 ChatGPT Project instructions 固定仓库模板并说明只在该 Project 内持久、不是全局默认。公网文档不要建议暴露 /health；当前 health 尚待安全加固，Controller UI 与 health 都保持私有。",
         "Review rejected. Retry from current working tree. Replace the mistaken Grok section with ngrok temporary-tunnel guidance. Preserve the new SVG banner and architecture assets. State product version 1.4.0, add upstream MIT attribution, add a ChatGPT Project binding template using only placeholder IDs, keep health/UI private, and run `bun run check:type`. Remove old PNG references.",
         "Dispatched RUN-iss-20260623-dde2e7-t4-1782209337056-06febfda to codex.",
-        "RUN-iss-20260623-dde2e7-t4-1782209337056-06febfda cancelled; explicit retry is required before another Run can be created."
+        "RUN-iss-20260623-dde2e7-t4-1782209337056-06febfda cancelled; explicit retry is required before another Run can be created.",
+        "ChatGPT 直接实施，不重启 Agent。计划：1) 将 README.md/README.zh-CN.md 重构为当前 fork 的双语公开入口；2) 新增双语完整使用指南，覆盖安装、功能、ngrok 临时隧道、Cloudflare Tunnel/自定义域名、ChatGPT App 连接、Project instructions 固定 repoId 与多仓库安全边界；3) 由 ChatGPT 生成并更新 README banner；4) 运行 release-surface/public-export/type 检查并复核链接。"
       ],
       "runIds": [
         "RUN-iss-20260623-dde2e7-t4-1782206989085-273e44ac",
         "RUN-iss-20260623-dde2e7-t4-1782209337056-06febfda"
       ],
       "createdAt": "2026-06-23T08:46:30.234Z",
-      "updatedAt": "2026-06-23T10:19:10.354Z",
+      "updatedAt": "2026-06-24T02:12:33.946Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56",
       "github": {
         "owner": "greysonOuyang",
@@ -549,7 +550,7 @@
       "id": "T7",
       "title": "安全收敛分支并准备 GitHub 公开发布",
       "objective": "在所有审计和修复通过后，建立明确的发布候选分支/标签，合并经验证改动，生成最终公开发布核对表；任何分支删除必须单独列出并在获得明确批准后执行。",
-      "status": "planned",
+      "status": "running",
       "dependsOn": [
         "T4",
         "T5",
@@ -576,11 +577,12 @@
       "risk": "high",
       "recommendedAgent": "codex",
       "notes": [
-        "Synced to GitHub: https://github.com/greysonOuyang/repo-harness-controller-runtime/issues/16"
+        "Synced to GitHub: https://github.com/greysonOuyang/repo-harness-controller-runtime/issues/16",
+        "ChatGPT 直接执行分支收敛：已刷新 origin/upstream；确认当前候选相对 origin/main 为纯快进；按产品语义版本建立远端 release/1.4，停止使用 release/v8.1 作为新发布线；当前 HEAD 通过 check:release-surface（typecheck、19 tests、public export 393 files），npm registry 确认 repo-harness@1.4.0 尚未发布。下一步提交治理状态并非强制快进 feature、release/1.4 与 main。"
       ],
       "runIds": [],
       "createdAt": "2026-06-23T08:46:30.234Z",
-      "updatedAt": "2026-06-23T08:49:10.528Z",
+      "updatedAt": "2026-06-24T07:20:22.522Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56",
       "github": {
         "owner": "greysonOuyang",
@@ -636,7 +638,7 @@
     }
   ],
   "createdAt": "2026-06-23T08:46:30.234Z",
-  "updatedAt": "2026-06-23T13:31:21.871Z",
+  "updatedAt": "2026-06-24T07:20:22.522Z",
   "repoId": "repo_123b7cf58b6b17b5cbe46a56",
   "github": {
     "owner": "greysonOuyang",
