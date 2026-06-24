@@ -39,19 +39,20 @@ describe("install script contracts", () => {
     expect(script).not.toMatch(/\bnode\b/i);
   });
 
-  test("README front-loads the no-Node installer and Bun package-manager fallback", () => {
+  test("README documents source checkout and Bun package installation", () => {
     const readme = read("README.md");
     const zhReadme = read("README.zh-CN.md");
+    const usageGuide = read("docs/public-usage-guide.md");
+    const zhUsageGuide = read("docs/public-usage-guide.zh-CN.md");
     const pkg = JSON.parse(read("package.json"));
 
-    expect(readme).toContain("curl -fsSL https://raw.githubusercontent.com/greysonOuyang/repo-harness-controller-runtime/main/install.sh | sh");
-    expect(readme).toContain("irm https://raw.githubusercontent.com/greysonOuyang/repo-harness-controller-runtime/main/install.ps1 | iex");
-    expect(readme).toContain("<summary>Already have Bun? Use Bun directly, or npx as a fallback</summary>");
-    expect(readme).toContain("bun add -g repo-harness");
-    expect(readme).toContain("npx -y repo-harness install");
+    for (const document of [readme, zhReadme, usageGuide, zhUsageGuide]) {
+      expect(document).toContain("git clone https://github.com/greysonOuyang/repo-harness-controller-runtime.git");
+      expect(document).toContain("bun add -g repo-harness");
+    }
+    expect(readme).toContain("docs/public-usage-guide.md");
+    expect(zhReadme).toContain("docs/public-usage-guide.zh-CN.md");
     expect(readme).not.toContain("npm install -g repo-harness");
-    expect(zhReadme).toContain("curl -fsSL https://raw.githubusercontent.com/greysonOuyang/repo-harness-controller-runtime/main/install.sh | sh");
-    expect(zhReadme).toContain("irm https://raw.githubusercontent.com/greysonOuyang/repo-harness-controller-runtime/main/install.ps1 | iex");
     expect(pkg.files).toContain("install.sh");
     expect(pkg.files).toContain("install.ps1");
   });
