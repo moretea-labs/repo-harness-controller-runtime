@@ -3,6 +3,7 @@ import {
   appendFileSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   renameSync,
@@ -10,7 +11,7 @@ import {
   writeFileSync,
 } from "fs";
 import { dirname, join } from "path";
-import { cancelAgentJob, getAgentJob, startTaskJob } from "../agent-jobs/job-manager";
+import { acceptTaskJob, cancelAgentJob, dispatchAcceptedTaskJob, getAgentJob, startTaskJob } from "../agent-jobs/job-manager";
 import { createIssue, getIssue, removeEphemeralIssue } from "../controller/issue-store";
 import { currentControllerCheckRevision, runControllerCheckAsync } from "../controller/check-runner";
 import {
@@ -35,7 +36,15 @@ import type {
 } from "./types";
 
 const JOB_ROOT = ".ai/harness/local-jobs";
+const ACTIVE_INDEX_PATH = `${JOB_ROOT}/active-index.json`;
 const CONFIG_PATH = ".repo-harness/local-bridge.json";
+
+interface LocalBridgeActiveIndex {
+  schemaVersion: 1;
+  ownerPid: number;
+  updatedAt: string;
+  jobIds: string[];
+}
 
 function now(): string {
   return new Date().toISOString();
@@ -57,14 +66,17 @@ function eventsPath(repoRoot: string, jobId: string): string {
   return join(jobDir(repoRoot, jobId), "events.jsonl");
 }
 
-function storedJobPaths(repoRoot: string, limit = 500): string[] {
+function allStoredJobPaths(repoRoot: string): string[] {
   const root = join(repoRoot, JOB_ROOT);
   if (!existsSync(root)) return [];
   return readdirSync(root, { withFileTypes: true })
     .filter((entry) => entry.isDirectory() && existsSync(join(root, entry.name, "job.json")))
     .map((entry) => join(root, entry.name, "job.json"))
-    .sort((a, b) => b.localeCompare(a))
-    .slice(0, Math.max(1, Math.min(limit, 5000)));
+    .sort((a, b) => b.localeCompare(a));
+}
+
+function storedJobPaths(repoRoot: string, limit = 500): string[] {
+  return allStoredJobPaths(repoRoot).slice(0, Math.max(1, Math.min(limit, 5000)));
 }
 
 function readStoredJobs(repoRoot: string, limit = 500): LocalBridgeJob[] {
@@ -75,6 +87,88 @@ function readStoredJobs(repoRoot: string, limit = 500): LocalBridgeJob[] {
       return [];
     }
   });
+}
+
+function activeIndexPath(repoRoot: string): string {
+  return join(repoRoot, ACTIVE_INDEX_PATH);
+}
+
+function isActiveLocalBridgeJob(job: LocalBridgeJob): boolean {
+  return ["pending_approval", "approved", "running", "dispatched"].includes(job.status);
+}
+
+function writeActiveJobIndex(
+  repoRoot: string,
+  jobIds: Iterable<string>,
+): LocalBridgeActiveIndex {
+  const index: LocalBridgeActiveIndex = {
+    schemaVersion: 1,
+    ownerPid: process.pid,
+    updatedAt: now(),
+    jobIds: Array.from(new Set(jobIds)).sort((a, b) => b.localeCompare(a)),
+  };
+  writeJson(activeIndexPath(repoRoot), index);
+  return index;
+}
+
+function rebuildActiveJobIndex(repoRoot: string): LocalBridgeActiveIndex {
+  const jobIds = allStoredJobPaths(repoRoot).flatMap((path) => {
+    try {
+      const job = readJson<LocalBridgeJob>(path);
+      return isActiveLocalBridgeJob(job) ? [job.jobId] : [];
+    } catch (_error) {
+      return [];
+    }
+  });
+  return writeActiveJobIndex(repoRoot, jobIds);
+}
+
+function loadActiveJobIndex(repoRoot: string): LocalBridgeActiveIndex {
+  const path = activeIndexPath(repoRoot);
+  if (!existsSync(path)) return rebuildActiveJobIndex(repoRoot);
+  try {
+    const index = readJson<LocalBridgeActiveIndex>(path);
+    if (
+      index.schemaVersion !== 1 ||
+      index.ownerPid !== process.pid ||
+      !Array.isArray(index.jobIds) ||
+      index.jobIds.some((jobId) => typeof jobId !== "string" || !jobId)
+    ) {
+      return rebuildActiveJobIndex(repoRoot);
+    }
+    return index;
+  } catch (_error) {
+    return rebuildActiveJobIndex(repoRoot);
+  }
+}
+
+function readActiveLocalBridgeJobs(repoRoot: string): LocalBridgeJob[] {
+  const index = loadActiveJobIndex(repoRoot);
+  const jobs: LocalBridgeJob[] = [];
+  const retainedJobIds: string[] = [];
+  for (const jobId of index.jobIds) {
+    try {
+      const job = readJson<LocalBridgeJob>(metaPath(repoRoot, jobId));
+      if (!isActiveLocalBridgeJob(job)) continue;
+      retainedJobIds.push(jobId);
+      jobs.push(job);
+    } catch (_error) {
+      // Missing or malformed state is pruned from the active index.
+    }
+  }
+  if (retainedJobIds.length !== index.jobIds.length) {
+    writeActiveJobIndex(repoRoot, retainedJobIds);
+  }
+  return jobs.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+function updateActiveJobIndex(repoRoot: string, job: LocalBridgeJob): void {
+  const index = loadActiveJobIndex(repoRoot);
+  const jobIds = new Set(index.jobIds);
+  const contained = jobIds.has(job.jobId);
+  if (isActiveLocalBridgeJob(job)) jobIds.add(job.jobId);
+  else jobIds.delete(job.jobId);
+  if (contained !== jobIds.has(job.jobId)) writeActiveJobIndex(repoRoot, jobIds);
 }
 
 function isPidAlive(pid: number | undefined): boolean {
@@ -242,6 +336,27 @@ function executionApproval(
   return taskApproval(synthetic);
 }
 
+function findExistingLaunchJob(
+  repoRoot: string,
+  payload: LaunchTaskPayload,
+): LocalBridgeJob | undefined {
+  const jobs = readStoredJobs(repoRoot, 500);
+  const requestId = payload.requestId?.trim();
+  if (requestId) {
+    return jobs.find((entry) =>
+      entry.action === "launch-task" &&
+      typeof (entry.payload as LaunchTaskPayload).requestId === "string" &&
+      (entry.payload as LaunchTaskPayload).requestId === requestId,
+    );
+  }
+  return jobs.find((entry) =>
+    entry.action === "launch-task" &&
+    ["approved", "running", "dispatched"].includes(entry.status) &&
+    entry.issueId === payload.issueId &&
+    entry.taskId === payload.taskId,
+  );
+}
+
 export function submitLocalBridgeJob(
   repoRoot: string,
   request: LocalBridgeJobRequest,
@@ -259,16 +374,19 @@ export function submitLocalBridgeJob(
   if (request.action === "run-check") {
     const payload = request.payload as RunCheckPayload;
     revision = currentControllerCheckRevision(repoRoot);
-    const candidate = readStoredJobs(repoRoot, 100).find((entry) =>
+    const candidate = readActiveLocalBridgeJobs(repoRoot).find((entry) =>
       entry.action === "run-check" &&
-      ["approved", "running", "succeeded"].includes(entry.status) &&
       (entry.payload as RunCheckPayload).checkId === payload.checkId &&
       entry.revision === revision
     );
     if (candidate) {
       const duplicate = refreshLocalBridgeJob(repoRoot, candidate, revision);
-      if (["approved", "running", "succeeded"].includes(duplicate.status)) return duplicate;
+      if (isActiveLocalBridgeJob(duplicate)) return duplicate;
     }
+  }
+  if (request.action === "launch-task") {
+    const existing = findExistingLaunchJob(repoRoot, request.payload as LaunchTaskPayload);
+    if (existing) return refreshLocalBridgeJob(repoRoot, existing);
   }
   const policyApproval = executionApproval(
     repoRoot,
@@ -301,7 +419,7 @@ export function submitLocalBridgeJob(
     ...(request.action === "quick-agent-session" && (request.payload as QuickAgentSessionPayload).ephemeral !== false ? { ephemeral: true } : {}),
     approvedAt: createdAt,
   };
-  writeJson(metaPath(repoRoot, job.jobId), job);
+  saveJob(repoRoot, job);
   appendEvent(repoRoot, job.jobId, {
     type: "job_created",
     message: `${job.action} job created with ${approval} approval.`,
@@ -443,7 +561,7 @@ export function reconcileLocalBridgeJobs(repoRoot: string): {
   active: number;
   terminalized: number;
 } {
-  const jobs = readStoredJobs(repoRoot, 5000);
+  const jobs = readActiveLocalBridgeJobs(repoRoot);
   const hasActiveCheck = jobs.some((entry) =>
     entry.action === "run-check" && entry.status === "running"
   );
@@ -475,6 +593,7 @@ export function getLocalBridgeJobEvents(
 function saveJob(repoRoot: string, job: LocalBridgeJob): LocalBridgeJob {
   job.updatedAt = now();
   writeJson(metaPath(repoRoot, job.jobId), job);
+  updateActiveJobIndex(repoRoot, job);
   return job;
 }
 
@@ -524,7 +643,7 @@ function executeLaunchTask(
   job: LocalBridgeJob,
   payload: LaunchTaskPayload,
 ): void {
-  const run = startTaskJob({
+  const accepted = acceptTaskJob({
     repoRoot,
     issueId: payload.issueId,
     taskId: payload.taskId,
@@ -535,24 +654,25 @@ function executeLaunchTask(
     baseRef: payload.baseRef,
     model: payload.model,
     createPullRequest: payload.createPullRequest,
+    requestId: payload.requestId,
     approveDestructive: payload.approveDestructive === true,
   });
-  job.runId = run.runId;
+  dispatchAcceptedTaskJob(repoRoot, accepted.runId);
+  const run = getAgentJob(repoRoot, accepted.runId);
+  job.runId = accepted.runId;
   job.issueId = payload.issueId;
   job.taskId = payload.taskId;
   job.status = "dispatched";
   delete job.finishedAt;
   job.result = {
-    runId: run.runId,
+    runId: accepted.runId,
     provider: run.provider,
-    status: run.status,
-    worktree: run.worktree,
-    github: run.github,
+    status: accepted.status,
   };
   appendEvent(repoRoot, job.jobId, {
     type: "job_dispatched",
-    message: `Task dispatched as ${run.runId}.`,
-    data: { runId: run.runId },
+    message: accepted.reused ? `Task reused ${accepted.runId}.` : `Task accepted as ${accepted.runId}.`,
+    data: { runId: accepted.runId, reused: accepted.reused, requestId: accepted.requestId },
   });
 }
 
@@ -597,16 +717,19 @@ function executeQuickSession(
   });
   const task = issue.tasks[0];
   if (!task) throw new Error("quick session issue was created without a Task");
-  const run = startTaskJob({
+  const accepted = acceptTaskJob({
     repoRoot,
     issueId: issue.id,
     taskId: task.id,
     agent: resolveExecutionAgent(repoRoot, payload.agent),
     timeoutMs: resolvedJobTimeout(repoRoot, payload.timeoutMs),
     isolate: resolvedIsolation(payload),
+    requestId: payload.requestId,
     approveDestructive: payload.approveDestructive === true,
   });
-  job.runId = run.runId;
+  dispatchAcceptedTaskJob(repoRoot, accepted.runId);
+  const run = getAgentJob(repoRoot, accepted.runId);
+  job.runId = accepted.runId;
   job.issueId = issue.id;
   job.taskId = task.id;
   job.status = "dispatched";
@@ -614,14 +737,14 @@ function executeQuickSession(
   job.result = {
     issueId: issue.id,
     taskId: task.id,
-    runId: run.runId,
+    runId: accepted.runId,
     provider: run.provider,
-    worktree: run.worktree,
+    status: accepted.status,
   };
   appendEvent(repoRoot, job.jobId, {
     type: "job_dispatched",
-    message: `Quick session dispatched as ${run.runId}.`,
-    data: { issueId: issue.id, taskId: task.id, runId: run.runId },
+    message: accepted.reused ? `Quick session reused ${accepted.runId}.` : `Quick session accepted as ${accepted.runId}.`,
+    data: { issueId: issue.id, taskId: task.id, runId: accepted.runId, reused: accepted.reused, requestId: accepted.requestId },
   });
 }
 

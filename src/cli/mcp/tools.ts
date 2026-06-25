@@ -23,6 +23,8 @@ import {
   type EditOperation,
 } from "../editing/edit-session";
 import {
+  acceptTaskJob,
+  dispatchAcceptedTaskJob,
   cancelAgentJob,
   getAgentJob,
   getAgentJobEvents,
@@ -180,6 +182,31 @@ function errorResult(
 ): CallToolResult {
   const result = textResult({
     error: { code, message: redactMcpText(message).text, details },
+  });
+  result.isError = true;
+  return result;
+}
+
+function dispatchErrorResult(
+  code: string,
+  message: string,
+  options: {
+    requestId?: string;
+    retryable?: boolean;
+    details?: unknown;
+  } = {},
+): CallToolResult {
+  const payload = {
+    accepted: false,
+    code,
+    message: redactMcpText(message).text,
+    retryable: options.retryable === true,
+    requestId: options.requestId,
+    details: options.details,
+  };
+  const result = textResult({
+    error: payload,
+    ...payload,
   });
   result.isError = true;
   return result;
@@ -362,6 +389,7 @@ function localBridgeRequestFromArgs(args: Record<string, unknown>) {
       payload: {
         issueId,
         taskId,
+        requestId: typeof args.request_id === "string" ? args.request_id.trim() || undefined : undefined,
         agent: parseControllerAgent(args.agent) ?? undefined,
         isolate: typeof args.isolate === "boolean" ? args.isolate : undefined,
         timeoutMs:
@@ -404,6 +432,7 @@ function localBridgeRequestFromArgs(args: Record<string, unknown>) {
     payload: {
       title,
       objective,
+      requestId: typeof args.request_id === "string" ? args.request_id.trim() || undefined : undefined,
       summary: typeof args.summary === "string" ? args.summary : undefined,
       allowedPaths: stringList(args.allowed_paths),
       forbiddenPaths: stringList(args.forbidden_paths),
@@ -1277,6 +1306,7 @@ export function buildMcpToolDefinitions(
               type: "string",
               enum: ["launch-task", "quick-agent-session", "run-check"],
             },
+            request_id: { type: "string" },
             issue_id: { type: "string" },
             task_id: { type: "string" },
             agent: {
@@ -1887,6 +1917,7 @@ export function buildMcpToolDefinitions(
           properties: {
             issue_id: { type: "string" },
             task_id: { type: "string" },
+            request_id: { type: "string" },
             agent: {
               type: "string",
               enum: ["codex", "claude", "github-copilot"],
@@ -1921,6 +1952,7 @@ export function buildMcpToolDefinitions(
           properties: {
             issue_id: { type: "string" },
             max_parallel: { type: "number" },
+            request_id: { type: "string" },
             agent: { type: "string", enum: ["codex", "claude", "github-copilot"], description: "Optional runtime executor override for selected Tasks." },
             timeout_ms: agentTimeoutSchema,
             isolate: {
@@ -1952,6 +1984,7 @@ export function buildMcpToolDefinitions(
           properties: {
             issue_id: { type: "string" },
             max_parallel: { type: "number" },
+            request_id: { type: "string" },
             agent: { type: "string", enum: ["codex", "claude", "github-copilot"], description: "Optional runtime executor override for selected Tasks." },
             timeout_ms: agentTimeoutSchema,
             isolate: {
@@ -2746,7 +2779,16 @@ export async function callMcpTool(
             : job;
         audit(ctx, name, "ok", args, undefined);
         return textResult({
-          job: result,
+          accepted: true,
+          job: {
+            jobId: result.jobId,
+            action: result.action,
+            status: result.status,
+            runId: result.runId,
+            issueId: result.issueId,
+            taskId: result.taskId,
+            updatedAt: result.updatedAt,
+          },
           localController:
             loadMcpRuntimeState(ctx.repoRoot)?.localController?.endpoint ??
             "http://127.0.0.1:8766/",
@@ -3486,31 +3528,36 @@ export async function callMcpTool(
         const issue = getIssue(ctx.repoRoot, issueId);
         const task = issue.tasks.find((entry) => entry.id === taskId);
         if (!task) return errorResult("TASK_NOT_FOUND", `task not found: ${issueId}/${taskId}`);
-        const readiness = inspectTaskReadiness(ctx.repoRoot, issueId, taskId, {
-          approveDestructive: args.approve_destructive === true,
-        });
-        if (!readiness.ready) return errorResult("TASK_NOT_LAUNCH_READY", "Task-local launch policy blocked execution.", readiness);
         const requested = resolveDispatchAgent(ctx, task, args.agent);
         if (!requested) return errorResult("AGENT_REQUIRED", "No agent is selected or enabled. Pass agent explicitly or enable a local agent in the controller profile.");
         if (requested !== "github-copilot") {
           if (!ctx.policy.execution.agentRunner) return errorResult("DEV_RUNNER_DISABLED", "Start the controller profile with --enable-dev-runner to dispatch local Codex or Claude agents.");
           if (!ctx.policy.execution.allowedAgents.includes(requested)) return errorResult("AGENT_DENIED", `local agent is not enabled: ${requested}`);
         }
-        const run = startTaskJob({
-          repoRoot: ctx.repoRoot,
-          issueId,
-          taskId,
-          agent: requested,
-          timeoutMs: runnerTimeoutMs(ctx, args.timeout_ms),
-          isolate: typeof args.isolate === "boolean" ? args.isolate : undefined,
-          githubRepo: typeof args.github_repo === "string" ? args.github_repo : undefined,
-          baseRef: typeof args.base_ref === "string" ? args.base_ref : undefined,
-          model: typeof args.model === "string" ? args.model : undefined,
-          createPullRequest: args.create_pull_request !== false,
-          approveDestructive: args.approve_destructive === true,
-        });
-        audit(ctx, name, run.status === "failed" ? "failed" : "ok", args, run.github?.url ?? run.promptPath, run.error);
-        return textResult({ ...run, readiness, run });
+        const requestId = typeof args.request_id === "string" ? args.request_id.trim() || undefined : undefined;
+        try {
+          const accepted = acceptTaskJob({
+            repoRoot: ctx.repoRoot,
+            issueId,
+            taskId,
+            agent: requested,
+            timeoutMs: runnerTimeoutMs(ctx, args.timeout_ms),
+            isolate: typeof args.isolate === "boolean" ? args.isolate : undefined,
+            githubRepo: typeof args.github_repo === "string" ? args.github_repo : undefined,
+            baseRef: typeof args.base_ref === "string" ? args.base_ref : undefined,
+            model: typeof args.model === "string" ? args.model : undefined,
+            createPullRequest: args.create_pull_request !== false,
+            requestId,
+            approveDestructive: args.approve_destructive === true,
+          });
+          dispatchAcceptedTaskJob(ctx.repoRoot, accepted.runId);
+          audit(ctx, name, "ok", args, accepted.runId);
+          return textResult(accepted);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          audit(ctx, name, "failed", args, undefined, message);
+          return dispatchErrorResult("RUN_PERSIST_FAILED", message, { requestId, retryable: true });
+        }
       }
       case "launch_issue": {
         if (ctx.policy.profile !== "controller") return errorResult("TOOL_DISABLED", "launch_issue requires the controller profile");
@@ -3567,6 +3614,7 @@ export async function callMcpTool(
         if (ctx.policy.profile !== "controller") return errorResult("TOOL_DISABLED", "dispatch_ready_tasks requires the controller profile");
         const requestedIssue = typeof args.issue_id === "string" && args.issue_id.trim() ? args.issue_id.trim() : undefined;
         const maxParallel = Math.min(Math.max(typeof args.max_parallel === "number" ? Math.trunc(args.max_parallel) : 2, 1), 4);
+        const batchRequestId = typeof args.request_id === "string" ? args.request_id.trim() || undefined : undefined;
         const candidates: Array<{ issueId: string; task: ControllerTask }> = [];
         const skipped: Array<{ issueId: string; taskId: string; reason: string }> = [];
         for (const issue of listIssues(ctx.repoRoot)) {
@@ -3589,7 +3637,7 @@ export async function callMcpTool(
           }
           selected.push(candidate);
         }
-        const runs = [];
+        const accepted = [];
         for (const candidate of selected) {
           const agent = resolveDispatchAgent(ctx, candidate.task, args.agent);
           if (!agent) {
@@ -3600,22 +3648,42 @@ export async function callMcpTool(
             skipped.push({ issueId: candidate.issueId, taskId: candidate.task.id, reason: `local agent is not enabled: ${agent}` });
             continue;
           }
-          runs.push(startTaskJob({
-            repoRoot: ctx.repoRoot,
-            issueId: candidate.issueId,
-            taskId: candidate.task.id,
-            agent,
-            timeoutMs: runnerTimeoutMs(ctx, args.timeout_ms),
-            isolate: typeof args.isolate === "boolean" ? args.isolate : undefined,
-            githubRepo: typeof args.github_repo === "string" ? args.github_repo : undefined,
-            baseRef: typeof args.base_ref === "string" ? args.base_ref : undefined,
-            model: typeof args.model === "string" ? args.model : undefined,
-            createPullRequest: args.create_pull_request !== false,
-            approveDestructive: args.approve_destructive === true,
-          }));
+          const requestId = batchRequestId ? `${batchRequestId}:${candidate.issueId}:${candidate.task.id}` : undefined;
+          try {
+            const summary = acceptTaskJob({
+              repoRoot: ctx.repoRoot,
+              issueId: candidate.issueId,
+              taskId: candidate.task.id,
+              agent,
+              timeoutMs: runnerTimeoutMs(ctx, args.timeout_ms),
+              isolate: typeof args.isolate === "boolean" ? args.isolate : undefined,
+              githubRepo: typeof args.github_repo === "string" ? args.github_repo : undefined,
+              baseRef: typeof args.base_ref === "string" ? args.base_ref : undefined,
+              model: typeof args.model === "string" ? args.model : undefined,
+              createPullRequest: args.create_pull_request !== false,
+              requestId,
+              approveDestructive: args.approve_destructive === true,
+            });
+            dispatchAcceptedTaskJob(ctx.repoRoot, summary.runId);
+            accepted.push(summary);
+          } catch (error) {
+            skipped.push({
+              issueId: candidate.issueId,
+              taskId: candidate.task.id,
+              reason: error instanceof Error ? error.message : String(error),
+            });
+          }
         }
-        audit(ctx, name, runs.length > 0 ? "ok" : "failed", args);
-        return textResult({ requestedIssue, dispatched: runs.length, runs, skipped, currentFocus: loadControllerProjectState(ctx.repoRoot).currentIssueId, focusIsInformational: true });
+        audit(ctx, name, accepted.length > 0 ? "ok" : "failed", args);
+        return textResult({
+          requestedIssue,
+          dispatched: accepted.length,
+          runIds: accepted.map((entry) => entry.runId),
+          accepted,
+          skipped,
+          currentFocus: loadControllerProjectState(ctx.repoRoot).currentIssueId,
+          focusIsInformational: true,
+        });
       }
       case "get_task_run": {
         if (ctx.policy.profile !== "controller")

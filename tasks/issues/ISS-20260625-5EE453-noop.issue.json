@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 5,
+  "id": "ISS-20260625-5EE453",
+  "title": "__noop__",
+  "slug": "noop",
+  "kind": "investigation",
+  "status": "cancelled",
+  "summary": "误创建的空 Issue，未包含任务或代码改动，已取消。",
+  "goals": [],
+  "nonGoals": [],
+  "acceptanceCriteria": [],
+  "relatedArtifacts": [],
+  "tasks": [],
+  "createdAt": "2026-06-25T07:01:01.828Z",
+  "updatedAt": "2026-06-25T07:07:59.060Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+}

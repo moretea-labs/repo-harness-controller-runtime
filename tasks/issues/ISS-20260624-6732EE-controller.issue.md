@@ -1,8 +1,8 @@
 ---
 id: "ISS-20260624-6732EE"
 kind: "bug"
-status: "planned"
-updated_at: "2026-06-24T13:54:27.575Z"
+status: "in_progress"
+updated_at: "2026-06-25T08:03:17.248Z"
 source: "repo-harness-controller-v8"
 ---
 
@@ -60,25 +60,26 @@ source: "repo-harness-controller-v8"
 
 ### T3 — 优化状态查询与 Connector 响应负载
 
-- Status: `ready`
+- Status: `superseded`
 - Objective: 让 Local Bridge Job 列表先限量再读取/刷新，活跃与历史状态分离，并压缩 project_snapshot、local_bridge_status 和事件读取的默认数据量。
 - Depends on: `T2`
 - Allowed paths: `src/cli/local-bridge/**`, `src/cli/mcp/tools.ts`, `tests/cli/mcp-controller.test.ts`, `tests/cli/local-bridge*.test.ts`, `docs/**`
 - Checks: `package:check:type`
 - Execution hint: selected at runtime
+- Superseded by: `T14`, `T15`
 
 ### T4 — 完善 Direct Edit First 与分层验证策略
 
 - Status: `planned`
 - Objective: 收紧工具路由和验证提示，使小中型改动默认 search + Direct Edit + targeted checks，完整 release gate 仅在最终发布阶段执行，并补充文档和回归断言。
-- Depends on: `T3`
+- Depends on: `T14`, `T15`
 - Allowed paths: `src/cli/mcp/**`, `src/cli/controller/**`, `tests/cli/**`, `docs/**`
 - Checks: `package:check:type`, `package:check:controller-v8`
 - Execution hint: selected at runtime
 
 ### T5 — 恢复公开包元数据并清理空编辑会话
 
-- Status: `ready`
+- Status: `done`
 - Objective: 移除误加的 package.json private 标记，保持公开 npm 包契约；关闭或回滚没有任何变更的遗留 Direct Edit 会话，恢复干净且可验证的工作区。
 - Depends on: none
 - Allowed paths: `package.json`, `tests/bootstrap-files.test.ts`, `.ai/harness/edit-sessions/**`
@@ -87,37 +88,103 @@ source: "repo-harness-controller-v8"
 
 ### T6 — 稳定仓库身份与远程映射
 
-- Status: `planned`
+- Status: `superseded`
 - Objective: 修复 repository refresh 在同一路径 remote 变化时生成重复 repoId 的问题；保持既有 repoId、Issue、Run 和 Edit Session 绑定稳定，并让 Registry remote、实际 Git origin 与 GitHub 插件映射能够明确校验和安全更新。
 - Depends on: none
 - Allowed paths: `src/cli/repository-registry/**`, `src/cli/controller/**`, `src/cli/mcp/**`, `tests/cli/**`, `docs/**`
 - Checks: `package:check:type`, `package:check:controller-v8`
 - Execution hint: selected at runtime
+- Superseded by: `T16`
 
 ### T7 — 执行最终回归并准备 MCP 重启
 
 - Status: `planned`
 - Objective: 在全部修复集成后执行分层回归，确认 Controller、MCP、Local Bridge、仓库身份和公开包契约均通过；输出可重启状态，重启后再次进行健康检查。
-- Depends on: `T4`, `T6`
+- Depends on: `T4`, `T16`
 - Allowed paths: `tests/**`, `scripts/**`, `docs/**`, `tasks/reports/**`
 - Checks: `package:check:type`, `package:check:controller-v8`, `package:check:release-surface`
 - Execution hint: selected at runtime
 
 ### T8 — 原子化 Agent 运行结果持久化
 
-- Status: `ready`
+- Status: `superseded`
 - Objective: 修复 Agent worker 写入 result/meta JSON 时被 Controller 并发读取导致 Unexpected EOF 的竞态；统一使用原子替换或可恢复读取，并补充高频轮询回归测试。
 - Depends on: `T1`
 - Allowed paths: `src/cli/agent-jobs/**`, `tests/cli/local-bridge.test.ts`, `tests/cli/mcp-controller.test.ts`
 - Checks: `package:check:type`
 - Execution hint: selected at runtime
+- Superseded by: `T10`, `T11`
 
 ### T9 — 修复并发调度规则
 
-- Status: `planned`
+- Status: `superseded`
 - Objective: 修复重型检查并发和本地 Run 工作区选择的跨进程竞态。
 - Depends on: `T2`
 - Allowed paths: `src/cli/controller/check-runner.ts`, `src/cli/agent-jobs/**`, `tests/cli/**`
+- Checks: `package:check:type`, `package:check:controller-v8`
+- Execution hint: selected at runtime
+- Superseded by: `T12`, `T13`
+
+### T10 — 收敛 Agent 状态文件原子持久化
+
+- Status: `planned`
+- Objective: 统一 Agent meta/result JSON 原子写入和可恢复读取，避免高频轮询读取半写入文件；保留现有状态语义，不改变正常 Run 生命周期。
+- Depends on: `T1`, `T15`
+- Allowed paths: `src/cli/agent-jobs/job-manager.ts`, `src/cli/agent-jobs/job-worker.ts`, `tests/cli/local-bridge.test.ts`, `tests/cli/mcp-controller.test.ts`
+- Checks: `package:check:type`
+- Execution hint: selected at runtime
+
+### T11 — 修复自动集成 Run 终态一致性
+
+- Status: `ready`
+- Objective: 确保 worktree 自动集成 Run 只有在集成完成并清理，或记录明确 autoIntegrationError 后才进入成功终态；worker 在 result 写入后异常退出不得被恢复为假成功。
+- Depends on: `T1`
+- Allowed paths: `src/cli/agent-jobs/integration.ts`, `src/cli/agent-jobs/job-manager.ts`, `src/cli/agent-jobs/job-worker.ts`, `tests/cli/local-bridge.test.ts`, `tests/cli/mcp-controller.test.ts`
+- Checks: `package:check:type`, `package:check:controller-v8`
+- Execution hint: selected at runtime
+
+### T12 — 收敛检查进程树与证据 Revision
+
+- Status: `ready`
+- Objective: 确保检查任务只有在完整子进程树退出后才进入终态；检查执行期间仓库 Revision 变化时不得生成可复用成功证据，并为排队/持锁阶段提供可观测状态。
+- Depends on: `T2`
+- Allowed paths: `src/cli/controller/check-runner.ts`, `src/cli/local-bridge/job-store.ts`, `tests/cli/local-bridge.test.ts`, `tests/cli/mcp-controller.test.ts`
+- Checks: `package:check:type`, `package:check:controller-v8`
+- Execution hint: selected at runtime
+
+### T13 — 修复共享检查订阅与取消语义
+
+- Status: `ready`
+- Objective: 将同 Revision 同 Check 的执行去重建模为共享执行加独立订阅者；单个 Job 取消、超时或变 stale 不得终止其他仍活跃订阅者使用的共享检查。
+- Depends on: `T2`
+- Allowed paths: `src/cli/controller/check-runner.ts`, `src/cli/local-bridge/job-store.ts`, `tests/cli/local-bridge.test.ts`
+- Checks: `package:check:type`, `package:check:controller-v8`
+- Execution hint: selected at runtime
+
+### T14 — 压缩 MCP 默认响应并保持兼容
+
+- Status: `review`
+- Objective: 移除 launch_task、verify_task 等工具返回中顶层与嵌套完整对象的重复副本；默认返回紧凑摘要，同时保留专用详情工具和必要兼容字段。
+- Depends on: `T2`
+- Allowed paths: `src/cli/mcp/tools.ts`, `tests/cli/mcp-controller.test.ts`, `docs/**`
+- Checks: `package:check:type`, `package:check:controller-v8`
+- Execution hint: selected at runtime
+
+### T15 — 建立活跃检查索引并限制历史扫描
+
+- Status: `running`
+- Objective: 将 run-check 去重与活跃状态读取从最近历史窗口中分离，优先读取非终态索引；历史列表只按请求上限读取，不因检查去重扫描大量旧 Job。
+- Depends on: `T2`
+- Allowed paths: `src/cli/local-bridge/job-store.ts`, `src/cli/local-bridge/types.ts`, `tests/cli/local-bridge.test.ts`
+- Checks: `package:check:type`, `package:check:controller-v8`
+- Execution hint: selected at runtime
+
+### T16 — 补充仓库远程映射一致性诊断
+
+- Status: `ready`
+- Objective: 保持 repoId 与 canonicalRoot 稳定；在 Git origin、Registry remote 和 GitHub 插件目标不一致时返回明确 warning，不静默重绑既有 Issue、Run 或 Edit Session。
+- Depends on: none
+- Allowed paths: `src/cli/repositories/registry.ts`, `tests/cli/repository-registry-v81.test.ts`, `src/cli/mcp/tools.ts`
 - Checks: `package:check:type`, `package:check:controller-v8`
 - Execution hint: selected at runtime
 

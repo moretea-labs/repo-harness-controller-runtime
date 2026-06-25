@@ -1,5 +1,5 @@
 import { createHash } from "crypto";
-import { existsSync, readFileSync, statSync } from "fs";
+import { existsSync, readFileSync, rmSync, statSync } from "fs";
 import { spawnSync } from "child_process";
 import { relative } from "path";
 import {
@@ -246,7 +246,15 @@ export function cleanupIntegratedWorktree(
     ]);
     if (!remove.ok)
       throw new Error(`failed to remove integrated worktree: ${remove.stderr}`);
-    removed = true;
+    removed = !existsSync(run.worktree);
+    if (!removed) {
+      rmSync(run.worktree, { recursive: true, force: true });
+      removed = !existsSync(run.worktree);
+    }
+    if (!removed)
+      throw new Error(
+        `integrated worktree still exists after cleanup: ${run.worktree}`,
+      );
   }
   let branchDeleted = !run.branch;
   if (run.branch) {

@@ -3,6 +3,7 @@ import type { TaskExecutionClass } from "../controller/execution-policy";
 
 export type AgentJobStatus =
   | "queued"
+  | "starting"
   | "running"
   | "waiting_for_user"
   | "succeeded"
@@ -54,6 +55,7 @@ export interface AgentJobMeta {
   schemaVersion: 1 | 2 | 3;
   repoId?: string;
   checkoutId?: string;
+  requestId?: string;
   runId: string;
   issueId: string;
   taskId: string;
@@ -74,6 +76,7 @@ export interface AgentJobMeta {
   stderrPath: string;
   resultPath: string;
   eventsPath: string;
+  launchPid?: number;
   workerPid?: number;
   agentPid?: number;
   exitCode?: number | null;

@@ -1,4 +1,4 @@
-import { randomBytes } from "crypto";
+import { createHash, randomBytes } from "crypto";
 import {
   closeSync,
   existsSync,
@@ -31,7 +31,9 @@ import {
   DEFAULT_AGENT_TIMEOUT_MS,
   MAX_AGENT_TIMEOUT_MS,
   normalizeAgentTimeoutMs,
+  repositoryIdentity,
 } from "../controller/runtime-config";
+import { normalizeRemoteUrl, stableCheckoutId, stableRemoteRepoId } from "../repositories/identity";
 import type {
   AgentExecutionMode,
   AgentJobEvent,
@@ -42,6 +44,10 @@ import type {
 
 const JOB_ROOT = ".ai/harness/jobs";
 const RUN_LAUNCH_LOCK = ".ai/harness/controller/run-launch.lock";
+const RUN_REQUEST_INDEX_ROOT = ".ai/harness/controller/run-requests";
+const RUN_LAUNCH_LOCK_STALE_MS = 30_000;
+const RUN_LAUNCH_LOCK_WAIT_MS = 500;
+const RUN_LAUNCH_LOCK_POLL_MS = 10;
 
 function shortId(): string {
   return randomBytes(4).toString("hex");
@@ -78,6 +84,49 @@ function isAlive(pid: number | undefined): boolean {
   }
 }
 
+function atomicCreateJson(path: string, value: unknown): boolean {
+  mkdirSync(dirname(path), { recursive: true });
+  try {
+    const fd = openSync(path, "wx", 0o600);
+    try {
+      writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`, "utf-8");
+    } finally {
+      closeSync(fd);
+    }
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw error;
+  }
+}
+
+function tryReadRepositoryIdentity(repoRoot: string): { repoId: string; checkoutId: string } {
+  const path = join(repoRoot, ".ai/harness/repository.json");
+  let repoId = "";
+  try {
+    if (existsSync(path)) {
+      const parsed = readJson<{ repoId?: string }>(path);
+      repoId = typeof parsed.repoId === "string" ? parsed.repoId.trim() : "";
+    }
+  } catch (_error) {
+    repoId = "";
+  }
+  if (!repoId) {
+    const remote = normalizeRemoteUrl(
+      runProcess("git", ["config", "--get", "remote.origin.url"], {
+        cwd: repoRoot,
+        timeoutMs: 10_000,
+        maxOutputBytes: 8 * 1024,
+      }).stdout.trim(),
+    );
+    repoId = remote ? stableRemoteRepoId(remote) : repositoryIdentity(repoRoot);
+  }
+  return {
+    repoId,
+    checkoutId: stableCheckoutId(repoId, repoRoot),
+  };
+}
+
 function withRunLaunchLock<T>(repoRoot: string, action: () => T): T {
   const path = join(repoRoot, RUN_LAUNCH_LOCK);
   mkdirSync(dirname(path), { recursive: true });
@@ -92,7 +141,10 @@ function withRunLaunchLock<T>(repoRoot: string, action: () => T): T {
       try {
         const lock = readJson<{ pid?: number; createdAt?: string }>(path);
         const createdAt = Date.parse(lock.createdAt ?? "");
-        stale = !Number.isFinite(createdAt) || !isAlive(lock.pid);
+        stale =
+          !Number.isFinite(createdAt) ||
+          Date.now() - createdAt > RUN_LAUNCH_LOCK_STALE_MS ||
+          !isAlive(lock.pid);
       } catch (_readError) {
         stale = true;
       }
@@ -100,11 +152,18 @@ function withRunLaunchLock<T>(repoRoot: string, action: () => T): T {
         rmSync(path, { force: true });
         return acquire();
       }
-      throw new Error("another Controller is preparing a local Task Run; retry after its workspace reservation is visible");
+      return -1;
     }
   };
 
-  const fd = acquire();
+  const deadline = Date.now() + RUN_LAUNCH_LOCK_WAIT_MS;
+  let fd = acquire();
+  while (fd < 0 && Date.now() < deadline) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, RUN_LAUNCH_LOCK_POLL_MS);
+    fd = acquire();
+  }
+  if (fd < 0)
+    throw new Error("another Controller is preparing a local Task Run; retry after its workspace reservation is visible");
   try {
     return action();
   } finally {
@@ -123,6 +182,15 @@ function metaPath(repoRoot: string, runId: string): string {
 
 function eventPath(repoRoot: string, runId: string): string {
   return join(jobDir(repoRoot, runId), "events.jsonl");
+}
+
+function requestIndexDir(repoRoot: string): string {
+  return join(repoRoot, RUN_REQUEST_INDEX_ROOT);
+}
+
+function requestIndexPath(repoRoot: string, requestId: string): string {
+  const digest = createHash("sha256").update(requestId).digest("hex");
+  return join(requestIndexDir(repoRoot), `${digest}.json`);
 }
 
 export function appendAgentJobEvent(
@@ -157,7 +225,7 @@ export function appendAgentJobEvent(
   }
 }
 
-function activeLocalRuns(repoRoot: string): AgentJobMeta[] {
+function activeLocalRuns(repoRoot: string, options: { excludeRunId?: string } = {}): AgentJobMeta[] {
   const root = join(repoRoot, JOB_ROOT);
   if (!existsSync(root)) return [];
   return readdirSync(root, { withFileTypes: true })
@@ -176,8 +244,9 @@ function activeLocalRuns(repoRoot: string): AgentJobMeta[] {
     .filter(
       (entry) =>
         entry.provider === "local" &&
-        ["queued", "running"].includes(entry.status) &&
-        (isAlive(entry.workerPid) || entry.status === "queued"),
+        ["queued", "starting", "running"].includes(entry.status) &&
+        entry.runId !== options.excludeRunId &&
+        (isAlive(entry.workerPid) || isAlive(entry.launchPid) || ["queued", "starting"].includes(entry.status)),
     );
 }
 
@@ -194,7 +263,7 @@ function activeRuns(repoRoot: string): AgentJobMeta[] {
       }
     })
     .filter((entry): entry is AgentJobMeta => Boolean(entry))
-    .filter((entry) => ["queued", "running", "waiting_for_user"].includes(entry.status));
+    .filter((entry) => ["queued", "starting", "running", "waiting_for_user"].includes(entry.status));
 }
 
 function assertNoTaskScopeConflict(
@@ -281,17 +350,18 @@ function resolveExecutionMode(
   repoRoot: string,
   provider: "local" | "github",
   isolate: boolean | undefined,
+  options: { excludeRunId?: string } = {},
 ): AgentExecutionMode {
   if (provider === "github") return "github";
   if (isolate === true) return "worktree";
   if (isolate === false) {
-    if (activeLocalRuns(repoRoot).length > 0)
+    if (activeLocalRuns(repoRoot, options).length > 0)
       throw new Error(
         "cannot run directly in the current workspace while another local Task Run is active; use automatic or worktree isolation",
       );
     return "workspace";
   }
-  return activeLocalRuns(repoRoot).length > 0 ? "worktree" : "workspace";
+  return activeLocalRuns(repoRoot, options).length > 0 ? "worktree" : "workspace";
 }
 
 function createWorktree(
@@ -317,9 +387,9 @@ function createWorktree(
       `failed to resolve task base revision: ${revision.error || revision.stderr}`,
     );
   const baseRevision = revision.stdout.trim();
-  const relativeWorktree = `.ai/harness/worktrees/${sanitize(issueId)}-${sanitize(task.id)}-${runId.slice(-8)}`;
-  const absoluteWorktree = join(repoRoot, relativeWorktree);
-  const branch = `controller/${sanitize(issueId)}-${sanitize(task.id)}-${runId.slice(-8)}`;
+  const planned = plannedWorktreeLocation(repoRoot, issueId, task.id, runId);
+  const absoluteWorktree = planned.path;
+  const branch = planned.branch;
   mkdirSync(dirname(absoluteWorktree), { recursive: true });
   const result = runProcess(
     "git",
@@ -335,6 +405,31 @@ function createWorktree(
       `failed to create task worktree: ${result.error || result.stderr}`,
     );
   return { path: absoluteWorktree, branch, baseRevision };
+}
+
+function currentBaseRevision(repoRoot: string): string | null {
+  const revision = runProcess("git", ["rev-parse", "HEAD"], {
+    cwd: repoRoot,
+    timeoutMs: 10_000,
+    maxOutputBytes: 8 * 1024,
+  });
+  return revision.ok ? revision.stdout.trim() || null : null;
+}
+
+function plannedWorktreeLocation(
+  repoRoot: string,
+  issueId: string,
+  taskId: string,
+  runId: string,
+): { path: string; branch: string } {
+  const suffix = runId.slice(-8);
+  return {
+    path: join(
+      repoRoot,
+      `.ai/harness/worktrees/${sanitize(issueId)}-${sanitize(taskId)}-${suffix}`,
+    ),
+    branch: `controller/${sanitize(issueId)}-${sanitize(taskId)}-${suffix}`,
+  };
 }
 
 export function taskPrompt(
@@ -417,8 +512,112 @@ export interface StartTaskJobOptions {
   model?: string;
   createPullRequest?: boolean;
   retryFromRunId?: string;
+  requestId?: string;
   approveRisk?: boolean;
   approveDestructive?: boolean;
+}
+
+export interface DispatchTaskAcceptance {
+  accepted: true;
+  reused: boolean;
+  runId: string;
+  issueId: string;
+  taskId: string;
+  agent: ControllerAgent;
+  provider: "local" | "github";
+  executionMode: AgentExecutionMode;
+  status: AgentJobStatus;
+  timeoutMs?: number;
+  requestId?: string;
+  statusTool: "get_task_run";
+}
+
+function persistRequestIndex(
+  repoRoot: string,
+  requestId: string,
+  value: { requestId: string; runId: string; issueId: string; taskId: string; createdAt: string },
+): void {
+  const path = requestIndexPath(repoRoot, requestId);
+  if (!existsSync(path)) writeJson(path, value);
+}
+
+function readRequestIndex(
+  repoRoot: string,
+  requestId: string,
+): { requestId?: string; runId?: string; issueId?: string; taskId?: string } | undefined {
+  const path = requestIndexPath(repoRoot, requestId);
+  if (!existsSync(path)) return undefined;
+  try {
+    return readJson(path);
+  } catch (_error) {
+    return undefined;
+  }
+}
+
+function acceptedSummary(meta: AgentJobMeta, reused = false): DispatchTaskAcceptance {
+  return {
+    accepted: true,
+    reused,
+    runId: meta.runId,
+    issueId: meta.issueId,
+    taskId: meta.taskId,
+    agent: meta.agent,
+    provider: meta.provider,
+    executionMode: meta.executionMode,
+    status: meta.status,
+    timeoutMs: meta.timeoutMs,
+    requestId: meta.requestId,
+    statusTool: "get_task_run",
+  };
+}
+
+function failAcceptedTaskJob(
+  repoRoot: string,
+  runId: string,
+  reason: unknown,
+): AgentJobMeta {
+  const current = getAgentJob(repoRoot, runId);
+  if (!["starting", "queued", "running"].includes(current.status)) return current;
+  const { stdoutTail: _stdout, stderrTail: _stderr, ...meta } = current;
+  meta.status = "failed";
+  meta.error = reason instanceof Error ? reason.message : String(reason);
+  meta.finishedAt = new Date().toISOString();
+  meta.lastHeartbeatAt = meta.finishedAt;
+  meta.terminationReason = "spawn_error";
+  writeJson(metaPath(repoRoot, runId), meta);
+  appendAgentJobEvent(repoRoot, runId, {
+    type: "run_failed",
+    message: meta.error,
+  });
+  try {
+    updateTask(repoRoot, meta.issueId, meta.taskId, {
+      status: "blocked",
+      runId: meta.runId,
+      transition: "run_sync",
+      note: `${meta.runId} failed before startup completed; explicit retry is required: ${meta.error}`,
+    });
+  } catch (_error) {
+    /* Run metadata remains authoritative when task sync also fails. */
+  }
+  return meta;
+}
+
+function acceptancePaths(repoRoot: string, runId: string) {
+  const dir = jobDir(repoRoot, runId);
+  return {
+    dir,
+    promptPath: join(dir, "prompt.md"),
+    stdoutPath: join(dir, "stdout.log"),
+    stderrPath: join(dir, "stderr.log"),
+    resultPath: join(dir, "result.json"),
+    eventsPath: join(dir, "events.jsonl"),
+  };
+}
+
+function findActiveTaskRun(repoRoot: string, issueId: string, taskId: string): AgentJobMeta | undefined {
+  return listAgentJobs(repoRoot, 5000)
+    .filter((entry) => entry.issueId === issueId && entry.taskId === taskId)
+    .find((entry) => ["queued", "starting", "running", "waiting_for_user"].includes(entry.status));
 }
 
 function baseMeta(
@@ -440,8 +639,17 @@ function baseMeta(
   provider: "local" | "github",
   executionMode: AgentExecutionMode,
 ): AgentJobMeta {
+  const identity = tryReadRepositoryIdentity(opts.repoRoot);
+  const plannedWorktree = provider === "local" && executionMode === "worktree"
+    ? plannedWorktreeLocation(opts.repoRoot, opts.issueId, task.id, runId)
+    : undefined;
+  const executionRoot = plannedWorktree?.path ?? isolation.path;
+  const branch = plannedWorktree?.branch ?? isolation.branch;
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
+    repoId: identity.repoId,
+    checkoutId: identity.checkoutId,
+    requestId: opts.requestId,
     runId,
     issueId: opts.issueId,
     taskId: opts.taskId,
@@ -450,10 +658,12 @@ function baseMeta(
     executionMode,
     executionClass: taskExecutionPolicy(task).executionClass,
     allowedPaths: [...task.allowedPaths],
-    status: "queued",
+    status: "starting",
     repoRoot: opts.repoRoot,
-    worktree: isolation.path,
-    branch: isolation.branch,
+    executionRoot,
+    worktree: executionRoot,
+    worktreePath: executionRoot,
+    branch,
     baseRevision: isolation.baseRevision,
     promptPath: relative(opts.repoRoot, paths.promptPath).replace(/\\/g, "/"),
     stdoutPath: relative(opts.repoRoot, paths.stdoutPath).replace(/\\/g, "/"),
@@ -464,9 +674,9 @@ function baseMeta(
     startupDeadlineAt: new Date(Date.now() + 30_000).toISOString(),
     autoIntegrate: executionMode === "worktree",
     progress: {
-      phase: "queued",
+      phase: "starting",
       percent: 2,
-      currentActivity: "等待本地 worker 启动",
+      currentActivity: "已受理，等待异步启动",
       lastActivityAt: new Date().toISOString(),
       activityCount: 0,
     },
@@ -474,17 +684,23 @@ function baseMeta(
   };
 }
 
-export function startTaskJob(opts: StartTaskJobOptions): AgentJobMeta {
+export function acceptTaskJob(opts: StartTaskJobOptions): DispatchTaskAcceptance {
   const timeoutMs = normalizeAgentTimeoutMs(opts.timeoutMs, {
     defaultMs: DEFAULT_AGENT_TIMEOUT_MS,
     maxMs: MAX_AGENT_TIMEOUT_MS,
   });
   opts = { ...opts, timeoutMs };
+  if (opts.requestId) {
+    const indexed = readRequestIndex(opts.repoRoot, opts.requestId);
+    if (indexed?.runId) return acceptedSummary(getAgentJob(opts.repoRoot, indexed.runId), true);
+  }
+  const existing = findActiveTaskRun(opts.repoRoot, opts.issueId, opts.taskId);
+  if (!opts.requestId && existing) return acceptedSummary(existing, true);
   const issue = getIssue(opts.repoRoot, opts.issueId);
   const task = issue.tasks.find((entry) => entry.id === opts.taskId);
   if (!task) throw new Error(`task not found: ${opts.issueId}/${opts.taskId}`);
   const selectedAgent = opts.agent ?? task.recommendedAgent;
-  if (!selectedAgent) throw new Error('agent must be selected at dispatch time');
+  if (!selectedAgent) throw new Error("agent must be selected at dispatch time");
   opts = { ...opts, agent: selectedAgent };
   const readiness = inspectTaskReadiness(opts.repoRoot, opts.issueId, opts.taskId, {
     approveRisk: opts.approveRisk,
@@ -492,67 +708,109 @@ export function startTaskJob(opts: StartTaskJobOptions): AgentJobMeta {
     retryFromRunId: opts.retryFromRunId,
   });
   if (!readiness.ready) {
-    throw new Error(`task-local launch blocked: ${readiness.blockers.map((entry) => `${entry.code}: ${entry.message}`).join('; ')}`);
+    throw new Error(`task-local launch blocked: ${readiness.blockers.map((entry) => `${entry.code}: ${entry.message}`).join("; ")}`);
   }
   const agent = opts.agent!;
   const provider = agent === "github-copilot" ? "github" : "local";
-  const prepared = withRunLaunchLock(opts.repoRoot, () => {
+  return withRunLaunchLock(opts.repoRoot, () => {
+    if (opts.requestId) {
+      const indexed = readRequestIndex(opts.repoRoot, opts.requestId);
+      if (indexed?.runId) return acceptedSummary(getAgentJob(opts.repoRoot, indexed.runId), true);
+    }
+    const existingWithinLock = findActiveTaskRun(opts.repoRoot, opts.issueId, opts.taskId);
+    if (!opts.requestId && existingWithinLock) return acceptedSummary(existingWithinLock, true);
     assertNoTaskScopeConflict(opts.repoRoot, opts.issueId, task);
     const runId = `RUN-${sanitize(opts.issueId)}-${sanitize(opts.taskId)}-${Date.now()}-${shortId()}`;
-    let executionMode = resolveExecutionMode(opts.repoRoot, provider, opts.isolate);
-    const dir = jobDir(opts.repoRoot, runId);
-    mkdirSync(dir, { recursive: true });
-    const isolation = executionMode === "worktree"
-      ? createWorktree(opts.repoRoot, opts.issueId, task, runId)
-      : {
-          path: opts.repoRoot,
-          branch: null,
-          baseRevision: provider === "local"
-            ? runProcess("git", ["rev-parse", "HEAD"], {
-                cwd: opts.repoRoot,
-                timeoutMs: 10_000,
-                maxOutputBytes: 8 * 1024,
-              }).stdout.trim() || null
-            : null,
-        };
-    if (executionMode === "worktree" && isolation.path === opts.repoRoot) executionMode = "workspace";
-    const paths = {
-      promptPath: join(dir, "prompt.md"),
-      stdoutPath: join(dir, "stdout.log"),
-      stderrPath: join(dir, "stderr.log"),
-      resultPath: join(dir, "result.json"),
-      eventsPath: join(dir, "events.jsonl"),
-    };
-    const prompt = taskPrompt(issue.title, issue.summary, task, opts.repoRoot, isolation.path, provider, executionMode);
-    writeFileSync(paths.promptPath, prompt, "utf-8");
+    const executionMode = provider === "github"
+      ? "github"
+      : opts.isolate === true
+        ? "worktree"
+        : opts.isolate === false
+          ? "workspace"
+          : activeLocalRuns(opts.repoRoot).length > 0
+            ? "worktree"
+            : "workspace";
+    const paths = acceptancePaths(opts.repoRoot, runId);
+    mkdirSync(paths.dir, { recursive: true });
+    writeFileSync(paths.promptPath, "", "utf-8");
     writeFileSync(paths.stdoutPath, "", "utf-8");
     writeFileSync(paths.stderrPath, "", "utf-8");
     writeFileSync(paths.eventsPath, "", "utf-8");
-    const meta = baseMeta(opts, task, runId, paths, isolation, provider, executionMode);
-    const absoluteMetaPath = metaPath(opts.repoRoot, runId);
-    writeJson(absoluteMetaPath, meta);
+    const meta = baseMeta(opts, task, runId, paths, {
+      path: opts.repoRoot,
+      branch: null,
+      baseRevision: currentBaseRevision(opts.repoRoot),
+    }, provider, executionMode);
+    writeJson(metaPath(opts.repoRoot, runId), meta);
     appendAgentJobEvent(opts.repoRoot, runId, {
       type: "run_created",
-      message: `${agent} Run created in ${executionMode} mode.`,
+      message: `${agent} Run accepted in ${executionMode} mode.`,
       data: { executionMode, autoIntegrate: executionMode === "worktree" },
     });
-    return { runId, executionMode, dir, paths, prompt, meta, absoluteMetaPath };
+    updateTask(opts.repoRoot, issue.id, task.id, {
+      status: "ready",
+      runId,
+      transition: "run_sync",
+      note: `Accepted ${runId} for asynchronous launch.`,
+    });
+    if (opts.requestId) {
+      persistRequestIndex(opts.repoRoot, opts.requestId, {
+        requestId: opts.requestId,
+        runId,
+        issueId: opts.issueId,
+        taskId: opts.taskId,
+        createdAt: meta.createdAt,
+      });
+    }
+    return acceptedSummary(meta);
   });
-  const { runId, executionMode, dir, paths, prompt, absoluteMetaPath } = prepared;
-  const meta = prepared.meta;
+}
+
+export function launchAcceptedTaskJob(
+  repoRoot: string,
+  runId: string,
+): AgentJobMeta {
+  const absoluteMetaPath = metaPath(repoRoot, runId);
+  if (!existsSync(absoluteMetaPath)) throw new Error(`agent job not found: ${runId}`);
+  const meta = readJson<AgentJobMeta>(absoluteMetaPath);
+  if (!["starting", "queued"].includes(meta.status)) return getAgentJob(repoRoot, runId);
+  const issue = getIssue(repoRoot, meta.issueId);
+  const task = issue.tasks.find((entry) => entry.id === meta.taskId);
+  if (!task) throw new Error(`task not found: ${meta.issueId}/${meta.taskId}`);
+  const provider = meta.agent === "github-copilot" ? "github" : "local";
+  let executionMode = resolveExecutionMode(
+    repoRoot,
+    provider,
+    meta.executionMode === "worktree" ? true : meta.executionMode === "workspace" ? false : undefined,
+    { excludeRunId: runId },
+  );
+  const paths = acceptancePaths(repoRoot, runId);
+  const isolation = executionMode === "worktree"
+    ? createWorktree(repoRoot, meta.issueId, task, runId)
+    : {
+        path: repoRoot,
+        branch: null,
+        baseRevision: currentBaseRevision(repoRoot),
+      };
+  if (executionMode === "worktree" && isolation.path === repoRoot) executionMode = "workspace";
+  meta.executionMode = executionMode;
+  meta.executionRoot = isolation.path;
+  meta.worktree = isolation.path;
+  meta.worktreePath = isolation.path;
+  meta.branch = isolation.branch;
+  meta.baseRevision = isolation.baseRevision;
+  const prompt = taskPrompt(issue.title, issue.summary, task, repoRoot, isolation.path, provider, executionMode);
+  writeFileSync(paths.promptPath, prompt, "utf-8");
+  writeJson(absoluteMetaPath, meta);
 
   if (provider === "github") {
     try {
-      const session = startGitHubAgentSession(opts.repoRoot, {
+      const session = startGitHubAgentSession(repoRoot, {
         prompt,
-        repo:
-          opts.githubRepo ??
-          (issue.github
-            ? `${issue.github.owner}/${issue.github.repo}`
-            : undefined),
-        baseRef: opts.baseRef,
-        model: opts.model,
-        createPullRequest: opts.createPullRequest,
+        repo: issue.github ? `${issue.github.owner}/${issue.github.repo}` : undefined,
+        baseRef: meta.github?.baseRef,
+        model: meta.github?.model,
+        createPullRequest: meta.github?.createPullRequest,
       });
       meta.status = mapGitHubState(session.state);
       meta.startedAt = new Date().toISOString();
@@ -563,20 +821,15 @@ export function startTaskJob(opts: StartTaskJobOptions): AgentJobMeta {
         state: session.state,
         url: session.url,
         pullRequestUrl: session.pullRequestUrl,
-        baseRef: opts.baseRef ?? session.repository.defaultBranch,
-        model: opts.model,
-        createPullRequest: opts.createPullRequest !== false,
+        baseRef: meta.github?.baseRef ?? session.repository.defaultBranch,
+        model: meta.github?.model,
+        createPullRequest: meta.github?.createPullRequest,
         raw: session.raw,
       };
-      writeFileSync(
-        paths.stdoutPath,
-        `${JSON.stringify(session.raw, null, 2)}\n`,
-        "utf-8",
-      );
-      if (["succeeded", "failed", "cancelled"].includes(meta.status))
-        meta.finishedAt = new Date().toISOString();
+      writeFileSync(paths.stdoutPath, `${JSON.stringify(session.raw, null, 2)}\n`, "utf-8");
+      if (["succeeded", "failed", "cancelled"].includes(meta.status)) meta.finishedAt = new Date().toISOString();
       writeJson(absoluteMetaPath, meta);
-      appendAgentJobEvent(opts.repoRoot, runId, {
+      appendAgentJobEvent(repoRoot, runId, {
         type:
           meta.status === "succeeded"
             ? "run_succeeded"
@@ -588,7 +841,7 @@ export function startTaskJob(opts: StartTaskJobOptions): AgentJobMeta {
         message: `GitHub cloud session ${session.id} entered ${session.state}.`,
         data: { url: session.url, pullRequestUrl: session.pullRequestUrl },
       });
-      updateTask(opts.repoRoot, issue.id, task.id, {
+      updateTask(repoRoot, issue.id, task.id, {
         status:
           meta.status === "succeeded"
             ? "review"
@@ -601,19 +854,20 @@ export function startTaskJob(opts: StartTaskJobOptions): AgentJobMeta {
         transition: "run_sync",
         note: `Dispatched ${runId} to GitHub Copilot cloud session ${session.id}.`,
       });
-      if (meta.status === "succeeded") continueTaskAfterSuccessfulRun(opts.repoRoot, meta);
+      if (meta.status === "succeeded") continueTaskAfterSuccessfulRun(repoRoot, meta);
       return meta;
     } catch (error) {
       meta.status = "failed";
       meta.error = error instanceof Error ? error.message : String(error);
       meta.finishedAt = new Date().toISOString();
+      meta.terminationReason = "spawn_error";
       writeFileSync(paths.stderrPath, meta.error, "utf-8");
       writeJson(absoluteMetaPath, meta);
-      appendAgentJobEvent(opts.repoRoot, runId, {
+      appendAgentJobEvent(repoRoot, runId, {
         type: "run_failed",
         message: meta.error,
       });
-      updateTask(opts.repoRoot, issue.id, task.id, {
+      updateTask(repoRoot, issue.id, task.id, {
         status: "blocked",
         runId,
         transition: "run_sync",
@@ -623,60 +877,89 @@ export function startTaskJob(opts: StartTaskJobOptions): AgentJobMeta {
     }
   }
 
-  const configPath = join(dir, "worker-config.json");
+  const configPath = join(paths.dir, "worker-config.json");
   const workerConfig: AgentJobWorkerConfig = {
     metaPath: absoluteMetaPath,
-    agent: agent as Exclude<ControllerAgent, "github-copilot">,
+    agent: meta.agent as Exclude<ControllerAgent, "github-copilot">,
     worktree: meta.worktree,
     promptPath: paths.promptPath,
     stdoutPath: paths.stdoutPath,
     stderrPath: paths.stderrPath,
     resultPath: paths.resultPath,
     eventsPath: paths.eventsPath,
-    timeoutMs: opts.timeoutMs,
+    timeoutMs: meta.timeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS,
     autoIntegrate: executionMode === "worktree",
   };
   writeJson(configPath, workerConfig);
   const workerEntry = fileURLToPath(
     new URL("./job-worker.ts", import.meta.url),
   );
-  const outFd = openSync(join(dir, "worker.log"), "a");
-  const errFd = openSync(join(dir, "worker-error.log"), "a");
-  const child = spawn(process.execPath, [workerEntry, configPath], {
-    cwd: opts.repoRoot,
-    detached: true,
-    stdio: ["ignore", outFd, errFd],
-  });
-  closeSync(outFd);
-  closeSync(errFd);
-  child.unref();
-  meta.workerPid = child.pid;
-  meta.status = "running";
-  meta.progress = {
-    phase: "starting",
-    percent: 5,
-    currentActivity: `正在启动 ${agent}`,
-    lastActivityAt: new Date().toISOString(),
-    activityCount: 0,
-  };
-  meta.startedAt = new Date().toISOString();
-  meta.deadlineAt = new Date(
-    Date.parse(meta.startedAt) + timeoutMs,
-  ).toISOString();
-  meta.lastHeartbeatAt = meta.startedAt;
-  writeJson(absoluteMetaPath, meta);
-  appendAgentJobEvent(opts.repoRoot, runId, {
-    type: "run_started",
-    message: `Local ${agent} worker started in ${executionMode} mode.`,
-    data: { executionMode, worktree: meta.worktree },
-  });
-  updateTask(opts.repoRoot, issue.id, task.id, {
-    status: "running",
-    runId,
-    transition: "run_sync",
-    note: `Dispatched ${runId} to ${meta.agent}.`,
-  });
-  return meta;
+  const outFd = openSync(join(paths.dir, "worker.log"), "a");
+  const errFd = openSync(join(paths.dir, "worker-error.log"), "a");
+  try {
+    const child = spawn(process.execPath, [workerEntry, configPath], {
+      cwd: repoRoot,
+      detached: true,
+      stdio: ["ignore", outFd, errFd],
+    });
+    child.unref();
+    meta.workerPid = child.pid;
+    meta.status = "running";
+    meta.progress = {
+      phase: "starting",
+      percent: 5,
+      currentActivity: `正在启动 ${meta.agent}`,
+      lastActivityAt: new Date().toISOString(),
+      activityCount: 0,
+    };
+    meta.startedAt = new Date().toISOString();
+    meta.deadlineAt = new Date(
+      Date.parse(meta.startedAt) + (meta.timeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS),
+    ).toISOString();
+    meta.lastHeartbeatAt = meta.startedAt;
+    writeJson(absoluteMetaPath, meta);
+    appendAgentJobEvent(repoRoot, runId, {
+      type: "run_started",
+      message: `Local ${meta.agent} worker started in ${executionMode} mode.`,
+      data: { executionMode, worktree: meta.worktree },
+    });
+    updateTask(repoRoot, issue.id, task.id, {
+      status: "running",
+      runId,
+      transition: "run_sync",
+      note: `Dispatched ${runId} to ${meta.agent}.`,
+    });
+    return meta;
+  } catch (error) {
+    meta.status = "failed";
+    meta.error = error instanceof Error ? error.message : String(error);
+    meta.finishedAt = new Date().toISOString();
+    meta.terminationReason = "spawn_error";
+    writeJson(absoluteMetaPath, meta);
+    appendAgentJobEvent(repoRoot, runId, {
+      type: "run_failed",
+      message: meta.error,
+    });
+    updateTask(repoRoot, issue.id, task.id, {
+      status: "blocked",
+      runId,
+      transition: "run_sync",
+      note: `${runId} failed to start and remains recorded as an attempt; explicit retry is required: ${meta.error}`,
+    });
+    return meta;
+  } finally {
+    closeSync(outFd);
+    closeSync(errFd);
+  }
+}
+
+export function startAcceptedTaskJob(repoRoot: string, runId: string): AgentJobMeta {
+  return withRunLaunchLock(repoRoot, () => launchAcceptedTaskJob(repoRoot, runId));
+}
+
+export function startTaskJob(opts: StartTaskJobOptions): AgentJobMeta {
+  const accepted = acceptTaskJob(opts);
+  return startAcceptedTaskJob(opts.repoRoot, accepted.runId);
 }
 
 function mapGitHubState(state: string): AgentJobStatus {
@@ -728,7 +1011,7 @@ export function getAgentJob(
   if (
     meta.provider === "github" &&
     meta.github &&
-    ["queued", "running", "waiting_for_user", "unknown"].includes(meta.status)
+    ["queued", "starting", "running", "waiting_for_user", "unknown"].includes(meta.status)
   ) {
     try {
       const session = getGitHubAgentSession(
@@ -798,7 +1081,7 @@ export function getAgentJob(
       meta.executionMode === "worktree" &&
       isAlive(meta.workerPid);
     if (
-      ["queued", "running"].includes(meta.status) &&
+      ["queued", "starting", "running"].includes(meta.status) &&
       existsSync(resultAbsolute) &&
       !autoIntegrationInFlight
     ) {
@@ -824,10 +1107,11 @@ export function getAgentJob(
         reconcileLatestTerminalRun(repoRoot, meta);
       }
     } else if (
-      meta.status === "queued" &&
+      ["queued", "starting"].includes(meta.status) &&
       meta.startupDeadlineAt &&
       Date.now() > Date.parse(meta.startupDeadlineAt) &&
-      !isAlive(meta.workerPid)
+      !isAlive(meta.workerPid) &&
+      !isAlive(meta.launchPid)
     ) {
       meta.status = "unknown";
       meta.error = meta.error ?? "worker did not start before the startup deadline";
@@ -975,6 +1259,30 @@ export function getAgentJobLog(
   };
 }
 
+export function dispatchAcceptedTaskJob(
+  repoRoot: string,
+  runId: string,
+): void {
+  try {
+    withRunLaunchLock(repoRoot, () => {
+      const meta = getAgentJob(repoRoot, runId);
+      if (!["starting", "queued"].includes(meta.status)) return;
+      if (meta.launchPid && isAlive(meta.launchPid)) return;
+      const launcher = spawn(process.execPath, [fileURLToPath(new URL("./job-manager.ts", import.meta.url)), "launch", repoRoot, runId], {
+        cwd: repoRoot,
+        detached: true,
+        stdio: "ignore",
+      });
+      launcher.unref();
+      const current = readJson<AgentJobMeta>(metaPath(repoRoot, runId));
+      current.launchPid = launcher.pid;
+      writeJson(metaPath(repoRoot, runId), current);
+    });
+  } catch (error) {
+    failAcceptedTaskJob(repoRoot, runId, error);
+  }
+}
+
 export function cancelAgentJob(repoRoot: string, runId: string): AgentJobMeta {
   const current = getAgentJob(repoRoot, runId);
   if (current.provider === "github")
@@ -1099,4 +1407,21 @@ export function markAgentJobIntegrated(
     message: `Integrated through edit session ${sessionId}.`,
   });
   return meta;
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url) && process.argv[2] === "launch") {
+  const repoRoot = process.argv[3];
+  const runId = process.argv[4];
+  if (!repoRoot || !runId) process.exit(1);
+  try {
+    startAcceptedTaskJob(repoRoot, runId);
+    process.exit(0);
+  } catch (error) {
+    try {
+      failAcceptedTaskJob(repoRoot, runId, error);
+    } catch (_nested) {
+      /* Best effort launcher failure persistence. */
+    }
+    process.exit(1);
+  }
 }

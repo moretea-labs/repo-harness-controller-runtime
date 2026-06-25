@@ -82,7 +82,7 @@ export interface TaskDependencyState {
 }
 
 const EXPLICIT_TERMINAL = new Set<TaskStatus>(["done", "cancelled", "superseded"]);
-const ACTIVE_RUN = new Set<AgentJobStatus>(["queued", "running", "waiting_for_user"]);
+const ACTIVE_RUN = new Set<AgentJobStatus>(["queued", "starting", "running", "waiting_for_user"]);
 const RETRYABLE_RUN = new Set<AgentJobStatus>(["failed", "cancelled", "unknown"]);
 
 function runTimestamp(run: AgentJobMeta): number {
@@ -234,7 +234,7 @@ export function resolveEffectiveTaskState(input: {
   }
 
   // Only a currently active Run may override a non-terminal declared status.
-  if (evidence.currentActiveRun?.status === "queued") {
+  if (evidence.currentActiveRun?.status === "queued" || evidence.currentActiveRun?.status === "starting") {
     return finalizeState(base, "queued", "active_run_queued", false, false);
   }
   if (evidence.currentActiveRun?.status === "running") {

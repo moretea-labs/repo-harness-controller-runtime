@@ -13,7 +13,7 @@ import {
 } from "./worklog";
 
 const TERMINAL_TASKS = new Set<TaskStatus>(["done", "cancelled", "superseded"]);
-const ACTIVE_RUNS = new Set(["queued", "running", "waiting_for_user"]);
+const ACTIVE_RUNS = new Set(["queued", "starting", "running", "waiting_for_user"]);
 const FAILED_RUNS = new Set(["failed", "unknown", "cancelled"]);
 
 export type EvidenceGateState = "pending" | "in_progress" | "passed" | "failed" | "not_required";
@@ -163,7 +163,7 @@ function completionEvidence(task: ControllerTask, run?: AgentJobMeta): TaskCompl
   const policy = taskExecutionPolicy(task);
   const execution = !run
     ? gate("Implementation Run", "pending")
-    : ["queued", "running", "waiting_for_user"].includes(run.status)
+    : ["queued", "starting", "running", "waiting_for_user"].includes(run.status)
       ? gate("Implementation Run", "in_progress", `${run.runId}: ${run.progress?.percent ?? 0}%`)
       : run.status === "succeeded"
         ? gate("Implementation Run", "passed", run.runId)

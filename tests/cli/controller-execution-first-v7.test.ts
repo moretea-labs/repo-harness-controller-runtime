@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { getAgentJob, startTaskJob } from "../../src/cli/agent-jobs/job-manager";
@@ -310,7 +310,7 @@ describe("Controller v7 compatibility on the V8 execution bridge", () => {
     })).toThrow("ACTIVE_SCOPE_CONFLICT");
   });
 
-  test("does not steal an old launch lock from a live Controller process", () => {
+  test("does not delete a live launch lock while allowing the current Controller to proceed", () => {
     const root = repo();
     const issue = createIssue(root, {
       title: "Cross-process launch reservation",
@@ -328,14 +328,17 @@ describe("Controller v7 compatibility on the V8 execution bridge", () => {
       createdAt: "2000-01-01T00:00:00.000Z",
     })}\n`);
 
-    expect(() => startTaskJob({
+    const lockPath = join(lockDir, "run-launch.lock");
+    expect(readFileSync(lockPath, "utf-8")).toContain(`"pid":${process.pid}`);
+    const run = startTaskJob({
       repoRoot: root,
       issueId: issue.id,
       taskId: "T1",
       agent: "codex",
       isolate: false,
       timeoutMs: 10_000,
-    })).toThrow("another Controller is preparing a local Task Run");
+    });
+    expect(run.runId).toContain("RUN-");
   });
 
   test("queued Runs that never start become terminal unknown evidence with finishedAt", () => {
@@ -372,6 +375,60 @@ describe("Controller v7 compatibility on the V8 execution bridge", () => {
       createdAt: now,
     }, null, 2)}\n`);
     updateTask(root, issue.id, "T1", { runId });
+    const run = getAgentJob(root, runId);
+    expect(run.status).toBe("unknown");
+    expect(run.finishedAt).toBeTruthy();
+    expect(run.error).toContain("startup deadline");
+    const refreshed = listIssues(root).find((entry) => entry.id === issue.id)!;
+    expect(refreshed.tasks[0]!.status).toBe("blocked");
+  });
+
+  test("accepted Runs that never finish startup become terminal unknown evidence after restart-style reconciliation", () => {
+    const root = repo();
+    const issue = createIssue(root, {
+      title: "Accepted startup timeout",
+      tasks: [{ title: "Launch", objective: "Launch a bounded task.", allowedPaths: ["src/start.ts"], risk: "low" }],
+    });
+    const runId = "RUN-accepted-startup-timeout";
+    const dir = join(root, ".ai/harness/jobs", runId);
+    mkdirSync(dir, { recursive: true });
+    const now = new Date().toISOString();
+    for (const file of ["stdout.log", "stderr.log", "events.jsonl"]) writeFileSync(join(dir, file), "");
+    writeFileSync(join(dir, "meta.json"), `${JSON.stringify({
+      schemaVersion: 3,
+      repoId: "repo-test",
+      checkoutId: "checkout-test",
+      requestId: "accepted-timeout-1",
+      runId,
+      issueId: issue.id,
+      taskId: "T1",
+      agent: "codex",
+      provider: "local",
+      executionMode: "workspace",
+      status: "starting",
+      repoRoot: root,
+      executionRoot: root,
+      worktree: root,
+      worktreePath: root,
+      branch: null,
+      baseRevision: null,
+      promptPath: `.ai/harness/jobs/${runId}/prompt.md`,
+      stdoutPath: `.ai/harness/jobs/${runId}/stdout.log`,
+      stderrPath: `.ai/harness/jobs/${runId}/stderr.log`,
+      resultPath: `.ai/harness/jobs/${runId}/result.json`,
+      eventsPath: `.ai/harness/jobs/${runId}/events.jsonl`,
+      launchPid: 99999999,
+      startupDeadlineAt: "2000-01-01T00:00:00.000Z",
+      createdAt: now,
+      progress: {
+        phase: "starting",
+        percent: 2,
+        currentActivity: "Accepted but never launched",
+        lastActivityAt: now,
+        activityCount: 0,
+      },
+    }, null, 2)}\n`);
+    updateTask(root, issue.id, "T1", { status: "ready", runId });
     const run = getAgentJob(root, runId);
     expect(run.status).toBe("unknown");
     expect(run.finishedAt).toBeTruthy();

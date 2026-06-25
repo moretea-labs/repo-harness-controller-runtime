@@ -68,6 +68,21 @@ function fakeCodex(): { binRoot: string; restore(): void } {
   };
 }
 
+async function waitForRun(
+  root: string,
+  runId: string,
+  predicate: (run: ReturnType<typeof getAgentJob>) => boolean,
+  attempts = 120,
+  delayMs = 25,
+) {
+  let run = getAgentJob(root, runId);
+  for (let attempt = 0; attempt < attempts && !predicate(run); attempt += 1) {
+    await Bun.sleep(delayMs);
+    run = getAgentJob(root, runId);
+  }
+  return run;
+}
+
 describe("Local Execution Bridge", () => {
   test("auto-dispatches a low-risk Task through the persistent Run system", async () => {
     const root = repo();
@@ -105,15 +120,7 @@ describe("Local Execution Bridge", () => {
       const dispatched = executeLocalBridgeJob(root, submitted.jobId);
       expect(dispatched.status).toBe("dispatched");
       expect(dispatched.runId).toBeTruthy();
-      let run = getAgentJob(root, dispatched.runId as string);
-      for (
-        let attempt = 0;
-        attempt < 80 && !["succeeded", "failed"].includes(run.status);
-        attempt += 1
-      ) {
-        await Bun.sleep(25);
-        run = getAgentJob(root, dispatched.runId as string);
-      }
+      let run = await waitForRun(root, dispatched.runId as string, (value) => ["succeeded", "failed"].includes(value.status));
       expect(run.status).toBe("succeeded");
       expect(run.executionMode).toBe("workspace");
       expect(run.stdoutTail).toContain("local-bridge-codex-ok");
@@ -202,15 +209,7 @@ esac
         },
       });
       const firstDispatch = executeLocalBridgeJob(root, firstJob.jobId);
-      let first = getAgentJob(root, firstDispatch.runId as string);
-      for (
-        let attempt = 0;
-        attempt < 40 && first.status !== "running";
-        attempt += 1
-      ) {
-        await Bun.sleep(25);
-        first = getAgentJob(root, firstDispatch.runId as string);
-      }
+      let first = await waitForRun(root, firstDispatch.runId as string, (value) => value.status === "running", 80);
       expect(first.executionMode).toBe("workspace");
       expect(first.status).toBe("running");
 
@@ -226,23 +225,17 @@ esac
         },
       });
       const secondDispatch = executeLocalBridgeJob(root, secondJob.jobId);
-      let second = getAgentJob(root, secondDispatch.runId as string);
+      let second = await waitForRun(root, secondDispatch.runId as string, (value) => value.executionMode === "worktree" || value.status === "failed", 120);
       expect(second.executionMode).toBe("worktree");
       const temporaryWorktree = second.worktree;
-      for (
-        let attempt = 0;
-        attempt < 1_000 &&
-        !second.worktreeCleanedAt &&
-        !second.autoIntegrationError;
-        attempt += 1
-      ) {
-        await Bun.sleep(25);
-        second = getAgentJob(root, secondDispatch.runId as string);
-      }
+      second = await waitForRun(root, secondDispatch.runId as string, (value) => Boolean(value.worktreeCleanedAt || value.autoIntegrationError || value.status === "failed"), 1200);
       expect(second.status).toBe("succeeded");
       expect(second.autoIntegrationError).toBeUndefined();
       expect(second.integratedSessionId).toBeTruthy();
       expect(second.worktreeCleanedAt).toBeTruthy();
+      for (let attempt = 0; attempt < 40 && existsSync(temporaryWorktree); attempt += 1) {
+        await Bun.sleep(25);
+      }
       expect(existsSync(temporaryWorktree)).toBe(false);
       expect(readFileSync(join(root, "src/second.ts"), "utf-8")).toContain(
         "second = 2",
@@ -299,7 +292,7 @@ printf '%s\n' '{"type":"turn.completed"}'
       const dispatched = executeLocalBridgeJob(root, job.jobId);
       let run = getAgentJob(root, dispatched.runId as string);
       let observed = false;
-      for (let attempt = 0; attempt < 50; attempt += 1) {
+      for (let attempt = 0; attempt < 120; attempt += 1) {
         await Bun.sleep(20);
         run = getAgentJob(root, dispatched.runId as string);
         if (
@@ -317,7 +310,7 @@ printf '%s\n' '{"type":"turn.completed"}'
     }
   });
 
-  test("runs checks without blocking Controller health and deduplicates the same revision", async () => {
+  test("runs checks without blocking Controller health and deduplicates only active checks", async () => {
     const root = repo();
     mkdirSync(join(root, ".repo-harness"), { recursive: true });
     writeFileSync(join(root, ".repo-harness/checks.json"), JSON.stringify({
@@ -368,13 +361,122 @@ printf '%s\n' '{"type":"turn.completed"}'
     expect(finished.finishedAt).toBeTruthy();
     expect(finished.workerPid).toBeUndefined();
 
-    const reused = submitLocalBridgeJob(root, {
+    const rerun = submitLocalBridgeJob(root, {
       action: "run-check",
       requestedBy: "test",
       payload: { checkId: "delayed", timeoutMs: 8_000 },
     });
-    expect(reused.jobId).toBe(created.jobId);
-    expect(reused.status).toBe("succeeded");
+    expect(rerun.jobId).not.toBe(created.jobId);
+    expect(rerun.status).toBe("approved");
+  });
+
+  test("rebuilds the active check index beyond recent history and keeps listings bounded", () => {
+    const root = repo();
+    const active = submitLocalBridgeJob(root, {
+      action: "run-check",
+      requestedBy: "test",
+      payload: { checkId: "older-active", timeoutMs: 8_000 },
+    });
+    const jobRoot = join(root, ".ai/harness/local-jobs");
+    const historyBase = Date.now() + 10_000;
+    for (let index = 0; index < 125; index += 1) {
+      const jobId = `JOB-${historyBase + index}-history-${String(index).padStart(3, "0")}`;
+      const directory = join(jobRoot, jobId);
+      const at = new Date(historyBase + index).toISOString();
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(join(directory, "job.json"), `${JSON.stringify({
+        ...active,
+        jobId,
+        payload: { checkId: `history-${index}`, timeoutMs: 8_000 },
+        status: "succeeded",
+        createdAt: at,
+        updatedAt: at,
+        finishedAt: at,
+      }, null, 2)}\n`);
+    }
+
+    rmSync(join(jobRoot, "active-index.json"), { force: true });
+    const duplicate = submitLocalBridgeJob(root, {
+      action: "run-check",
+      requestedBy: "test",
+      payload: { checkId: "older-active", timeoutMs: 8_000 },
+    });
+    expect(duplicate.jobId).toBe(active.jobId);
+
+    const recent = listLocalBridgeJobs(root, 5);
+    expect(recent).toHaveLength(5);
+    expect(recent.some((job) => job.jobId === active.jobId)).toBe(false);
+
+    const terminalAt = new Date().toISOString();
+    writeFileSync(join(jobRoot, active.jobId, "job.json"), `${JSON.stringify({
+      ...active,
+      status: "succeeded",
+      updatedAt: terminalAt,
+      finishedAt: terminalAt,
+    }, null, 2)}\n`);
+    rmSync(join(jobRoot, "active-index.json"), { force: true });
+
+    const replacement = submitLocalBridgeJob(root, {
+      action: "run-check",
+      requestedBy: "test",
+      payload: { checkId: "older-active", timeoutMs: 8_000 },
+    });
+    expect(replacement.jobId).not.toBe(active.jobId);
+    expect(replacement.status).toBe("approved");
+  });
+
+  test("deduplicates concurrent launch-task submissions with the same requestId", async () => {
+    const root = repo();
+    const codex = fakeCodex();
+    try {
+      const issue = createIssue(root, {
+        title: "Bridge request idempotency",
+        tasks: [
+          {
+            title: "Execute once",
+            objective: "Collapse duplicate launch-task requests.",
+            allowedPaths: ["src/**"],
+            checks: ["manual"],
+            acceptanceCriteria: ["Only one Run is created."],
+            risk: "low",
+            recommendedAgent: "codex",
+          },
+        ],
+      });
+      const [firstJob, secondJob] = await Promise.all([
+        Promise.resolve(submitLocalBridgeJob(root, {
+          action: "launch-task",
+          requestedBy: "test",
+          payload: {
+            issueId: issue.id,
+            taskId: "T1",
+            agent: "codex",
+            executionMode: "auto",
+            timeoutMs: 10_000,
+            requestId: "bridge-req-1",
+          },
+        })),
+        Promise.resolve(submitLocalBridgeJob(root, {
+          action: "launch-task",
+          requestedBy: "test",
+          payload: {
+            issueId: issue.id,
+            taskId: "T1",
+            agent: "codex",
+            executionMode: "auto",
+            timeoutMs: 10_000,
+            requestId: "bridge-req-1",
+          },
+        })),
+      ]);
+      expect(secondJob.jobId).toBe(firstJob.jobId);
+      const dispatched = executeLocalBridgeJob(root, firstJob.jobId);
+      let run = await waitForRun(root, dispatched.runId as string, (value) => ["succeeded", "failed"].includes(value.status));
+      expect(run.status).toBe("succeeded");
+      expect(listLocalBridgeJobs(root).filter((entry) => entry.jobId === firstJob.jobId)).toHaveLength(1);
+    } finally {
+      codex.restore();
+    }
   });
 
   test("classifies full repository gates as heavy while leaving focused checks concurrent", () => {

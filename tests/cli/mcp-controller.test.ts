@@ -29,6 +29,21 @@ async function jsonTool(
   return { raw: result, value: JSON.parse(result.content[0].text) };
 }
 
+async function waitForRun(
+  ctx: McpToolContext,
+  runId: string,
+  predicate: (run: any) => boolean,
+  attempts = 120,
+  delayMs = 25,
+) {
+  let run = (await jsonTool(ctx, "get_task_run", { run_id: runId })).value;
+  for (let attempt = 0; attempt < attempts && !predicate(run); attempt += 1) {
+    await Bun.sleep(delayMs);
+    run = (await jsonTool(ctx, "get_task_run", { run_id: runId })).value;
+  }
+  return run;
+}
+
 async function withController<T>(
   fn: (repoRoot: string, ctx: McpToolContext) => Promise<T>,
 ): Promise<T> {
@@ -532,8 +547,13 @@ describe("MCP controller profile", () => {
           isolate: false,
           timeout_ms: 10_000,
         });
-        expect(dispatched.value.status).toBe("running");
-        let run = dispatched.value;
+        expect(dispatched.value.accepted).toBe(true);
+        expect(["starting", "running"]).toContain(dispatched.value.status);
+        let run = (
+          await jsonTool(ctx, "get_task_run", {
+            run_id: dispatched.value.runId,
+          })
+        ).value;
         for (
           let attempt = 0;
           attempt < 50 && !["succeeded", "failed"].includes(run.status);
@@ -617,7 +637,11 @@ printf '%s\n' '{"type":"turn.completed"}'
           isolate: false,
           timeout_ms: 10_000,
         });
-        let run = dispatched.value.run;
+        let run = (
+          await jsonTool(ctx, "get_task_run", {
+            run_id: dispatched.value.runId,
+          })
+        ).value;
         for (
           let attempt = 0;
           attempt < 60 && !["succeeded", "failed"].includes(run.status);
@@ -626,19 +650,19 @@ printf '%s\n' '{"type":"turn.completed"}'
           await Bun.sleep(25);
           run = (
             await jsonTool(ctx, "get_task_run", {
-              run_id: dispatched.value.run.runId,
+              run_id: dispatched.value.runId,
             })
           ).value;
         }
         const initial = await jsonTool(ctx, "get_task_run_events", {
-          run_id: dispatched.value.run.runId,
+          run_id: dispatched.value.runId,
           limit: 20,
         });
         expect(initial.value.events.length).toBeGreaterThan(0);
         expect(initial.value.heartbeatsCollapsed).toBe(true);
         const cursor = initial.value.nextSinceEventIndex;
         const delta = await jsonTool(ctx, "get_task_run_events", {
-          run_id: dispatched.value.run.runId,
+          run_id: dispatched.value.runId,
           since_event_index: typeof cursor === "number" ? cursor : -1,
           limit: 20,
         });
@@ -695,9 +719,21 @@ printf '%s\n' '{"type":"turn.completed"}'
         });
         expect(dispatched.raw.isError).not.toBe(true);
         expect(dispatched.value.timeoutMs).toBe(3_600_000);
+        let run = (
+          await jsonTool(ctx, "get_task_run", {
+            run_id: dispatched.value.runId,
+          })
+        ).value;
+        for (let attempt = 0; attempt < 60 && !run.startedAt; attempt += 1) {
+          await Bun.sleep(25);
+          run = (
+            await jsonTool(ctx, "get_task_run", {
+              run_id: dispatched.value.runId,
+            })
+          ).value;
+        }
         expect(
-          Date.parse(dispatched.value.deadlineAt) -
-            Date.parse(dispatched.value.startedAt),
+          Date.parse(run.deadlineAt) - Date.parse(run.startedAt),
         ).toBe(3_600_000);
         const workerConfig = JSON.parse(
           readFileSync(
@@ -848,6 +884,221 @@ printf '%s\n' '{"type":"turn.completed"}'
     });
   });
 
+  test("reuses the same runId when dispatch_task is retried with the same request_id", async () => {
+    await withController(async (repoRoot, baseCtx) => {
+      const binRoot = mkdtempSync(join(tmpdir(), "repo-harness-controller-idem-bin-"));
+      const originalPath = process.env.PATH;
+      try {
+        const fakeCodex = join(binRoot, "codex");
+        writeFileSync(
+          fakeCodex,
+          '#!/usr/bin/env bash\necho "idempotent-run"\nsleep 0.2\n',
+        );
+        chmodSync(fakeCodex, 0o755);
+        process.env.PATH = `${binRoot}:${originalPath ?? ""}`;
+        const ctx = {
+          ...baseCtx,
+          policy: getMcpPolicy("controller", {
+            repoRoot,
+            devAgentRunner: true,
+            allowedAgents: ["codex"],
+            runnerTimeoutMs: 10_000,
+          }),
+        };
+        const created = await jsonTool(ctx, "create_issue", {
+          title: "Dispatch idempotency",
+          tasks: [
+            {
+              title: "Execute",
+              objective: "Verify same-request reuse",
+              allowed_paths: ["src/**"],
+              checks: ["manual"],
+              agent: "codex",
+            },
+          ],
+        });
+        const first = await jsonTool(ctx, "dispatch_task", {
+          issue_id: created.value.id,
+          task_id: "T1",
+          request_id: "req-123",
+        });
+        const second = await jsonTool(ctx, "dispatch_task", {
+          issue_id: created.value.id,
+          task_id: "T1",
+          request_id: "req-123",
+        });
+        expect(first.value.runId).toBe(second.value.runId);
+        if (!second.raw.isError) expect(second.value.reused).toBe(true);
+        const runs = await jsonTool(ctx, "list_task_runs", {});
+        expect(runs.value.runs.filter((entry: { runId: string }) => entry.runId === first.value.runId)).toHaveLength(1);
+      } finally {
+        process.env.PATH = originalPath;
+        rmSync(binRoot, { recursive: true, force: true });
+      }
+    });
+  });
+
+  test("returns dispatch_task quickly after acceptance even when agent startup is slow", async () => {
+    await withController(async (repoRoot, baseCtx) => {
+      const binRoot = mkdtempSync(join(tmpdir(), "repo-harness-controller-fast-ack-bin-"));
+      const originalPath = process.env.PATH;
+      try {
+        const fakeCodex = join(binRoot, "codex");
+        writeFileSync(
+          fakeCodex,
+          `#!/usr/bin/env bash
+sleep 1.2
+echo "slow-start-ok"
+`,
+        );
+        chmodSync(fakeCodex, 0o755);
+        process.env.PATH = `${binRoot}:${originalPath ?? ""}`;
+        const ctx = {
+          ...baseCtx,
+          policy: getMcpPolicy("controller", {
+            repoRoot,
+            devAgentRunner: true,
+            allowedAgents: ["codex"],
+            runnerTimeoutMs: 10_000,
+          }),
+        };
+        const created = await jsonTool(ctx, "create_issue", {
+          title: "Fast accept",
+          tasks: [
+            {
+              title: "Execute slowly",
+              objective: "Confirm dispatch returns before worker finishes.",
+              allowed_paths: ["src/**"],
+              checks: ["manual"],
+              agent: "codex",
+            },
+          ],
+        });
+        const startedAt = Date.now();
+        const dispatched = await jsonTool(ctx, "dispatch_task", {
+          issue_id: created.value.id,
+          task_id: "T1",
+          request_id: "slow-accept-1",
+        });
+        expect(dispatched.value.accepted).toBe(true);
+        expect(Date.now() - startedAt).toBeLessThan(1_000);
+        const acceptedRun = (
+          await jsonTool(ctx, "get_task_run", { run_id: dispatched.value.runId })
+        ).value;
+        expect(["starting", "running", "succeeded"]).toContain(acceptedRun.status);
+      } finally {
+        process.env.PATH = originalPath;
+        rmSync(binRoot, { recursive: true, force: true });
+      }
+    });
+  });
+
+  test("creates only one Run for concurrent dispatch_task calls with the same request_id", async () => {
+    await withController(async (repoRoot, baseCtx) => {
+      const binRoot = mkdtempSync(join(tmpdir(), "repo-harness-controller-concurrent-idem-bin-"));
+      const originalPath = process.env.PATH;
+      try {
+        const fakeCodex = join(binRoot, "codex");
+        writeFileSync(
+          fakeCodex,
+          '#!/usr/bin/env bash\necho "concurrent-idem"\nsleep 0.2\n',
+        );
+        chmodSync(fakeCodex, 0o755);
+        process.env.PATH = `${binRoot}:${originalPath ?? ""}`;
+        const ctx = {
+          ...baseCtx,
+          policy: getMcpPolicy("controller", {
+            repoRoot,
+            devAgentRunner: true,
+            allowedAgents: ["codex"],
+            runnerTimeoutMs: 10_000,
+          }),
+        };
+        const created = await jsonTool(ctx, "create_issue", {
+          title: "Concurrent dispatch",
+          tasks: [
+            {
+              title: "Execute once",
+              objective: "Ensure concurrent retries collapse to one Run.",
+              allowed_paths: ["src/**"],
+              checks: ["manual"],
+              agent: "codex",
+            },
+          ],
+        });
+        const [first, second] = await Promise.all([
+          jsonTool(ctx, "dispatch_task", {
+            issue_id: created.value.id,
+            task_id: "T1",
+            request_id: "concurrent-req-1",
+          }),
+          jsonTool(ctx, "dispatch_task", {
+            issue_id: created.value.id,
+            task_id: "T1",
+            request_id: "concurrent-req-1",
+          }),
+        ]);
+        expect(first.value.runId).toBeTruthy();
+        expect(second.value.runId).toBe(first.value.runId);
+        const runs = await jsonTool(ctx, "list_task_runs", {});
+        expect(
+          runs.value.runs.filter((entry: { runId: string }) => entry.runId === first.value.runId),
+        ).toHaveLength(1);
+      } finally {
+        process.env.PATH = originalPath;
+        rmSync(binRoot, { recursive: true, force: true });
+      }
+    });
+  });
+
+  test("keeps dispatch responses compact even when the issue contains large notes and history", async () => {
+    await withController(async (repoRoot, baseCtx) => {
+      const binRoot = mkdtempSync(join(tmpdir(), "repo-harness-controller-compact-bin-"));
+      const originalPath = process.env.PATH;
+      try {
+        const fakeCodex = join(binRoot, "codex");
+        writeFileSync(fakeCodex, '#!/usr/bin/env bash\necho "compact"\n');
+        chmodSync(fakeCodex, 0o755);
+        process.env.PATH = `${binRoot}:${originalPath ?? ""}`;
+        const ctx = {
+          ...baseCtx,
+          policy: getMcpPolicy("controller", {
+            repoRoot,
+            devAgentRunner: true,
+            allowedAgents: ["codex"],
+            runnerTimeoutMs: 10_000,
+          }),
+        };
+        const created = await jsonTool(ctx, "create_issue", {
+          title: "Compact response",
+          summary: "x".repeat(20_000),
+          tasks: [
+            {
+              title: "Execute",
+              objective: "Keep dispatch response small",
+              allowed_paths: ["src/**"],
+              checks: ["manual"],
+              acceptance_criteria: ["y".repeat(5000)],
+              agent: "codex",
+            },
+          ],
+        });
+        const dispatched = await jsonTool(ctx, "dispatch_task", {
+          issue_id: created.value.id,
+          task_id: "T1",
+          request_id: "compact-1",
+        });
+        const bytes = Buffer.byteLength(dispatched.raw.content[0].text, "utf-8");
+        expect(bytes).toBeLessThan(2048);
+        expect(dispatched.value.issue).toBeUndefined();
+        expect(dispatched.value.run).toBeUndefined();
+      } finally {
+        process.env.PATH = originalPath;
+        rmSync(binRoot, { recursive: true, force: true });
+      }
+    });
+  });
+
   test("reviews and integrates an isolated Task Run before acceptance", async () => {
     const repoRoot = mkdtempSync(
       join(tmpdir(), "repo-harness-controller-git-"),
@@ -917,13 +1168,17 @@ printf '%s\n' '{"type":"turn.completed"}'
           },
         ],
       });
-      const dispatched = await jsonTool(ctx, "dispatch_task", {
-        issue_id: created.value.id,
-        task_id: "T1",
-        isolate: true,
-        timeout_ms: 10_000,
-      });
-      let run = dispatched.value;
+        const dispatched = await jsonTool(ctx, "dispatch_task", {
+          issue_id: created.value.id,
+          task_id: "T1",
+          isolate: true,
+          timeout_ms: 10_000,
+        });
+      let run = (
+        await jsonTool(ctx, "get_task_run", {
+          run_id: dispatched.value.runId,
+        })
+      ).value;
       const runDeadline = Date.now() + 30_000;
       for (
         let attempt = 0;
@@ -1147,9 +1402,9 @@ process.exit(2);
           github_repo: "acme/demo",
         });
         expect(dispatched.value.provider).toBe("github");
-        const completed = await jsonTool(ctx, "get_task_run", {
-          run_id: dispatched.value.runId,
-        });
+        const completed = {
+          value: await waitForRun(ctx, dispatched.value.runId, (run) => run.status === "succeeded", 80, 25),
+        };
         expect(completed.value.status).toBe("succeeded");
         expect(completed.value.github.pullRequestUrl).toContain("/pull/77");
         const log = await jsonTool(ctx, "get_task_run_log", {

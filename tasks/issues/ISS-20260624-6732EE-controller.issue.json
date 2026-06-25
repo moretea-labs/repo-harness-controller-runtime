@@ -4,7 +4,7 @@
   "title": "修复 Controller 重连崩溃与执行链路性能瓶颈",
   "slug": "controller",
   "kind": "bug",
-  "status": "planned",
+  "status": "in_progress",
   "summary": "修复 ChatGPT Connector/Controller 频繁重连或挂掉、Local Bridge run-check 僵尸状态与超时失效、历史 Job 全量扫描和重型检查重复并发，并减少状态接口负载和日常任务编排开销。实施时优先使用 bounded Direct Edit，不启动 Agent。",
   "goals": [
     "Controller/Connector 在大状态量和历史任务存在时保持稳定，不因单次状态查询产生 502 或频繁重连",
@@ -192,7 +192,7 @@
       "id": "T3",
       "title": "优化状态查询与 Connector 响应负载",
       "objective": "让 Local Bridge Job 列表先限量再读取/刷新，活跃与历史状态分离，并压缩 project_snapshot、local_bridge_status 和事件读取的默认数据量。",
-      "status": "ready",
+      "status": "superseded",
       "dependsOn": [
         "T2"
       ],
@@ -220,12 +220,17 @@
       "risk": "medium",
       "notes": [
         "复核：状态快照已加入数量上限和紧凑映射，方向正确；仍缺响应体大小/历史目录读取次数的专项断言，且 MCP controller 测试有 8 项接口契约失败，暂不能验收。",
-        "已定位性能根因：提交检查时全量刷新最近 250 个 Job，并对每个 running check 重复执行 Git revision 计算。开始改为候选过滤和单次 Revision 复用。"
+        "已定位性能根因：提交检查时全量刷新最近 250 个 Job，并对每个 running check 重复执行 Git revision 计算。开始改为候选过滤和单次 Revision 复用。",
+        "本轮补充范围：消除 launch_task/verify_task 顶层与嵌套完整对象重复；活跃 run-check 去重不得依赖最近 100 条历史窗口；保持专用详情工具兼容。"
       ],
       "runIds": [],
       "createdAt": "2026-06-24T08:57:01.690Z",
-      "updatedAt": "2026-06-24T12:21:55.242Z",
-      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+      "updatedAt": "2026-06-25T00:45:13.382Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+      "supersededBy": [
+        "T14",
+        "T15"
+      ]
     },
     {
       "id": "T4",
@@ -233,7 +238,8 @@
       "objective": "收紧工具路由和验证提示，使小中型改动默认 search + Direct Edit + targeted checks，完整 release gate 仅在最终发布阶段执行，并补充文档和回归断言。",
       "status": "planned",
       "dependsOn": [
-        "T3"
+        "T14",
+        "T15"
       ],
       "allowedPaths": [
         "src/cli/mcp/**",
@@ -259,14 +265,14 @@
       "notes": [],
       "runIds": [],
       "createdAt": "2026-06-24T08:57:01.690Z",
-      "updatedAt": "2026-06-24T08:57:01.690Z",
+      "updatedAt": "2026-06-25T00:45:13.382Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     },
     {
       "id": "T5",
       "title": "恢复公开包元数据并清理空编辑会话",
       "objective": "移除误加的 package.json private 标记，保持公开 npm 包契约；关闭或回滚没有任何变更的遗留 Direct Edit 会话，恢复干净且可验证的工作区。",
-      "status": "ready",
+      "status": "done",
       "dependsOn": [],
       "allowedPaths": [
         "package.json",
@@ -289,17 +295,80 @@
         "工作区不存在与本任务无关的未提交修改"
       ],
       "risk": "low",
-      "notes": [],
-      "runIds": [],
+      "notes": [
+        "阶段一并发任务。仅修改 package.json、公开包契约测试和空编辑会话；不得提交、推送或触碰 src。完成后先专项验证，再由 Controller 审核集成。",
+        "Accepted RUN-iss-20260624-6732ee-t5-1782373614135-ecc4401d for asynchronous launch.",
+        "Dispatched RUN-iss-20260624-6732ee-t5-1782373614135-ecc4401d to codex.",
+        "RUN-iss-20260624-6732ee-t5-1782373614135-ecc4401d finished successfully. Automatic integration is starting.",
+        "RUN-iss-20260624-6732ee-t5-1782373614135-ecc4401d integrated through edit session EDIT-1782373992616-5d75c8dc; run focused checks and record verification before acceptance.",
+        "Verification evidence passed and low_risk_change policy auto-completed the Task."
+      ],
+      "runIds": [
+        "RUN-iss-20260624-6732ee-t5-1782373614135-ecc4401d"
+      ],
       "createdAt": "2026-06-24T11:32:25.388Z",
-      "updatedAt": "2026-06-24T11:32:25.388Z",
-      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+      "updatedAt": "2026-06-25T07:53:14.517Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+      "verification": {
+        "runId": "RUN-iss-20260624-6732ee-t5-1782373614135-ecc4401d",
+        "integratedRevision": "EDIT-1782373992616-5d75c8dc",
+        "reviewedDiffHash": "069fee5b707d7199ef43ea683036d8e1dd9d8cc5c5370e2cfe0a0f6f2be61cab",
+        "reviewer": "repo-harness-controller",
+        "checkResults": [
+          {
+            "checkId": "package:check:type",
+            "ok": true,
+            "summary": "Passed with persisted evidence: .ai/harness/checks/controller/latest-package-check-type.json"
+          }
+        ],
+        "commandEvidence": [
+          {
+            "command": [
+              "repo-harness",
+              "agent-run",
+              "RUN-iss-20260624-6732ee-t5-1782373614135-ecc4401d"
+            ],
+            "cwd": "/Users/greyson/DevProjects/repo-harness-controller-runtime/.ai/harness/worktrees/iss-20260624-6732ee-t5-ecc4401d",
+            "ok": true,
+            "exitCode": 0,
+            "artifactPath": ".ai/harness/jobs/RUN-iss-20260624-6732ee-t5-1782373614135-ecc4401d/result.json",
+            "reportedBy": "codex",
+            "executedAt": "2026-06-25T07:53:12.963Z",
+            "source": "controller"
+          }
+        ],
+        "acceptanceResults": [
+          {
+            "criterion": "package.json 不包含 private:true",
+            "ok": true,
+            "evidence": "Successful Run RUN-iss-20260624-6732ee-t5-1782373614135-ecc4401d integrated by EDIT-1782373992616-5d75c8dc."
+          },
+          {
+            "criterion": "公开包回归断言通过",
+            "ok": true,
+            "evidence": "Successful Run RUN-iss-20260624-6732ee-t5-1782373614135-ecc4401d integrated by EDIT-1782373992616-5d75c8dc."
+          },
+          {
+            "criterion": "空 Direct Edit 会话不再保持 open",
+            "ok": true,
+            "evidence": "Successful Run RUN-iss-20260624-6732ee-t5-1782373614135-ecc4401d integrated by EDIT-1782373992616-5d75c8dc."
+          },
+          {
+            "criterion": "工作区不存在与本任务无关的未提交修改",
+            "ok": true,
+            "evidence": "Successful Run RUN-iss-20260624-6732ee-t5-1782373614135-ecc4401d integrated by EDIT-1782373992616-5d75c8dc."
+          }
+        ],
+        "verifiedAt": "2026-06-25T07:53:14.517Z",
+        "autoCompleted": true,
+        "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+      }
     },
     {
       "id": "T6",
       "title": "稳定仓库身份与远程映射",
       "objective": "修复 repository refresh 在同一路径 remote 变化时生成重复 repoId 的问题；保持既有 repoId、Issue、Run 和 Edit Session 绑定稳定，并让 Registry remote、实际 Git origin 与 GitHub 插件映射能够明确校验和安全更新。",
-      "status": "planned",
+      "status": "superseded",
       "dependsOn": [],
       "allowedPaths": [
         "src/cli/repository-registry/**",
@@ -329,8 +398,11 @@
       "notes": [],
       "runIds": [],
       "createdAt": "2026-06-24T11:32:45.669Z",
-      "updatedAt": "2026-06-24T11:35:37.767Z",
-      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+      "updatedAt": "2026-06-25T00:45:36.256Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+      "supersededBy": [
+        "T16"
+      ]
     },
     {
       "id": "T7",
@@ -339,7 +411,7 @@
       "status": "planned",
       "dependsOn": [
         "T4",
-        "T6"
+        "T16"
       ],
       "allowedPaths": [
         "tests/**",
@@ -368,14 +440,14 @@
       "notes": [],
       "runIds": [],
       "createdAt": "2026-06-24T11:33:01.807Z",
-      "updatedAt": "2026-06-24T11:33:01.807Z",
+      "updatedAt": "2026-06-25T00:45:36.256Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     },
     {
       "id": "T8",
       "title": "原子化 Agent 运行结果持久化",
       "objective": "修复 Agent worker 写入 result/meta JSON 时被 Controller 并发读取导致 Unexpected EOF 的竞态；统一使用原子替换或可恢复读取，并补充高频轮询回归测试。",
-      "status": "ready",
+      "status": "superseded",
       "dependsOn": [
         "T1"
       ],
@@ -405,14 +477,18 @@
       ],
       "runIds": [],
       "createdAt": "2026-06-24T11:55:58.232Z",
-      "updatedAt": "2026-06-24T12:06:20.878Z",
-      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+      "updatedAt": "2026-06-25T00:42:58.760Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+      "supersededBy": [
+        "T10",
+        "T11"
+      ]
     },
     {
       "id": "T9",
       "title": "修复并发调度规则",
       "objective": "修复重型检查并发和本地 Run 工作区选择的跨进程竞态。",
-      "status": "planned",
+      "status": "superseded",
       "dependsOn": [
         "T2"
       ],
@@ -435,11 +511,295 @@
       "notes": [],
       "runIds": [],
       "createdAt": "2026-06-24T13:54:27.575Z",
-      "updatedAt": "2026-06-24T13:54:27.575Z",
+      "updatedAt": "2026-06-25T00:43:13.193Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+      "supersededBy": [
+        "T12",
+        "T13"
+      ]
+    },
+    {
+      "id": "T10",
+      "title": "收敛 Agent 状态文件原子持久化",
+      "objective": "统一 Agent meta/result JSON 原子写入和可恢复读取，避免高频轮询读取半写入文件；保留现有状态语义，不改变正常 Run 生命周期。",
+      "status": "planned",
+      "dependsOn": [
+        "T1",
+        "T15"
+      ],
+      "allowedPaths": [
+        "src/cli/agent-jobs/job-manager.ts",
+        "src/cli/agent-jobs/job-worker.ts",
+        "tests/cli/local-bridge.test.ts",
+        "tests/cli/mcp-controller.test.ts"
+      ],
+      "forbiddenPaths": [
+        ".git/**",
+        "tasks/issues/ISS-20260623-DDE2E7*",
+        ".ai/harness/jobs/**",
+        ".ai/harness/worktrees/**"
+      ],
+      "checks": [
+        "package:check:type"
+      ],
+      "acceptanceCriteria": [
+        "meta/result 使用不会暴露半写入内容的持久化方式",
+        "临时文件命名支持同进程并发且失败后可清理",
+        "高频读取不会出现 Unexpected EOF",
+        "现有 Run 状态回归不退化"
+      ],
+      "risk": "high",
+      "notes": [],
+      "runIds": [],
+      "createdAt": "2026-06-25T00:41:04.011Z",
+      "updatedAt": "2026-06-25T00:46:13.400Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    },
+    {
+      "id": "T11",
+      "title": "修复自动集成 Run 终态一致性",
+      "objective": "确保 worktree 自动集成 Run 只有在集成完成并清理，或记录明确 autoIntegrationError 后才进入成功终态；worker 在 result 写入后异常退出不得被恢复为假成功。",
+      "status": "ready",
+      "dependsOn": [
+        "T1"
+      ],
+      "allowedPaths": [
+        "src/cli/agent-jobs/integration.ts",
+        "src/cli/agent-jobs/job-manager.ts",
+        "src/cli/agent-jobs/job-worker.ts",
+        "tests/cli/local-bridge.test.ts",
+        "tests/cli/mcp-controller.test.ts"
+      ],
+      "forbiddenPaths": [
+        ".git/**",
+        "tasks/issues/ISS-20260623-DDE2E7*",
+        ".ai/harness/jobs/**"
+      ],
+      "checks": [
+        "package:check:type",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "auto-integrate Run 未完成集成时不显示 succeeded",
+        "worker 在 result.ok 后、集成前退出会进入 unknown/failed/waiting 等非假成功状态",
+        "成功 Run 必须有 integratedSessionId 与 worktreeCleanedAt，或明确保留 worktree 的 autoIntegrationError",
+        "补充中途退出和正常集成回归测试"
+      ],
+      "risk": "high",
+      "notes": [
+        "阶段二任务；必须在 T10 完成并验收后再调度，避免同时修改 Agent job lifecycle 文件。"
+      ],
+      "runIds": [],
+      "createdAt": "2026-06-25T00:41:26.770Z",
+      "updatedAt": "2026-06-25T00:47:28.366Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    },
+    {
+      "id": "T12",
+      "title": "收敛检查进程树与证据 Revision",
+      "objective": "确保检查任务只有在完整子进程树退出后才进入终态；检查执行期间仓库 Revision 变化时不得生成可复用成功证据，并为排队/持锁阶段提供可观测状态。",
+      "status": "ready",
+      "dependsOn": [
+        "T2"
+      ],
+      "allowedPaths": [
+        "src/cli/controller/check-runner.ts",
+        "src/cli/local-bridge/job-store.ts",
+        "tests/cli/local-bridge.test.ts",
+        "tests/cli/mcp-controller.test.ts"
+      ],
+      "forbiddenPaths": [
+        ".git/**",
+        "tasks/issues/ISS-20260623-DDE2E7*",
+        ".ai/harness/jobs/**"
+      ],
+      "checks": [
+        "package:check:type",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "Run/Job 成功前其检查进程组已退出",
+        "重型检查排队时记录明确 waiting/queued 状态而非无 PID 的模糊 running",
+        "检查开始后 Revision 变化会返回 stale/failed 且不写入可复用成功缓存",
+        "补充残留子进程和执行中提交变化回归测试"
+      ],
+      "risk": "high",
+      "notes": [],
+      "runIds": [],
+      "createdAt": "2026-06-25T00:41:59.916Z",
+      "updatedAt": "2026-06-25T00:41:59.916Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    },
+    {
+      "id": "T13",
+      "title": "修复共享检查订阅与取消语义",
+      "objective": "将同 Revision 同 Check 的执行去重建模为共享执行加独立订阅者；单个 Job 取消、超时或变 stale 不得终止其他仍活跃订阅者使用的共享检查。",
+      "status": "ready",
+      "dependsOn": [
+        "T2"
+      ],
+      "allowedPaths": [
+        "src/cli/controller/check-runner.ts",
+        "src/cli/local-bridge/job-store.ts",
+        "tests/cli/local-bridge.test.ts"
+      ],
+      "forbiddenPaths": [
+        ".git/**",
+        "tasks/issues/ISS-20260623-DDE2E7*",
+        ".ai/harness/jobs/**"
+      ],
+      "checks": [
+        "package:check:type",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "多个订阅者共享一个实际检查进程",
+        "取消一个订阅者不会杀死其他订阅者的检查",
+        "只有最后一个活跃订阅者取消时才允许终止共享进程",
+        "每个 Job 独立记录终态和事件",
+        "补充取消、超时和共享成功回归测试"
+      ],
+      "risk": "high",
+      "notes": [],
+      "runIds": [],
+      "createdAt": "2026-06-25T00:42:35.983Z",
+      "updatedAt": "2026-06-25T00:42:35.983Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    },
+    {
+      "id": "T14",
+      "title": "压缩 MCP 默认响应并保持兼容",
+      "objective": "移除 launch_task、verify_task 等工具返回中顶层与嵌套完整对象的重复副本；默认返回紧凑摘要，同时保留专用详情工具和必要兼容字段。",
+      "status": "review",
+      "dependsOn": [
+        "T2"
+      ],
+      "allowedPaths": [
+        "src/cli/mcp/tools.ts",
+        "tests/cli/mcp-controller.test.ts",
+        "docs/**"
+      ],
+      "forbiddenPaths": [
+        "src/cli/local-bridge/**",
+        "src/cli/agent-jobs/**",
+        ".ai/**"
+      ],
+      "checks": [
+        "package:check:type",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "完整 Run/Issue 不再在同一响应中重复两份",
+        "常用工具默认响应大小有回归断言",
+        "现有调用方所需字段仍可读取",
+        "详细内容通过 get_task_run/get_issue 等专用工具获取"
+      ],
+      "risk": "medium",
+      "notes": [
+        "阶段一并发任务。仅处理 MCP 响应结构与专项测试；保持现有调用兼容，不得修改 Local Bridge、Agent 生命周期或仓库映射。不得提交或推送。",
+        "Accepted RUN-iss-20260624-6732ee-t14-1782373635978-d0d56398 for asynchronous launch.",
+        "Dispatched RUN-iss-20260624-6732ee-t14-1782373635978-d0d56398 to codex.",
+        "RUN-iss-20260624-6732ee-t14-1782373635978-d0d56398 finished successfully. Automatic integration is starting.",
+        "Automatic integration failed for RUN-iss-20260624-6732ee-t14-1782373635978-d0d56398: main working tree changed since Task dispatch: src/cli/mcp/tools.ts"
+      ],
+      "runIds": [
+        "RUN-iss-20260624-6732ee-t14-1782373635978-d0d56398"
+      ],
+      "createdAt": "2026-06-25T00:43:56.169Z",
+      "updatedAt": "2026-06-25T08:03:17.248Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    },
+    {
+      "id": "T15",
+      "title": "建立活跃检查索引并限制历史扫描",
+      "objective": "将 run-check 去重与活跃状态读取从最近历史窗口中分离，优先读取非终态索引；历史列表只按请求上限读取，不因检查去重扫描大量旧 Job。",
+      "status": "running",
+      "dependsOn": [
+        "T2"
+      ],
+      "allowedPaths": [
+        "src/cli/local-bridge/job-store.ts",
+        "src/cli/local-bridge/types.ts",
+        "tests/cli/local-bridge.test.ts"
+      ],
+      "forbiddenPaths": [
+        "src/cli/mcp/tools.ts",
+        "src/cli/agent-jobs/**",
+        ".ai/**"
+      ],
+      "checks": [
+        "package:check:type",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "超过 100 条新 Job 后仍能找到较早的活跃同 revision 检查",
+        "终态历史不会进入活跃去重路径",
+        "列表读取量受 limit 约束",
+        "重启后活跃索引可由持久状态重建",
+        "补充大历史与活跃任务回归测试"
+      ],
+      "risk": "medium",
+      "notes": [
+        "Accepted RUN-iss-20260624-6732ee-t15-1782369359087-6b019f0b for asynchronous launch.",
+        "Dispatched RUN-iss-20260624-6732ee-t15-1782369359087-6b019f0b to codex.",
+        "RUN-iss-20260624-6732ee-t15-1782369359087-6b019f0b cancelled; explicit retry is required before another Run can be created.",
+        "首次 Codex Run 因执行器卡在 Reading additional input from stdin 被取消；任务本身未产生修改，改用其他执行器重试。",
+        "Explicit retry requested from RUN-iss-20260624-6732ee-t15-1782369359087-6b019f0b.",
+        "Accepted RUN-iss-20260624-6732ee-t15-1782369756284-8305ffe4 for asynchronous launch.",
+        "Dispatched RUN-iss-20260624-6732ee-t15-1782369756284-8305ffe4 to codex.",
+        "RUN-iss-20260624-6732ee-t15-1782369756284-8305ffe4 cancelled; explicit retry is required before another Run can be created.",
+        "两次 Agent Run 均卡在 Codex stdin 启动阶段，改为 bounded Direct Edit 手工完成，不再重试 Agent。",
+        "Direct Edit 正在实施。",
+        "活跃索引补丁准备落盘。",
+        "空 Issue 已取消，继续落 T15 补丁。",
+        "准备应用代码变更。",
+        "开始写入活跃索引实现。"
+      ],
+      "runIds": [
+        "RUN-iss-20260624-6732ee-t15-1782369359087-6b019f0b",
+        "RUN-iss-20260624-6732ee-t15-1782369756284-8305ffe4"
+      ],
+      "createdAt": "2026-06-25T00:44:23.319Z",
+      "updatedAt": "2026-06-25T07:14:30.762Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    },
+    {
+      "id": "T16",
+      "title": "补充仓库远程映射一致性诊断",
+      "objective": "保持 repoId 与 canonicalRoot 稳定；在 Git origin、Registry remote 和 GitHub 插件目标不一致时返回明确 warning，不静默重绑既有 Issue、Run 或 Edit Session。",
+      "status": "ready",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src/cli/repositories/registry.ts",
+        "tests/cli/repository-registry-v81.test.ts",
+        "src/cli/mcp/tools.ts"
+      ],
+      "forbiddenPaths": [
+        ".git/**",
+        "src/cli/local-bridge/**",
+        "src/cli/agent-jobs/**",
+        ".ai/harness/jobs/**"
+      ],
+      "checks": [
+        "package:check:type",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "refresh 不因 remote 变化创建新 repoId",
+        "origin 与 GitHub 插件目标不一致时 validate/status 返回明确 warning",
+        "诊断不自动更改 Git remote 或插件配置",
+        "既有 repository bindings 保持可读",
+        "补充 remote 变化和映射不一致回归测试"
+      ],
+      "risk": "high",
+      "notes": [],
+      "runIds": [],
+      "createdAt": "2026-06-25T00:44:40.723Z",
+      "updatedAt": "2026-06-25T00:44:40.723Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     }
   ],
   "createdAt": "2026-06-24T08:57:01.690Z",
-  "updatedAt": "2026-06-24T13:54:27.575Z",
+  "updatedAt": "2026-06-25T08:03:17.248Z",
   "repoId": "repo_123b7cf58b6b17b5cbe46a56"
 }

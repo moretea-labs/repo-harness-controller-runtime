@@ -22,6 +22,7 @@ export type LocalBridgeJobAction =
 export interface LaunchTaskPayload {
   issueId: string;
   taskId: string;
+  requestId?: string;
   agent?: ControllerAgent;
   isolate?: boolean;
   executionMode?: LocalExecutionPreference;
@@ -36,6 +37,7 @@ export interface LaunchTaskPayload {
 export interface QuickAgentSessionPayload {
   title: string;
   objective: string;
+  requestId?: string;
   summary?: string;
   allowedPaths?: string[];
   forbiddenPaths?: string[];
