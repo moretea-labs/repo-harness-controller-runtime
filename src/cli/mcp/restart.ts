@@ -96,6 +96,13 @@ export function defaultMcpRestartLogPath(repoRoot: string): string {
   return join(repoRoot, '.ai', 'local', 'logs', 'repo-harness-mcp.log');
 }
 
+export function shouldVerifyPublicSurface(config: {
+  tunnelMode: ResolvedMcpRestartConfig['tunnelMode'];
+  publicEndpoint?: string;
+}): boolean {
+  return config.tunnelMode !== 'none' && Boolean(config.publicEndpoint);
+}
+
 export function buildMcpRestartKeepaliveArgs(config: ResolvedMcpRestartConfig): string[] {
   const args = [
     'mcp',
@@ -620,7 +627,7 @@ async function runToolsSmoke(config: ResolvedMcpRestartConfig): Promise<ToolsSmo
 }
 
 async function verifyPublicSurface(config: ResolvedMcpRestartConfig): Promise<PublicSurfaceCheck | undefined> {
-  if (!config.publicEndpoint) return undefined;
+  if (!shouldVerifyPublicSurface(config)) return undefined;
   const response = await fetch(config.publicEndpoint, { method: 'HEAD', redirect: 'manual' });
   const toolSurface = response.headers.get('x-repo-harness-tool-surface') ?? '';
   if (toolSurface !== config.expectedToolSurface) {

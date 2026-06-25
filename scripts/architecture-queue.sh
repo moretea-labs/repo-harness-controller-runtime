@@ -359,71 +359,14 @@ pending_count_at_or_above() {
   printf '%s' "$count"
 }
 
-reindex_requests_with_node() {
-  INDEX_FILE="$index_file" REQUESTS_DIR="$requests_dir" CHECK_MODE="$check_mode" node <<'NODE_EOF'
-const fs = require("fs");
-const path = require("path");
-const indexFile = process.env.INDEX_FILE;
-const requestsDir = process.env.REQUESTS_DIR;
-const checkMode = process.env.CHECK_MODE === "true";
-const begin = "<!-- BEGIN ARCHITECTURE PENDING REQUESTS -->";
-const end = "<!-- END ARCHITECTURE PENDING REQUESTS -->";
-const metadata = (file) => {
-  const result = {};
-  for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
-    const match = line.match(/^> \*\*(.+?)\*\*:\s*(.*)$/);
-    if (match) result[match[1]] = match[2].trim().replace(/^`|`$/g, "");
-  }
-  return result;
-};
-const files = fs.existsSync(requestsDir)
-  ? fs.readdirSync(requestsDir)
-      .filter((name) => name.endsWith(".md"))
-      .map((name) => path.join(requestsDir, name))
-      .filter((file) => (metadata(file).Status || "Pending").toLowerCase() === "pending")
-  : [];
-const block = files.length === 0 ? "- (none)" : files.map((file) => {
-  const data = metadata(file);
-  const name = path.basename(file);
-  return `- [ ] ${data.Updated || data.Detected || "unknown"} [${data.Severity || "unknown"}] \`${data.File || "unknown"}\` -> [${name.replace(/\.md$/, "")}](requests/${name})`;
-}).sort().join("\n");
-const fallback = "# Architecture Index\n\n## Pending Requests\n";
-const current = fs.existsSync(indexFile) ? fs.readFileSync(indexFile, "utf8") : fallback;
-const controlled = `${begin}\n${block}\n${end}`;
-const looseRemoved = current.split(/\r?\n/).filter((line) => !/^- \[ \] .*\]\(requests\/[^)]+\.md\)$/.test(line.trim())).join("\n");
-const beginAt = looseRemoved.indexOf(begin);
-const endAt = beginAt >= 0 ? looseRemoved.indexOf(end, beginAt + begin.length) : -1;
-let next;
-if (beginAt >= 0 && endAt >= 0) {
-  next = `${`${looseRemoved.slice(0, beginAt)}${controlled}${looseRemoved.slice(endAt + end.length)}`.trimEnd()}\n`;
-} else {
-  next = `${looseRemoved.trimEnd()}\n\n## Pending Requests\n\n${controlled}\n`;
-}
-if (checkMode) {
-  if (current !== next) {
-    console.error("architecture-queue: pending request index is stale");
-    process.exit(1);
-  }
-} else {
-  fs.mkdirSync(path.dirname(indexFile), { recursive: true });
-  fs.writeFileSync(indexFile, next);
-}
-NODE_EOF
-}
-
 reindex_requests() {
-  if command -v bun >/dev/null 2>&1 && [[ -f "scripts/architecture-event.ts" ]]; then
-    if [[ "$check_mode" == "true" ]]; then
-      architecture_event reindex-requests --index-file "$index_file" --requests-dir "$requests_dir" --check
-    else
-      architecture_event reindex-requests --index-file "$index_file" --requests-dir "$requests_dir"
-    fi
-  elif command -v node >/dev/null 2>&1; then
-    reindex_requests_with_node
+  architecture_event_required
+  if [[ "$check_mode" == "true" ]]; then
+    architecture_event reindex-requests --index-file "$index_file" --requests-dir "$requests_dir" --check
   else
-    architecture_event_required
+    architecture_event reindex-requests --index-file "$index_file" --requests-dir "$requests_dir"
+    [[ "$quiet" == "true" ]] || echo "[ArchitectureQueue] Reindexed $index_file"
   fi
-  [[ "$check_mode" == "true" || "$quiet" == "true" ]] || echo "[ArchitectureQueue] Reindexed $index_file"
 }
 
 status_command() {

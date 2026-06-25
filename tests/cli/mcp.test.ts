@@ -8,6 +8,7 @@ import {
   defaultMcpRestartLogPath,
   isRepoLaunchAgentPlist,
   parseLaunchAgentLabel,
+  shouldVerifyPublicSurface,
 } from '../../src/cli/mcp/restart';
 
 const ROOT = join(import.meta.dir, '../..');
@@ -129,6 +130,17 @@ describe('mcp command', () => {
 
   test('uses a deterministic default restart log path inside repo-local logs', () => {
     expect(defaultMcpRestartLogPath('/tmp/example-repo')).toBe('/tmp/example-repo/.ai/local/logs/repo-harness-mcp.log');
+  });
+
+  test('restart skips public verification when runtime tunnel mode is none', () => {
+    expect(shouldVerifyPublicSurface({
+      tunnelMode: 'none',
+      publicEndpoint: 'https://example.test/mcp',
+    })).toBe(false);
+    expect(shouldVerifyPublicSurface({
+      tunnelMode: 'quick',
+      publicEndpoint: 'https://example.test/mcp',
+    })).toBe(true);
   });
 
   test('recognizes repo-local launchd plists for MCP keepalive', () => {
