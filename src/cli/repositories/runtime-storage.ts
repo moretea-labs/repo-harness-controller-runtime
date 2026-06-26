@@ -43,9 +43,11 @@ interface RuntimeStorageSpec {
   controllerName: string;
   preserveNonEmpty?: boolean;
   detectActiveRuns?: boolean;
+  detectActiveLocalJobs?: boolean;
 }
 
 const ACTIVE_RUN_STATUSES = new Set(['queued', 'running', 'waiting_for_user']);
+const ACTIVE_LOCAL_JOB_STATUSES = new Set(['approved', 'dispatched', 'running']);
 
 const RUNTIME_STORAGE_SPECS: RuntimeStorageSpec[] = [
   { name: 'runs', sourceName: 'jobs', controllerName: 'runs', detectActiveRuns: true },
@@ -53,7 +55,7 @@ const RUNTIME_STORAGE_SPECS: RuntimeStorageSpec[] = [
   { name: 'edit-sessions', sourceName: 'edit-sessions', controllerName: 'edit-sessions' },
   { name: 'controller-state', sourceName: 'controller', controllerName: 'controller' },
   { name: 'artifacts', sourceName: 'artifacts', controllerName: 'artifacts' },
-  { name: 'local-jobs', sourceName: 'local-jobs', controllerName: 'local-jobs' },
+  { name: 'local-jobs', sourceName: 'local-jobs', controllerName: 'local-jobs', detectActiveLocalJobs: true },
   { name: 'mcp', sourceName: 'mcp', controllerName: 'mcp' },
   { name: 'local-bridge', sourceName: 'local-bridge', controllerName: 'local-bridge' },
   { name: 'ephemeral-issues', sourceName: 'ephemeral-issues', controllerName: 'ephemeral-issues' },
@@ -86,6 +88,22 @@ function hasActiveRuns(path: string): boolean {
     try {
       const meta = JSON.parse(readFileSync(metaPath, 'utf-8')) as { status?: string };
       if (meta.status && ACTIVE_RUN_STATUSES.has(meta.status)) return true;
+    } catch (_error) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasActiveLocalJobs(path: string): boolean {
+  if (!existsSync(path)) return false;
+  for (const entry of readdirSync(path, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const jobPath = join(path, entry.name, 'job.json');
+    if (!existsSync(jobPath)) continue;
+    try {
+      const job = JSON.parse(readFileSync(jobPath, 'utf-8')) as { status?: string };
+      if (job.status && ACTIVE_LOCAL_JOB_STATUSES.has(job.status)) return true;
     } catch (_error) {
       return true;
     }
@@ -170,6 +188,16 @@ function bindRuntimeDirectory(
       controllerPath,
       status: 'legacy-active',
       message: 'active or unreadable legacy Runs must finish before runtime storage can be relocated',
+    };
+  }
+
+  if (spec.detectActiveLocalJobs && hasActiveLocalJobs(repositoryPath)) {
+    return {
+      name: spec.name,
+      repositoryPath,
+      controllerPath,
+      status: 'legacy-active',
+      message: 'active or unreadable Local Jobs must finish before runtime storage can be relocated',
     };
   }
 
