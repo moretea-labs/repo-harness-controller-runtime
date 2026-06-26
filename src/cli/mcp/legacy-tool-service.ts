@@ -41,6 +41,7 @@ import {
   createIssue,
   getIssue,
   getIssueEffectiveView,
+  getIssueReadView,
   inspectIssueReadiness,
   inspectTaskReadiness,
   acceptVerifiedTask,
@@ -65,6 +66,7 @@ import {
   getControllerTimeline,
   getProjectProgress,
   getTaskProgressDetail,
+  getTaskProgressReadView,
 } from "../controller/progress";
 import { exportControllerWorklog, parseWorklogCategory } from "../controller/worklog";
 import { inspectProjectGovernance, reconcileProjectGovernance } from "../controller/governance";
@@ -1746,12 +1748,13 @@ export function buildMcpToolDefinitions(
       {
         name: "get_task_progress_detail",
         description:
-          "Return one Task with effective progress, Run history, Verification evidence, and unified worklog timeline.",
+          "Return one Task with effective progress, bounded Run and timeline summaries by default, and full detail on demand.",
         inputSchema: {
           type: "object",
           properties: {
             issue_id: { type: "string" },
             task_id: { type: "string" },
+            detail_level: { type: "string", enum: ["summary", "full"] },
           },
           required: ["issue_id", "task_id"],
           additionalProperties: false,
@@ -1825,10 +1828,13 @@ export function buildMcpToolDefinitions(
       },
       {
         name: "get_issue",
-        description: "Read one controller issue by ID.",
+        description: "Read one controller issue by ID with bounded task summaries by default and full detail on demand.",
         inputSchema: {
           type: "object",
-          properties: { issue_id: { type: "string" } },
+          properties: {
+            issue_id: { type: "string" },
+            detail_level: { type: "string", enum: ["summary", "full"] },
+          },
           required: ["issue_id"],
           additionalProperties: false,
         },
@@ -3370,10 +3376,11 @@ export async function callMcpTool(
       case "get_task_progress_detail": {
         if (ctx.policy.profile !== "controller")
           return errorResult("TOOL_DISABLED", "get_task_progress_detail requires the controller profile");
-        const result = getTaskProgressDetail(
+        const result = getTaskProgressReadView(
           ctx.repoRoot,
           String(args.issue_id ?? ""),
           String(args.task_id ?? ""),
+          args.detail_level === "full" ? "full" : "summary",
         );
         audit(ctx, name, "ok", args, `tasks/issues/${result.issue.id}`);
         return textResult(result);
@@ -3437,7 +3444,11 @@ export async function callMcpTool(
             "TOOL_DISABLED",
             "get_issue requires the controller profile",
           );
-        const issue = getIssueEffectiveView(ctx.repoRoot, String(args.issue_id ?? ""));
+        const issue = getIssueReadView(
+          ctx.repoRoot,
+          String(args.issue_id ?? ""),
+          args.detail_level === "full" ? "full" : "summary",
+        );
         audit(ctx, name, "ok", args, `tasks/issues/${issue.id}`);
         return textResult(issue);
       }
