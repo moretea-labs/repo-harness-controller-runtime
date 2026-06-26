@@ -4,7 +4,7 @@ import { getIssue, listIssues } from "./issue-store";
 import { readIssueRunEvidence, readTaskRunEvidence } from "./run-evidence";
 import { loadControllerProjectState } from "./project-state";
 import { taskExecutionPolicy, verificationEvidencePassed } from "./execution-policy";
-import type { ControllerIssue, ControllerTask, TaskStatus } from "./types";
+import type { ControllerIssue, ControllerTask, TaskStatus, TaskVerification } from "./types";
 import { resolveEffectiveTaskState, resolveIssueTaskStates, resolveTaskDependencies } from "./task-status-resolver";
 import {
   listControllerWorklogEvents,
@@ -15,6 +15,9 @@ import {
 const TERMINAL_TASKS = new Set<TaskStatus>(["done", "cancelled", "superseded"]);
 const ACTIVE_RUNS = new Set(["queued", "starting", "running", "waiting_for_user"]);
 const FAILED_RUNS = new Set(["failed", "unknown", "cancelled"]);
+const TASK_PROGRESS_SUMMARY_RUN_LIMIT = 6;
+const TASK_PROGRESS_SUMMARY_TIMELINE_LIMIT = 20;
+const TASK_PROGRESS_SUMMARY_ERROR_CHARS = 280;
 
 export type EvidenceGateState = "pending" | "in_progress" | "passed" | "failed" | "not_required";
 
@@ -130,6 +133,79 @@ export interface ControllerTimelineEvent {
   jobId?: string;
   editSessionId?: string;
   details?: Record<string, unknown>;
+}
+
+function summarizeText(value: string | undefined, maxChars: number): string | undefined {
+  if (!value) return value;
+  return value.length <= maxChars ? value : `${value.slice(0, Math.max(0, maxChars - 1))}…`;
+}
+
+function summarizeVerification(verification?: TaskVerification) {
+  if (!verification) return undefined;
+  return {
+    repoId: verification.repoId,
+    runId: verification.runId,
+    integratedRevision: verification.integratedRevision,
+    reviewedDiffHash: verification.reviewedDiffHash,
+    checkResults: verification.checkResults,
+    acceptanceResults: verification.acceptanceResults.map((result) => ({
+      criterion: result.criterion,
+      ok: result.ok,
+    })),
+    acceptanceResultCount: verification.acceptanceResults.length,
+    commandEvidenceCount: verification.commandEvidence?.length ?? 0,
+    reviewer: verification.reviewer,
+    verifiedAt: verification.verifiedAt,
+    autoCompleted: verification.autoCompleted,
+    detailLevel: "summary" as const,
+  };
+}
+
+function summarizeRun(run: AgentJobMeta) {
+  return {
+    runId: run.runId,
+    issueId: run.issueId,
+    taskId: run.taskId,
+    agent: run.agent,
+    provider: run.provider,
+    executionMode: run.executionMode,
+    status: run.status,
+    exitCode: run.exitCode,
+    error: summarizeText(run.error, TASK_PROGRESS_SUMMARY_ERROR_CHARS),
+    timeoutMs: run.timeoutMs,
+    deadlineAt: run.deadlineAt,
+    lastHeartbeatAt: run.lastHeartbeatAt,
+    progress: run.progress,
+    autoIntegrationError: summarizeText(run.autoIntegrationError, TASK_PROGRESS_SUMMARY_ERROR_CHARS),
+    createdAt: run.createdAt,
+    startedAt: run.startedAt,
+    finishedAt: run.finishedAt,
+    integratedSessionId: run.integratedSessionId,
+    integratedAt: run.integratedAt,
+    timing: run.timing,
+    github: run.github
+      ? {
+          owner: run.github.owner,
+          repo: run.github.repo,
+          taskId: run.github.taskId,
+          state: run.github.state,
+          url: run.github.url,
+          pullRequestUrl: run.github.pullRequestUrl,
+          baseRef: run.github.baseRef,
+          model: run.github.model,
+          createPullRequest: run.github.createPullRequest,
+        }
+      : undefined,
+    detailLevel: "summary" as const,
+  };
+}
+
+function summarizeTimelineEvent(event: ControllerTimelineEvent) {
+  const { details, ...rest } = event;
+  return {
+    ...rest,
+    summary: summarizeText(rest.summary, 120) ?? "",
+  };
 }
 
 function runById(runs: AgentJobMeta[]): Map<string, AgentJobMeta> {
@@ -492,5 +568,52 @@ export function getTaskProgressDetail(repoRoot: string, issueId: string, taskId:
     progress,
     runs,
     timeline: getControllerTimeline(repoRoot, { issueId, taskId, limit: 300 }),
+  };
+}
+
+export function getTaskProgressReadView(
+  repoRoot: string,
+  issueId: string,
+  taskId: string,
+  detailLevel: "summary" | "full" = "summary",
+) {
+  const full = getTaskProgressDetail(repoRoot, issueId, taskId);
+  if (detailLevel === "full") return { ...full, detailLevel };
+
+  const {
+    notes,
+    runIds,
+    verification,
+    effectiveState,
+    ...task
+  } = full.task;
+  const summarizedRuns = full.runs.slice(-TASK_PROGRESS_SUMMARY_RUN_LIMIT).map(summarizeRun);
+  const summarizedTimeline = getControllerTimeline(repoRoot, {
+    issueId,
+    taskId,
+    limit: TASK_PROGRESS_SUMMARY_TIMELINE_LIMIT,
+  }).map(summarizeTimelineEvent);
+
+  return {
+    ...full,
+    detailLevel,
+    task: {
+      ...task,
+      notes: notes.slice(-2).map((note) => summarizeText(note, TASK_PROGRESS_SUMMARY_ERROR_CHARS) ?? ""),
+      noteCount: notes.length,
+      runIds: runIds.slice(-TASK_PROGRESS_SUMMARY_RUN_LIMIT),
+      runIdCount: runIds.length,
+      verification: summarizeVerification(verification),
+      effectiveState: {
+        ...effectiveState,
+        historicalRunOutcomeCount: effectiveState.historicalRunOutcomes.length,
+        historicalRunOutcomes: [],
+      },
+    },
+    runs: summarizedRuns,
+    runCount: full.runs.length,
+    timeline: summarizedTimeline,
+    timelineCount: full.timeline.length,
+    next: "Call get_task_progress_detail with detail_level=full only when full run metadata or the complete timeline is required.",
   };
 }
