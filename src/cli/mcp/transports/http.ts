@@ -399,11 +399,21 @@ async function handleMcpGet(req: Request, res: Response, transports: Map<string,
   }
   managed.lastSeenAt = Date.now();
   managed.inFlightGets += 1;
+  let released = false;
+  const releaseStream = (): void => {
+    if (released) return;
+    released = true;
+    managed.inFlightGets = Math.max(0, managed.inFlightGets - 1);
+    managed.lastSeenAt = Date.now();
+  };
+  req.once('aborted', releaseStream);
+  res.once('close', releaseStream);
   try {
     await managed.transport.handleRequest(req, res);
   } finally {
-    managed.inFlightGets -= 1;
-    managed.lastSeenAt = Date.now();
+    req.off('aborted', releaseStream);
+    res.off('close', releaseStream);
+    releaseStream();
   }
 }
 
