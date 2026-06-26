@@ -559,7 +559,7 @@
       "id": "T11",
       "title": "修复自动集成 Run 终态一致性",
       "objective": "确保 worktree 自动集成 Run 只有在集成完成并清理，或记录明确 autoIntegrationError 后才进入成功终态；worker 在 result 写入后异常退出不得被恢复为假成功。",
-      "status": "planned",
+      "status": "ready",
       "dependsOn": [
         "T1"
       ],
@@ -598,7 +598,7 @@
       "id": "T12",
       "title": "收敛检查进程树与证据 Revision",
       "objective": "确保检查任务只有在完整子进程树退出后才进入终态；检查执行期间仓库 Revision 变化时不得生成可复用成功证据，并为排队/持锁阶段提供可观测状态。",
-      "status": "planned",
+      "status": "ready",
       "dependsOn": [
         "T2"
       ],
@@ -634,7 +634,7 @@
       "id": "T13",
       "title": "修复共享检查订阅与取消语义",
       "objective": "将同 Revision 同 Check 的执行去重建模为共享执行加独立订阅者；单个 Job 取消、超时或变 stale 不得终止其他仍活跃订阅者使用的共享检查。",
-      "status": "planned",
+      "status": "ready",
       "dependsOn": [
         "T2"
       ],
@@ -768,7 +768,7 @@
       "id": "T16",
       "title": "补充仓库远程映射一致性诊断",
       "objective": "保持 repoId 与 canonicalRoot 稳定；在 Git origin、Registry remote 和 GitHub 插件目标不一致时返回明确 warning，不静默重绑既有 Issue、Run 或 Edit Session。",
-      "status": "planned",
+      "status": "ready",
       "dependsOn": [],
       "allowedPaths": [
         "src/cli/repositories/registry.ts",
@@ -1115,9 +1115,46 @@
       "createdAt": "2026-06-26T08:48:01.979Z",
       "updatedAt": "2026-06-26T10:28:50.000Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    },
+    {
+      "id": "T23",
+      "title": "压缩 Issue 与 Task 默认读取响应以消除 502",
+      "objective": "为 get_issue 和 get_task_progress_detail 建立 summary/full 两级读取契约；默认只返回有界 Task、Run 与 Timeline 摘要，完整证据通过 detail_level=full 显式读取，避免大 Issue 或长时间线导致 Connector 502。",
+      "status": "ready",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src/cli/mcp/legacy-tool-service.ts",
+        "tests/cli/mcp-controller.test.ts"
+      ],
+      "forbiddenPaths": [
+        "src/cli/controller/lifecycle.ts",
+        "tests/cli/controller-service.test.ts",
+        ".git/**",
+        ".ai/harness/jobs/**",
+        ".ai/harness/worktrees/**"
+      ],
+      "checks": [
+        "package:check:type",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "get_issue 默认不返回 notes、verification 详情、历史 Run outcome 等大字段",
+        "get_issue detail_level=full 保持原始完整结构",
+        "get_task_progress_detail 默认只返回有界 Run 摘要和不超过配置上限的 Timeline",
+        "get_task_progress_detail detail_level=full 保持完整读取能力",
+        "默认响应体有明确字节上限回归断言",
+        "现有状态与任务生命周期调用保持兼容"
+      ],
+      "risk": "high",
+      "recommendedAgent": "codex",
+      "notes": [],
+      "runIds": [],
+      "createdAt": "2026-06-26T11:01:38.788Z",
+      "updatedAt": "2026-06-26T11:01:38.788Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     }
   ],
   "createdAt": "2026-06-24T08:57:01.690Z",
-  "updatedAt": "2026-06-26T10:28:50.000Z",
+  "updatedAt": "2026-06-26T11:01:38.788Z",
   "repoId": "repo_123b7cf58b6b17b5cbe46a56"
 }

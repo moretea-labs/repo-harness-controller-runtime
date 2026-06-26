@@ -117,7 +117,7 @@ function currentPackageVersion(): string {
 }
 
 export function controllerServiceStatePath(repoRoot: string): string {
-  return join(repoRoot, ".repo-harness", "controller-service.json");
+  return join(repoRoot, ".ai", "local", "state", "controller-service.json");
 }
 
 export function defaultControllerServiceLogPath(repoRoot: string): string {

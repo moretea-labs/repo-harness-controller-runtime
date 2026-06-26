@@ -115,9 +115,15 @@ describe("controller service lifecycle", () => {
 
     const start = runCli(controllerHome, ["start", "--repo", repoRoot, "--json"], { useScript: true });
     expect(start.status).toBe(0);
-    const firstStart = JSON.parse(start.stdout) as { action: string; status: { running: boolean; supervisor: { pid?: number } } };
+    const firstStart = JSON.parse(start.stdout) as {
+      action: string;
+      status: { running: boolean; serviceStatePath: string; supervisor: { pid?: number } };
+    };
     expect(firstStart.action).toBe("started");
     expect(firstStart.status.running).toBe(true);
+    expect(firstStart.status.serviceStatePath).toBe(
+      join(repoRoot, ".ai", "local", "state", "controller-service.json"),
+    );
     expect(firstStart.status.supervisor.pid).toBeTruthy();
 
     const secondStart = runCli(controllerHome, ["start", "--repo", repoRoot, "--json"], { useScript: true });

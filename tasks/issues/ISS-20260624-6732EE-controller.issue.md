@@ -2,7 +2,7 @@
 id: "ISS-20260624-6732EE"
 kind: "bug"
 status: "in_progress"
-updated_at: "2026-06-26T10:28:50.000Z"
+updated_at: "2026-06-26T11:01:38.788Z"
 source: "repo-harness-controller-v8"
 ---
 
@@ -136,7 +136,7 @@ source: "repo-harness-controller-v8"
 
 ### T11 — 修复自动集成 Run 终态一致性
 
-- Status: `planned`
+- Status: `ready`
 - Objective: 确保 worktree 自动集成 Run 只有在集成完成并清理，或记录明确 autoIntegrationError 后才进入成功终态；worker 在 result 写入后异常退出不得被恢复为假成功。
 - Depends on: `T1`
 - Allowed paths: `src/cli/agent-jobs/integration.ts`, `src/cli/agent-jobs/job-manager.ts`, `src/cli/agent-jobs/job-worker.ts`, `tests/cli/local-bridge.test.ts`, `tests/cli/mcp-controller.test.ts`
@@ -145,7 +145,7 @@ source: "repo-harness-controller-v8"
 
 ### T12 — 收敛检查进程树与证据 Revision
 
-- Status: `planned`
+- Status: `ready`
 - Objective: 确保检查任务只有在完整子进程树退出后才进入终态；检查执行期间仓库 Revision 变化时不得生成可复用成功证据，并为排队/持锁阶段提供可观测状态。
 - Depends on: `T2`
 - Allowed paths: `src/cli/controller/check-runner.ts`, `src/cli/local-bridge/job-store.ts`, `tests/cli/local-bridge.test.ts`, `tests/cli/mcp-controller.test.ts`
@@ -154,7 +154,7 @@ source: "repo-harness-controller-v8"
 
 ### T13 — 修复共享检查订阅与取消语义
 
-- Status: `planned`
+- Status: `ready`
 - Objective: 将同 Revision 同 Check 的执行去重建模为共享执行加独立订阅者；单个 Job 取消、超时或变 stale 不得终止其他仍活跃订阅者使用的共享检查。
 - Depends on: `T2`
 - Allowed paths: `src/cli/controller/check-runner.ts`, `src/cli/local-bridge/job-store.ts`, `tests/cli/local-bridge.test.ts`
@@ -181,7 +181,7 @@ source: "repo-harness-controller-v8"
 
 ### T16 — 补充仓库远程映射一致性诊断
 
-- Status: `planned`
+- Status: `ready`
 - Objective: 保持 repoId 与 canonicalRoot 稳定；在 Git origin、Registry remote 和 GitHub 插件目标不一致时返回明确 warning，不静默重绑既有 Issue、Run 或 Edit Session。
 - Depends on: none
 - Allowed paths: `src/cli/repositories/registry.ts`, `tests/cli/repository-registry-v81.test.ts`, `src/cli/mcp/tools.ts`
@@ -205,10 +205,6 @@ source: "repo-harness-controller-v8"
 - Allowed paths: `tasks/reports/**`, `docs/**`, `.github/**`
 - Checks: not defined
 - Execution hint: agent / codex
-- Notes:
-  - 审计和清理结果记录于 `tasks/reports/20260626-controller-read-safety-and-topology-convergence.md`。
-  - 4 个已合并 worktree 的脏改动先导出到 `/tmp/repo-harness-worktree-backups/`，随后删除对应 worktree 和分支。
-  - 仅保留 `archive/local-main-pre-convergence-20260624` 与 `codex/v81-current-snapshot-20260623` 两个仍含大体量唯一历史的本地分支。
 
 ### T19 — 停止并根治孤儿 Job Worker CPU 泄露
 
@@ -245,10 +241,15 @@ source: "repo-harness-controller-v8"
 - Allowed paths: `src/cli/mcp/**`, `src/runtime/gateway/**`, `src/cli/agent-jobs/**`, `src/runtime/execution/**`, `tests/cli/**`, `tests/runtime/**`, `docs/**`
 - Checks: `package:check:type`, `package:check:controller-v8`
 - Execution hint: agent / codex
-- Notes:
-  - `get_task_run`、`get_task_run_log`、`list_task_runs`、`get_job` 和 `list_jobs` 已改为 summary-first；完整路径和 full durable state 需要显式 opt-in。
-  - Local Controller lifecycle 健康检查改为对目标 `--repo` 计算 fingerprint，修复 detached 启停测试中的误判 unhealthy。
-  - 验证证据见 `tasks/reports/20260626-controller-read-safety-and-topology-convergence.md`。
+
+### T23 — 压缩 Issue 与 Task 默认读取响应以消除 502
+
+- Status: `ready`
+- Objective: 为 get_issue 和 get_task_progress_detail 建立 summary/full 两级读取契约；默认只返回有界 Task、Run 与 Timeline 摘要，完整证据通过 detail_level=full 显式读取，避免大 Issue 或长时间线导致 Connector 502。
+- Depends on: none
+- Allowed paths: `src/cli/mcp/legacy-tool-service.ts`, `tests/cli/mcp-controller.test.ts`
+- Checks: `package:check:type`, `package:check:controller-v8`
+- Execution hint: agent / codex
 
 ## Related Artifacts
 
