@@ -1,0 +1,45 @@
+name: Diagnostic Runtime Storage
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install
+        run: bun install --frozen-lockfile
+      - name: Run targeted diagnostics
+        id: diagnostics
+        shell: bash
+        run: |
+          set +e
+          {
+            echo '=== TYPECHECK ==='
+            bun run check:type
+            TYPE_STATUS=$?
+            echo "TYPE_STATUS=$TYPE_STATUS"
+            echo '=== TARGETED TEST ==='
+            bun test --timeout 180000 tests/cli/repository-runtime-storage-v81.test.ts
+            TEST_STATUS=$?
+            echo "TEST_STATUS=$TEST_STATUS"
+            if [[ "$TYPE_STATUS" -ne 0 || "$TEST_STATUS" -ne 0 ]]; then
+              exit 1
+            fi
+          } 2>&1 | tee diagnostic.log
+          exit ${PIPESTATUS[0]}
+      - name: Upload diagnostic output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-storage-diagnostic
+          path: diagnostic.log
+          if-no-files-found: error
