@@ -28,6 +28,9 @@ import { executionScopesConflict, taskExecutionPolicy, verificationEvidencePasse
 
 const ISSUE_ROOT = 'tasks/issues';
 const EPHEMERAL_ISSUE_ROOT = '.ai/harness/ephemeral-issues';
+const ISSUE_SUMMARY_NOTE_LIMIT = 2;
+const ISSUE_SUMMARY_NOTE_CHARS = 280;
+const ISSUE_SUMMARY_RUN_ID_LIMIT = 10;
 
 function slugify(value: string): string {
   return value.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64) || 'issue';
@@ -211,8 +214,71 @@ export function projectIssueEffectiveView(repoRoot: string, issue: ControllerIss
   };
 }
 
+function summarizeText(value: string, maxChars: number): string {
+  return value.length <= maxChars ? value : `${value.slice(0, Math.max(0, maxChars - 1))}…`;
+}
+
+function summarizeNotes(notes: string[]): string[] {
+  return notes.slice(-ISSUE_SUMMARY_NOTE_LIMIT).map((note) => summarizeText(note, ISSUE_SUMMARY_NOTE_CHARS));
+}
+
+function summarizeVerification(verification?: TaskVerification) {
+  if (!verification) return undefined;
+  return {
+    repoId: verification.repoId,
+    runId: verification.runId,
+    integratedRevision: verification.integratedRevision,
+    reviewedDiffHash: verification.reviewedDiffHash,
+    checkResults: verification.checkResults,
+    acceptanceResults: verification.acceptanceResults.map((result) => ({
+      criterion: result.criterion,
+      ok: result.ok,
+    })),
+    acceptanceResultCount: verification.acceptanceResults.length,
+    commandEvidenceCount: verification.commandEvidence?.length ?? 0,
+    reviewer: verification.reviewer,
+    verifiedAt: verification.verifiedAt,
+    autoCompleted: verification.autoCompleted,
+    detailLevel: 'summary' as const,
+  };
+}
+
+function summarizeEffectiveTaskView(task: ReturnType<typeof projectIssueEffectiveView>['tasks'][number]) {
+  const {
+    notes,
+    runIds,
+    verification,
+    historicalRunOutcomes,
+    ...rest
+  } = task;
+  return {
+    ...rest,
+    notes: summarizeNotes(notes),
+    noteCount: notes.length,
+    runIds: runIds.slice(-ISSUE_SUMMARY_RUN_ID_LIMIT),
+    runIdCount: runIds.length,
+    verification: summarizeVerification(verification),
+    historicalRunOutcomeCount: historicalRunOutcomes.length,
+  };
+}
+
 export function getIssueEffectiveView(repoRoot: string, id: string) {
   return projectIssueEffectiveView(repoRoot, getIssue(repoRoot, id));
+}
+
+export function getIssueReadView(
+  repoRoot: string,
+  id: string,
+  detailLevel: 'summary' | 'full' = 'summary',
+) {
+  const full = getIssueEffectiveView(repoRoot, id);
+  if (detailLevel === 'full') return { ...full, detailLevel };
+  return {
+    ...full,
+    detailLevel,
+    tasks: full.tasks.map(summarizeEffectiveTaskView),
+    next: 'Call get_issue with detail_level=full only when full notes, verification evidence, or run history is required.',
+  };
 }
 
 export function listIssueEffectiveViews(repoRoot: string) {

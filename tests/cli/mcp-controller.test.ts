@@ -12,6 +12,7 @@ import { tmpdir } from "os";
 import { spawnSync } from "child_process";
 import { join } from "path";
 import { writeJsonAtomic } from "../../src/runtime/shared/json-files";
+import { appendControllerWorklogEvent } from "../../src/cli/controller/worklog";
 import { createExecutionJob, updateExecutionJob } from "../../src/runtime/execution/jobs/store";
 import { callRuntimeTool } from "../../src/runtime/gateway/mcp/runtime-tools";
 import { getMcpPolicy } from "../../src/cli/mcp/policy";
@@ -85,6 +86,95 @@ async function withController<T>(
     else process.env.REPO_HARNESS_CONTROLLER_HOME = previousControllerHome;
     rmSync(repoRoot, { recursive: true, force: true });
     rmSync(controllerHome, { recursive: true, force: true });
+  }
+}
+
+function issueFilePath(
+  repoRoot: string,
+  issue: { id: string; slug: string },
+) {
+  return join(repoRoot, "tasks/issues", `${issue.id}-${issue.slug}.issue.json`);
+}
+
+function seedLargeControllerIssue(
+  repoRoot: string,
+  issue: { id: string; slug: string; tasks: Array<{ id: string }> },
+) {
+  const path = issueFilePath(repoRoot, issue);
+  const stored = JSON.parse(readFileSync(path, "utf-8")) as Record<string, any>;
+  const task = stored.tasks[0];
+  task.notes = Array.from({ length: 24 }, (_, index) =>
+    `note-${index}: ${"controller-summary-payload ".repeat(24)}`,
+  );
+  task.runIds = Array.from({ length: 18 }, (_, index) => `RUN-SUMMARY-${index + 1}`);
+  task.verification = {
+    runId: task.runIds.at(-1),
+    checkResults: Array.from({ length: 4 }, (_, index) => ({
+      checkId: `check-${index + 1}`,
+      ok: true,
+      summary: `summary-${index + 1}`,
+    })),
+    commandEvidence: Array.from({ length: 6 }, (_, index) => ({
+      command: ["bun", "test", `suite-${index + 1}`],
+      ok: true,
+      stdout: "stdout ".repeat(200),
+      stderr: "stderr ".repeat(120),
+    })),
+    acceptanceResults: Array.from({ length: 5 }, (_, index) => ({
+      criterion: `criterion-${index + 1}`,
+      ok: true,
+      evidence: "evidence ".repeat(80),
+    })),
+    reviewer: "summary-fixture",
+    verifiedAt: "2026-06-26T12:00:00.000Z",
+  };
+  writeJsonAtomic(path, stored);
+
+  for (let index = 0; index < task.runIds.length; index += 1) {
+    const runId = task.runIds[index];
+    writeJsonAtomic(join(repoRoot, ".ai/harness/jobs", runId, "meta.json"), {
+      schemaVersion: 3,
+      runId,
+      issueId: stored.id,
+      taskId: task.id,
+      agent: "codex",
+      provider: "local",
+      executionMode: "worktree",
+      status: index === task.runIds.length - 1 ? "succeeded" : "failed",
+      repoRoot,
+      worktree: join(repoRoot, ".ai/harness/worktrees", runId),
+      branch: `codex/${runId.toLowerCase()}`,
+      baseRevision: "abc1234",
+      promptPath: join(repoRoot, ".ai/harness/jobs", runId, "prompt.md"),
+      stdoutPath: join(repoRoot, ".ai/harness/jobs", runId, "stdout.log"),
+      stderrPath: join(repoRoot, ".ai/harness/jobs", runId, "stderr.log"),
+      resultPath: join(repoRoot, ".ai/harness/jobs", runId, "result.json"),
+      eventsPath: join(repoRoot, ".ai/harness/jobs", runId, "events.jsonl"),
+      error: index === task.runIds.length - 1 ? undefined : "failure ".repeat(80),
+      progress: {
+        phase: index === task.runIds.length - 1 ? "completed" : "failed",
+        percent: index === task.runIds.length - 1 ? 100 : 0,
+        currentActivity: `run-${index + 1}`,
+        lastActivityAt: `2026-06-26T12:${String(index).padStart(2, "0")}:00.000Z`,
+        activityCount: 12 + index,
+      },
+      createdAt: `2026-06-26T11:${String(index).padStart(2, "0")}:00.000Z`,
+      startedAt: `2026-06-26T11:${String(index).padStart(2, "0")}:10.000Z`,
+      finishedAt: `2026-06-26T11:${String(index).padStart(2, "0")}:50.000Z`,
+    });
+  }
+
+  for (let index = 0; index < 140; index += 1) {
+    appendControllerWorklogEvent(repoRoot, {
+      at: `2026-06-26T13:${String(Math.floor(index / 2)).padStart(2, "0")}:${index % 2 === 0 ? "00" : "30"}.000Z`,
+      category: "run",
+      action: "run_activity",
+      summary: `timeline-${index + 1}: ${"history ".repeat(20)}`,
+      issueId: stored.id,
+      taskId: task.id,
+      runId: task.runIds[index % task.runIds.length],
+      details: { message: "detail ".repeat(120) },
+    });
   }
 }
 
@@ -219,6 +309,90 @@ describe("MCP controller profile", () => {
       const status = await jsonTool(ctx, "get_github_plugin_status");
       expect(status.value.ready).toBe(false);
       expect(status.value.config.repository).toBe("owner/repository");
+    });
+  });
+
+  test("returns bounded issue summaries by default and keeps full detail opt-in", async () => {
+    await withController(async (repoRoot, ctx) => {
+      const created = await jsonTool(ctx, "create_issue", {
+        title: "Bounded issue summary",
+        summary: "Exercise summary and full issue reads.",
+        tasks: [{
+          title: "Large task",
+          objective: "Seed large controller metadata.",
+          allowed_paths: ["src/**"],
+          checks: ["focused"],
+        }],
+      });
+      seedLargeControllerIssue(repoRoot, created.value);
+
+      const summary = await jsonTool(ctx, "get_issue", {
+        issue_id: created.value.id,
+      });
+      const full = await jsonTool(ctx, "get_issue", {
+        issue_id: created.value.id,
+        detail_level: "full",
+      });
+
+      expect(summary.value.detailLevel).toBe("summary");
+      expect(summary.value.tasks[0].noteCount).toBe(24);
+      expect(summary.value.tasks[0].notes).toHaveLength(2);
+      expect(summary.value.tasks[0].runIdCount).toBe(18);
+      expect(summary.value.tasks[0].runIds).toHaveLength(10);
+      expect(summary.value.tasks[0].verification.commandEvidenceCount).toBe(6);
+      expect(summary.value.tasks[0].verification.commandEvidence).toBeUndefined();
+      expect(summary.value.tasks[0].historicalRunOutcomes).toBeUndefined();
+      expect(full.value.detailLevel).toBe("full");
+      expect(full.value.tasks[0].notes).toHaveLength(24);
+      expect(full.value.tasks[0].runIds).toHaveLength(18);
+      expect(full.value.tasks[0].verification.commandEvidence).toHaveLength(6);
+      expect(Buffer.byteLength(summary.raw.content[0].text)).toBeLessThan(12_000);
+      expect(Buffer.byteLength(full.raw.content[0].text)).toBeGreaterThan(30_000);
+    });
+  });
+
+  test("returns bounded task progress detail by default and keeps full detail opt-in", async () => {
+    await withController(async (repoRoot, ctx) => {
+      const created = await jsonTool(ctx, "create_issue", {
+        title: "Bounded task detail",
+        summary: "Exercise summary and full task detail reads.",
+        tasks: [{
+          title: "Large task detail",
+          objective: "Seed large run history and timeline.",
+          allowed_paths: ["src/**"],
+          checks: ["focused"],
+        }],
+      });
+      seedLargeControllerIssue(repoRoot, created.value);
+
+      const summary = await jsonTool(ctx, "get_task_progress_detail", {
+        issue_id: created.value.id,
+        task_id: "T1",
+      });
+      const full = await jsonTool(ctx, "get_task_progress_detail", {
+        issue_id: created.value.id,
+        task_id: "T1",
+        detail_level: "full",
+      });
+
+      expect(summary.value.detailLevel).toBe("summary");
+      expect(summary.value.runCount).toBe(18);
+      expect(summary.value.runs.length).toBeGreaterThan(0);
+      expect(summary.value.runs.length).toBeLessThanOrEqual(6);
+      expect(summary.value.runs[0].repoRoot).toBeUndefined();
+      expect(summary.value.runs[0].promptPath).toBeUndefined();
+      expect(summary.value.task.noteCount).toBe(24);
+      expect(summary.value.task.runIdCount).toBe(18);
+      expect(summary.value.task.effectiveState.historicalRunOutcomeCount).toBeGreaterThan(0);
+      expect(summary.value.task.effectiveState.historicalRunOutcomes).toHaveLength(0);
+      expect(summary.value.timelineCount).toBeGreaterThan(summary.value.timeline.length);
+      expect(summary.value.timeline.length).toBeLessThanOrEqual(20);
+      expect(full.value.detailLevel).toBe("full");
+      expect(full.value.runs).toHaveLength(18);
+      expect(full.value.timeline.length).toBeGreaterThan(60);
+      expect(full.value.runs[0].repoRoot).toBe(repoRoot);
+      expect(Buffer.byteLength(summary.raw.content[0].text)).toBeLessThan(20_000);
+      expect(Buffer.byteLength(full.raw.content[0].text)).toBeGreaterThan(50_000);
     });
   });
 
