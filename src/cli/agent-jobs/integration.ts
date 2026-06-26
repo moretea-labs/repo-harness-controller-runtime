@@ -1,5 +1,11 @@
 import { createHash } from "crypto";
-import { existsSync, readFileSync, rmSync, statSync } from "fs";
+import {
+  existsSync,
+  lstatSync,
+  readFileSync,
+  readlinkSync,
+  statSync,
+} from "fs";
 import { spawnSync } from "child_process";
 import { relative } from "path";
 import {
@@ -14,9 +20,13 @@ import { readTaskRunEvidence } from "../controller/run-evidence";
 import { resolveEffectiveTaskState } from "../controller/task-status-resolver";
 import { resolveMcpPath } from "../mcp/paths";
 import type { McpPolicy } from "../mcp/types";
-import { getAgentJob, markAgentJobIntegrated } from "./job-manager";
+import {
+  getAgentJob,
+  listAgentJobs,
+  markAgentJobIntegrated,
+} from "./job-manager";
 
-function sha256(value: string): string {
+function sha256(value: string | Buffer): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
@@ -78,6 +88,161 @@ function baseContent(
   if (binary(result.stdout))
     throw new Error(`binary file integration is not supported: ${path}`);
   return { exists: true, content: result.stdout.toString("utf-8") };
+}
+
+function branchExists(repoRoot: string, branch: string): boolean {
+  return gitBuffer(repoRoot, [
+    "show-ref",
+    "--verify",
+    "--quiet",
+    `refs/heads/${branch}`,
+  ]).ok;
+}
+
+function worktreePathMatchesRoot(
+  repoRoot: string,
+  worktree: string,
+  path: string,
+): boolean {
+  const workerPath = `${worktree}/${path}`;
+  const rootPath = `${repoRoot}/${path}`;
+  const workerExists = existsSync(workerPath);
+  const rootExists = existsSync(rootPath);
+  if (workerExists !== rootExists) return false;
+  if (!workerExists) return true;
+
+  const workerStat = lstatSync(workerPath);
+  const rootStat = lstatSync(rootPath);
+  if (workerStat.isSymbolicLink() || rootStat.isSymbolicLink()) {
+    return (
+      workerStat.isSymbolicLink() &&
+      rootStat.isSymbolicLink() &&
+      readlinkSync(workerPath) === readlinkSync(rootPath)
+    );
+  }
+  if (!workerStat.isFile() || !rootStat.isFile()) return false;
+  return sha256(readFileSync(workerPath)) === sha256(readFileSync(rootPath));
+}
+
+export interface IntegratedWorktreeCleanupAudit {
+  eligible: boolean;
+  reasons: string[];
+  worktreeExists: boolean;
+  branchExists: boolean;
+  uniqueCommitCount: number | null;
+  changedPaths: string[];
+  mismatchedPaths: string[];
+  conflictingRunIds: string[];
+}
+
+export function inspectIntegratedWorktreeCleanup(
+  repoRoot: string,
+  runId: string,
+): IntegratedWorktreeCleanupAudit {
+  const run = getAgentJob(repoRoot, runId);
+  const reasons: string[] = [];
+  const worktreeExists = existsSync(run.worktree);
+  const hasBranch = Boolean(run.branch && branchExists(repoRoot, run.branch));
+  let uniqueCommitCount: number | null = null;
+  let changes: Array<{ status: string; path: string }> = [];
+  const mismatchedPaths: string[] = [];
+
+  if (run.provider !== "local" || run.executionMode !== "worktree") {
+    reasons.push("Run did not use a local isolated worktree");
+  }
+  if (!run.integratedSessionId) {
+    reasons.push("Run has no integrated edit session");
+  }
+
+  const autoFinalizing =
+    run.status === "running" &&
+    run.autoIntegrate === true &&
+    run.progress?.phase === "finalizing";
+  const cleanupRetry = [
+    "succeeded",
+    "failed",
+    "cancelled",
+    "unknown",
+    "waiting_for_user",
+  ].includes(run.status);
+  if (!autoFinalizing && !cleanupRetry) {
+    reasons.push(`Run is still active in status ${run.status}`);
+  }
+
+  const conflictingRunIds = listAgentJobs(repoRoot, 5000)
+    .filter(
+      (entry) =>
+        entry.runId !== runId &&
+        ["queued", "starting", "running", "waiting_for_user"].includes(
+          entry.status,
+        ) &&
+        ((run.branch && entry.branch === run.branch) ||
+          entry.worktree === run.worktree),
+    )
+    .map((entry) => entry.runId);
+  if (conflictingRunIds.length > 0) {
+    reasons.push(
+      `Worktree or branch is referenced by active Runs: ${conflictingRunIds.join(", ")}`,
+    );
+  }
+
+  if (hasBranch) {
+    if (run.branch) {
+      const unique = gitBuffer(repoRoot, [
+        "rev-list",
+        "--count",
+        `HEAD..${run.branch}`,
+      ]);
+      if (!unique.ok) {
+        reasons.push(
+          `Failed to inspect branch-only commits: ${unique.stderr.trim() || "unknown git error"}`,
+        );
+      } else {
+        uniqueCommitCount = Number(unique.stdout.toString("utf-8").trim());
+        if (!Number.isFinite(uniqueCommitCount)) {
+          uniqueCommitCount = null;
+          reasons.push("Git returned an invalid unique-commit count");
+        } else if (uniqueCommitCount > 0) {
+          reasons.push(
+            `Temporary branch contains ${uniqueCommitCount} commit(s) not reachable from the target checkout HEAD`,
+          );
+        }
+      }
+    }
+  } else {
+    uniqueCommitCount = 0;
+  }
+
+  if (worktreeExists) {
+    try {
+      changes = changedPaths(run.worktree);
+      for (const change of changes) {
+        if (!worktreePathMatchesRoot(repoRoot, run.worktree, change.path)) {
+          mismatchedPaths.push(change.path);
+        }
+      }
+      if (mismatchedPaths.length > 0) {
+        reasons.push(
+          `Worktree changes are not fully reproduced in the target workspace: ${mismatchedPaths.join(", ")}`,
+        );
+      }
+    } catch (error) {
+      reasons.push(
+        `Failed to verify worktree contents: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  return {
+    eligible: reasons.length === 0,
+    reasons,
+    worktreeExists,
+    branchExists: hasBranch,
+    uniqueCommitCount,
+    changedPaths: changes.map((entry) => entry.path),
+    mismatchedPaths,
+    conflictingRunIds,
+  };
 }
 
 export function integrateAgentJob(
@@ -230,12 +395,27 @@ export function integrateAgentJob(
 export function cleanupIntegratedWorktree(
   repoRoot: string,
   runId: string,
-): { removed: boolean; branchDeleted: boolean } {
+): {
+  removed: boolean;
+  branchDeleted: boolean;
+  audit: IntegratedWorktreeCleanupAudit;
+} {
   const run = getAgentJob(repoRoot, runId);
-  if (run.provider !== "local" || run.executionMode !== "worktree")
-    return { removed: false, branchDeleted: false };
-  if (!run.integratedSessionId)
-    throw new Error("cannot clean an isolated worktree before integration");
+  if (run.provider !== "local" || run.executionMode !== "worktree") {
+    return {
+      removed: false,
+      branchDeleted: false,
+      audit: inspectIntegratedWorktreeCleanup(repoRoot, runId),
+    };
+  }
+
+  const audit = inspectIntegratedWorktreeCleanup(repoRoot, runId);
+  if (!audit.eligible) {
+    throw new Error(
+      `refusing to clean isolated worktree: ${audit.reasons.join("; ")}`,
+    );
+  }
+
   let removed = !existsSync(run.worktree);
   if (!removed) {
     const remove = gitBuffer(repoRoot, [
@@ -245,27 +425,24 @@ export function cleanupIntegratedWorktree(
       run.worktree,
     ]);
     if (!remove.ok)
-      throw new Error(`failed to remove integrated worktree: ${remove.stderr}`);
+      throw new Error(`failed to remove verified worktree: ${remove.stderr}`);
     removed = !existsSync(run.worktree);
-    if (!removed) {
-      rmSync(run.worktree, { recursive: true, force: true });
-      removed = !existsSync(run.worktree);
-    }
     if (!removed)
       throw new Error(
-        `integrated worktree still exists after cleanup: ${run.worktree}`,
+        `verified worktree still exists after git cleanup: ${run.worktree}`,
       );
   }
-  let branchDeleted = !run.branch;
-  if (run.branch) {
-    const deleted = gitBuffer(repoRoot, ["branch", "-D", run.branch]);
+
+  let branchDeleted = !run.branch || !branchExists(repoRoot, run.branch);
+  if (run.branch && !branchDeleted) {
+    const deleted = gitBuffer(repoRoot, ["branch", "-d", run.branch]);
     if (!deleted.ok && !deleted.stderr.includes("not found"))
       throw new Error(
-        `failed to delete integrated worktree branch: ${deleted.stderr}`,
+        `failed to delete verified worktree branch: ${deleted.stderr}`,
       );
-    branchDeleted = true;
+    branchDeleted = !branchExists(repoRoot, run.branch);
   }
-  return { removed, branchDeleted };
+  return { removed, branchDeleted, audit };
 }
 
 export function taskRunDiff(
