@@ -1,0 +1,67 @@
+name: Run controller 502 fix on PR
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    env:
+      BUN_TEST_MAX_CONCURRENCY: "1"
+      BUN_TEST_TIMEOUT_MS: "180000"
+      BUN_TEST_ISOLATE_FILES: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.10
+
+      - name: Extract and run bounded response patch
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          workflow = Path('.github/workflows/apply-controller-502-fix.yml').read_text().splitlines()
+          marker = '      - name: Apply bounded response patch'
+          start = workflow.index(marker)
+          run_line = next(i for i in range(start, len(workflow)) if workflow[i] == '        run: |')
+          end = next(i for i in range(run_line + 1, len(workflow)) if workflow[i].startswith('      - name:'))
+          script = '\n'.join(line[10:] if line.startswith('          ') else line for line in workflow[run_line + 1:end]) + '\n'
+          Path('/tmp/apply-controller-502.sh').write_text(script)
+          PY
+          bash /tmp/apply-controller-502.sh
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Focused tests
+        run: bun test tests/cli/mcp-controller.test.ts
+
+      - name: Type check
+        run: bun run check:type
+
+      - name: Controller v8 gate
+        run: bun run check:controller-v8
+
+      - name: Commit fix and remove temporary workflows
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rm .github/workflows/apply-controller-502-fix.yml
+          rm .github/workflows/run-controller-502-fix-on-pr.yml
+          git add -A
+          git diff --cached --check
+          git commit -m "fix: bound controller status responses"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
