@@ -65,8 +65,6 @@ export type WorkflowContract = {
   helpers: {
     runtimeDirectory?: string;
     compatibilityDirectory?: string;
-    runtimeSource?: string;
-    dir?: string;
     scripts: string[];
   };
   artifacts: {
@@ -187,7 +185,7 @@ export function getHelperScripts(contract: WorkflowContract): string[] {
 }
 
 export function getHelperRuntimeDir(contract: WorkflowContract): string {
-  return contract.helpers.runtimeDirectory ?? contract.helpers.dir ?? "scripts";
+  return contract.helpers.dir ?? "scripts";
 }
 
 export function getRequiredDirectories(contract: WorkflowContract): string[] {
