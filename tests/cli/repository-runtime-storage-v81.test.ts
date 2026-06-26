@@ -24,6 +24,17 @@ function writeRun(root: string, runId: string, status: string, marker: string): 
   }, null, 2)}\n`, 'utf-8');
 }
 
+function writeLocalJob(root: string, jobId: string, status: string, marker: string): void {
+  const directory = join(root, '.ai', 'harness', 'local-jobs', jobId);
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, 'job.json'), `${JSON.stringify({
+    schemaVersion: 1,
+    jobId,
+    status,
+    marker,
+  }, null, 2)}\n`, 'utf-8');
+}
+
 describe('v8.1 repository runtime storage isolation', () => {
   test('isolates identical Run IDs for two repositories under Controller Home', () => {
     const fixture = repositoryFixture();
@@ -70,12 +81,44 @@ describe('v8.1 repository runtime storage isolation', () => {
       expect(realpathSync(localJobsSource)).toBe(realpathSync(localJobsTarget));
       expect(realpathSync(mcpSource)).toBe(realpathSync(mcpTarget));
 
-      mkdirSync(join(localJobsSource, 'JOB-same'), { recursive: true });
-      writeFileSync(join(localJobsSource, 'JOB-same', 'job.json'), '{"status":"queued"}\n', 'utf-8');
+      writeLocalJob(fixture.repoA.canonicalRoot, 'JOB-same', 'succeeded', 'controller-home');
       writeFileSync(join(mcpSource, 'audit.log'), '{"tool":"controller_ready"}\n', 'utf-8');
 
-      expect(readFileSync(join(localJobsTarget, 'JOB-same', 'job.json'), 'utf-8')).toContain('queued');
+      expect(readFileSync(join(localJobsTarget, 'JOB-same', 'job.json'), 'utf-8')).toContain('controller-home');
       expect(readFileSync(join(mcpTarget, 'audit.log'), 'utf-8')).toContain('controller_ready');
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test('migrates terminal legacy Local Jobs before linking repository runtime storage', () => {
+    const fixture = repositoryFixture();
+    try {
+      writeLocalJob(fixture.repoA.canonicalRoot, 'JOB-legacy', 'succeeded', 'terminal');
+      const storage = ensureRepositoryRuntimeStorage(fixture.repoA, fixture.controllerHome);
+      const binding = storage.bindings.find((entry) => entry.name === 'local-jobs');
+      const source = join(fixture.repoA.canonicalRoot, '.ai', 'harness', 'local-jobs');
+      const target = join(repositoryControllerRoot(fixture.controllerHome, fixture.repoA.repoId), 'local-jobs');
+      expect(storage.readyForExecution).toBe(true);
+      expect(binding?.status).toBe('migrated');
+      expect(lstatSync(source).isSymbolicLink()).toBe(true);
+      expect(readFileSync(join(target, 'JOB-legacy', 'job.json'), 'utf-8')).toContain('terminal');
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test('blocks execution while an active legacy Local Job remains repository-local', () => {
+    const fixture = repositoryFixture();
+    try {
+      writeLocalJob(fixture.repoA.canonicalRoot, 'JOB-active', 'running', 'active');
+      const storage = ensureRepositoryRuntimeStorage(fixture.repoA, fixture.controllerHome);
+      const binding = storage.bindings.find((entry) => entry.name === 'local-jobs');
+      const source = join(fixture.repoA.canonicalRoot, '.ai', 'harness', 'local-jobs');
+      expect(storage.readyForExecution).toBe(false);
+      expect(binding?.status).toBe('legacy-active');
+      expect(lstatSync(source).isSymbolicLink()).toBe(false);
+      expect(readFileSync(join(source, 'JOB-active', 'job.json'), 'utf-8')).toContain('active');
     } finally {
       fixture.cleanup();
     }
