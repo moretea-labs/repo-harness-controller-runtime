@@ -51,6 +51,36 @@ describe('v8.1 repository runtime storage isolation', () => {
     }
   });
 
+  test('isolates Local Job tickets and MCP audit data under Controller Home', () => {
+    const fixture = repositoryFixture();
+    try {
+      const storage = ensureRepositoryRuntimeStorage(fixture.repoA, fixture.controllerHome);
+      expect(storage.readyForExecution).toBe(true);
+
+      const controllerRoot = repositoryControllerRoot(fixture.controllerHome, fixture.repoA.repoId);
+      const localJobsSource = join(fixture.repoA.canonicalRoot, '.ai', 'harness', 'local-jobs');
+      const localJobsTarget = join(controllerRoot, 'local-jobs');
+      const mcpSource = join(fixture.repoA.canonicalRoot, '.ai', 'harness', 'mcp');
+      const mcpTarget = join(controllerRoot, 'mcp');
+
+      expect(storage.bindings.find((binding) => binding.name === 'local-jobs')?.status).toBe('linked');
+      expect(storage.bindings.find((binding) => binding.name === 'mcp')?.status).toBe('linked');
+      expect(lstatSync(localJobsSource).isSymbolicLink()).toBe(true);
+      expect(lstatSync(mcpSource).isSymbolicLink()).toBe(true);
+      expect(realpathSync(localJobsSource)).toBe(realpathSync(localJobsTarget));
+      expect(realpathSync(mcpSource)).toBe(realpathSync(mcpTarget));
+
+      mkdirSync(join(localJobsSource, 'JOB-same'), { recursive: true });
+      writeFileSync(join(localJobsSource, 'JOB-same', 'job.json'), '{"status":"queued"}\n', 'utf-8');
+      writeFileSync(join(mcpSource, 'audit.log'), '{"tool":"controller_ready"}\n', 'utf-8');
+
+      expect(readFileSync(join(localJobsTarget, 'JOB-same', 'job.json'), 'utf-8')).toContain('queued');
+      expect(readFileSync(join(mcpTarget, 'audit.log'), 'utf-8')).toContain('controller_ready');
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   test('migrates terminal legacy Runs before linking repository runtime storage', () => {
     const fixture = repositoryFixture();
     try {
