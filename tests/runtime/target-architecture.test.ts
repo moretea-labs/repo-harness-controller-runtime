@@ -25,6 +25,7 @@ import { evaluateSchedule } from '../../src/runtime/workflow/schedules/engine';
 import { createSchedule, listActiveOccurrences, listOccurrences } from '../../src/runtime/workflow/schedules/store';
 import { createPortfolioWorkflow } from '../../src/runtime/workflow/portfolio/store';
 import { recordCandidateFinding } from '../../src/runtime/workflow/findings/store';
+import { invalidateExecutionWorker } from '../../src/runtime/execution/workers/ownership';
 
 const homes: string[] = [];
 function home(): string {
@@ -69,6 +70,44 @@ describe('target architecture runtime', () => {
     expect(() => assertFencingToken(controllerHome, 'repo-a', lease.leaseId, lease.fencingToken + 1)).toThrow('FENCING_TOKEN_STALE');
     releaseExecutionLeases(controllerHome, 'repo-a', 'job-a');
     expect(listActiveLeases(controllerHome, 'repo-a')).toHaveLength(0);
+  });
+
+  test('flags lease loss before a durable worker can keep running', () => {
+    const controllerHome = home();
+    const created = createExecutionJob(controllerHome, {
+      repoId: 'repo-a',
+      type: 'check',
+      requestId: 'lease-loss',
+      semanticKey: 'check:lease-loss',
+      origin: { surface: 'mcp' },
+      payload: { operation: 'run_check', target: 'mcp-tool' },
+      resourceClaims: [{ resourceKey: 'heavy-check:repo-a', mode: 'exclusive' }],
+    }).job;
+    const acquired = acquireExecutionLeases(controllerHome, 'repo-a', created.jobId, created.resourceClaims, 30_000);
+    const running = updateExecutionJob(controllerHome, 'repo-a', created.jobId, (job) => ({
+      ...job,
+      status: 'running',
+      attempt: 1,
+      workerPid: process.pid,
+      leaseRefs: acquired.leases.map((lease) => ({
+        leaseId: lease.leaseId,
+        resourceKey: lease.resourceKey,
+        fencingToken: lease.fencingToken,
+        expiresAt: lease.expiresAt,
+      })),
+    }));
+    expect(invalidateExecutionWorker(controllerHome, 'repo-a', created.jobId, {
+      workerPid: process.pid,
+      attempt: running.attempt,
+      job: running,
+    })).toBeUndefined();
+    releaseExecutionLeases(controllerHome, 'repo-a', created.jobId, running.leaseRefs);
+    const invalidation = invalidateExecutionWorker(controllerHome, 'repo-a', created.jobId, {
+      workerPid: process.pid,
+      attempt: running.attempt,
+    });
+    expect(invalidation?.code).toBe('LEASE_INVALID');
+    expect(invalidation?.message).toContain('LEASE_EXPIRED');
   });
 
   test('auto-isolates a concurrent agent job into a worktree', () => {

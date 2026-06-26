@@ -76,6 +76,9 @@ export interface AgentJobMeta {
   stderrPath: string;
   resultPath: string;
   eventsPath: string;
+  controllerPid?: number;
+  controllerEpoch?: string;
+  controllerEpochPath?: string;
   launchPid?: number;
   workerPid?: number;
   agentPid?: number;
@@ -122,4 +125,8 @@ export interface AgentJobWorkerConfig {
   eventsPath: string;
   timeoutMs: number;
   autoIntegrate: boolean;
+  controllerPid?: number;
+  controllerEpoch?: string;
+  controllerEpochPath?: string;
+  parentPid?: number;
 }

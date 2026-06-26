@@ -345,6 +345,8 @@ export function registerRepository(input: RegisterRepositoryInput): RepositoryRe
     updatedAt: timestamp,
     lastSeenAt: timestamp,
   };
+  const restoringExisting = Boolean(existing && (existing.removedAt || existing.enabled === false));
+  const enabled = input.enabled ?? (restoringExisting ? true : existing?.enabled ?? true);
   const record: RepositoryRecord = {
     schemaVersion: 1,
     repoId,
@@ -361,14 +363,14 @@ export function registerRepository(input: RegisterRepositoryInput): RepositoryRe
     github: defaultGitHubMapping(canonicalRemote, existing?.github, existing?.canonicalRemote, legacyGitHub),
     defaultBranch: input.defaultBranch?.trim() || existing?.defaultBranch || defaultBranch(canonicalRoot),
     repositoryType: input.repositoryType ?? existing?.repositoryType ?? repositoryType(canonicalRoot, rawRemote),
-    enabled: input.enabled ?? existing?.enabled ?? true,
+    enabled,
     createdAt: existing?.createdAt ?? timestamp,
     updatedAt: timestamp,
     lastSeenAt: timestamp,
     configurationPath: join(canonicalRoot, LOCAL_CONFIG),
     stateStorageStrategy: input.stateStorageStrategy ?? existing?.stateStorageStrategy ?? 'hybrid',
-    disabledAt: input.enabled === true ? undefined : existing?.disabledAt,
-    removedAt: undefined,
+    disabledAt: enabled ? undefined : existing?.disabledAt,
+    removedAt: enabled ? undefined : existing?.removedAt,
   };
   const retained = registry.repositories.filter((candidate) => candidate.repoId !== repoId);
   registry.repositories = [
@@ -388,6 +390,7 @@ export function updateRepository(repoId: string, patch: UpdateRepositoryInput, c
   if (index < 0) throw new Error(`repository not found: ${repoId}`);
   const previous = registry.repositories[index];
   const enabled = patch.enabled ?? previous.enabled;
+  const restoring = previous.enabled === false && patch.enabled === true;
   const next: RepositoryRecord = {
     ...previous,
     ...patch,
@@ -395,7 +398,7 @@ export function updateRepository(repoId: string, patch: UpdateRepositoryInput, c
     defaultBranch: patch.defaultBranch?.trim() || previous.defaultBranch,
     enabled,
     disabledAt: enabled ? undefined : previous.disabledAt ?? now(),
-    removedAt: enabled ? undefined : previous.removedAt,
+    removedAt: restoring ? previous.removedAt : enabled ? undefined : previous.removedAt,
     github: patch.github ?? previous.github,
     updatedAt: now(),
   };
@@ -556,10 +559,14 @@ export function resolveRepositorySelection(input: {
   explicitPath?: string;
   controllerHome?: string;
   allowSoleRepository?: boolean;
+  allowDisabledReason?: 'restore';
 }): RepositoryRecord {
   if (input.repoId?.trim()) {
     const record = getRepository(input.repoId.trim(), input.controllerHome);
-    if (!record.enabled) throw new Error(`repository is disabled: ${record.repoId}`);
+    if (!record.enabled) {
+      const allowRestore = input.allowDisabledReason === 'restore';
+      if (!allowRestore) throw new Error(`repository is disabled: ${record.repoId}`);
+    }
     return selectRepositoryCheckout(record, input.checkoutId);
   }
   if (input.explicitPath?.trim()) {

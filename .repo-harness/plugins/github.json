@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "enabled": true,
-  "repository": "greysonouyang/repo-harness-controller-runtime",
+  "repository": "moretea-labs/repo-harness-controller-runtime",
   "syncMode": "manual",
   "includeTasks": true
 }

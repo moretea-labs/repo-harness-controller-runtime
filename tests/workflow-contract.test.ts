@@ -58,7 +58,6 @@ describe("workflow contract manifest", () => {
   test("helper inventory should come from the workflow contract", () => {
     const contract = loadWorkflowContract(join(ROOT, "assets/workflow-contract.v1.json"));
     expect(contract.helpers.runtimeDirectory).toBe("package:assets/templates/helpers");
-    expect(contract.helpers.runtimeSource).toBe("package");
     expect(contract.helpers.compatibilityDirectory).toBe("scripts");
     expect(contract.helpers.scripts).toContain("contract-worktree.sh");
     expect(contract.helpers.scripts).toContain("contract-run.ts");

@@ -34,6 +34,11 @@ import {
   repositoryIdentity,
 } from "../controller/runtime-config";
 import { normalizeRemoteUrl, stableCheckoutId, stableRemoteRepoId } from "../repositories/identity";
+import {
+  ensureControllerEpoch,
+  invalidateAgentWorker,
+  isPidAlive,
+} from "./worker-lifecycle";
 import type {
   AgentExecutionMode,
   AgentJobEvent,
@@ -77,13 +82,7 @@ function writeJson(path: string, value: unknown): void {
 }
 
 function isAlive(pid: number | undefined): boolean {
-  if (!pid) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (_error) {
-    return false;
-  }
+  return isPidAlive(pid);
 }
 
 function atomicCreateJson(path: string, value: unknown): boolean {
@@ -302,6 +301,65 @@ function writeAgentMeta(repoRoot: string, path: string, meta: AgentJobMeta): voi
   updateRunIndexes(repoRoot, meta);
 }
 
+function terminateRunProcess(pid: number | undefined): void {
+  if (!pid || pid === process.pid || !isAlive(pid)) return;
+  try {
+    if (process.platform === "win32") process.kill(pid, "SIGTERM");
+    else process.kill(-pid, "SIGTERM");
+  } catch (_error) {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch (_nested) {
+      /* already exited */
+    }
+  }
+}
+
+function markRunUnknown(
+  repoRoot: string,
+  path: string,
+  meta: AgentJobMeta,
+  reason: string,
+): void {
+  if (["succeeded", "failed", "cancelled", "unknown"].includes(meta.status)) return;
+  meta.status = "unknown";
+  meta.error = meta.error ?? reason;
+  meta.finishedAt = meta.finishedAt ?? new Date().toISOString();
+  meta.lastHeartbeatAt = meta.finishedAt;
+  writeAgentMeta(repoRoot, path, meta);
+  appendAgentJobEvent(repoRoot, meta.runId, {
+    type: "run_failed",
+    message: meta.error,
+  });
+  reconcileLatestTerminalRun(repoRoot, meta);
+}
+
+function reconcileLocalRunOwnership(
+  repoRoot: string,
+  path: string,
+  meta: AgentJobMeta,
+): void {
+  if (!["queued", "starting", "running"].includes(meta.status)) return;
+  const hasOwnershipMetadata = Boolean(
+    meta.controllerPid || meta.controllerEpoch || meta.controllerEpochPath,
+  );
+  if (!hasOwnershipMetadata && meta.status !== "running") return;
+  const invalidation = invalidateAgentWorker(meta, {
+    controllerPid: meta.controllerPid,
+    controllerEpoch: meta.controllerEpoch,
+    controllerEpochPath: meta.controllerEpochPath
+      ? join(repoRoot, meta.controllerEpochPath)
+      : undefined,
+  }, {
+    workerPid: meta.workerPid,
+  });
+  if (!invalidation) return;
+  terminateRunProcess(meta.agentPid);
+  terminateRunProcess(meta.workerPid);
+  terminateRunProcess(meta.launchPid);
+  markRunUnknown(repoRoot, path, meta, invalidation.message);
+}
+
 export function appendAgentJobEvent(
   repoRoot: string,
   runId: string,
@@ -337,7 +395,7 @@ export function appendAgentJobEvent(
 
 function activeRunIndexEntries(repoRoot: string): AgentRunIndexEntry[] {
   let active = readRunIndex(repoRoot, 'active').runs;
-  if (active.length === 0 && readRunIndex(repoRoot, 'recent').runs.length === 0 && existsSync(join(repoRoot, JOB_ROOT))) {
+  if (active.length === 0 && existsSync(join(repoRoot, JOB_ROOT))) {
     listAgentJobs(repoRoot, 5000);
     active = readRunIndex(repoRoot, 'active').runs;
   }
@@ -346,7 +404,7 @@ function activeRunIndexEntries(repoRoot: string): AgentRunIndexEntry[] {
 
 function activeLocalRuns(repoRoot: string, options: { excludeRunId?: string } = {}): AgentJobMeta[] {
   return activeRunIndexEntries(repoRoot).flatMap((entry) => {
-    try { return [readJson<AgentJobMeta>(metaPath(repoRoot, entry.runId))]; }
+    try { return [getAgentJob(repoRoot, entry.runId)]; }
     catch (_error) { return []; }
   }).filter(
     (entry) =>
@@ -990,6 +1048,11 @@ export function launchAcceptedTaskJob(
   }
 
   const configPath = join(paths.dir, "worker-config.json");
+  const controllerEpoch = ensureControllerEpoch(repoRoot);
+  meta.controllerPid = controllerEpoch.pid;
+  meta.controllerEpoch = controllerEpoch.epoch;
+  meta.controllerEpochPath = relative(repoRoot, controllerEpoch.path).replace(/\\/g, "/");
+  meta.launchPid = process.pid;
   const workerConfig: AgentJobWorkerConfig = {
     metaPath: absoluteMetaPath,
     agent: meta.agent as Exclude<ControllerAgent, "github-copilot">,
@@ -1001,6 +1064,10 @@ export function launchAcceptedTaskJob(
     eventsPath: paths.eventsPath,
     timeoutMs: meta.timeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS,
     autoIntegrate: executionMode === "worktree",
+    controllerPid: meta.controllerPid,
+    controllerEpoch: meta.controllerEpoch,
+    controllerEpochPath: controllerEpoch.path,
+    parentPid: process.pid,
   };
   writeJson(configPath, workerConfig);
   const workerEntry = fileURLToPath(
@@ -1011,10 +1078,9 @@ export function launchAcceptedTaskJob(
   try {
     const child = spawn(process.execPath, [workerEntry, configPath], {
       cwd: repoRoot,
-      detached: true,
+      detached: false,
       stdio: ["ignore", outFd, errFd],
     });
-    child.unref();
     meta.workerPid = child.pid;
     meta.status = "running";
     meta.progress = {
@@ -1187,6 +1253,7 @@ export function getAgentJob(
       writeAgentMeta(repoRoot, path, meta);
     }
   } else if (meta.provider === "local") {
+    reconcileLocalRunOwnership(repoRoot, path, meta);
     const resultAbsolute = join(repoRoot, meta.resultPath);
     const autoIntegrationInFlight = meta.status === "running" &&
       meta.autoIntegrate === true &&
@@ -1274,6 +1341,33 @@ export function getAgentJob(
         Date.now() > deadlineMs,
     },
   };
+}
+
+export function reconcileAgentJobs(repoRoot: string): {
+  scanned: number;
+  terminalized: number;
+} {
+  const runs = activeRunIndexEntries(repoRoot);
+  let terminalized = 0;
+  for (const entry of runs) {
+    try {
+      const path = metaPath(repoRoot, entry.runId);
+      const before = readJson<AgentJobMeta>(path);
+      if (before.provider !== "local") continue;
+      const previous = before.status;
+      getAgentJob(repoRoot, entry.runId);
+      const after = readJson<AgentJobMeta>(path);
+      if (
+        previous !== after.status &&
+        ["succeeded", "failed", "cancelled", "unknown"].includes(after.status)
+      ) {
+        terminalized += 1;
+      }
+    } catch (_error) {
+      // Missing state is pruned lazily by index rebuilds.
+    }
+  }
+  return { scanned: runs.length, terminalized };
 }
 
 export function listPendingIntegrationRuns(repoRoot: string, limit = 500): AgentJobMeta[] {
@@ -1448,6 +1542,7 @@ export function cancelAgentJob(repoRoot: string, runId: string): AgentJobMeta {
   };
   terminate(current.agentPid);
   terminate(current.workerPid);
+  terminate(current.launchPid);
   const { stdoutTail: _stdout, stderrTail: _stderr, ...meta } = current;
   meta.status = "cancelled";
   meta.terminationReason = "cancelled";
@@ -1555,15 +1650,27 @@ if (process.argv[1] === fileURLToPath(import.meta.url) && process.argv[2] === "l
   const repoRoot = process.argv[3];
   const runId = process.argv[4];
   if (!repoRoot || !runId) process.exit(1);
-  try {
-    startAcceptedTaskJob(repoRoot, runId);
-    process.exit(0);
-  } catch (error) {
+  void (async () => {
     try {
-      failAcceptedTaskJob(repoRoot, runId, error);
-    } catch (_nested) {
-      /* Best effort launcher failure persistence. */
+      startAcceptedTaskJob(repoRoot, runId);
+      while (true) {
+        const current = getAgentJob(repoRoot, runId);
+        if (
+          !["queued", "starting", "running", "waiting_for_user"].includes(current.status) ||
+          !isAlive(current.workerPid)
+        ) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+      }
+      process.exit(0);
+    } catch (error) {
+      try {
+        failAcceptedTaskJob(repoRoot, runId, error);
+      } catch (_nested) {
+        /* Best effort launcher failure persistence. */
+      }
+      process.exit(1);
     }
-    process.exit(1);
-  }
+  })();
 }

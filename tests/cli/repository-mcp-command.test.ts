@@ -8,6 +8,7 @@ import { callRepositoryTool } from "../../src/cli/mcp/repository-tools";
 import { createMcpToolContext } from "../../src/cli/mcp/multi-repository";
 import { getLocalBridgeJob, readLocalBridgeJobOutput } from "../../src/cli/local-bridge/job-store";
 import { routeDurableMcpCall } from "../../src/runtime/gateway/mcp/router";
+import { getExecutionJob } from "../../src/runtime/execution/jobs/store";
 
 function git(root: string, args: string[]): void {
   const result = spawnSync("git", ["-C", root, ...args], {
@@ -181,6 +182,38 @@ describe("repository MCP command tools", () => {
       expect(stdout.content).toContain("ready");
       const stderr = readLocalBridgeJobOutput(repoRoot, executedValue.jobId, { stream: "stderr" });
       expect(stderr.content).toBe("");
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  test("durable repository_update can restore a disabled repository", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "repo-harness-mcp-repo-restore-"));
+    const controllerHome = join(workspace, "controller-home");
+    const repoRoot = join(workspace, "sample-repo");
+    try {
+      mkdirSync(controllerHome, { recursive: true });
+      mkdirSync(repoRoot, { recursive: true });
+      git(repoRoot, ["init", "-b", "main"]);
+      const repository = registerRepository({ path: repoRoot, controllerHome });
+      await json(callRepositoryTool(controllerHome, "repository_update", {
+        repo_id: repository.repoId,
+        enabled: false,
+      }));
+
+      const ctx = createMcpToolContext({ repo: repoRoot, controllerHome, profile: "controller" });
+      const durable = await routeDurableMcpCall(ctx, "repository_update", {
+        repo_id: repository.repoId,
+        enabled: true,
+        request_id: "restore-disabled-repository",
+      });
+      const value = JSON.parse(durable?.content[0]?.text ?? "{}");
+      expect(value.accepted).toBe(true);
+      expect(typeof value.jobId).toBe("string");
+
+      const job = getExecutionJob(controllerHome, repository.repoId, value.jobId);
+      expect(job.payload.operation).toBe("repository_update");
+      expect(job.repoId).toBe(repository.repoId);
     } finally {
       rmSync(workspace, { recursive: true, force: true });
     }

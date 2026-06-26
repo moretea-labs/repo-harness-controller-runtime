@@ -36,6 +36,10 @@ function bindOwnedField(value: Record<string, unknown>, key: string, expected: s
   return false;
 }
 
+function normalizeRoot(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim().replace(/\\/g, '/') : undefined;
+}
+
 function bindIssue(value: Record<string, unknown>, record: RepositoryRecord): boolean {
   let changed = bindOwnedField(value, 'repoId', record.repoId, 'Issue');
   const tasks = Array.isArray(value.tasks) ? value.tasks : [];
@@ -54,10 +58,7 @@ function bindIssue(value: Record<string, unknown>, record: RepositoryRecord): bo
 function inferredCheckoutId(value: Record<string, unknown>, record: RepositoryRecord, label: string): string {
   const existing = typeof value.checkoutId === 'string' ? value.checkoutId.trim() : '';
   if (existing) {
-    if (!record.checkouts.some((checkout) => checkout.checkoutId === existing)) {
-      throw new Error(`${label} references unknown checkout ${existing}`);
-    }
-    return existing;
+    if (record.checkouts.some((checkout) => checkout.checkoutId === existing)) return existing;
   }
   const repoRoot = typeof value.repoRoot === 'string' ? value.repoRoot : undefined;
   const matched = repoRoot
@@ -69,7 +70,27 @@ function inferredCheckoutId(value: Record<string, unknown>, record: RepositoryRe
 }
 
 function bindRun(value: Record<string, unknown>, record: RepositoryRecord): boolean {
-  let changed = bindOwnedField(value, 'repoId', record.repoId, `Run ${String(value.runId ?? 'unknown')}`);
+  let changed = false;
+  const currentRepoId = typeof value.repoId === 'string' ? value.repoId.trim() : '';
+  if (!currentRepoId) {
+    value.repoId = record.repoId;
+    changed = true;
+  } else if (currentRepoId !== record.repoId) {
+    const repoRoot = normalizeRoot(value.repoRoot);
+    const executionRoot = normalizeRoot(value.executionRoot);
+    const worktreePath = normalizeRoot(value.worktreePath);
+    const worktree = normalizeRoot(value.worktree);
+    const checkoutRoots = new Set(record.checkouts.flatMap((checkout) => [
+      normalizeRoot(checkout.canonicalRoot),
+      normalizeRoot(checkout.localRoot),
+    ].filter(Boolean) as string[]));
+    const safeToRebind = [repoRoot, executionRoot, worktreePath, worktree].some((root) => root && checkoutRoots.has(root));
+    if (!safeToRebind) {
+      throw new Error(`Run ${String(value.runId ?? 'unknown')} is already bound to ${currentRepoId} and cannot be rebound to ${record.repoId}`);
+    }
+    value.repoId = record.repoId;
+    changed = true;
+  }
   const checkoutId = inferredCheckoutId(value, record, `Run ${String(value.runId ?? 'unknown')}`);
   if (value.checkoutId !== checkoutId) {
     value.checkoutId = checkoutId;

@@ -2,6 +2,7 @@ import { appendFileSync, readFileSync, renameSync, writeFileSync } from "fs";
 import { dirname, join, relative } from "path";
 import { spawn } from "child_process";
 import { getIssue, removeEphemeralIssue, updateTask } from "../controller/issue-store";
+import { invalidateAgentWorker } from "./worker-lifecycle";
 import type {
   AgentJobEvent,
   AgentJobMeta,
@@ -19,6 +20,7 @@ const config = JSON.parse(
 const prompt = readFileSync(config.promptPath, "utf-8");
 const meta = JSON.parse(readFileSync(config.metaPath, "utf-8")) as AgentJobMeta;
 const MAX_STREAM_BYTES = 4 * 1024 * 1024;
+assertOwnership();
 
 function event(
   type: AgentJobEvent["type"],
@@ -40,6 +42,51 @@ function persistJson(path: string, value: unknown): void {
 
 function persistMeta(value: AgentJobMeta): void {
   persistJson(config.metaPath, value);
+}
+
+function readMeta(): AgentJobMeta {
+  return JSON.parse(readFileSync(config.metaPath, "utf-8")) as AgentJobMeta;
+}
+
+function ownershipFailure(current: AgentJobMeta): Error | undefined {
+  const invalidation = invalidateAgentWorker(current, {
+    controllerPid: config.controllerPid,
+    controllerEpoch: config.controllerEpoch,
+    controllerEpochPath: config.controllerEpochPath,
+    parentPid: config.parentPid,
+  }, {
+    currentParentPid: process.ppid,
+    workerPid: process.pid,
+  });
+  return invalidation ? new Error(invalidation.message) : undefined;
+}
+
+function assertOwnership(): void {
+  const invalid = ownershipFailure(readMeta());
+  if (invalid) throw invalid;
+}
+
+function persistOwnershipLoss(reason: string): void {
+  const current = readMeta();
+  if (
+    current.workerPid !== process.pid ||
+    !["starting", "running"].includes(current.status)
+  ) {
+    return;
+  }
+  current.status = "unknown";
+  current.error = reason;
+  current.finishedAt = new Date().toISOString();
+  current.lastHeartbeatAt = current.finishedAt;
+  current.progress = {
+    phase: "failed",
+    percent: 100,
+    currentActivity: reason,
+    lastActivityAt: current.finishedAt,
+    activityCount: (current.progress?.activityCount ?? 0) + 1,
+  };
+  persistMeta(current);
+  event("run_failed", reason, { ownershipLost: true });
 }
 
 function appendBounded(
@@ -280,6 +327,7 @@ let stdoutLineBuffer = "";
 let stderrLineBuffer = "";
 let timedOut = false;
 let spawnError: Error | undefined;
+let ownershipError: Error | undefined;
 
 function noteLogUpdate(stream: "stdout" | "stderr", bytes: number): void {
   const now = Date.now();
@@ -359,9 +407,7 @@ child.stderr?.on("data", (value: Buffer | string) => {
 });
 
 const heartbeat = setInterval(() => {
-  const current = JSON.parse(
-    readFileSync(config.metaPath, "utf-8"),
-  ) as AgentJobMeta;
+  const current = readMeta();
   current.lastHeartbeatAt = new Date().toISOString();
   persistMeta(current);
   event(
@@ -378,6 +424,20 @@ const heartbeat = setInterval(() => {
   );
 }, 10_000);
 heartbeat.unref();
+
+const ownershipGuard = setInterval(() => {
+  if (ownershipError) return;
+  ownershipError = ownershipFailure(readMeta());
+  if (!ownershipError) return;
+  persistOwnershipLoss(ownershipError.message);
+  updateProgress("failed", ownershipError.message, 100, {
+    ownershipLost: true,
+  });
+  terminateAgent("SIGTERM");
+  const forceKill = setTimeout(() => terminateAgent("SIGKILL"), 5_000);
+  forceKill.unref();
+}, 5_000);
+ownershipGuard.unref();
 
 function terminateAgent(signal: NodeJS.Signals): void {
   if (!child.pid) return;
@@ -428,16 +488,21 @@ const result = await new Promise<{
   child.once("close", () => {
     clearTimeout(timeout);
     clearInterval(heartbeat);
+    clearInterval(ownershipGuard);
   });
   child.once("error", () => {
     clearTimeout(timeout);
     clearInterval(heartbeat);
+    clearInterval(ownershipGuard);
   });
 });
 
 const finishedAt = new Date().toISOString();
-const ok = result.code === 0 && !timedOut && !spawnError;
+const finalOwnershipError = ownershipError ?? ownershipFailure(readMeta());
+if (finalOwnershipError) persistOwnershipLoss(finalOwnershipError.message);
+const ok = result.code === 0 && !timedOut && !spawnError && !finalOwnershipError;
 const error =
+  finalOwnershipError?.message ??
   spawnError?.message ??
   (timedOut ? `agent timed out after ${config.timeoutMs}ms` : undefined) ??
   (ok
@@ -461,6 +526,10 @@ persistJson(config.resultPath, {
 const finalMeta = JSON.parse(
   readFileSync(config.metaPath, "utf-8"),
 ) as AgentJobMeta;
+const currentOwnershipError = ownershipFailure(finalMeta);
+if (currentOwnershipError) {
+  process.exit(1);
+}
 const autoFinalizing = ok && config.autoIntegrate && finalMeta.executionMode === "worktree";
 finalMeta.status = ok ? (autoFinalizing ? "running" : "succeeded") : "failed";
 finalMeta.exitCode = result.code;
@@ -525,6 +594,7 @@ if (ok) {
 
 if (ok && config.autoIntegrate && finalMeta.executionMode === "worktree") {
   try {
+    assertOwnership();
     updateProgress("finalizing", "正在自动集成 worktree 修改", 96);
     const [
       { integrateAgentJob, cleanupIntegratedWorktree, taskRunDiff },
@@ -547,6 +617,7 @@ if (ok && config.autoIntegrate && finalMeta.executionMode === "worktree") {
     const beforeIntegrationMeta = JSON.parse(
       readFileSync(config.metaPath, "utf-8"),
     ) as AgentJobMeta;
+    assertOwnership();
     beforeIntegrationMeta.diffArtifactPath = relative(
       finalMeta.repoRoot,
       diffArtifactPath,
@@ -557,6 +628,7 @@ if (ok && config.autoIntegrate && finalMeta.executionMode === "worktree") {
       getMcpPolicy("controller", { repoRoot: finalMeta.repoRoot }),
       finalMeta.runId,
     );
+    assertOwnership();
     event(
       "run_auto_integrated",
       `Automatically integrated ${integrated.changedPaths.length} changed path(s).`,
@@ -595,6 +667,7 @@ if (ok && config.autoIntegrate && finalMeta.executionMode === "worktree") {
     const failedMeta = JSON.parse(
       readFileSync(config.metaPath, "utf-8"),
     ) as AgentJobMeta;
+    if (ownershipFailure(failedMeta)) process.exit(1);
     const completedAt = new Date().toISOString();
     failedMeta.status = "waiting_for_user";
     delete failedMeta.finishedAt;
@@ -632,6 +705,7 @@ if (ok) {
   try {
     const { continueTaskAfterSuccessfulRun } = await import("../controller/execution-completion");
     const latestMeta = JSON.parse(readFileSync(config.metaPath, "utf-8")) as AgentJobMeta;
+    assertOwnership();
     const continuation = continueTaskAfterSuccessfulRun(latestMeta.repoRoot, latestMeta);
     continuationStatus = continuation.status;
     if (continuation.continued) {

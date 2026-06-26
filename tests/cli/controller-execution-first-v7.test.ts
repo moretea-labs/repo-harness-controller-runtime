@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs"
 import { tmpdir } from "os";
 import { join } from "path";
 import { getAgentJob, startTaskJob } from "../../src/cli/agent-jobs/job-manager";
+import { invalidateAgentWorker } from "../../src/cli/agent-jobs/worker-lifecycle";
 import {
   createIssue,
   inspectIssueReadiness,
@@ -465,6 +466,40 @@ describe("Controller v7 compatibility on the V8 execution bridge", () => {
     const refreshed = listIssues(root).find((entry) => entry.id === issue.id)!;
     expect(refreshed.tasks[0]!.status).toBe("done");
     expect(refreshed.tasks[0]!.verification?.autoCompleted).toBe(true);
+  });
+
+  test("treats PPID=1 workers as disconnected ownership", () => {
+    const now = new Date().toISOString();
+    const invalidation = invalidateAgentWorker({
+      schemaVersion: 3,
+      runId: "RUN-ppid-orphan",
+      issueId: "ISS-1",
+      taskId: "T1",
+      agent: "codex",
+      provider: "local",
+      executionMode: "workspace",
+      status: "running",
+      repoRoot: "/repo",
+      worktree: "/repo",
+      worktreePath: "/repo",
+      branch: null,
+      baseRevision: null,
+      promptPath: "prompt.md",
+      stdoutPath: "stdout.log",
+      stderrPath: "stderr.log",
+      resultPath: "result.json",
+      eventsPath: "events.jsonl",
+      workerPid: 321,
+      createdAt: now,
+      startedAt: now,
+    }, {
+      parentPid: 123,
+    }, {
+      currentParentPid: 1,
+      workerPid: 321,
+    });
+    expect(invalidation?.code).toBe("PARENT_DISCONNECTED");
+    expect(invalidation?.message).toContain("PPID became 1");
   });
 
 });

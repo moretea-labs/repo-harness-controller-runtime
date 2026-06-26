@@ -10,7 +10,7 @@ import {
 } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { spawnSync } from "child_process";
+import { spawn, spawnSync } from "child_process";
 import { getAgentJob } from "../../src/cli/agent-jobs/job-manager";
 import {
   controllerCheckConcurrencyClass,
@@ -137,6 +137,56 @@ describe("Local Execution Bridge", () => {
       expect(run.stdoutTail).toContain("local-bridge-codex-ok");
     } finally {
       codex.restore();
+    }
+  });
+
+  test("keeps a healthy local Run alive while its controller owner is still active", async () => {
+    const root = repo();
+    const binRoot = mkdtempSync(join(tmpdir(), "repo-harness-owned-run-bin-"));
+    roots.push(binRoot);
+    const originalPath = process.env.PATH;
+    const executable = join(binRoot, "codex");
+    writeFileSync(
+      executable,
+      `#!/usr/bin/env bash
+printf '%s\n' '{"type":"turn.started"}'
+sleep 0.4
+printf '%s\n' '{"type":"turn.completed"}'
+`,
+    );
+    chmodSync(executable, 0o755);
+    process.env.PATH = `${binRoot}:${originalPath ?? ""}`;
+    try {
+      const issue = createIssue(root, {
+        title: "Healthy owned run",
+        tasks: [{
+          title: "Stay owned",
+          objective: "Remain active until the bounded task finishes.",
+          allowedPaths: ["src/**"],
+          checks: ["manual"],
+          risk: "low",
+          recommendedAgent: "codex",
+        }],
+      });
+      const job = submitLocalBridgeJob(root, {
+        action: "launch-task",
+        requestedBy: "test",
+        payload: {
+          issueId: issue.id,
+          taskId: "T1",
+          agent: "codex",
+          executionMode: "auto",
+          timeoutMs: 10_000,
+        },
+      });
+      const dispatched = executeLocalBridgeJob(root, job.jobId);
+      const running = await waitForRun(root, dispatched.runId as string, (value) => value.status === "running", 120);
+      expect(running.status).toBe("running");
+      expect(running.error).toBeUndefined();
+      const finished = await waitForRun(root, dispatched.runId as string, (value) => ["succeeded", "failed", "unknown"].includes(value.status), 240);
+      expect(finished.status).toBe("succeeded");
+    } finally {
+      process.env.PATH = originalPath;
     }
   });
 
@@ -639,6 +689,87 @@ printf '%s\n' '{"type":"turn.completed"}'
     expect(refreshed.status).toBe("timed_out");
     expect(refreshed.finishedAt).toBeTruthy();
     expect(refreshed.error).toContain("deadline");
+  });
+
+  test("startup reconciliation terminates orphaned detached Run workers", async () => {
+    const root = repo();
+    const issue = createIssue(root, {
+      title: "Orphaned worker",
+      tasks: [{
+        title: "Recover",
+        objective: "Mark and stop a leaked worker.",
+        allowedPaths: ["src/example.ts"],
+        risk: "low",
+      }],
+    });
+    const runId = "RUN-orphaned-detached-worker";
+    const runDir = join(root, ".ai/harness/jobs", runId);
+    mkdirSync(runDir, { recursive: true });
+    for (const name of ["stdout.log", "stderr.log", "events.jsonl"]) {
+      writeFileSync(join(runDir, name), "");
+    }
+    const worker = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      stdio: "ignore",
+    });
+    const now = new Date().toISOString();
+    writeFileSync(join(runDir, "meta.json"), `${JSON.stringify({
+      schemaVersion: 3,
+      repoId: "repo-test",
+      checkoutId: "checkout-test",
+      runId,
+      issueId: issue.id,
+      taskId: "T1",
+      agent: "codex",
+      provider: "local",
+      executionMode: "workspace",
+      status: "running",
+      repoRoot: root,
+      executionRoot: root,
+      worktree: root,
+      worktreePath: root,
+      branch: null,
+      baseRevision: null,
+      promptPath: `.ai/harness/jobs/${runId}/prompt.md`,
+      stdoutPath: `.ai/harness/jobs/${runId}/stdout.log`,
+      stderrPath: `.ai/harness/jobs/${runId}/stderr.log`,
+      resultPath: `.ai/harness/jobs/${runId}/result.json`,
+      eventsPath: `.ai/harness/jobs/${runId}/events.jsonl`,
+      controllerPid: 999_999,
+      controllerEpoch: "stale-epoch",
+      controllerEpochPath: ".ai/harness/controller/runtime-owner.json",
+      workerPid: worker.pid,
+      createdAt: now,
+      startedAt: now,
+      lastHeartbeatAt: now,
+      progress: {
+        phase: "editing",
+        percent: 40,
+        currentActivity: "stale worker",
+        lastActivityAt: now,
+        activityCount: 1,
+      },
+    }, null, 2)}\n`);
+    updateTask(root, issue.id, "T1", { status: "running", runId });
+
+    try {
+      const handle = await startLocalBridgeServer({ repoRoot: root, port: 0, openBrowser: false });
+      servers.push(handle);
+      let alive = true;
+      for (let attempt = 0; attempt < 80 && alive; attempt += 1) {
+        await Bun.sleep(25);
+        try {
+          process.kill(worker.pid!, 0);
+        } catch {
+          alive = false;
+        }
+      }
+      const run = getAgentJob(root, runId);
+      expect(run.status).toBe("unknown");
+      expect(run.error).toContain("Controller process 999999");
+      expect(alive).toBe(false);
+    } finally {
+      if (worker.exitCode === null) worker.kill("SIGKILL");
+    }
   });
 
   test("accepts high-risk quick sessions immediately without an approval queue", () => {

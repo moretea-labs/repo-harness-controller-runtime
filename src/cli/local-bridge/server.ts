@@ -12,6 +12,7 @@ import {
   getAgentJobEvents,
   getAgentJobLog,
   listAgentJobs,
+  reconcileAgentJobs,
   retryAgentJob,
 } from "../agent-jobs/job-manager";
 import {
@@ -322,6 +323,7 @@ export async function startLocalBridgeServer(
   const host = options.host ?? "127.0.0.1";
   const requestedPort = options.port ?? 8766;
   assertLoopback(host);
+  reconcileAgentJobs(options.repoRoot);
   reconcileLocalBridgeJobs(options.repoRoot);
   const token = options.token ?? randomBytes(32).toString("base64url");
   const app = express();

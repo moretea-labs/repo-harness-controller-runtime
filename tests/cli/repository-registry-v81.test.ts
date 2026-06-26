@@ -12,6 +12,7 @@ import {
   listRepositories,
   refreshRepository,
   registerRepository,
+  updateRepository,
   validateRepository,
   resolveRepositorySelection,
 } from '../../src/cli/repositories/registry';
@@ -104,6 +105,52 @@ describe('v8.1 repository identity and selection', () => {
       expect(registered.github?.includeTasks).toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('allows explicit enable to restore a disabled repository', () => {
+    const root = mkdtempSync(join(tmpdir(), 'repo-harness-v81-restore-'));
+    const controllerHome = mkdtempSync(join(tmpdir(), 'repo-harness-v81-restore-controller-'));
+    try {
+      execSync('git init -q', { cwd: root });
+      const registered = registerRepository({ path: root, controllerHome });
+      const disabled = updateRepository(registered.repoId, { enabled: false }, controllerHome);
+      expect(disabled.enabled).toBe(false);
+
+      expect(() => resolveRepositorySelection({
+        controllerHome,
+        repoId: registered.repoId,
+      })).toThrow(`repository is disabled: ${registered.repoId}`);
+
+      const restored = updateRepository(registered.repoId, { enabled: true }, controllerHome);
+      expect(restored.enabled).toBe(true);
+      expect(restored.disabledAt).toBeUndefined();
+      expect(resolveRepositorySelection({
+        controllerHome,
+        repoId: registered.repoId,
+      }).repoId).toBe(registered.repoId);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(controllerHome, { recursive: true, force: true });
+    }
+  });
+
+  test('re-registering the same disabled path reuses repoId and restores execution', () => {
+    const root = mkdtempSync(join(tmpdir(), 'repo-harness-v81-reregister-'));
+    const controllerHome = mkdtempSync(join(tmpdir(), 'repo-harness-v81-reregister-controller-'));
+    try {
+      execSync('git init -q', { cwd: root });
+      const registered = registerRepository({ path: root, controllerHome });
+      updateRepository(registered.repoId, { enabled: false }, controllerHome);
+
+      const restored = registerRepository({ path: root, controllerHome });
+      expect(restored.repoId).toBe(registered.repoId);
+      expect(restored.enabled).toBe(true);
+      expect(restored.removedAt).toBeUndefined();
+      expect(listRepositories(controllerHome)).toHaveLength(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(controllerHome, { recursive: true, force: true });
     }
   });
 });

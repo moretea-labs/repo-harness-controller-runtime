@@ -97,6 +97,9 @@ export async function routeDurableMcpCall(
 ): Promise<CallToolResult | undefined> {
   if (!shouldCreateDurableJob(ctx, name)) return undefined;
 
+  const restoringDisabledRepository = name === 'repository_update'
+    && typeof args.repo_id === 'string'
+    && args.enabled === true;
   const isRepositoryTool = name.startsWith('repository_');
   const controllerScopedRepositoryTool = name === 'repository_register'
     || (name === 'repository_workbench' && typeof args.repo_id !== 'string' && typeof args.checkout_id !== 'string');
@@ -108,6 +111,7 @@ export async function routeDurableMcpCall(
       explicitPath: ctx.explicitRepository?.canonicalRoot,
       controllerHome: ctx.controllerHome,
       allowSoleRepository: true,
+      ...(restoringDisabledRepository ? { allowDisabledReason: 'restore' as const } : {}),
     });
   const repoId = repository?.repoId ?? '__controller__';
   const checkoutId = repository?.activeCheckoutId;

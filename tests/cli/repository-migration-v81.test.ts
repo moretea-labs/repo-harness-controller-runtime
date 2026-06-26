@@ -65,4 +65,31 @@ describe('v8.1 repository ownership migration', () => {
       fixture.cleanup();
     }
   });
+
+  test('rebinds conflicting run ownership when the run roots still prove local ownership', () => {
+    const fixture = repositoryFixture();
+    try {
+      const jobRoot = join(fixture.repoA.canonicalRoot, '.ai', 'harness', 'jobs', 'RUN-rebind');
+      mkdirSync(jobRoot, { recursive: true });
+      writeFileSync(join(jobRoot, 'meta.json'), JSON.stringify({
+        schemaVersion: 2,
+        runId: 'RUN-rebind',
+        repoId: fixture.repoB.repoId,
+        checkoutId: fixture.repoB.activeCheckoutId,
+        repoRoot: fixture.repoA.canonicalRoot,
+        worktree: fixture.repoA.canonicalRoot,
+        executionRoot: fixture.repoA.canonicalRoot,
+        worktreePath: fixture.repoA.canonicalRoot,
+      }), 'utf-8');
+
+      const report = bindRepositoryEntities(fixture.repoA);
+      expect(report.unresolved).toBe(0);
+      expect(report.updated).toBe(1);
+      const run = JSON.parse(readFileSync(join(jobRoot, 'meta.json'), 'utf-8'));
+      expect(run.repoId).toBe(fixture.repoA.repoId);
+      expect(run.checkoutId).toBe(fixture.repoA.activeCheckoutId);
+    } finally {
+      fixture.cleanup();
+    }
+  });
 });
