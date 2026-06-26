@@ -47,7 +47,7 @@ interface RuntimeStorageSpec {
 }
 
 const ACTIVE_RUN_STATUSES = new Set(['queued', 'running', 'waiting_for_user']);
-const ACTIVE_LOCAL_JOB_STATUSES = new Set(['approved', 'dispatched', 'running']);
+const ACTIVE_LOCAL_JOB_STATUSES = new Set(['pending_approval', 'approved', 'dispatched', 'running']);
 
 const RUNTIME_STORAGE_SPECS: RuntimeStorageSpec[] = [
   { name: 'runs', sourceName: 'jobs', controllerName: 'runs', detectActiveRuns: true },
