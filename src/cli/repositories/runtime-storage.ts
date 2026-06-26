@@ -53,6 +53,8 @@ const RUNTIME_STORAGE_SPECS: RuntimeStorageSpec[] = [
   { name: 'edit-sessions', sourceName: 'edit-sessions', controllerName: 'edit-sessions' },
   { name: 'controller-state', sourceName: 'controller', controllerName: 'controller' },
   { name: 'artifacts', sourceName: 'artifacts', controllerName: 'artifacts' },
+  { name: 'local-jobs', sourceName: 'local-jobs', controllerName: 'local-jobs' },
+  { name: 'mcp', sourceName: 'mcp', controllerName: 'mcp' },
   { name: 'local-bridge', sourceName: 'local-bridge', controllerName: 'local-bridge' },
   { name: 'ephemeral-issues', sourceName: 'ephemeral-issues', controllerName: 'ephemeral-issues' },
 ];
