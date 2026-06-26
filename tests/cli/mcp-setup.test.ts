@@ -55,7 +55,7 @@ describe("mcp setup", () => {
         oauthFile: ".repo-harness/mcp.oauth.json",
         tokenFile: ".repo-harness/mcp.tokens.json",
       });
-      expect(config.chatgpt.serverName).toBe("repo-harness-controller-v7");
+      expect(config.chatgpt.serverName).toBe("repo-harness-controller-v8");
       expect(config.profile).toBe("controller");
       expect(config.localController).toEqual({
         enabled: true,
@@ -93,7 +93,7 @@ describe("mcp setup", () => {
       );
       expect(doctor.mcp.authConfigured).toBe(true);
       expect(doctor.mcp.devMode.agentRunner).toBe(true);
-      expect(doctor.chatgpt.serverName).toBe("repo-harness-controller-v7");
+      expect(doctor.chatgpt.serverName).toBe("repo-harness-controller-v8");
       expect(doctor.chatgpt.localEndpoint).toBe("http://127.0.0.1:8765/mcp");
       expect(doctor.chatgpt.localController).toBe("http://127.0.0.1:8766/");
       expect(doctor.mcp.localController.enabled).toBe(true);
@@ -127,7 +127,7 @@ describe("mcp setup", () => {
       const config = JSON.parse(
         readFileSync(join(repoRoot, ".repo-harness/mcp.local.json"), "utf-8"),
       );
-      expect(config.chatgpt.serverName).toBe("repo-harness-controller-v7");
+      expect(config.chatgpt.serverName).toBe("repo-harness-controller-v8");
       expect(config.devMode.timeoutMs).toBe(3_600_000);
       expect(config.devMode.maxTimeoutMs).toBe(43_200_000);
     });
@@ -206,7 +206,7 @@ describe("mcp setup", () => {
       expect(doctor.chatgpt.serverName).toBeUndefined();
       expect(doctor.chatgpt.serverNameConfigured).toBe(false);
       expect(doctor.chatgpt.defaultServerName).toBe(
-        "repo-harness-controller-v7",
+        "repo-harness-controller-v8",
       );
       expect(doctor.chatgpt.publicEndpoint).toBe(
         "https://repo-harness-mcp.example.com/mcp",
