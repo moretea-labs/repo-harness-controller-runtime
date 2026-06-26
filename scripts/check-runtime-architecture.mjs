@@ -15,6 +15,9 @@ function text(path) {
 function requireText(path, needle) {
   if (!text(path).includes(needle)) failures.push(`${path} must contain ${JSON.stringify(needle)}`);
 }
+function requireMatch(path, expression, description) {
+  if (!expression.test(text(path))) failures.push(`${path} must ${description}`);
+}
 function forbid(path, expression, description) {
   if (expression.test(text(path))) failures.push(`${path} violates ${description}`);
 }
@@ -57,7 +60,11 @@ if (!(runtimeCall >= 0 && durableCall > runtimeCall && legacyCall > durableCall)
 requireText('src/runtime/gateway/mcp/router.ts', 'createExecutionJob');
 requireText('src/runtime/gateway/mcp/router.ts', 'requestId');
 requireText('src/runtime/gateway/mcp/router.ts', 'semanticKey');
-requireText('src/runtime/gateway/mcp/router.ts', "const DIRECT_REPOSITORY_TOOLS = new Set(['repository_list', 'repository_get']);");
+requireMatch(
+  'src/runtime/gateway/mcp/router.ts',
+  /const DIRECT_REPOSITORY_TOOLS = new Set\(\[[\s\S]*?'repository_list'[\s\S]*?'repository_get'[\s\S]*?\]\);/,
+  'declare DIRECT_REPOSITORY_TOOLS with repository_list and repository_get',
+);
 requireText('src/runtime/gateway/mcp/router.ts', "name === 'repository_workbench'");
 requireText('src/runtime/gateway/mcp/runtime-tools.ts', "case 'controller_context'");
 requireText('src/runtime/gateway/mcp/runtime-tools.ts', "case 'local_bridge_status'");

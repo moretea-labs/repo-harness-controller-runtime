@@ -19,6 +19,87 @@ target_branch=""
 changed_files_file=""
 format="text"
 
+required_current_docs=(
+  "docs/architecture/current/README.md"
+  "docs/architecture/current/governance.md"
+  "docs/architecture/current/system-overview.md"
+  "docs/architecture/current/architecture-invariants.md"
+  "docs/architecture/current/entity-model.md"
+  "docs/architecture/current/job-and-run-lifecycle.md"
+  "docs/architecture/current/dispatch-and-agent-strategy.md"
+  "docs/architecture/current/scheduler-and-resource-claims.md"
+  "docs/architecture/current/multi-repository-execution.md"
+  "docs/architecture/current/automation-and-schedule-engine.md"
+  "docs/architecture/current/failure-recovery.md"
+  "docs/architecture/current/verification-and-release-gates.md"
+  "docs/architecture/current/implementation-status.md"
+  "docs/architecture/current/migration-roadmap.md"
+  "docs/architecture/current/runtime-directory-map.md"
+  "docs/architecture/current/operations-runbook.md"
+)
+
+historical_runtime_docs=(
+  "docs/repo-harness-chatgpt-controller.md"
+  "docs/repo-harness-local-execution-bridge.md"
+  "docs/repo-harness-execution-closure-v5.md"
+  "docs/repo-harness-direct-change-v6.md"
+  "docs/repo-harness-execution-first-v7.md"
+  "docs/repo-harness-chatgpt-bridge-v8.md"
+  "docs/repo-harness-v8-verification.md"
+)
+
+runtime_architecture_gate_enabled() {
+  [[ -d "docs/architecture/current" ]] && return 0
+  local file
+  for file in "${historical_runtime_docs[@]}"; do
+    [[ -f "$file" ]] && return 0
+  done
+  [[ -f "docs/architecture/index.md" ]] && grep -Fq -- "Controller Runtime" "docs/architecture/index.md"
+}
+
+architecture_baseline_fail() {
+  echo "[ArchitectureSync] current Controller Runtime architecture baseline failed: $1" >&2
+  return 1
+}
+
+require_architecture_file() {
+  local file="$1"
+  [[ -f "$file" ]] || architecture_baseline_fail "missing required file $file"
+}
+
+require_architecture_text() {
+  local file="$1"
+  local text="$2"
+  require_architecture_file "$file"
+  grep -Fq -- "$text" "$file" || architecture_baseline_fail "$file must contain: $text"
+}
+
+check_runtime_architecture_baseline() {
+  local file
+  require_architecture_text "docs/architecture/index.md" "Runtime Authority"
+  require_architecture_text "docs/architecture/index.md" "docs/architecture/current/"
+  require_architecture_text "docs/architecture/current/README.md" "Runtime Authority"
+  require_architecture_text "docs/architecture/current/governance.md" "Runtime Authority"
+
+  for file in "${required_current_docs[@]}"; do
+    require_architecture_file "$file"
+  done
+
+  for file in "${historical_runtime_docs[@]}"; do
+    require_architecture_text "$file" "Historical Design"
+    require_architecture_text "$file" "Not Runtime Authority"
+    require_architecture_text "$file" "architecture/current/README.md"
+  done
+
+  require_architecture_text "docs/architecture/current/architecture-invariants.md" "Invariant 2 — Persist Before Execute"
+  require_architecture_text "docs/architecture/current/architecture-invariants.md" "Invariant 4 — Task Is Intent; Run Is Attempt"
+  require_architecture_text "docs/architecture/current/architecture-invariants.md" "Invariant 16 — Evidence Binds to Exact Revision"
+  require_architecture_text "docs/architecture/current/architecture-invariants.md" "Invariant 21 — Scheduled Work Is Bounded"
+  require_architecture_text "docs/architecture/current/implementation-status.md" "## Completion Statement"
+  require_architecture_text "docs/architecture/current/migration-roadmap.md" "## P0"
+  require_architecture_text "docs/architecture/current/migration-roadmap.md" "## P5"
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --mode)
@@ -197,6 +278,13 @@ case "$mode" in
     exit 1
     ;;
 esac
+
+# Structural authority checks are invariant and must run even when freshness gating is disabled.
+if runtime_architecture_gate_enabled; then
+  if ! check_runtime_architecture_baseline; then
+    exit 1
+  fi
+fi
 
 if [[ ! -x "scripts/architecture-queue.sh" ]]; then
   if [[ "$mode" == "strict" ]]; then
