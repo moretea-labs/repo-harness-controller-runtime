@@ -279,8 +279,11 @@ case "$mode" in
     ;;
 esac
 
+# Structural authority checks are invariant and must run even when freshness gating is disabled.
 if runtime_architecture_gate_enabled; then
-  check_runtime_architecture_baseline
+  if ! check_runtime_architecture_baseline; then
+    exit 1
+  fi
 fi
 
 if [[ ! -x "scripts/architecture-queue.sh" ]]; then
