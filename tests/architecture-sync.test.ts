@@ -21,6 +21,8 @@ const REQUIRED_CURRENT_DOCS = [
   "verification-and-release-gates.md",
   "implementation-status.md",
   "migration-roadmap.md",
+  "runtime-directory-map.md",
+  "operations-runbook.md",
 ];
 
 const HISTORICAL_RUNTIME_DOCS = [
@@ -49,7 +51,7 @@ function installRuntimeArchitectureBaseline(cwd: string): void {
       ].join("\n");
     }
     if (file === "implementation-status.md") {
-      content += "\n## Implementation Gap\n";
+      content += "\n## Completion Statement\n";
     }
     if (file === "migration-roadmap.md") {
       content += "\n## P0\n\n## P1\n\n## P2\n\n## P3\n\n## P4\n\n## P5\n";
