@@ -6,6 +6,7 @@ import { ensureControllerHome } from '../../cli/repositories/controller-home';
 import { withControllerLock } from '../../cli/repositories/locks';
 import { readJsonFile, writeJsonAtomic } from '../shared/json-files';
 import { readSchedulerHealthSnapshot } from './global-scheduler/scheduler';
+import { cleanupControllerRuntimeState } from './runtime-cleanup';
 
 export interface ControllerDaemonStatus {
   schemaVersion: 1;
@@ -58,6 +59,13 @@ export function readControllerDaemonStatus(controllerHome: string): ControllerDa
 
 export function ensureControllerDaemon(controllerHome: string): ControllerDaemonStatus {
   const home = ensureControllerHome(controllerHome);
+  // Cleanup is bounded but still performs filesystem I/O. Run it before taking
+  // the global daemon-start lock so unrelated Controller operations are not blocked.
+  try {
+    cleanupControllerRuntimeState(home, { reason: 'startup' });
+  } catch (error) {
+    console.error('[repo-harness cleanup] startup cleanup failed:', error);
+  }
   return withControllerLock(home, { scope: 'global' }, 'ensure-controller-daemon', () => {
     const current = readControllerDaemonStatus(home);
     if ((current.status === 'ready' || current.status === 'starting') && pidAlive(current.pid)) return current;

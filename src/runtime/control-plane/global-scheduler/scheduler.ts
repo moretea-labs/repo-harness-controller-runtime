@@ -14,8 +14,10 @@ import { tickPortfolioWorkflows } from '../../workflow/portfolio/engine';
 import { readJsonFile, writeJsonAtomic } from '../../shared/json-files';
 import { isProcessAlive, terminateProcessTree } from '../../shared/process-tree';
 import { readSchedulerWakeSignal, waitForSchedulerWakeSignal } from './wake-signal';
+import { cleanupControllerRuntimeState } from '../runtime-cleanup';
 
 const DARWIN_MEMORY_SAMPLE_TTL_MS = 5_000;
+const RUNTIME_CLEANUP_INTERVAL_MS = Math.max(30_000, Number(process.env.REPO_HARNESS_RUNTIME_CLEANUP_INTERVAL_MS ?? 60_000));
 const DARWIN_RECLAIMABLE_PAGE_LABELS = new Set([
   'Pages free',
   'Pages inactive',
@@ -114,6 +116,8 @@ export class GlobalScheduler {
   private lastTickAt = this.loopStartedAt;
   private lastDispatchAt: string | undefined;
   private lastReconcileAt: string | undefined;
+  private lastCleanupAt = 0;
+  private runtimeCleanup = cleanupControllerRuntimeState;
   private lastDarwinMemorySampleAt = 0;
   private cachedDarwinAvailableMemoryMb: number | undefined;
 
@@ -273,6 +277,20 @@ export class GlobalScheduler {
   async tick(): Promise<{ activeJobs: number }> {
     const now = Date.now();
     this.lastTickAt = new Date(now).toISOString();
+    if (now - this.lastCleanupAt >= RUNTIME_CLEANUP_INTERVAL_MS) {
+      // Advance the interval before cleanup so a failing pass cannot create a
+      // tight retry loop on every scheduler tick.
+      this.lastCleanupAt = now;
+      try {
+        this.runtimeCleanup(this.controllerHome, {
+          reason: 'periodic',
+          nowMs: now,
+          protectedControllerPid: this.controllerPid,
+        });
+      } catch (error) {
+        console.error('[repo-harness cleanup] periodic cleanup failed:', error);
+      }
+    }
     if (now - this.lastReconcile >= 5_000) {
       await reconcileExecutionJobsAsync(this.controllerHome);
       this.lastReconcile = now;
