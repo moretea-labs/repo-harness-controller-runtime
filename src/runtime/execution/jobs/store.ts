@@ -5,7 +5,9 @@ import { ensureControllerHome, ensureRepositoryControllerLayout, repositoryContr
 import { withControllerLock } from '../../../cli/repositories/locks';
 import { appendJobEvent } from '../../evidence/event-ledger';
 import { markRepositoryProjectionDirty } from '../../projections/invalidation';
+import { touchSchedulerWakeSignal } from '../../control-plane/global-scheduler/wake-signal';
 import { readJsonFile, removeFile, sanitizeFileComponent, writeJsonAtomic } from '../../shared/json-files';
+import { terminateProcessTree } from '../../shared/process-tree';
 import { releaseExecutionLeases } from '../../resources/leases/store';
 import {
   ACTIVE_JOB_STATUSES,
@@ -123,17 +125,6 @@ function upsertIndexes(controllerHome: string, job: ExecutionJob): void {
   }, 10_000);
 }
 
-function terminateWorkerProcess(pid: number | undefined): void {
-  if (!pid || pid === process.pid) return;
-  if (process.platform !== 'win32') {
-    try {
-      process.kill(-pid, 'SIGTERM');
-      return;
-    } catch { /* fall back to the direct PID */ }
-  }
-  try { process.kill(pid, 'SIGTERM'); } catch { /* already exited */ }
-}
-
 function persistJob(controllerHome: string, job: ExecutionJob): ExecutionJob {
   writeJsonAtomic(jobPath(controllerHome, job.repoId, job.jobId), job);
   upsertIndexes(controllerHome, job);
@@ -220,6 +211,7 @@ export function createExecutionJob(controllerHome: string, input: CreateExecutio
     upsertIndexesUnlocked(home, job);
     markRepositoryProjectionDirty(home, job.repoId, `job:${job.jobId}:created`);
     appendJobEvent(home, job, 'job_created', { type: job.type, priority: job.priority });
+    touchSchedulerWakeSignal(home, `job-created:${job.jobId}`);
     return { job, deduplicated: false };
   }, 10_000);
 }
@@ -231,6 +223,7 @@ export function updateExecutionJob(
   updater: (current: ExecutionJob) => ExecutionJob,
   eventType?: string,
   eventData?: Record<string, unknown>,
+  notifyScheduler = false,
 ): ExecutionJob {
   return withControllerLock(controllerHome, { scope: 'task', repoId, taskId: `execution-job-${jobId}` }, `update-job:${jobId}`, () => {
     const current = getExecutionJob(controllerHome, repoId, jobId);
@@ -240,6 +233,7 @@ export function updateExecutionJob(
     next.updatedAt = now();
     persistJob(controllerHome, next);
     if (eventType) appendJobEvent(controllerHome, next, eventType, eventData);
+    if (notifyScheduler) touchSchedulerWakeSignal(controllerHome, `job-updated:${jobId}`);
     return next;
   }, 10_000);
 }
@@ -248,6 +242,34 @@ const WAITING_JOB_STATUSES = new Set<ExecutionJobStatus>([
   'queued', 'waiting_for_dependency', 'waiting_for_workspace', 'waiting_for_heavy_check',
   'waiting_for_integration', 'waiting_for_release_barrier',
 ]);
+
+function writeJobState(
+  controllerHome: string,
+  repoId: string,
+  jobId: string,
+  writer: (current: ExecutionJob) => { next: ExecutionJob; eventType?: string; eventData?: Record<string, unknown> } | undefined,
+  reason: string,
+): ExecutionJob | undefined {
+  return withControllerLock(
+    controllerHome,
+    { scope: 'task', repoId, taskId: `execution-job-${jobId}` },
+    reason,
+    () => {
+      const current = getExecutionJob(controllerHome, repoId, jobId);
+      const written = writer(structuredClone(current));
+      if (!written) return undefined;
+      const { next, eventType, eventData } = written;
+      if (next.jobId !== current.jobId || next.repoId !== current.repoId) throw new Error('JOB_IDENTITY_IMMUTABLE');
+      next.revision = current.revision + 1;
+      next.updatedAt = now();
+      persistJob(controllerHome, next);
+      if (eventType) appendJobEvent(controllerHome, next, eventType, eventData);
+      touchSchedulerWakeSignal(controllerHome, `job-state:${jobId}`);
+      return next;
+    },
+    10_000,
+  );
+}
 
 function transitionAllowed(from: ExecutionJobStatus, to: ExecutionJobStatus): boolean {
   if (from === to) return true;
@@ -286,7 +308,56 @@ export function transitionExecutionJob(
       next.workerPid = undefined;
     }
     return next;
-  }, `job_${status}`, eventData);
+  }, `job_${status}`, eventData, true);
+}
+
+export function claimExecutionJobForDispatch(
+  controllerHome: string,
+  repoId: string,
+  jobId: string,
+  leaseRefs: ExecutionJob['leaseRefs'],
+  eventData?: Record<string, unknown>,
+): ExecutionJob | undefined {
+  return writeJobState(controllerHome, repoId, jobId, (current) => {
+    if (!WAITING_JOB_STATUSES.has(current.status)) return undefined;
+    return {
+      next: {
+        ...current,
+        status: 'dispatched',
+        attempt: current.attempt + 1,
+        workerPid: undefined,
+        heartbeatAt: undefined,
+        leaseRefs,
+      },
+      eventType: 'job_dispatched',
+      eventData,
+    };
+  }, `claim-job:${jobId}`);
+}
+
+export function attachExecutionWorker(
+  controllerHome: string,
+  repoId: string,
+  jobId: string,
+  workerPid: number,
+): ExecutionJob | undefined {
+  return writeJobState(controllerHome, repoId, jobId, (current) => {
+    const spawnable = current.status === 'dispatched' || (current.status === 'running' && current.workerPid === undefined);
+    if (!spawnable) return current.workerPid === workerPid ? { next: current } : undefined;
+    if (current.workerPid !== undefined && current.workerPid !== workerPid) return undefined;
+    const timestamp = now();
+    return {
+      next: {
+        ...current,
+        status: 'running',
+        workerPid,
+        heartbeatAt: timestamp,
+        startedAt: current.startedAt ?? timestamp,
+      },
+      eventType: 'job_running',
+      eventData: { workerPid },
+    };
+  }, `attach-worker:${jobId}`);
 }
 
 function sameLeaseRefs(
@@ -345,7 +416,7 @@ export function transitionExecutionJobFromWorker(
       finishedAt: timestamp,
       workerPid: undefined,
     };
-  }, `job_${status}`, eventData);
+  }, `job_${status}`, eventData, true);
 }
 
 export function listActiveExecutionJobs(controllerHome: string, repoId?: string): ExecutionJob[] {
@@ -388,17 +459,15 @@ export function listExecutionJobs(controllerHome: string, repoId: string, limit 
   } catch { return []; }
 }
 
-export function cancelExecutionJob(controllerHome: string, repoId: string, jobId: string, reason = 'Cancelled by user'): ExecutionJob {
+export async function cancelExecutionJob(controllerHome: string, repoId: string, jobId: string, reason = 'Cancelled by user'): Promise<ExecutionJob> {
   const current = getExecutionJob(controllerHome, repoId, jobId);
   if (TERMINAL_JOB_STATUSES.has(current.status)) return current;
   const cancelled = transitionExecutionJob(controllerHome, repoId, jobId, 'cancelled', {
     error: { code: 'CANCELLED', message: reason, retryable: false },
     leaseRefs: [],
   }, { reason });
-  if (current.workerPid && current.workerPid !== process.pid) {
-    terminateWorkerProcess(current.workerPid);
-  }
   releaseExecutionLeases(controllerHome, repoId, jobId, current.leaseRefs);
+  await terminateProcessTree(current.workerPid);
   return cancelled;
 }
 

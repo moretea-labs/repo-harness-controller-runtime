@@ -1,8 +1,8 @@
 import { withControllerLock } from '../../../cli/repositories/locks';
-import { findExecutionJob, listActiveExecutionJobs, transitionExecutionJob, updateExecutionJob } from '../../execution/jobs/store';
+import { claimExecutionJobForDispatch, findExecutionJob, listActiveExecutionJobs, transitionExecutionJob, updateExecutionJob } from '../../execution/jobs/store';
 import type { ExecutionJob, ExecutionJobStatus } from '../../execution/jobs/types';
 import { normalizeClaims } from '../../resources/claims/conflicts';
-import { acquireExecutionLeases } from '../../resources/leases/store';
+import { acquireExecutionLeases, releaseExecutionLeases } from '../../resources/leases/store';
 import { rebuildRepositoryProjection } from '../../projections/materialized-view';
 
 export interface RepoActorConfig {
@@ -133,19 +133,26 @@ export class RepoActor {
             continue;
           }
 
-          const runningJob = transitionExecutionJob(this.controllerHome, dispatchJob.repoId, dispatchJob.jobId, 'running', {
-            attempt: job.attempt + 1,
-            leaseRefs: acquisition.leases.map((lease) => ({
+          const dispatchedJob = claimExecutionJobForDispatch(
+            this.controllerHome,
+            dispatchJob.repoId,
+            dispatchJob.jobId,
+            acquisition.leases.map((lease) => ({
               leaseId: lease.leaseId,
               resourceKey: lease.resourceKey,
               fencingToken: lease.fencingToken,
               expiresAt: lease.expiresAt,
             })),
-          }, { leaseIds: acquisition.leases.map((lease) => lease.leaseId) });
+            { leaseIds: acquisition.leases.map((lease) => lease.leaseId) },
+          );
+          if (!dispatchedJob) {
+            releaseExecutionLeases(this.controllerHome, dispatchJob.repoId, dispatchJob.jobId, acquisition.leases);
+            continue;
+          }
           rebuildRepositoryProjection(this.controllerHome, this.repoId);
           return {
-            job: runningJob,
-            fencingTokens: runningJob.leaseRefs.map(({ leaseId, resourceKey, fencingToken }) => ({ leaseId, resourceKey, fencingToken })),
+            job: dispatchedJob,
+            fencingTokens: dispatchedJob.leaseRefs.map(({ leaseId, resourceKey, fencingToken }) => ({ leaseId, resourceKey, fencingToken })),
           };
         }
         rebuildRepositoryProjection(this.controllerHome, this.repoId);

@@ -6,6 +6,7 @@ import { withControllerLock } from '../../../cli/repositories/locks';
 import type { ResourceClaimSpec } from '../../execution/jobs/types';
 import { readJsonFile, removeFile, writeJsonAtomic } from '../../shared/json-files';
 import { markRepositoryProjectionDirty } from '../../projections/invalidation';
+import { touchSchedulerWakeSignal } from '../../control-plane/global-scheduler/wake-signal';
 import { claimsConflict } from '../claims/conflicts';
 import { appendRuntimeEvent } from '../../evidence/event-ledger';
 import type { ExecutionLease, LeaseAcquisitionResult } from './types';
@@ -84,7 +85,10 @@ export function acquireExecutionLeases(
         data: { resourceKey: lease.resourceKey, mode: lease.mode, expiresAt: lease.expiresAt },
       });
     }
-    if (leases.length > 0) markRepositoryProjectionDirty(controllerHome, repoId, `leases-acquired:${ownerJobId}`);
+    if (leases.length > 0) {
+      markRepositoryProjectionDirty(controllerHome, repoId, `leases-acquired:${ownerJobId}`);
+      touchSchedulerWakeSignal(controllerHome, `leases-acquired:${ownerJobId}`);
+    }
     return { acquired: true, leases, blockers: [] };
   }, 10_000);
 }
@@ -144,7 +148,10 @@ export function releaseExecutionLeases(
       });
       released = true;
     }
-    if (released) markRepositoryProjectionDirty(controllerHome, repoId, `leases-released:${ownerJobId}`);
+    if (released) {
+      markRepositoryProjectionDirty(controllerHome, repoId, `leases-released:${ownerJobId}`);
+      touchSchedulerWakeSignal(controllerHome, `leases-released:${ownerJobId}`);
+    }
   }, 10_000);
 }
 

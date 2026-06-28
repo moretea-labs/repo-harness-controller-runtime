@@ -1,13 +1,16 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { RepoActor } from '../../src/runtime/control-plane/repo-actor/actor';
 import { GlobalScheduler } from '../../src/runtime/control-plane/global-scheduler/scheduler';
+import { touchSchedulerWakeSignal, waitForSchedulerWakeSignal } from '../../src/runtime/control-plane/global-scheduler/wake-signal';
 import { assertAutomatedOperationAllowed } from '../../src/runtime/control-plane/governance/external-effects';
 import { boundExecutionResult, readExecutionArtifact } from '../../src/runtime/evidence/artifact-store';
 import {
+  attachExecutionWorker,
   cancelExecutionJob,
+  claimExecutionJobForDispatch,
   createExecutionJob,
   getExecutionJob,
   listExecutionJobs,
@@ -21,6 +24,7 @@ import {
   listActiveLeases,
   releaseExecutionLeases,
 } from '../../src/runtime/resources/leases/store';
+import { writeJsonAtomic } from '../../src/runtime/shared/json-files';
 import { evaluateSchedule } from '../../src/runtime/workflow/schedules/engine';
 import { createSchedule, listActiveOccurrences, listOccurrences } from '../../src/runtime/workflow/schedules/store';
 import { createPortfolioWorkflow } from '../../src/runtime/workflow/portfolio/store';
@@ -110,6 +114,70 @@ describe('target architecture runtime', () => {
     expect(invalidation?.message).toContain('LEASE_EXPIRED');
   });
 
+  test('treats a stale controller heartbeat as lost worker ownership', () => {
+    const controllerHome = home();
+    const startedAt = new Date(Date.now() - 60_000).toISOString();
+    const created = createExecutionJob(controllerHome, {
+      repoId: 'repo-a',
+      type: 'check',
+      requestId: 'controller-heartbeat-loss',
+      semanticKey: 'check:controller-heartbeat-loss',
+      origin: { surface: 'mcp' },
+      payload: { operation: 'run_check', target: 'mcp-tool' },
+      resourceClaims: [{ resourceKey: 'repo-state', mode: 'read' }],
+    }).job;
+    const acquired = acquireExecutionLeases(controllerHome, 'repo-a', created.jobId, created.resourceClaims, 30_000);
+    const running = updateExecutionJob(controllerHome, 'repo-a', created.jobId, (job) => ({
+      ...job,
+      status: 'running',
+      attempt: 1,
+      workerPid: process.pid,
+      leaseRefs: acquired.leases.map((lease) => ({
+        leaseId: lease.leaseId,
+        resourceKey: lease.resourceKey,
+        fencingToken: lease.fencingToken,
+        expiresAt: lease.expiresAt,
+      })),
+    }));
+    writeJsonAtomic(join(controllerHome, 'daemon', 'state.json'), {
+      schemaVersion: 1,
+      status: 'ready',
+      pid: process.pid,
+      startedAt,
+      gatewaySeparated: true,
+      workerIsolation: true,
+    });
+    writeFileSync(join(controllerHome, 'daemon', 'controller.pid'), `${process.pid}\n`, 'utf8');
+    writeJsonAtomic(join(controllerHome, 'scheduler', 'state.json'), {
+      schemaVersion: 1,
+      updatedAt: startedAt,
+      loopStartedAt: startedAt,
+      lastTickAt: new Date(Date.now() - 15_000).toISOString(),
+      lastRepoDispatch: {},
+    });
+    const invalidation = invalidateExecutionWorker(controllerHome, 'repo-a', created.jobId, {
+      workerPid: process.pid,
+      attempt: running.attempt,
+      controllerPid: process.pid,
+      controllerStartedAt: startedAt,
+      currentParentPid: process.pid,
+    });
+    expect(invalidation?.code).toBe('CONTROLLER_UNAVAILABLE');
+    expect(invalidation?.message).toContain('Controller daemon is failed');
+  });
+
+  test('scheduler wake signals interrupt idle backoff waits', async () => {
+    const controllerHome = home();
+    const revision = touchSchedulerWakeSignal(controllerHome, 'seed').revision;
+    const startedAt = Date.now();
+    const pending = waitForSchedulerWakeSignal(controllerHome, revision, 1_000);
+    await Bun.sleep(40);
+    touchSchedulerWakeSignal(controllerHome, 'job-created');
+    const result = await pending;
+    expect(result).toBe('wakeup');
+    expect(Date.now() - startedAt).toBeLessThan(500);
+  });
+
   test('auto-isolates a concurrent agent job into a worktree', () => {
     const controllerHome = home();
     for (const taskId of ['TASK-1', 'TASK-2']) {
@@ -125,14 +193,52 @@ describe('target architecture runtime', () => {
     }
     const actor = new RepoActor(controllerHome, 'repo-a', { maxConcurrentWorkers: 2 });
     const first = actor.tryClaimNext();
-    expect(first?.job.status).toBe('running');
+    expect(first?.job.status).toBe('dispatched');
     const second = actor.tryClaimNext();
-    expect(second?.job.status).toBe('running');
+    expect(second?.job.status).toBe('dispatched');
     expect(second?.job.resourceClaims[0]?.resourceKey.startsWith('worktree:')).toBe(true);
     expect(second?.job.payload.arguments?.isolate).toBe(true);
   });
 
-  test('cancels a durable job and releases its leases', () => {
+  test('claims the same queued job only once', () => {
+    const controllerHome = home();
+    createExecutionJob(controllerHome, {
+      repoId: 'repo-a',
+      type: 'dispatch-task',
+      requestId: 'claim-once',
+      semanticKey: 'dispatch:claim-once',
+      origin: { surface: 'mcp' },
+      payload: { operation: 'dispatch_task', target: 'mcp-tool', arguments: { issue_id: 'ISSUE-1', task_id: 'TASK-1' } },
+      resourceClaims: [{ resourceKey: 'workspace:checkout-a', mode: 'write' }],
+    });
+    const first = new RepoActor(controllerHome, 'repo-a', { maxConcurrentWorkers: 2 }).tryClaimNext();
+    const second = new RepoActor(controllerHome, 'repo-a', { maxConcurrentWorkers: 2 }).tryClaimNext();
+    expect(first?.job.status).toBe('dispatched');
+    expect(second).toBeUndefined();
+    expect(getExecutionJob(controllerHome, 'repo-a', first!.job.jobId).status).toBe('dispatched');
+  });
+
+  test('attaches only the first worker pid for a dispatched job', () => {
+    const controllerHome = home();
+    const created = createExecutionJob(controllerHome, {
+      repoId: 'repo-a',
+      type: 'mcp-tool',
+      requestId: 'spawn-once',
+      semanticKey: 'spawn-once',
+      origin: { surface: 'mcp' },
+      payload: { operation: 'controller_context', target: 'mcp-tool' },
+      resourceClaims: [],
+    }).job;
+    const claimed = claimExecutionJobForDispatch(controllerHome, 'repo-a', created.jobId, []);
+    expect(claimed?.status).toBe('dispatched');
+    const first = attachExecutionWorker(controllerHome, 'repo-a', created.jobId, 41_001);
+    const second = attachExecutionWorker(controllerHome, 'repo-a', created.jobId, 41_002);
+    expect(first?.workerPid).toBe(41_001);
+    expect(second).toBeUndefined();
+    expect(getExecutionJob(controllerHome, 'repo-a', created.jobId).workerPid).toBe(41_001);
+  });
+
+  test('cancels a durable job and releases its leases', async () => {
     const controllerHome = home();
     const created = createExecutionJob(controllerHome, {
       repoId: 'repo-a',
@@ -148,7 +254,7 @@ describe('target architecture runtime', () => {
       ...job,
       leaseRefs: acquired.leases.map((lease) => ({ leaseId: lease.leaseId, resourceKey: lease.resourceKey, fencingToken: lease.fencingToken, expiresAt: lease.expiresAt })),
     }));
-    expect(cancelExecutionJob(controllerHome, 'repo-a', created.jobId).status).toBe('cancelled');
+    expect((await cancelExecutionJob(controllerHome, 'repo-a', created.jobId)).status).toBe('cancelled');
     expect(listActiveLeases(controllerHome, 'repo-a')).toHaveLength(0);
   });
 

@@ -11,6 +11,7 @@ import { resolveMcpRepoRoot } from "../mcp/repo";
 import { resolveControllerHome } from "../repositories/controller-home";
 import { runProcess } from "../../effects/process-runner";
 import { ensureControllerDaemon, readControllerDaemonStatus, type ControllerDaemonStatus } from "../../runtime/control-plane/daemon-client";
+import { isProcessAlive, terminateProcessTree } from "../../runtime/shared/process-tree";
 
 const DEFAULT_START_TIMEOUT_MS = 20_000;
 const DEFAULT_STOP_TIMEOUT_MS = 8_000;
@@ -142,13 +143,7 @@ export function loadControllerServiceState(repoRoot: string): ControllerServiceS
 }
 
 function isPidAlive(pid: number | undefined): boolean {
-  if (!pid || pid === process.pid) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (_error) {
-    return false;
-  }
+  return pid !== process.pid && isProcessAlive(pid);
 }
 
 async function sleep(ms: number): Promise<void> {
@@ -156,20 +151,11 @@ async function sleep(ms: number): Promise<void> {
 }
 
 async function stopPid(pid: number, timeoutMs: number): Promise<void> {
-  try {
-    process.kill(pid, "SIGTERM");
-  } catch (_error) {
-    return;
-  }
-  const deadline = Date.now() + Math.max(500, timeoutMs);
-  while (isPidAlive(pid) && Date.now() < deadline) await sleep(PROCESS_STOP_POLL_MS);
-  if (isPidAlive(pid)) {
-    try {
-      process.kill(pid, "SIGKILL");
-    } catch (_error) {
-      // Already gone.
-    }
-  }
+  await terminateProcessTree(pid, {
+    gracePeriodMs: Math.max(PROCESS_STOP_POLL_MS, Math.min(timeoutMs, 1_500)),
+    killAfterMs: Math.max(500, timeoutMs),
+    pollIntervalMs: PROCESS_STOP_POLL_MS,
+  });
 }
 
 function readLogTail(path: string, maxChars = 8_000): string {

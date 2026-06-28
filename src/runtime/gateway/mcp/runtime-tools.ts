@@ -504,7 +504,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         const jobId = String(args.job_id ?? '').trim();
         const job = typeof args.repo_id === 'string' ? getExecutionJob(ctx.controllerHome, args.repo_id, jobId) : findExecutionJob(ctx.controllerHome, jobId);
         if (!job) return result({ error: { code: 'JOB_NOT_FOUND', message: jobId } }, true);
-        return result({ job: cancelExecutionJob(ctx.controllerHome, job.repoId, job.jobId, typeof args.reason === 'string' ? args.reason : undefined) });
+        return result({ job: await cancelExecutionJob(ctx.controllerHome, job.repoId, job.jobId, typeof args.reason === 'string' ? args.reason : undefined) });
       }
       case 'controller_ready': {
         const explicitRepoId = typeof args.repo_id === 'string' && args.repo_id.trim() ? args.repo_id.trim() : undefined;
