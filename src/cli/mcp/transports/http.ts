@@ -61,6 +61,39 @@ function isInitializeRequest(body: unknown): boolean {
   return typeof body === 'object' && body !== null && (body as Record<string, unknown>).method === 'initialize';
 }
 
+export interface McpSessionLookupErrorResponse {
+  status: 400 | 404;
+  body: {
+    error: 'missing_session' | 'session_not_found';
+    message: string;
+  };
+}
+
+export function mcpSessionLookupError(sessionId: string | undefined): McpSessionLookupErrorResponse {
+  if (!sessionId?.trim()) {
+    return {
+      status: 400,
+      body: {
+        error: 'missing_session',
+        message: 'Mcp-Session-Id header is required for this request.',
+      },
+    };
+  }
+  return {
+    status: 404,
+    body: {
+      error: 'session_not_found',
+      message: 'MCP session not found or expired; initialize a new session.',
+    },
+  };
+}
+
+export function sendMcpSessionLookupError(res: Response, sessionId: string | undefined): void {
+  const response = mcpSessionLookupError(sessionId);
+  res.setHeader('Cache-Control', 'no-store');
+  res.status(response.status).json(response.body);
+}
+
 function getConfiguredPublicOrigin(repoRoot: string): string | undefined {
   const configured = process.env.REPO_HARNESS_MCP_PUBLIC_ORIGIN?.trim();
   if (configured) {
@@ -387,14 +420,14 @@ async function handleMcpPost(
       return;
     }
   }
-  res.status(400).json({ error: 'No valid session' });
+  sendMcpSessionLookupError(res, sessionId);
 }
 
 async function handleMcpGet(req: Request, res: Response, transports: Map<string, ManagedTransport>): Promise<void> {
   const sessionId = req.headers['mcp-session-id'] as string | undefined;
   const managed = sessionId ? transports.get(sessionId) : undefined;
   if (!managed) {
-    res.status(400).json({ error: 'No valid session' });
+    sendMcpSessionLookupError(res, sessionId);
     return;
   }
   managed.lastSeenAt = Date.now();
