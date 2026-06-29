@@ -2390,7 +2390,7 @@ pi_ensure_harness_state_surface() {
   local mode="${2:-apply}"
 
   if [[ "$mode" != "apply" ]]; then
-    echo "[dry-run] ensure harness policy/context/events/runs/worktrees/triage/planning in $target_dir"
+    echo "[dry-run] ensure harness policy/context/events/runs/worktrees/local-jobs/controller/triage/planning in $target_dir"
     return 0
   fi
 
@@ -2406,6 +2406,8 @@ pi_ensure_harness_state_surface() {
     "$target_dir/.ai/harness/planning" \
     "$target_dir/.ai/harness/architecture" \
     "$target_dir/.ai/harness/worktrees" \
+    "$target_dir/.ai/harness/controller" \
+    "$target_dir/.ai/harness/local-jobs" \
     "$target_dir/.ai/harness/triage" \
     "$target_dir/docs/researches" \
     "$target_dir/docs/architecture/domains" \

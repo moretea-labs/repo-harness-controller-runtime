@@ -97,6 +97,16 @@ export function readControllerEpoch(path: string | undefined): ControllerEpochRe
   }
 }
 
+export function hasControllerOwnershipMetadata(
+  ownership: AgentWorkerOwnershipConfig,
+): boolean {
+  return Boolean(
+    ownership.controllerPid &&
+      ownership.controllerEpoch &&
+      ownership.controllerEpochPath,
+  );
+}
+
 export function invalidateAgentWorker(
   meta: AgentJobMeta,
   ownership: AgentWorkerOwnershipConfig,

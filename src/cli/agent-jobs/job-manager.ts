@@ -36,9 +36,11 @@ import {
 import { normalizeRemoteUrl, stableCheckoutId, stableRemoteRepoId } from "../repositories/identity";
 import {
   ensureControllerEpoch,
+  hasControllerOwnershipMetadata,
   invalidateAgentWorker,
   isPidAlive,
 } from "./worker-lifecycle";
+import { terminateProcessTreeSync } from "../../runtime/shared/process-tree";
 import type {
   AgentExecutionMode,
   AgentJobEvent,
@@ -72,6 +74,27 @@ function sanitize(value: string): string {
 
 function readJson<T>(path: string): T {
   return JSON.parse(readFileSync(path, "utf-8")) as T;
+}
+
+function normalizeAgentMeta(
+  repoRoot: string,
+  runId: string,
+  meta: AgentJobMeta,
+): AgentJobMeta {
+  meta.schemaVersion = meta.schemaVersion ?? 1;
+  meta.provider = meta.provider ?? "local";
+  meta.executionMode =
+    meta.executionMode ??
+    (meta.provider === "github"
+      ? "github"
+      : meta.worktree === repoRoot
+        ? "workspace"
+        : "worktree");
+  meta.autoIntegrate = meta.autoIntegrate ?? meta.executionMode === "worktree";
+  meta.eventsPath =
+    meta.eventsPath ??
+    relative(repoRoot, eventPath(repoRoot, runId)).replace(/\\/g, "/");
+  return meta;
 }
 
 function writeJson(path: string, value: unknown): void {
@@ -183,6 +206,23 @@ function metaPath(repoRoot: string, runId: string): string {
 
 function eventPath(repoRoot: string, runId: string): string {
   return join(jobDir(repoRoot, runId), "events.jsonl");
+}
+
+function rawJobMetaPath(repoRoot: string, runId: string): string {
+  return join(jobDir(repoRoot, runId), "meta.json");
+}
+
+function readRawAgentMeta(
+  repoRoot: string,
+  runId: string,
+): AgentJobMeta | undefined {
+  const path = rawJobMetaPath(repoRoot, runId);
+  if (!existsSync(path)) return undefined;
+  try {
+    return normalizeAgentMeta(repoRoot, runId, readJson<AgentJobMeta>(path));
+  } catch (_error) {
+    return undefined;
+  }
 }
 
 function requestIndexDir(repoRoot: string): string {
@@ -303,15 +343,16 @@ function writeAgentMeta(repoRoot: string, path: string, meta: AgentJobMeta): voi
 
 function terminateRunProcess(pid: number | undefined): void {
   if (!pid || pid === process.pid || !isAlive(pid)) return;
-  try {
-    if (process.platform === "win32") process.kill(pid, "SIGTERM");
-    else process.kill(-pid, "SIGTERM");
-  } catch (_error) {
-    try {
-      process.kill(pid, "SIGTERM");
-    } catch (_nested) {
-      /* already exited */
-    }
+  terminateProcessTreeSync(pid, {
+    gracePeriodMs: 100,
+    killAfterMs: 2_000,
+    pollIntervalMs: 25,
+  });
+}
+
+function terminateRunProcesses(meta: Pick<AgentJobMeta, "agentPid" | "workerPid" | "launchPid">): void {
+  for (const pid of [meta.agentPid, meta.workerPid, meta.launchPid]) {
+    terminateRunProcess(pid);
   }
 }
 
@@ -340,10 +381,20 @@ function reconcileLocalRunOwnership(
   meta: AgentJobMeta,
 ): void {
   if (!["queued", "starting", "running"].includes(meta.status)) return;
-  const hasOwnershipMetadata = Boolean(
-    meta.controllerPid || meta.controllerEpoch || meta.controllerEpochPath,
-  );
+  const hasOwnershipMetadata = hasControllerOwnershipMetadata({
+    controllerPid: meta.controllerPid,
+    controllerEpoch: meta.controllerEpoch,
+    controllerEpochPath: meta.controllerEpochPath,
+  });
   if (!hasOwnershipMetadata && meta.status !== "running") return;
+  if (!hasOwnershipMetadata) {
+    terminateRunProcesses(meta);
+    meta.agentPid = undefined;
+    meta.workerPid = undefined;
+    meta.launchPid = undefined;
+    markRunUnknown(repoRoot, path, meta, "Run ownership metadata is missing");
+    return;
+  }
   const invalidation = invalidateAgentWorker(meta, {
     controllerPid: meta.controllerPid,
     controllerEpoch: meta.controllerEpoch,
@@ -354,9 +405,10 @@ function reconcileLocalRunOwnership(
     workerPid: meta.workerPid,
   });
   if (!invalidation) return;
-  terminateRunProcess(meta.agentPid);
-  terminateRunProcess(meta.workerPid);
-  terminateRunProcess(meta.launchPid);
+  terminateRunProcesses(meta);
+  meta.agentPid = undefined;
+  meta.workerPid = undefined;
+  meta.launchPid = undefined;
   markRunUnknown(repoRoot, path, meta, invalidation.message);
 }
 
@@ -396,7 +448,7 @@ export function appendAgentJobEvent(
 function activeRunIndexEntries(repoRoot: string): AgentRunIndexEntry[] {
   let active = readRunIndex(repoRoot, 'active').runs;
   if (active.length === 0 && existsSync(join(repoRoot, JOB_ROOT))) {
-    listAgentJobs(repoRoot, 5000);
+    for (const meta of scanLegacyJobMeta(repoRoot, 5000)) updateRunIndexes(repoRoot, meta);
     active = readRunIndex(repoRoot, 'active').runs;
   }
   return active;
@@ -499,6 +551,42 @@ function reconcileLatestTerminalRun(repoRoot: string, meta: AgentJobMeta): void 
     cleanupEphemeralIssueAfterRun(repoRoot, issue.id);
   } catch (_error) {
     // Run evidence remains authoritative if Issue metadata changed concurrently.
+  }
+}
+
+function reconcileIncompleteAutoIntegration(
+  repoRoot: string,
+  path: string,
+  meta: AgentJobMeta,
+): void {
+  const message = meta.autoIntegrationError?.trim() || "automatic worktree integration did not finish after the worker exited; the isolated worktree was preserved for manual integration";
+  const progressedAt = new Date().toISOString();
+  meta.status = "waiting_for_user";
+  meta.autoIntegrationError = message;
+  meta.lastHeartbeatAt = progressedAt;
+  delete meta.finishedAt;
+  meta.progress = {
+    phase: "waiting",
+    percent: 96,
+    currentActivity: `实现完成，但自动集成需要处理：${message}`,
+    lastActivityAt: progressedAt,
+    activityCount: (meta.progress?.activityCount ?? 0) + 1,
+  };
+  writeAgentMeta(repoRoot, path, meta);
+  appendAgentJobEvent(repoRoot, meta.runId, {
+    type: "run_waiting",
+    message: "Automatic worktree integration did not finish; the worktree was preserved for manual integration.",
+    data: { error: message, recovered: true },
+  });
+  try {
+    updateTask(repoRoot, meta.issueId, meta.taskId, {
+      status: "review",
+      runId: meta.runId,
+      transition: "run_sync",
+      note: `Automatic integration did not finish for ${meta.runId}: ${message}`,
+    });
+  } catch (_error) {
+    // Run evidence remains authoritative if task metadata changed concurrently.
   }
 }
 
@@ -770,6 +858,25 @@ function acceptancePaths(repoRoot: string, runId: string) {
   };
 }
 
+function scanLegacyJobMeta(repoRoot: string, limit = 50): AgentJobMeta[] {
+  const boundedLimit = Math.min(Math.max(limit, 1), 5000);
+  const root = join(repoRoot, JOB_ROOT);
+  if (!existsSync(root)) return [];
+  const createdAtFromRunId = (runId: string): number => {
+    const match = runId.match(/-(\d{13})-[a-f0-9]+$/i);
+    return match ? Number(match[1]) : 0;
+  };
+  return readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && existsSync(join(root, entry.name, "meta.json")))
+    .sort((a, b) => createdAtFromRunId(b.name) - createdAtFromRunId(a.name))
+    .slice(0, boundedLimit)
+    .flatMap((entry) => {
+      const meta = readRawAgentMeta(repoRoot, entry.name);
+      return meta ? [meta] : [];
+    })
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
 function findActiveTaskRun(repoRoot: string, issueId: string, taskId: string): AgentJobMeta | undefined {
   const indexPath = taskRunIndexPath(repoRoot, issueId, taskId);
   if (existsSync(indexPath)) {
@@ -783,7 +890,7 @@ function findActiveTaskRun(repoRoot: string, issueId: string, taskId: string): A
       // Fall through to compatibility backfill.
     }
   }
-  const active = listAgentJobs(repoRoot, 5000)
+  const active = scanLegacyJobMeta(repoRoot, 5000)
     .filter((entry) => entry.issueId === issueId && entry.taskId === taskId)
     .find((entry) => ["queued", "starting", "running", "waiting_for_user"].includes(entry.status));
   if (active) updateRunIndexes(repoRoot, active);
@@ -1171,20 +1278,7 @@ export function getAgentJob(
 } {
   const path = metaPath(repoRoot, runId);
   if (!existsSync(path)) throw new Error(`agent job not found: ${runId}`);
-  const meta = readJson<AgentJobMeta>(path);
-  meta.schemaVersion = meta.schemaVersion ?? 1;
-  meta.provider = meta.provider ?? "local";
-  meta.executionMode =
-    meta.executionMode ??
-    (meta.provider === "github"
-      ? "github"
-      : meta.worktree === repoRoot
-        ? "workspace"
-        : "worktree");
-  meta.autoIntegrate = meta.autoIntegrate ?? meta.executionMode === "worktree";
-  meta.eventsPath =
-    meta.eventsPath ??
-    relative(repoRoot, eventPath(repoRoot, runId)).replace(/\\/g, "/");
+  const meta = normalizeAgentMeta(repoRoot, runId, readJson<AgentJobMeta>(path));
 
   if (
     meta.provider === "github" &&
@@ -1253,7 +1347,6 @@ export function getAgentJob(
       writeAgentMeta(repoRoot, path, meta);
     }
   } else if (meta.provider === "local") {
-    reconcileLocalRunOwnership(repoRoot, path, meta);
     const resultAbsolute = join(repoRoot, meta.resultPath);
     const autoIntegrationInFlight = meta.status === "running" &&
       meta.autoIntegrate === true &&
@@ -1271,21 +1364,33 @@ export function getAgentJob(
         finishedAt: string;
       }>(resultAbsolute);
       const previous = meta.status;
-      meta.status = result.ok ? "succeeded" : "failed";
       meta.exitCode = result.exitCode;
       meta.error = result.error;
-      meta.finishedAt = result.finishedAt;
-      writeAgentMeta(repoRoot, path, meta);
-      if (previous !== meta.status) {
-        appendAgentJobEvent(repoRoot, runId, {
-          type: result.ok ? "run_succeeded" : "run_failed",
-          message: result.ok
-            ? "Local worker finished."
-            : (result.error ?? `exit ${result.exitCode}`),
-        });
-        reconcileLatestTerminalRun(repoRoot, meta);
+      if (
+        result.ok &&
+        meta.autoIntegrate === true &&
+        meta.executionMode === "worktree" &&
+        !meta.integratedSessionId
+      ) {
+        reconcileIncompleteAutoIntegration(repoRoot, path, meta);
+      } else {
+        meta.status = result.ok ? "succeeded" : "failed";
+        meta.finishedAt = result.finishedAt;
+        writeAgentMeta(repoRoot, path, meta);
+        if (previous !== meta.status) {
+          appendAgentJobEvent(repoRoot, runId, {
+            type: result.ok ? "run_succeeded" : "run_failed",
+            message: result.ok
+              ? "Local worker finished."
+              : (result.error ?? `exit ${result.exitCode}`),
+          });
+          reconcileLatestTerminalRun(repoRoot, meta);
+        }
       }
-    } else if (
+    } else {
+      reconcileLocalRunOwnership(repoRoot, path, meta);
+    }
+    if (
       ["queued", "starting"].includes(meta.status) &&
       meta.startupDeadlineAt &&
       Date.now() > Date.parse(meta.startupDeadlineAt) &&
@@ -1386,30 +1491,13 @@ export function listAgentJobs(repoRoot: string, limit = 50): AgentJobMeta[] {
   const recentIndex = readRunIndex(repoRoot, 'recent');
   if (recentIndex.runs.length > 0) {
     return recentIndex.runs.slice(0, boundedLimit).flatMap((entry) => {
-      try {
-        const { stdoutTail: _stdout, stderrTail: _stderr, ...meta } = getAgentJob(repoRoot, entry.runId);
-        return [meta];
-      } catch (_error) { return []; }
+      const meta = readRawAgentMeta(repoRoot, entry.runId);
+      return meta ? [meta] : [];
     });
   }
 
   // Backward-compatible one-time scan for repositories created before run indexes.
-  const root = join(repoRoot, JOB_ROOT);
-  if (!existsSync(root)) return [];
-  const createdAtFromRunId = (runId: string): number => {
-    const match = runId.match(/-(\d{13})-[a-f0-9]+$/i);
-    return match ? Number(match[1]) : 0;
-  };
-  const legacy = readdirSync(root, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && existsSync(join(root, entry.name, "meta.json")))
-    .sort((a, b) => createdAtFromRunId(b.name) - createdAtFromRunId(a.name))
-    .slice(0, boundedLimit)
-    .flatMap((entry) => {
-      try { return [getAgentJob(repoRoot, entry.name)]; }
-      catch (_error) { return []; }
-    })
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-    .map(({ stdoutTail: _stdout, stderrTail: _stderr, ...meta }) => meta);
+  const legacy = scanLegacyJobMeta(repoRoot, boundedLimit);
   for (const meta of legacy) updateRunIndexes(repoRoot, meta);
   return legacy;
 }
@@ -1527,23 +1615,11 @@ export function cancelAgentJob(repoRoot: string, runId: string): AgentJobMeta {
     );
   if (!["queued", "running", "unknown"].includes(current.status))
     return current;
-  const terminate = (pid: number | undefined): void => {
-    if (!pid || !isAlive(pid)) return;
-    try {
-      if (process.platform === "win32") process.kill(pid, "SIGTERM");
-      else process.kill(-pid, "SIGTERM");
-    } catch (_error) {
-      try {
-        process.kill(pid, "SIGTERM");
-      } catch (_nested) {
-        /* already exited */
-      }
-    }
-  };
-  terminate(current.agentPid);
-  terminate(current.workerPid);
-  terminate(current.launchPid);
+  terminateRunProcesses(current);
   const { stdoutTail: _stdout, stderrTail: _stderr, ...meta } = current;
+  meta.agentPid = undefined;
+  meta.workerPid = undefined;
+  meta.launchPid = undefined;
   meta.status = "cancelled";
   meta.terminationReason = "cancelled";
   meta.finishedAt = new Date().toISOString();

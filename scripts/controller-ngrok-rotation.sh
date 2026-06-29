@@ -20,6 +20,8 @@ LOG_DIR="${REPO_HARNESS_NGROK_ROTATION_LOG_DIR:-$LOG_DIR_DEFAULT}"
 PID_FILE="$STATE_DIR/controller-ngrok-rotation.pid"
 STATE_FILE="$STATE_DIR/controller-ngrok-rotation.state"
 LOG_FILE="$LOG_DIR/controller-ngrok-rotation.log"
+LOCK_DIR="$STATE_DIR/controller-ngrok-rotation.lock"
+LOCK_PID_FILE="$LOCK_DIR/pid"
 
 STARTUP_RETRIES_DEFAULT=12
 STARTUP_RETRY_DELAY_DEFAULT=3
@@ -29,6 +31,7 @@ CURL_TIMEOUT_DEFAULT=12
 ROTATE_BACKOFF_DEFAULT=5
 
 ACTIVE_NGROK_PID=""
+MANAGER_CHILD_PID=""
 STOP_REQUESTED=0
 
 usage() {
@@ -58,6 +61,34 @@ is_pid_alive() {
 read_pid_file() {
   [[ -f "$PID_FILE" ]] || return 1
   tr -d '[:space:]' <"$PID_FILE"
+}
+
+read_lock_pid() {
+  [[ -f "$LOCK_PID_FILE" ]] || return 1
+  tr -d '[:space:]' <"$LOCK_PID_FILE"
+}
+
+acquire_lock() {
+  ensure_dirs
+
+  while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+    local lock_pid
+    lock_pid="$(read_lock_pid || true)"
+    if is_pid_alive "$lock_pid"; then
+      return 1
+    fi
+    rm -rf "$LOCK_DIR"
+  done
+
+  printf '%s\n' "$$" >"$LOCK_PID_FILE"
+}
+
+release_lock() {
+  local lock_pid
+  lock_pid="$(read_lock_pid || true)"
+  if [[ -d "$LOCK_DIR" ]] && [[ -z "$lock_pid" || "$lock_pid" == "$$" ]]; then
+    rm -rf "$LOCK_DIR"
+  fi
 }
 
 state_value() {
@@ -90,6 +121,8 @@ load_rotation_config() {
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
 
+  pin_entries_to_configured_endpoint
+
   if [[ ${NGROK_ENTRIES+x} != x ]] || (( ${#NGROK_ENTRIES[@]} == 0 )); then
     log "NGROK_ENTRIES is empty in $CONFIG_FILE"
     exit 1
@@ -120,6 +153,47 @@ else:
 PY
 }
 
+current_chatgpt_endpoint() {
+  python3 - <<'PY'
+from pathlib import Path
+import json
+
+p = Path(".repo-harness/mcp.local.json")
+if not p.exists():
+    print("")
+else:
+    data = json.loads(p.read_text())
+    print(data.get("chatgpt", {}).get("endpoint", ""))
+PY
+}
+
+pin_entries_to_configured_endpoint() {
+  local configured_endpoint allow_rotation
+  configured_endpoint="$(current_chatgpt_endpoint)"
+  allow_rotation="${ALLOW_ENDPOINT_ROTATION:-0}"
+
+  if [[ -z "$configured_endpoint" || "$allow_rotation" == "1" ]]; then
+    return 0
+  fi
+
+  local configured_base="${configured_endpoint%/mcp}"
+  local filtered=()
+  local entry name config_path url
+  for entry in "${NGROK_ENTRIES[@]}"; do
+    IFS='|' read -r name config_path url <<<"$entry"
+    if [[ "${url%/}" == "$configured_base" ]]; then
+      filtered+=("$entry")
+    fi
+  done
+
+  if (( ${#filtered[@]} > 0 )); then
+    if (( ${#filtered[@]} != ${#NGROK_ENTRIES[@]} )); then
+      log "pinning ngrok candidates to configured ChatGPT endpoint: $configured_endpoint"
+    fi
+    NGROK_ENTRIES=("${filtered[@]}")
+  fi
+}
+
 stop_ngrok_child() {
   local pid="${1:-$ACTIVE_NGROK_PID}"
   [[ -n "$pid" ]] || return 0
@@ -140,15 +214,33 @@ stop_ngrok_child() {
   ACTIVE_NGROK_PID=""
 }
 
-cleanup() {
+cleanup_worker() {
   STOP_REQUESTED=1
   LAST_REASON="${LAST_REASON:-stopped}"
   stop_ngrok_child
-  rm -f "$PID_FILE"
   write_state "stopped"
 }
 
-trap 'cleanup; exit 0' INT TERM
+cleanup_supervisor() {
+  STOP_REQUESTED=1
+  LAST_REASON="${LAST_REASON:-stopped}"
+
+  if [[ -n "$MANAGER_CHILD_PID" ]] && is_pid_alive "$MANAGER_CHILD_PID"; then
+    kill "$MANAGER_CHILD_PID" 2>/dev/null || true
+    local waited=0
+    while is_pid_alive "$MANAGER_CHILD_PID" && (( waited < 20 )); do
+      sleep 0.5
+      waited=$((waited + 1))
+    done
+    if is_pid_alive "$MANAGER_CHILD_PID"; then
+      kill -9 "$MANAGER_CHILD_PID" 2>/dev/null || true
+    fi
+  fi
+
+  rm -f "$PID_FILE"
+  release_lock
+  write_state "stopped"
+}
 
 http_status() {
   local url="$1"
@@ -310,7 +402,7 @@ monitor_candidate() {
   return 0
 }
 
-rotation_run() {
+rotation_run_once() {
   ensure_dirs
   load_rotation_config
 
@@ -322,10 +414,6 @@ rotation_run() {
       start_index="$previous_index"
     fi
   fi
-
-  printf '%s\n' "$$" >"$PID_FILE"
-  write_state "starting"
-  log "rotation manager started for $REPO_ROOT"
 
   while (( STOP_REQUESTED == 0 )); do
     local rotated=0
@@ -356,6 +444,54 @@ rotation_run() {
   done
 }
 
+rotation_run_supervisor() {
+  ensure_dirs
+  load_rotation_config
+
+  if ! acquire_lock; then
+    local existing_pid
+    existing_pid="$(read_lock_pid || true)"
+    if [[ -n "$existing_pid" ]]; then
+      printf '%s\n' "$existing_pid" >"$PID_FILE"
+      log "rotation manager already running (pid $existing_pid)"
+    else
+      log "rotation manager already running"
+    fi
+    return 0
+  fi
+
+  printf '%s\n' "$$" >"$PID_FILE"
+  write_state "starting"
+  log "rotation manager started for $REPO_ROOT"
+
+  trap 'cleanup_supervisor' EXIT
+  trap 'exit 0' INT TERM
+
+  while (( STOP_REQUESTED == 0 )); do
+    "$0" run-once --repo "$REPO_ROOT" --config "$CONFIG_FILE" &
+    MANAGER_CHILD_PID="$!"
+
+    local child_status=0
+    if wait "$MANAGER_CHILD_PID"; then
+      child_status=0
+    else
+      child_status=$?
+    fi
+    MANAGER_CHILD_PID=""
+
+    if (( STOP_REQUESTED != 0 )); then
+      break
+    fi
+
+    if (( child_status != 0 )); then
+      log "rotation worker exited with status $child_status; restarting in ${ROTATE_BACKOFF_SECONDS}s"
+    else
+      log "rotation worker exited unexpectedly; restarting in ${ROTATE_BACKOFF_SECONDS}s"
+    fi
+    sleep "$ROTATE_BACKOFF_SECONDS"
+  done
+}
+
 start_manager() {
   ensure_dirs
   if [[ ! -f "$CONFIG_FILE" ]]; then
@@ -365,6 +501,14 @@ start_manager() {
 
   local existing_pid
   existing_pid="$(read_pid_file || true)"
+  if ! is_pid_alive "$existing_pid"; then
+    local lock_pid
+    lock_pid="$(read_lock_pid || true)"
+    if is_pid_alive "$lock_pid"; then
+      printf '%s\n' "$lock_pid" >"$PID_FILE"
+      existing_pid="$lock_pid"
+    fi
+  fi
   if is_pid_alive "$existing_pid"; then
     log "rotation manager already running (pid $existing_pid)"
     return 0
@@ -377,7 +521,7 @@ import subprocess
 
 cmd = [
     os.environ["SCRIPT_PATH"],
-    "run",
+    "supervise",
     "--repo",
     os.environ["REPO_ROOT"],
     "--config",
@@ -404,7 +548,16 @@ stop_manager() {
   local pid
   pid="$(read_pid_file || true)"
   if ! is_pid_alive "$pid"; then
+    local lock_pid
+    lock_pid="$(read_lock_pid || true)"
+    if is_pid_alive "$lock_pid"; then
+      printf '%s\n' "$lock_pid" >"$PID_FILE"
+      pid="$lock_pid"
+    fi
+  fi
+  if ! is_pid_alive "$pid"; then
     rm -f "$PID_FILE"
+    release_lock
     log "rotation manager is not running"
     return 0
   fi
@@ -419,13 +572,19 @@ stop_manager() {
     kill -9 "$pid" 2>/dev/null || true
   fi
   rm -f "$PID_FILE"
+  release_lock
   log "rotation manager stopped"
 }
 
 status_manager() {
   ensure_dirs
-  local pid status active_name active_url last_reason updated_at
+  local pid lock_pid status active_name active_url last_reason updated_at
   pid="$(read_pid_file || true)"
+  lock_pid="$(read_lock_pid || true)"
+  if ! is_pid_alive "$pid" && is_pid_alive "$lock_pid"; then
+    printf '%s\n' "$lock_pid" >"$PID_FILE"
+    pid="$lock_pid"
+  fi
   status="$(state_value STATUS || true)"
   active_name="$(state_value ACTIVE_NAME || true)"
   active_url="$(state_value ACTIVE_URL || true)"
@@ -488,6 +647,8 @@ done
 PID_FILE="$STATE_DIR/controller-ngrok-rotation.pid"
 STATE_FILE="$STATE_DIR/controller-ngrok-rotation.state"
 LOG_FILE="$LOG_DIR/controller-ngrok-rotation.log"
+LOCK_DIR="$STATE_DIR/controller-ngrok-rotation.lock"
+LOCK_PID_FILE="$LOCK_DIR/pid"
 
 case "$COMMAND" in
   start)
@@ -502,8 +663,13 @@ case "$COMMAND" in
   logs)
     logs_manager
     ;;
-  run)
-    rotation_run
+  supervise)
+    rotation_run_supervisor
+    ;;
+  run|run-once)
+    trap 'cleanup_worker' EXIT
+    trap 'exit 0' INT TERM
+    rotation_run_once
     ;;
   *)
     usage

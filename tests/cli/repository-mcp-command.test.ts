@@ -9,6 +9,7 @@ import { createMcpToolContext } from "../../src/cli/mcp/multi-repository";
 import { getLocalBridgeJob, readLocalBridgeJobOutput } from "../../src/cli/local-bridge/job-store";
 import { routeDurableMcpCall } from "../../src/runtime/gateway/mcp/router";
 import { getExecutionJob } from "../../src/runtime/execution/jobs/store";
+import { terminateProcessesByCommand, waitForNoProcessesByCommand } from "../runtime/process-hygiene";
 
 function git(root: string, args: string[]): void {
   const result = spawnSync("git", ["-C", root, ...args], {
@@ -23,6 +24,11 @@ function git(root: string, args: string[]): void {
 async function json(result: ReturnType<typeof callRepositoryTool>) {
   const resolved = await result;
   return JSON.parse(resolved?.content[0]?.text ?? "{}");
+}
+
+async function cleanupWorkspace(paths: string[]): Promise<void> {
+  await terminateProcessesByCommand(paths);
+  await waitForNoProcessesByCommand(paths);
 }
 
 describe("repository MCP command tools", () => {
@@ -75,6 +81,7 @@ describe("repository MCP command tools", () => {
       });
       expect(status.stdout).toContain("A  tracked.txt");
     } finally {
+      await cleanupWorkspace([workspace, controllerHome, repoRoot]);
       rmSync(workspace, { recursive: true, force: true });
     }
   });
@@ -105,6 +112,7 @@ describe("repository MCP command tools", () => {
       expect(value.status).toBe("approval_required");
       expect(value.after).toBeUndefined();
     } finally {
+      await cleanupWorkspace([workspace, controllerHome, repoRoot]);
       rmSync(workspace, { recursive: true, force: true });
     }
   });
@@ -138,6 +146,7 @@ describe("repository MCP command tools", () => {
       expect(preview.status).toBe("preview");
       expect(preview.approvalToken).toBeTruthy();
     } finally {
+      await cleanupWorkspace([workspace, controllerHome, repoRoot]);
       rmSync(workspace, { recursive: true, force: true });
     }
   });
@@ -183,6 +192,7 @@ describe("repository MCP command tools", () => {
       const stderr = readLocalBridgeJobOutput(repoRoot, executedValue.jobId, { stream: "stderr" });
       expect(stderr.content).toBe("");
     } finally {
+      await cleanupWorkspace([workspace, controllerHome, repoRoot]);
       rmSync(workspace, { recursive: true, force: true });
     }
   });
@@ -215,6 +225,7 @@ describe("repository MCP command tools", () => {
       expect(job.payload.operation).toBe("repository_update");
       expect(job.repoId).toBe(repository.repoId);
     } finally {
+      await cleanupWorkspace([workspace, controllerHome, repoRoot]);
       rmSync(workspace, { recursive: true, force: true });
     }
   });

@@ -43,6 +43,8 @@ describe("Hook recursive copy", () => {
 
       expect(existsSync(join(repo, ".ai/hooks/lib/workflow-state.sh"))).toBe(true);
       expect(existsSync(join(repo, ".ai/hooks/lib/session-state.sh"))).toBe(true);
+      expect(existsSync(join(repo, ".ai/harness/local-jobs"))).toBe(true);
+      expect(existsSync(join(repo, ".ai/harness/controller"))).toBe(true);
       expect(existsSync(join(repo, ".claude/hooks/lib/workflow-state.sh"))).toBe(false);
       expect(existsSync(join(repo, ".claude/hooks/lib/session-state.sh"))).toBe(false);
       expect(existsSync(join(repo, ".claude/hooks/hook-input.sh"))).toBe(false);

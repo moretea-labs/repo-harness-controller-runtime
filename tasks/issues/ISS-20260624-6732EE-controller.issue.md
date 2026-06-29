@@ -2,7 +2,7 @@
 id: "ISS-20260624-6732EE"
 kind: "bug"
 status: "in_progress"
-updated_at: "2026-06-26T11:01:38.788Z"
+updated_at: "2026-06-29T10:41:00.000Z"
 source: "repo-harness-controller-v8"
 ---
 
@@ -136,21 +136,23 @@ source: "repo-harness-controller-v8"
 
 ### T11 — 修复自动集成 Run 终态一致性
 
-- Status: `ready`
+- Status: `verified`
 - Objective: 确保 worktree 自动集成 Run 只有在集成完成并清理，或记录明确 autoIntegrationError 后才进入成功终态；worker 在 result 写入后异常退出不得被恢复为假成功。
 - Depends on: `T1`
 - Allowed paths: `src/cli/agent-jobs/integration.ts`, `src/cli/agent-jobs/job-manager.ts`, `src/cli/agent-jobs/job-worker.ts`, `tests/cli/local-bridge.test.ts`, `tests/cli/mcp-controller.test.ts`
 - Checks: `package:check:type`, `package:check:controller-v8`
 - Execution hint: selected at runtime
+- Notes: 已补上恢复分支：worktree Run 在 `result.ok` 后、自动集成完成前若 worker 异常退出，会回收到 `waiting_for_user + autoIntegrationError`，不再显示为假成功；新增中途退出回归测试，并复验正常自动集成路径与类型检查。
 
 ### T12 — 收敛检查进程树与证据 Revision
 
-- Status: `ready`
+- Status: `verified`
 - Objective: 确保检查任务只有在完整子进程树退出后才进入终态；检查执行期间仓库 Revision 变化时不得生成可复用成功证据，并为排队/持锁阶段提供可观测状态。
 - Depends on: `T2`
 - Allowed paths: `src/cli/controller/check-runner.ts`, `src/cli/local-bridge/job-store.ts`, `tests/cli/local-bridge.test.ts`, `tests/cli/mcp-controller.test.ts`
 - Checks: `package:check:type`, `package:check:controller-v8`
 - Execution hint: selected at runtime
+- Notes: 已将检查命令终态收口改为等待完整进程树退出；若主命令退出后仍残留子进程，则先回收再 fail-closed，避免把泄漏子进程记成成功检查。新增残留子进程回归测试，并复验 `check:controller-v8` 与类型检查。
 
 ### T13 — 修复共享检查订阅与取消语义
 

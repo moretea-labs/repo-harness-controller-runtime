@@ -9,6 +9,7 @@ import {
   type ProcessRunResult,
 } from '../../effects/process-runner';
 import { atomicWriteFileSync } from '../installer/shared';
+import { listProcessTreeMembers, terminateProcessTree } from '../../runtime/shared/process-tree';
 
 export interface ControllerCheck {
   id: string;
@@ -441,6 +442,23 @@ function signalProcessTree(pid: number | undefined, signal: NodeJS.Signals): voi
   }
 }
 
+async function reapResidualCheckProcessTree(
+  pid: number | undefined,
+): Promise<string | undefined> {
+  if (!pid) return undefined;
+  const lingering = listProcessTreeMembers(pid);
+  if (lingering.length === 0) return undefined;
+  const terminated = await terminateProcessTree(pid, {
+    gracePeriodMs: 100,
+    killAfterMs: 2_000,
+    pollIntervalMs: 25,
+  });
+  if (!terminated.exited) {
+    return `check process tree did not exit cleanly; remaining processes: ${terminated.remainingPids.join(', ')}`;
+  }
+  return `check process tree remained alive after the main command exited; terminated lingering processes: ${lingering.join(', ')}`;
+}
+
 export interface ControllerCheckSubscriptionRelease {
   released: boolean;
   remainingSubscribers: number;
@@ -512,26 +530,27 @@ async function executeControllerCheckAsync(
     }, timeoutMs);
     timeout.unref?.();
 
-    const finish = (status: number, error?: string): void => {
+    const finish = async (status: number, error?: string): Promise<void> => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
       if (hardKillTimer) clearTimeout(hardKillTimer);
+      const processTreeError = await reapResidualCheckProcessTree(child.pid);
       const timeoutMessage = timedOut
         ? `process timed out after ${timeoutMs}ms: ${command.join(' ')}`
         : '';
-      const stderrText = [stderr, timeoutMessage || error || ''].filter(Boolean).join('\n');
+      const stderrText = [stderr, timeoutMessage || error || '', processTreeError || ''].filter(Boolean).join('\n');
       resolvePromise({
-        ok: status === 0 && !timedOut && !error,
-        status,
+        ok: status === 0 && !timedOut && !error && !processTreeError,
+        status: processTreeError && status === 0 ? 1 : status,
         timedOut,
         stdout: capProcessOutput(redactProcessOutput(stdout), maxOutputBytes),
         stderr: capProcessOutput(redactProcessOutput(stderrText), maxOutputBytes),
       });
     };
 
-    child.once('error', (error) => finish(1, error.message));
-    child.once('close', (code) => finish(code ?? 1));
+    child.once('error', (error) => { void finish(1, error.message); });
+    child.once('close', (code) => { void finish(code ?? 1); });
   });
 
   const withoutPath = {

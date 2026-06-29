@@ -468,6 +468,79 @@ describe("Controller v7 compatibility on the V8 execution bridge", () => {
     expect(refreshed.tasks[0]!.verification?.autoCompleted).toBe(true);
   });
 
+  test("isolated Runs do not become succeeded before automatic integration finishes", () => {
+    const root = repo();
+    const issue = createIssue(root, {
+      title: "Auto integration recovery",
+      tasks: [{
+        title: "Preserve isolated change",
+        objective: "Keep the worktree available when auto integration did not finish.",
+        allowedPaths: ["src/recovered.ts"],
+        risk: "low",
+      }],
+    });
+    const runId = "RUN-auto-integration-recovery";
+    const dir = join(root, ".ai/harness/jobs", runId);
+    const worktree = join(root, ".ai/harness/worktrees", runId);
+    mkdirSync(dir, { recursive: true });
+    mkdirSync(worktree, { recursive: true });
+    const now = new Date().toISOString();
+    for (const file of ["stdout.log", "stderr.log", "events.jsonl"]) writeFileSync(join(dir, file), "");
+    writeFileSync(join(dir, "meta.json"), `${JSON.stringify({
+      schemaVersion: 3,
+      repoId: "repo-test",
+      checkoutId: "checkout-test",
+      runId,
+      issueId: issue.id,
+      taskId: "T1",
+      agent: "codex",
+      provider: "local",
+      executionMode: "worktree",
+      executionClass: "low_risk_change",
+      allowedPaths: ["src/recovered.ts"],
+      status: "running",
+      repoRoot: root,
+      executionRoot: worktree,
+      worktree,
+      worktreePath: worktree,
+      branch: "controller/test",
+      baseRevision: "HEAD",
+      promptPath: `.ai/harness/jobs/${runId}/prompt.md`,
+      stdoutPath: `.ai/harness/jobs/${runId}/stdout.log`,
+      stderrPath: `.ai/harness/jobs/${runId}/stderr.log`,
+      resultPath: `.ai/harness/jobs/${runId}/result.json`,
+      eventsPath: `.ai/harness/jobs/${runId}/events.jsonl`,
+      workerPid: 99999999,
+      autoIntegrate: true,
+      createdAt: now,
+      startedAt: now,
+      lastHeartbeatAt: now,
+      progress: {
+        phase: "finalizing",
+        percent: 96,
+        currentActivity: "Agent implementation finished; automatic integration is finalizing",
+        lastActivityAt: now,
+        activityCount: 1,
+      },
+    }, null, 2)}\n`);
+    updateTask(root, issue.id, "T1", { status: "running", runId });
+    writeFileSync(join(dir, "result.json"), `${JSON.stringify({
+      ok: true,
+      exitCode: 0,
+      finishedAt: new Date().toISOString(),
+    }, null, 2)}\n`);
+
+    const run = getAgentJob(root, runId);
+    expect(run.status).toBe("waiting_for_user");
+    expect(run.autoIntegrationError).toContain("automatic worktree integration did not finish");
+    expect(run.integratedSessionId).toBeUndefined();
+    expect(run.finishedAt).toBeUndefined();
+
+    const refreshed = listIssues(root).find((entry) => entry.id === issue.id)!;
+    expect(refreshed.tasks[0]!.status).toBe("review");
+    expect(refreshed.tasks[0]!.notes.at(-1)).toContain("Automatic integration did not finish");
+  });
+
   test("treats PPID=1 workers as disconnected ownership", () => {
     const now = new Date().toISOString();
     const invalidation = invalidateAgentWorker({

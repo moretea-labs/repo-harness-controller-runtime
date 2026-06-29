@@ -14,12 +14,31 @@ import type {
 const configPath = process.argv[2];
 if (!configPath) throw new Error("agent job worker requires a config path");
 
+type AgentJobWorkerRuntimeConfig = AgentJobWorkerConfig & {
+  ownershipPollIntervalMs?: number;
+  ownershipKillGraceMs?: number;
+};
+
 const config = JSON.parse(
   readFileSync(configPath, "utf-8"),
-) as AgentJobWorkerConfig;
+) as AgentJobWorkerRuntimeConfig;
 const prompt = readFileSync(config.promptPath, "utf-8");
 const meta = JSON.parse(readFileSync(config.metaPath, "utf-8")) as AgentJobMeta;
 const MAX_STREAM_BYTES = 4 * 1024 * 1024;
+const OWNERSHIP_POLL_INTERVAL_MS = Math.max(
+  50,
+  config.ownershipPollIntervalMs ?? 5_000,
+);
+const OWNERSHIP_KILL_GRACE_MS = Math.max(
+  100,
+  config.ownershipKillGraceMs ?? 5_000,
+);
+let timedOut = false;
+let spawnError: Error | undefined;
+let ownershipError: Error | undefined;
+let child: ReturnType<typeof spawn> | undefined;
+let childExited = false;
+let failClosedRequested = false;
 assertOwnership();
 
 function event(
@@ -44,11 +63,26 @@ function persistMeta(value: AgentJobMeta): void {
   persistJson(config.metaPath, value);
 }
 
-function readMeta(): AgentJobMeta {
-  return JSON.parse(readFileSync(config.metaPath, "utf-8")) as AgentJobMeta;
+function missingOwnershipError(): Error {
+  return new Error("Run ownership metadata is unreadable or missing");
 }
 
-function ownershipFailure(current: AgentJobMeta): Error | undefined {
+function tryReadMeta(): AgentJobMeta | undefined {
+  try {
+    return JSON.parse(readFileSync(config.metaPath, "utf-8")) as AgentJobMeta;
+  } catch (_error) {
+    return undefined;
+  }
+}
+
+function readMeta(): AgentJobMeta {
+  const current = tryReadMeta();
+  if (!current) throw missingOwnershipError();
+  return current;
+}
+
+function ownershipFailure(current: AgentJobMeta | undefined): Error | undefined {
+  if (!current) return missingOwnershipError();
   const invalidation = invalidateAgentWorker(current, {
     controllerPid: config.controllerPid,
     controllerEpoch: config.controllerEpoch,
@@ -62,7 +96,7 @@ function ownershipFailure(current: AgentJobMeta): Error | undefined {
 }
 
 function assertOwnership(): void {
-  const invalid = ownershipFailure(readMeta());
+  const invalid = ownershipFailure(tryReadMeta());
   if (invalid) throw invalid;
 }
 
@@ -88,6 +122,60 @@ function persistOwnershipLoss(reason: string): void {
   persistMeta(current);
   event("run_failed", reason, { ownershipLost: true });
 }
+
+function terminateAgent(signal: NodeJS.Signals): void {
+  if (!child?.pid || childExited) return;
+  try {
+    if (process.platform === "win32") child.kill(signal);
+    else process.kill(-child.pid, signal);
+  } catch (_error) {
+    try {
+      child.kill(signal);
+    } catch (_nested) {
+      /* process already exited */
+    }
+  }
+}
+
+function beginFailClosed(reason: string): void {
+  ownershipError ??= new Error(reason);
+  try {
+    persistOwnershipLoss(reason);
+  } catch (_error) {
+    /* metadata may already be gone; fail-closed still terminates the child tree */
+  }
+  try {
+    updateProgress("failed", reason, 100, { ownershipLost: true });
+  } catch (_error) {
+    /* metadata may already be gone; fail-closed still terminates the child tree */
+  }
+  terminateAgent("SIGTERM");
+  const forceKill = setTimeout(() => terminateAgent("SIGKILL"), OWNERSHIP_KILL_GRACE_MS);
+  forceKill.unref();
+}
+
+function fatalWorkerError(error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  if (failClosedRequested) {
+    if (!child?.pid || childExited) process.exit(1);
+    return;
+  }
+  failClosedRequested = true;
+  beginFailClosed(reason || "worker encountered an unexpected fatal error");
+  if (!child?.pid || childExited) {
+    process.exit(1);
+    return;
+  }
+  const exitTimer = setTimeout(() => process.exit(1), OWNERSHIP_KILL_GRACE_MS + 250);
+  exitTimer.unref();
+  child.once("close", () => {
+    clearTimeout(exitTimer);
+    process.exit(1);
+  });
+}
+
+process.once("uncaughtException", fatalWorkerError);
+process.once("unhandledRejection", fatalWorkerError);
 
 function appendBounded(
   path: string,
@@ -325,10 +413,6 @@ let lastLogEventAt = 0;
 let lastActivityAt = 0;
 let stdoutLineBuffer = "";
 let stderrLineBuffer = "";
-let timedOut = false;
-let spawnError: Error | undefined;
-let ownershipError: Error | undefined;
-
 function noteLogUpdate(stream: "stdout" | "stderr", bytes: number): void {
   const now = Date.now();
   if (now - lastLogEventAt < 750) return;
@@ -366,7 +450,7 @@ function consumeLines(stream: "stdout" | "stderr", chunk: Buffer): void {
   }
 }
 
-const child = spawn(command.bin, command.args, {
+child = spawn(command.bin, command.args, {
   cwd: config.worktree,
   detached: process.platform !== "win32",
   stdio: ["ignore", "pipe", "pipe"],
@@ -427,31 +511,11 @@ heartbeat.unref();
 
 const ownershipGuard = setInterval(() => {
   if (ownershipError) return;
-  ownershipError = ownershipFailure(readMeta());
+  ownershipError = ownershipFailure(tryReadMeta());
   if (!ownershipError) return;
-  persistOwnershipLoss(ownershipError.message);
-  updateProgress("failed", ownershipError.message, 100, {
-    ownershipLost: true,
-  });
-  terminateAgent("SIGTERM");
-  const forceKill = setTimeout(() => terminateAgent("SIGKILL"), 5_000);
-  forceKill.unref();
-}, 5_000);
+  beginFailClosed(ownershipError.message);
+}, OWNERSHIP_POLL_INTERVAL_MS);
 ownershipGuard.unref();
-
-function terminateAgent(signal: NodeJS.Signals): void {
-  if (!child.pid) return;
-  try {
-    if (process.platform === "win32") child.kill(signal);
-    else process.kill(-child.pid, signal);
-  } catch (_error) {
-    try {
-      child.kill(signal);
-    } catch (_nested) {
-      /* process already exited */
-    }
-  }
-}
 
 const result = await new Promise<{
   code: number | null;
@@ -468,6 +532,9 @@ const result = await new Promise<{
     finish(null, null);
   });
   child.once("close", (code, signal) => finish(code, signal));
+  child.once("close", () => {
+    childExited = true;
+  });
 
   const timeout = setTimeout(() => {
     timedOut = true;
@@ -481,7 +548,7 @@ const result = await new Promise<{
       `Agent exceeded timeout ${config.timeoutMs}ms; terminating process.`,
     );
     terminateAgent("SIGTERM");
-    const forceKill = setTimeout(() => terminateAgent("SIGKILL"), 5_000);
+    const forceKill = setTimeout(() => terminateAgent("SIGKILL"), OWNERSHIP_KILL_GRACE_MS);
     forceKill.unref();
   }, config.timeoutMs);
   timeout.unref();
@@ -498,8 +565,14 @@ const result = await new Promise<{
 });
 
 const finishedAt = new Date().toISOString();
-const finalOwnershipError = ownershipError ?? ownershipFailure(readMeta());
-if (finalOwnershipError) persistOwnershipLoss(finalOwnershipError.message);
+const finalOwnershipError = ownershipError ?? ownershipFailure(tryReadMeta());
+if (finalOwnershipError) {
+  try {
+    persistOwnershipLoss(finalOwnershipError.message);
+  } catch (_error) {
+    /* metadata may already be gone; the worker still exits fail-closed */
+  }
+}
 const ok = result.code === 0 && !timedOut && !spawnError && !finalOwnershipError;
 const error =
   finalOwnershipError?.message ??
@@ -523,9 +596,8 @@ persistJson(config.resultPath, {
   finishedAt,
 });
 
-const finalMeta = JSON.parse(
-  readFileSync(config.metaPath, "utf-8"),
-) as AgentJobMeta;
+const finalMeta = tryReadMeta();
+if (!finalMeta) process.exit(1);
 const currentOwnershipError = ownershipFailure(finalMeta);
 if (currentOwnershipError) {
   process.exit(1);

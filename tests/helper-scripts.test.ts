@@ -1,4 +1,4 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, setDefaultTimeout } from "bun:test";
 import {
   copyFileSync,
   cpSync,
@@ -20,6 +20,13 @@ const ROOT = join(import.meta.dir, "..");
 const HELPER_DIR = join(ROOT, "assets/templates/helpers");
 const TEMPLATE_DIR = join(ROOT, "assets/templates");
 const ASSETS_HOOKS_DIR = join(ROOT, "assets/hooks");
+const HELPER_SCRIPT_TIMEOUT_MS = 60000;
+
+// These tests spawn layered bash helpers that in turn run git, jq, bun/node,
+// hook dispatchers, and worktree operations. Under full-suite parallel load,
+// the Bun 5s default is too low and turns healthy helper executions into
+// timeout-driven false negatives.
+setDefaultTimeout(HELPER_SCRIPT_TIMEOUT_MS);
 
 function tmpWorkspace(prefix: string): string {
   return realpathSync(mkdtempSync(join(tmpdir(), `${prefix}-`)));

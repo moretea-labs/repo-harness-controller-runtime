@@ -1650,7 +1650,12 @@ describe("Hook runtime behavior", () => {
         cwd,
         input: JSON.stringify({ tool_input: { file_path: "src/app.ts" } }),
         encoding: "utf-8",
-        env: { ...process.env, HOOK_HOST: "codex", HOOK_REPO_ROOT: cwd },
+        env: {
+          ...process.env,
+          HOOK_HOST: "codex",
+          HOOK_REPO_ROOT: cwd,
+          REPO_HARNESS_EDIT_PLAN_GATE: "enforce",
+        },
       });
 
       expect(blockRes.status).toBe(2);
@@ -1696,7 +1701,8 @@ describe("Hook runtime behavior", () => {
       });
 
       // Without bun/CLI the prompt layer cannot classify; it must degrade to
-      // a one-shot advisory instead of guessing. The edit layer still blocks.
+      // a one-shot advisory instead of guessing. The edit layer can still
+      // enforce the deterministic plan gate when the repo opts into enforce.
       expect(res.status).toBe(0);
       expect(res.stdout).toContain("degraded to advisory");
       expect(res.stdout).not.toContain("[PromptGuard] Decision engine unavailable or failed.");
@@ -1710,6 +1716,7 @@ describe("Hook runtime behavior", () => {
           HOME: process.env.HOME ?? "",
           HOOK_REPO_ROOT: cwd,
           PATH: "/bin:/usr/bin:/usr/sbin",
+          REPO_HARNESS_EDIT_PLAN_GATE: "enforce",
         },
       });
       expect(editRes.status).toBe(2);

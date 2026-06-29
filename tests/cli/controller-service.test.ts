@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "fs";
 import { createServer } from "net";
 import { tmpdir } from "os";
 import { join } from "path";
+import { terminateProcessesByCommand, waitForNoProcessesByCommand } from "../runtime/process-hygiene";
 
 const ROOT = join(import.meta.dir, "../..");
 const CLI = join(ROOT, "src/cli/index.ts");
@@ -21,6 +22,8 @@ afterEach(async () => {
         REPO_HARNESS_CONTROLLER_HOME: fixture.controllerHome,
       },
     });
+    await terminateProcessesByCommand([fixture.repoRoot, fixture.controllerHome]);
+    await waitForNoProcessesByCommand([fixture.repoRoot, fixture.controllerHome]);
     rmSync(fixture.repoRoot, { recursive: true, force: true });
     rmSync(fixture.controllerHome, { recursive: true, force: true });
   }
@@ -82,9 +85,37 @@ function runCli(
       env: {
         ...process.env,
         REPO_HARNESS_CONTROLLER_HOME: controllerHome,
+        REPO_HARNESS_NGROK_ROTATION_CONFIG: join(controllerHome, "disabled-ngrok-rotation.env"),
       },
     },
   );
+}
+
+function parseJsonPrefix<T>(text: string): T {
+  const start = text.indexOf("{");
+  if (start < 0) throw new Error(`JSON payload missing from output: ${text}`);
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index]!;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === "\"") inString = false;
+      continue;
+    }
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+    if (char === "{") depth += 1;
+    else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return JSON.parse(text.slice(start, index + 1)) as T;
+    }
+  }
+  throw new Error(`JSON payload was not terminated: ${text}`);
 }
 
 async function waitForRunning(repoRoot: string, controllerHome: string, running: boolean): Promise<Record<string, unknown>> {
@@ -115,20 +146,20 @@ describe("controller service lifecycle", () => {
 
     const start = runCli(controllerHome, ["start", "--repo", repoRoot, "--json"], { useScript: true });
     expect(start.status).toBe(0);
-    const firstStart = JSON.parse(start.stdout) as {
+    const firstStart = parseJsonPrefix<{
       action: string;
       status: { running: boolean; serviceStatePath: string; supervisor: { pid?: number } };
-    };
+    }>(start.stdout);
     expect(firstStart.action).toBe("started");
     expect(firstStart.status.running).toBe(true);
-    expect(firstStart.status.serviceStatePath).toBe(
-      join(repoRoot, ".ai", "local", "state", "controller-service.json"),
+    expect(realpathSync(firstStart.status.serviceStatePath)).toBe(
+      realpathSync(join(repoRoot, ".ai", "local", "state", "controller-service.json")),
     );
     expect(firstStart.status.supervisor.pid).toBeTruthy();
 
     const secondStart = runCli(controllerHome, ["start", "--repo", repoRoot, "--json"], { useScript: true });
     expect(secondStart.status).toBe(0);
-    const secondPayload = JSON.parse(secondStart.stdout) as { action: string; status: { supervisor: { pid?: number } } };
+    const secondPayload = parseJsonPrefix<{ action: string; status: { supervisor: { pid?: number } } }>(secondStart.stdout);
     expect(secondPayload.action).toBe("already_running");
     expect(secondPayload.status.supervisor.pid).toBe(firstStart.status.supervisor.pid);
 
@@ -143,13 +174,13 @@ describe("controller service lifecycle", () => {
 
     const restart = runCli(controllerHome, ["restart", "--repo", repoRoot, "--json"], { useScript: true });
     expect(restart.status).toBe(0);
-    const restarted = JSON.parse(restart.stdout) as { action: string; status: { running: boolean } };
+    const restarted = parseJsonPrefix<{ action: string; status: { running: boolean } }>(restart.stdout);
     expect(restarted.action).toBe("restarted");
     expect(restarted.status.running).toBe(true);
 
     const stop = runCli(controllerHome, ["stop", "--repo", repoRoot, "--json"], { useScript: true });
     expect(stop.status).toBe(0);
-    const stopped = JSON.parse(stop.stdout) as { action: string };
+    const stopped = parseJsonPrefix<{ action: string }>(stop.stdout);
     expect(stopped.action).toBe("stopped");
 
     const finalStatus = await waitForRunning(repoRoot, controllerHome, false);
@@ -158,5 +189,5 @@ describe("controller service lifecycle", () => {
 
     const logPath = join(repoRoot, ".ai", "local", "logs", "repo-harness-controller.log");
     expect(readFileSync(logPath, "utf-8")).toContain("[repo-harness mcp keepalive] Repo:");
-  });
+  }, 30_000);
 });

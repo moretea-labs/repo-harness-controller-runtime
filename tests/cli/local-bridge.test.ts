@@ -11,7 +11,7 @@ import {
 import { tmpdir } from "os";
 import { join } from "path";
 import { spawn, spawnSync } from "child_process";
-import { getAgentJob } from "../../src/cli/agent-jobs/job-manager";
+import { cancelAgentJob, getAgentJob, listAgentJobs } from "../../src/cli/agent-jobs/job-manager";
 import {
   controllerCheckConcurrencyClass,
   releaseControllerCheckSubscription,
@@ -24,6 +24,7 @@ import { getMcpPolicy } from "../../src/cli/mcp/policy";
 import {
   executeLocalBridgeJob,
   getLocalBridgeJob,
+  cancelLocalBridgeJob,
   listLocalBridgeJobs,
   reconcileLocalBridgeJobs,
   submitLocalBridgeJob,
@@ -32,15 +33,32 @@ import {
   startLocalBridgeServer,
   type LocalBridgeServerHandle,
 } from "../../src/cli/local-bridge/server";
+import { isProcessAlive } from "../../src/runtime/shared/process-tree";
+import { terminateProcessesByCommand, waitForNoProcessesByCommand } from "../runtime/process-hygiene";
 
 const roots: string[] = [];
+const repoRoots: string[] = [];
 const servers: LocalBridgeServerHandle[] = [];
 const originalControllerHome = process.env.REPO_HARNESS_CONTROLLER_HOME;
 
 afterEach(async () => {
   for (const server of servers.splice(0)) await server.close();
-  for (const root of roots.splice(0))
-    rmSync(root, { recursive: true, force: true });
+  const cleanupRoots = repoRoots.splice(0);
+  for (const repoRoot of cleanupRoots) {
+    for (const job of listLocalBridgeJobs(repoRoot, 5000)) {
+      if (["approved", "dispatched", "running"].includes(job.status)) {
+        cancelLocalBridgeJob(repoRoot, job.jobId);
+      }
+    }
+    for (const run of listAgentJobs(repoRoot, 5000)) {
+      if (run.provider === "local" && ["queued", "starting", "running", "unknown"].includes(run.status)) {
+        cancelAgentJob(repoRoot, run.runId);
+      }
+    }
+  }
+  await terminateProcessesByCommand(cleanupRoots);
+  await waitForNoProcessesByCommand(cleanupRoots);
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
   if (originalControllerHome === undefined) delete process.env.REPO_HARNESS_CONTROLLER_HOME;
   else process.env.REPO_HARNESS_CONTROLLER_HOME = originalControllerHome;
 });
@@ -50,6 +68,7 @@ function repo(): string {
   const controllerHome = mkdtempSync(join(tmpdir(), "repo-harness-local-bridge-controller-"));
   roots.push(root);
   roots.push(controllerHome);
+  repoRoots.push(root);
   mkdirSync(join(root, "src"), { recursive: true });
   mkdirSync(join(root, "tasks"), { recursive: true });
   mkdirSync(join(root, ".ai/harness"), { recursive: true });
@@ -608,6 +627,42 @@ printf '%s\n' '{"type":"turn.completed"}'
     expect(secondPids).toEqual(firstPids);
   });
 
+  test("fails a check when the command exits but leaves a child process tree behind", async () => {
+    const root = repo();
+    mkdirSync(join(root, ".repo-harness"), { recursive: true });
+    const childPidPath = join(root, "leaky-check-child.pid");
+    writeFileSync(join(root, ".repo-harness/checks.json"), JSON.stringify({
+      version: 1,
+      checks: {
+        leaky: {
+          command: [process.execPath, "-e", `
+            const { spawn } = require("child_process");
+            const { writeFileSync } = require("fs");
+            const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+            writeFileSync(${JSON.stringify(childPidPath)}, String(child.pid), "utf8");
+            process.exit(0);
+          `],
+          timeoutMs: 5_000,
+        },
+      },
+    }));
+
+    const result = await runControllerCheckAsync(root, "leaky");
+    let childPid: number | undefined;
+    for (let attempt = 0; attempt < 80 && childPid === undefined; attempt += 1) {
+      if (existsSync(childPidPath)) {
+        const value = Number.parseInt(readFileSync(childPidPath, "utf8").trim(), 10);
+        if (Number.isInteger(value) && value > 0) childPid = value;
+      }
+      if (childPid === undefined) await Bun.sleep(25);
+    }
+
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("check process tree remained alive");
+    expect(isProcessAlive(childPid)).toBe(false);
+  });
+
   test("releasing one shared-check subscriber does not terminate the remaining subscriber", async () => {
     const root = repo();
     mkdirSync(join(root, ".repo-harness"), { recursive: true });
@@ -766,6 +821,84 @@ printf '%s\n' '{"type":"turn.completed"}'
       const run = getAgentJob(root, runId);
       expect(run.status).toBe("unknown");
       expect(run.error).toContain("Controller process 999999");
+      expect(alive).toBe(false);
+    } finally {
+      if (worker.exitCode === null) worker.kill("SIGKILL");
+    }
+  });
+
+  test("startup reconciliation fail-closes a running Run that lost ownership metadata", async () => {
+    const root = repo();
+    const issue = createIssue(root, {
+      title: "Missing run ownership",
+      tasks: [{
+        title: "Recover",
+        objective: "Stop a local worker whose ownership metadata disappeared.",
+        allowedPaths: ["src/example.ts"],
+        risk: "low",
+      }],
+    });
+    const runId = "RUN-missing-ownership";
+    const runDir = join(root, ".ai/harness/jobs", runId);
+    mkdirSync(runDir, { recursive: true });
+    for (const name of ["stdout.log", "stderr.log", "events.jsonl"]) {
+      writeFileSync(join(runDir, name), "");
+    }
+    const worker = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      stdio: "ignore",
+    });
+    const now = new Date().toISOString();
+    writeFileSync(join(runDir, "meta.json"), `${JSON.stringify({
+      schemaVersion: 3,
+      repoId: "repo-test",
+      checkoutId: "checkout-test",
+      runId,
+      issueId: issue.id,
+      taskId: "T1",
+      agent: "codex",
+      provider: "local",
+      executionMode: "workspace",
+      status: "running",
+      repoRoot: root,
+      executionRoot: root,
+      worktree: root,
+      worktreePath: root,
+      branch: null,
+      baseRevision: null,
+      promptPath: `.ai/harness/jobs/${runId}/prompt.md`,
+      stdoutPath: `.ai/harness/jobs/${runId}/stdout.log`,
+      stderrPath: `.ai/harness/jobs/${runId}/stderr.log`,
+      resultPath: `.ai/harness/jobs/${runId}/result.json`,
+      eventsPath: `.ai/harness/jobs/${runId}/events.jsonl`,
+      workerPid: worker.pid,
+      createdAt: now,
+      startedAt: now,
+      lastHeartbeatAt: now,
+      progress: {
+        phase: "editing",
+        percent: 40,
+        currentActivity: "ownership disappeared",
+        lastActivityAt: now,
+        activityCount: 1,
+      },
+    }, null, 2)}\n`);
+    updateTask(root, issue.id, "T1", { status: "running", runId });
+
+    try {
+      const handle = await startLocalBridgeServer({ repoRoot: root, port: 0, openBrowser: false });
+      servers.push(handle);
+      let alive = true;
+      for (let attempt = 0; attempt < 80 && alive; attempt += 1) {
+        await Bun.sleep(25);
+        try {
+          process.kill(worker.pid!, 0);
+        } catch {
+          alive = false;
+        }
+      }
+      const run = getAgentJob(root, runId);
+      expect(run.status).toBe("unknown");
+      expect(run.error).toContain("ownership metadata is missing");
       expect(alive).toBe(false);
     } finally {
       if (worker.exitCode === null) worker.kill("SIGKILL");

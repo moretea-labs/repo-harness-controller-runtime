@@ -559,7 +559,7 @@
       "id": "T11",
       "title": "修复自动集成 Run 终态一致性",
       "objective": "确保 worktree 自动集成 Run 只有在集成完成并清理，或记录明确 autoIntegrationError 后才进入成功终态；worker 在 result 写入后异常退出不得被恢复为假成功。",
-      "status": "ready",
+      "status": "verified",
       "dependsOn": [
         "T1"
       ],
@@ -587,18 +587,21 @@
       ],
       "risk": "high",
       "notes": [
-        "阶段二任务；必须在 T10 完成并验收后再调度，避免同时修改 Agent job lifecycle 文件。"
+        "阶段二任务；必须在 T10 完成并验收后再调度，避免同时修改 Agent job lifecycle 文件。",
+        "已补上恢复分支：worktree Run 在 result.ok 后、自动集成完成前若 worker 异常退出，会回收到 waiting_for_user + autoIntegrationError，不再被恢复为假成功。",
+        "新增中途退出回归测试，并复验正常自动集成路径与 package:check:type。",
+        "进一步复验 package:check:controller-v8 后，确认隔离 Run 自动集成成功路径与恢复路径均通过。"
       ],
       "runIds": [],
       "createdAt": "2026-06-25T00:41:26.770Z",
-      "updatedAt": "2026-06-25T00:47:28.366Z",
+      "updatedAt": "2026-06-29T11:02:00.000Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     },
     {
       "id": "T12",
       "title": "收敛检查进程树与证据 Revision",
       "objective": "确保检查任务只有在完整子进程树退出后才进入终态；检查执行期间仓库 Revision 变化时不得生成可复用成功证据，并为排队/持锁阶段提供可观测状态。",
-      "status": "ready",
+      "status": "verified",
       "dependsOn": [
         "T2"
       ],
@@ -624,10 +627,13 @@
         "补充残留子进程和执行中提交变化回归测试"
       ],
       "risk": "high",
-      "notes": [],
+      "notes": [
+        "已将检查命令终态收口改为等待完整进程树退出；若主命令退出后仍残留子进程，则先回收再 fail-closed，避免把泄漏子进程记成成功检查。",
+        "新增残留子进程回归测试，并复验 package:check:type 与 package:check:controller-v8。"
+      ],
       "runIds": [],
       "createdAt": "2026-06-25T00:41:59.916Z",
-      "updatedAt": "2026-06-25T00:41:59.916Z",
+      "updatedAt": "2026-06-29T11:02:00.000Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     },
     {

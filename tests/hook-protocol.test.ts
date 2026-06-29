@@ -13,10 +13,13 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { spawnSync } from "child_process";
 
-// Every test here spawns bash hook scripts (each forking git/jq/bun
-// subprocesses) several times; one invocation can exceed 2s under parallel
-// session load, so the 5s bun default flakes on multi-invocation tests.
-setDefaultTimeout(20000);
+const HOOK_PROTOCOL_TIMEOUT_MS = 60000;
+
+// Every test here spawns bash hook scripts (each forking git/jq/bun/node
+// subprocesses) several times. Under full-suite parallel load, the default 5s
+// and the previous 20s ceilings both produced timeout false negatives while
+// the same guards completed quickly in isolation.
+setDefaultTimeout(HOOK_PROTOCOL_TIMEOUT_MS);
 
 const ROOT = join(import.meta.dir, "..");
 const ASSETS_HOOKS_DIR = join(ROOT, "assets/hooks");
@@ -235,6 +238,7 @@ describe("Claude Code hook protocol compliance", () => {
 
       const res = runHook("pre-edit-guard.sh", cwd, {
         stdin: JSON.stringify({ tool_input: { file_path: "src/app.ts" } }),
+        env: { REPO_HARNESS_EDIT_PLAN_GATE: "enforce" },
       });
       expect(res.status).toBe(2);
       expect(res.stderr).toContain("[PlanStatusGuard]");
