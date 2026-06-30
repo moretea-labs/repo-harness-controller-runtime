@@ -11,7 +11,8 @@ export interface RepositoryCommandClassification {
 const READ_ONLY_PROGRAMS = new Set([
   'pwd', 'ls', 'rg', 'grep', 'egrep', 'fgrep', 'cat', 'head', 'tail', 'wc',
   'sort', 'uniq', 'cut', 'tr', 'stat', 'file', 'which', 'whereis', 'basename',
-  'dirname', 'printf',
+  'dirname', 'printf', 'echo', 'true', 'false', 'ps', 'pgrep', 'date', 'uname',
+  'id', 'whoami', 'du', 'df', 'realpath', 'readlink', 'jq', 'shasum', 'sha256sum',
 ]);
 
 const READ_ONLY_GIT_SUBCOMMANDS = new Set([
@@ -22,7 +23,89 @@ const READ_ONLY_GIT_SUBCOMMANDS = new Set([
 ]);
 
 function shellSegments(command: string): string[] {
-  return command.split(/&&|\|\||[;|]/).map((segment) => segment.trim()).filter(Boolean);
+  const segments: string[] = [];
+  let current = '';
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+
+  const flush = () => {
+    const segment = current.trim();
+    if (segment) segments.push(segment);
+    current = '';
+  };
+
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index]!;
+    if (escaped) {
+      current += character;
+      escaped = false;
+      continue;
+    }
+    if (character === '\\' && quote !== "'") {
+      current += character;
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      current += character;
+      if (character === quote) quote = undefined;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      current += character;
+      continue;
+    }
+    if (character === ';' || character === '|' || character === '&') {
+      flush();
+      if (command[index + 1] === character) index += 1;
+      continue;
+    }
+    current += character;
+  }
+  flush();
+  return segments;
+}
+
+function isSedInPlaceSegment(segment: string): boolean {
+  const words = firstWords(segment);
+  if (words[0]?.toLowerCase() !== 'sed') return false;
+  return words.slice(1).some((word) => word === '--in-place'
+    || word.startsWith('--in-place=')
+    || /^-[^-]*i/.test(word));
+}
+
+function hasRepositoryOutputRedirection(command: string): boolean {
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === '\\' && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = undefined;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    if (character !== '>' || command[index - 1] === '=') continue;
+
+    let targetIndex = index + 1;
+    if (command[targetIndex] === '>') targetIndex += 1;
+    while (/\s/.test(command[targetIndex] ?? '')) targetIndex += 1;
+    if (command[targetIndex] === '&' && /\d/.test(command[targetIndex + 1] ?? '')) continue;
+    if (command.slice(targetIndex).startsWith('/dev/null')) continue;
+    return true;
+  }
+  return false;
 }
 
 function firstWords(segment: string): string[] {
@@ -61,7 +144,7 @@ function isReadOnlySegment(segment: string): boolean {
   if (!program) return false;
   if (program === 'git') return readOnlyGitSegment(words, segment);
   if (program === 'find') return !/(?:-delete|-exec|-execdir|-ok|-okdir)\b/.test(segment);
-  if (program === 'sed') return /(?:^|\s)-n(?:\s|$)/.test(segment) && !/(?:^|\s)-i/.test(segment);
+  if (program === 'sed') return !isSedInPlaceSegment(segment);
   if (program === 'gh') {
     return /\bgh\s+(?:repo\s+view|pr\s+(?:list|view|status|checks|diff)|issue\s+(?:list|view)|run\s+(?:list|view|watch))(?:\s|$)/.test(segment);
   }
@@ -113,12 +196,12 @@ export function classifyRepositoryCommand(
 
   const workspaceWritePatterns: Array<[RegExp, string]> = [
     [/\bgit\s+(?:add|commit|pull|fetch|merge|rebase|checkout|switch|cherry-pick|revert|stash|mv|rm|restore|apply|am|bisect)(?:\s|$)/i, 'changes the checkout, local refs, index, or working tree'],
-    [/(?:^|[^>])>{1,2}(?!=)/, 'redirects output into a repository file'],
     [/(?:^|[;&|]\s*)(?:touch|mkdir|cp|mv|install|tee|truncate|patch)(?:\s|$)/i, 'writes repository files'],
-    [/(?:^|[;&|]\s*)sed\s+[^\n]*-[a-z]*i/i, 'edits repository files in place'],
     [/(?:^|[;&|]\s*)(?:npm|bun|pnpm|yarn)\s+(?:install|add|remove|update|run)(?:\s|$)/i, 'may modify dependencies, generated files, or the working tree'],
   ];
   for (const [pattern, reason] of workspaceWritePatterns) if (pattern.test(normalized)) reasons.push(reason);
+  if (hasRepositoryOutputRedirection(normalized)) reasons.push('redirects output into a repository file');
+  if (shellSegments(normalized).some(isSedInPlaceSegment)) reasons.push('edits repository files in place');
   if (reasons.length > 0) return { risk: 'workspace_write', confirmation: 'authorization', reasons };
 
   const segments = shellSegments(normalized.toLowerCase());
