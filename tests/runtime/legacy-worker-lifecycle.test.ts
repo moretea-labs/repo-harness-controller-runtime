@@ -140,6 +140,9 @@ function writeWorkerFixture(
 }
 
 async function waitForExit(child: ChildProcess, timeoutMs = 5_000): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return { code: child.exitCode, signal: child.signalCode };
+  }
   return await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("timed out waiting for worker exit")), timeoutMs);
     child.once("exit", (code, signal) => {
@@ -151,10 +154,19 @@ async function waitForExit(child: ChildProcess, timeoutMs = 5_000): Promise<{ co
 
 afterEach(async () => {
   process.env.PATH = originalPath;
+  const remaining = new Set<number>();
   for (const pid of trackedPids) {
-    await terminateProcessTree(pid, { gracePeriodMs: 100, killAfterMs: 1_000, pollIntervalMs: 25 });
+    const result = await terminateProcessTree(pid, {
+      gracePeriodMs: 100,
+      killAfterMs: 1_000,
+      pollIntervalMs: 25,
+    });
+    for (const remainingPid of result.remainingPids) remaining.add(remainingPid);
   }
   trackedPids.clear();
+  if (remaining.size > 0) {
+    throw new Error(`worker lifecycle test leaked process IDs: ${[...remaining].join(", ")}`);
+  }
   while (roots.length > 0) rmSync(roots.pop()!, { recursive: true, force: true });
 });
 

@@ -39,6 +39,14 @@ let ownershipError: Error | undefined;
 let child: ReturnType<typeof spawn> | undefined;
 let childExited = false;
 let failClosedRequested = false;
+let heartbeat: ReturnType<typeof setInterval> | undefined;
+let ownershipGuard: ReturnType<typeof setInterval> | undefined;
+let executionTimeout: ReturnType<typeof setTimeout> | undefined;
+let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
+let hardExitTimer: ReturnType<typeof setTimeout> | undefined;
+let settleAgentResult:
+  | ((code: number | null, signal: NodeJS.Signals | null) => void)
+  | undefined;
 assertOwnership();
 
 function event(
@@ -137,8 +145,48 @@ function terminateAgent(signal: NodeJS.Signals): void {
   }
 }
 
+function stopWorkerLoops(): void {
+  if (heartbeat) {
+    clearInterval(heartbeat);
+    heartbeat = undefined;
+  }
+  if (ownershipGuard) {
+    clearInterval(ownershipGuard);
+    ownershipGuard = undefined;
+  }
+}
+
+function clearTerminationTimers(): void {
+  if (forceKillTimer) {
+    clearTimeout(forceKillTimer);
+    forceKillTimer = undefined;
+  }
+  if (hardExitTimer) {
+    clearTimeout(hardExitTimer);
+    hardExitTimer = undefined;
+  }
+}
+
+function scheduleBoundedTermination(): void {
+  terminateAgent("SIGTERM");
+  forceKillTimer ??= setTimeout(() => {
+    terminateAgent("SIGKILL");
+  }, OWNERSHIP_KILL_GRACE_MS);
+  forceKillTimer.unref();
+  hardExitTimer ??= setTimeout(() => {
+    terminateAgent("SIGKILL");
+    if (settleAgentResult) {
+      settleAgentResult(null, "SIGKILL");
+      return;
+    }
+    process.exit(1);
+  }, OWNERSHIP_KILL_GRACE_MS + 250);
+}
+
 function beginFailClosed(reason: string): void {
+  failClosedRequested = true;
   ownershipError ??= new Error(reason);
+  stopWorkerLoops();
   try {
     persistOwnershipLoss(reason);
   } catch (_error) {
@@ -149,29 +197,15 @@ function beginFailClosed(reason: string): void {
   } catch (_error) {
     /* metadata may already be gone; fail-closed still terminates the child tree */
   }
-  terminateAgent("SIGTERM");
-  const forceKill = setTimeout(() => terminateAgent("SIGKILL"), OWNERSHIP_KILL_GRACE_MS);
-  forceKill.unref();
+  scheduleBoundedTermination();
 }
 
 function fatalWorkerError(error: unknown): void {
   const reason = error instanceof Error ? error.message : String(error);
-  if (failClosedRequested) {
-    if (!child?.pid || childExited) process.exit(1);
-    return;
+  if (!failClosedRequested) {
+    beginFailClosed(reason || "worker encountered an unexpected fatal error");
   }
-  failClosedRequested = true;
-  beginFailClosed(reason || "worker encountered an unexpected fatal error");
-  if (!child?.pid || childExited) {
-    process.exit(1);
-    return;
-  }
-  const exitTimer = setTimeout(() => process.exit(1), OWNERSHIP_KILL_GRACE_MS + 250);
-  exitTimer.unref();
-  child.once("close", () => {
-    clearTimeout(exitTimer);
-    process.exit(1);
-  });
+  if (!child?.pid || childExited) process.exit(1);
 }
 
 process.once("uncaughtException", fatalWorkerError);
@@ -490,30 +524,39 @@ child.stderr?.on("data", (value: Buffer | string) => {
   noteLogUpdate("stderr", chunk.length);
 });
 
-const heartbeat = setInterval(() => {
-  const current = readMeta();
-  current.lastHeartbeatAt = new Date().toISOString();
-  persistMeta(current);
-  event(
-    "run_heartbeat",
-    current.progress?.currentActivity ?? "Agent process is still running.",
-    {
-      pid: child.pid,
-      stdoutBytes,
-      stderrBytes,
-      deadlineAt: current.deadlineAt,
-      phase: current.progress?.phase,
-      percent: current.progress?.percent,
-    },
-  );
+heartbeat = setInterval(() => {
+  if (failClosedRequested) return;
+  const current = tryReadMeta();
+  if (!current) {
+    beginFailClosed(missingOwnershipError().message);
+    return;
+  }
+  try {
+    current.lastHeartbeatAt = new Date().toISOString();
+    persistMeta(current);
+    event(
+      "run_heartbeat",
+      current.progress?.currentActivity ?? "Agent process is still running.",
+      {
+        pid: child?.pid,
+        stdoutBytes,
+        stderrBytes,
+        deadlineAt: current.deadlineAt,
+        phase: current.progress?.phase,
+        percent: current.progress?.percent,
+      },
+    );
+  } catch (error) {
+    beginFailClosed(error instanceof Error ? error.message : String(error));
+  }
 }, 10_000);
 heartbeat.unref();
 
-const ownershipGuard = setInterval(() => {
-  if (ownershipError) return;
-  ownershipError = ownershipFailure(tryReadMeta());
-  if (!ownershipError) return;
-  beginFailClosed(ownershipError.message);
+ownershipGuard = setInterval(() => {
+  if (failClosedRequested) return;
+  const invalid = ownershipFailure(tryReadMeta());
+  if (!invalid) return;
+  beginFailClosed(invalid.message);
 }, OWNERSHIP_POLL_INTERVAL_MS);
 ownershipGuard.unref();
 
@@ -525,43 +568,45 @@ const result = await new Promise<{
   const finish = (code: number | null, signal: NodeJS.Signals | null) => {
     if (settled) return;
     settled = true;
+    childExited = true;
+    stopWorkerLoops();
+    if (executionTimeout) {
+      clearTimeout(executionTimeout);
+      executionTimeout = undefined;
+    }
+    clearTerminationTimers();
+    settleAgentResult = undefined;
     resolve({ code, signal });
   };
+  settleAgentResult = finish;
   child.once("error", (error) => {
     spawnError = error;
     finish(null, null);
   });
-  child.once("close", (code, signal) => finish(code, signal));
+  child.once("exit", (code, signal) => finish(code, signal));
   child.once("close", () => {
     childExited = true;
   });
 
-  const timeout = setTimeout(() => {
+  executionTimeout = setTimeout(() => {
     timedOut = true;
-    updateProgress(
-      "waiting",
-      `已达到执行时限 ${config.timeoutMs}ms，正在终止进程`,
-      98,
-    );
-    event(
-      "run_waiting",
-      `Agent exceeded timeout ${config.timeoutMs}ms; terminating process.`,
-    );
-    terminateAgent("SIGTERM");
-    const forceKill = setTimeout(() => terminateAgent("SIGKILL"), OWNERSHIP_KILL_GRACE_MS);
-    forceKill.unref();
+    try {
+      updateProgress(
+        "waiting",
+        `已达到执行时限 ${config.timeoutMs}ms，正在终止进程`,
+        98,
+      );
+      event(
+        "run_waiting",
+        `Agent exceeded timeout ${config.timeoutMs}ms; terminating process.`,
+      );
+    } catch (_error) {
+      /* timeout remains authoritative even if runtime metadata disappeared */
+    }
+    stopWorkerLoops();
+    scheduleBoundedTermination();
   }, config.timeoutMs);
-  timeout.unref();
-  child.once("close", () => {
-    clearTimeout(timeout);
-    clearInterval(heartbeat);
-    clearInterval(ownershipGuard);
-  });
-  child.once("error", () => {
-    clearTimeout(timeout);
-    clearInterval(heartbeat);
-    clearInterval(ownershipGuard);
-  });
+  executionTimeout.unref();
 });
 
 const finishedAt = new Date().toISOString();

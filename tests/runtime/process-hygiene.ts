@@ -3,6 +3,7 @@ import { terminateProcessTree } from "../../src/runtime/shared/process-tree";
 
 export interface MatchingProcess {
   pid: number;
+  ppid: number;
   command: string;
 }
 
@@ -15,21 +16,26 @@ export function findProcessesByCommand(matchers: string[]): MatchingProcess[] {
   if (needles.length === 0) return [];
   let output = "";
   try {
-    output = execFileSync("ps", ["ax", "-o", "pid=", "-o", "command="], {
-      encoding: "utf-8",
-      timeout: 5_000,
-      maxBuffer: 512 * 1024,
-    });
+    output = execFileSync(
+      "ps",
+      ["ax", "-o", "pid=", "-o", "ppid=", "-o", "command="],
+      {
+        encoding: "utf-8",
+        timeout: 5_000,
+        maxBuffer: 512 * 1024,
+      },
+    );
   } catch (_error) {
     return [];
   }
   return output
     .split("\n")
-    .map((line) => /^\s*(\d+)\s+(.*)$/.exec(line))
+    .map((line) => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line))
     .filter((match): match is RegExpExecArray => Boolean(match))
     .map((match) => ({
       pid: Number.parseInt(match[1], 10),
-      command: match[2] ?? "",
+      ppid: Number.parseInt(match[2], 10),
+      command: match[3] ?? "",
     }))
     .filter((entry) =>
       Number.isInteger(entry.pid) &&
@@ -45,7 +51,6 @@ export async function terminateProcessesByCommand(matchers: string[]): Promise<n
     const matches = findProcessesByCommand(matchers);
     if (matches.length === 0) break;
     for (const match of matches) {
-      if (terminated.has(match.pid)) continue;
       terminated.add(match.pid);
       await terminateProcessTree(match.pid, {
         gracePeriodMs: 100,
@@ -55,6 +60,7 @@ export async function terminateProcessesByCommand(matchers: string[]): Promise<n
     }
     await Bun.sleep(25);
   }
+  await waitForNoProcessesByCommand(matchers);
   return [...terminated];
 }
 
@@ -72,7 +78,7 @@ export async function waitForNoProcessesByCommand(
   if (remaining.length === 0) return;
   throw new Error(
     `processes still matched ${normalizedMatchers(matchers).join(", ")}: ${remaining
-      .map((entry) => `${entry.pid}:${entry.command}`)
+      .map((entry) => `${entry.pid}(ppid=${entry.ppid}):${entry.command}`)
       .join(" | ")}`,
   );
 }
