@@ -29,6 +29,48 @@ describe('v8.1 repository lock and remote routing', () => {
     }
   });
 
+  test('named global locks isolate unrelated controller resources', () => {
+    const fixture = repositoryFixture();
+    const indexKey = { scope: 'global' as const, resource: 'execution-index' };
+    const requestKey = { scope: 'global' as const, resource: 'execution-request-abc' };
+    const indexLock = acquireControllerLock(fixture.controllerHome, indexKey, 'index-owner');
+    let requestLock: ReturnType<typeof acquireControllerLock> | undefined;
+    try {
+      requestLock = acquireControllerLock(fixture.controllerHome, requestKey, 'request-owner');
+      expect(requestLock.path).not.toBe(indexLock.path);
+      expect(() => acquireControllerLock(fixture.controllerHome, indexKey, 'second-index-owner', 10_000, 0))
+        .toThrow('LOCK_HELD');
+    } finally {
+      if (requestLock) releaseControllerLock(fixture.controllerHome, requestKey, requestLock.lockId);
+      releaseControllerLock(fixture.controllerHome, indexKey, indexLock.lockId);
+      fixture.cleanup();
+    }
+  });
+
+  test('reaps an expired lock even while its recorded pid is alive', () => {
+    const fixture = repositoryFixture();
+    const key = { scope: 'global' as const, resource: 'expired-live-owner' };
+    try {
+      const path = controllerLockPath(fixture.controllerHome, key);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, `${JSON.stringify({
+        ...key,
+        lockId: 'global:expired-live-owner',
+        owner: 'expired-owner',
+        pid: process.pid,
+        acquiredAt: '2026-06-24T00:00:00.000Z',
+        heartbeatAt: '2026-06-24T00:00:00.000Z',
+        expiresAt: '2026-06-24T00:00:01.000Z',
+        path,
+      }, null, 2)}\n`, 'utf-8');
+      expect(readControllerLock(fixture.controllerHome, key)).toBeUndefined();
+      const reacquired = acquireControllerLock(fixture.controllerHome, key, 'fresh-owner');
+      releaseControllerLock(fixture.controllerHome, key, reacquired.lockId);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   test('reaps a repository lock whose owner pid is no longer alive', () => {
     const fixture = repositoryFixture();
     const key = { scope: 'repository' as const, repoId: fixture.repoA.repoId };

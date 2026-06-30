@@ -120,7 +120,7 @@ function upsertIndexesUnlocked(controllerHome: string, job: ExecutionJob): void 
 }
 
 function upsertIndexes(controllerHome: string, job: ExecutionJob): void {
-  withControllerLock(controllerHome, { scope: 'global' }, `execution-index:${job.jobId}`, () => {
+  withControllerLock(controllerHome, { scope: 'global', resource: 'execution-index' }, `execution-index:${job.jobId}`, () => {
     upsertIndexesUnlocked(controllerHome, job);
   }, 10_000);
 }
@@ -163,7 +163,8 @@ export function createExecutionJob(controllerHome: string, input: CreateExecutio
   const normalizedSemanticKey = input.semanticKey.trim();
   if (!normalizedSemanticKey) throw new Error('SEMANTIC_KEY_REQUIRED: every durable command must have a semanticKey');
 
-  return withControllerLock(home, { scope: 'global' }, `create-job:${normalizedRequestId}`, () => {
+  const requestLockId = createHash('sha256').update(normalizedRequestId).digest('hex').slice(0, 24);
+  return withControllerLock(home, { scope: 'global', resource: `execution-request-${requestLockId}` }, `create-job:${normalizedRequestId}`, () => {
     const requestRecordPath = requestPath(home, normalizedRequestId);
     if (existsSync(requestRecordPath)) {
       const record = readJsonFile<RequestIndexRecord>(requestRecordPath);
@@ -208,7 +209,7 @@ export function createExecutionJob(controllerHome: string, input: CreateExecutio
       repoId: job.repoId,
       createdAt,
     } satisfies RequestIndexRecord);
-    upsertIndexesUnlocked(home, job);
+    upsertIndexes(home, job);
     markRepositoryProjectionDirty(home, job.repoId, `job:${job.jobId}:created`);
     appendJobEvent(home, job, 'job_created', { type: job.type, priority: job.priority });
     touchSchedulerWakeSignal(home, `job-created:${job.jobId}`);
@@ -451,7 +452,7 @@ export function listExecutionJobs(controllerHome: string, repoId: string, limit 
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, boundedLimit);
     if (legacy.length > 0) {
-      withControllerLock(controllerHome, { scope: 'global' }, `execution-index-backfill:${repoId}`, () => {
+      withControllerLock(controllerHome, { scope: 'global', resource: 'execution-index' }, `execution-index-backfill:${repoId}`, () => {
         for (const job of legacy) upsertIndexesUnlocked(controllerHome, job);
       }, 10_000);
     }
@@ -472,7 +473,7 @@ export async function cancelExecutionJob(controllerHome: string, repoId: string,
 }
 
 export function removeExecutionJobFromActiveIndex(controllerHome: string, job: ExecutionJob): void {
-  withControllerLock(controllerHome, { scope: 'global' }, `execution-index-remove:${job.jobId}`, () => {
+  withControllerLock(controllerHome, { scope: 'global', resource: 'execution-index' }, `execution-index-remove:${job.jobId}`, () => {
     const active = readActiveIndex(controllerHome);
     active.jobs = active.jobs.filter((entry) => entry.jobId !== job.jobId);
     writeActiveIndex(controllerHome, active);
