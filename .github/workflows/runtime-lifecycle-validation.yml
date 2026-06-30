@@ -1,0 +1,30 @@
+name: Runtime lifecycle validation
+
+on:
+  push:
+    branches:
+      - fix-mcp-runtime-lifecycle
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - name: Focused tests
+        run: |
+          bun test tests/cli/mcp-keepalive.test.ts
+          bun test tests/runtime/mcp-http-session-recovery.test.ts
+          bun test tests/runtime/process-tree-reclamation.test.ts
+          bun test tests/cli/local-bridge.test.ts
+          bun test tests/cli/repository-mcp-command.test.ts
+          bun test tests/cli/controller-service.test.ts
+      - run: bun run check:type
+      - run: bun run check:mcp-compatibility
+      - run: bun run check:controller-v8
