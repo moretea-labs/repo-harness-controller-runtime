@@ -65,7 +65,10 @@ export interface McpSessionLookupErrorResponse {
   status: 400 | 404;
   body: {
     error: 'missing_session' | 'session_not_found';
+    code: 'MCP_SESSION_REQUIRED' | 'MCP_SESSION_EXPIRED';
     message: string;
+    recoverable: true;
+    action: 'reinitialize';
   };
 }
 
@@ -75,7 +78,10 @@ export function mcpSessionLookupError(sessionId: string | undefined): McpSession
       status: 400,
       body: {
         error: 'missing_session',
+        code: 'MCP_SESSION_REQUIRED',
         message: 'Mcp-Session-Id header is required for this request.',
+        recoverable: true,
+        action: 'reinitialize',
       },
     };
   }
@@ -83,7 +89,10 @@ export function mcpSessionLookupError(sessionId: string | undefined): McpSession
     status: 404,
     body: {
       error: 'session_not_found',
+      code: 'MCP_SESSION_EXPIRED',
       message: 'MCP session not found or expired; initialize a new session.',
+      recoverable: true,
+      action: 'reinitialize',
     },
   };
 }
@@ -91,6 +100,29 @@ export function mcpSessionLookupError(sessionId: string | undefined): McpSession
 export function sendMcpSessionLookupError(res: Response, sessionId: string | undefined): void {
   const response = mcpSessionLookupError(sessionId);
   res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Mcp-Session-Reset', 'reinitialize');
+  res.setHeader('x-repo-harness-session-reset', 'reinitialize');
+  res.status(response.status).json(response.body);
+}
+
+export function mcpRequestError(error: unknown) {
+  return {
+    status: 500 as const,
+    body: {
+      error: 'request_failed' as const,
+      code: 'MCP_REQUEST_FAILED' as const,
+      message: error instanceof Error ? error.message : String(error),
+      recoverable: true as const,
+      sessionPreserved: true as const,
+      action: 'retry' as const,
+    },
+  };
+}
+
+export function sendMcpRequestError(res: Response, error: unknown): void {
+  const response = mcpRequestError(error);
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('x-repo-harness-session-preserved', 'true');
   res.status(response.status).json(response.body);
 }
 
@@ -362,7 +394,11 @@ async function handleMcpPost(
     return;
   }
   const sessionId = req.headers['mcp-session-id'] as string | undefined;
-  if (!sessionId && isInitializeRequest(body)) {
+  if (isInitializeRequest(body)) {
+    if (sessionId) {
+      res.setHeader('Mcp-Session-Reset', 'reinitialized');
+      res.setHeader('x-repo-harness-session-reset', 'reinitialized');
+    }
     if (stats.initializing >= MAX_INITIALIZING_SESSIONS || stats.activePosts >= MAX_ACTIVE_POSTS) {
       stats.rejectedOverload += 1;
       res.setHeader('retry-after', '1');
@@ -609,12 +645,12 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   });
   app.post('/mcp', requireMcpHttpAuth(authMode, authToken, oauthProvider, configuredPublicOrigin), express.raw({ type: '*/*', limit: '1mb' }), (req, res) => {
     handleMcpPost(req, res, toolContext, transports, runtimeStats).catch((error: unknown) => {
-      if (!res.headersSent) res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+      if (!res.headersSent) sendMcpRequestError(res, error);
     });
   });
   app.get('/mcp', requireMcpHttpAuth(authMode, authToken, oauthProvider, configuredPublicOrigin), (req, res) => {
     handleMcpGet(req, res, transports).catch((error: unknown) => {
-      if (!res.headersSent) res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+      if (!res.headersSent) sendMcpRequestError(res, error);
     });
   });
   app.use((_req, res) => res.status(404).json({ error: 'not_found' }));

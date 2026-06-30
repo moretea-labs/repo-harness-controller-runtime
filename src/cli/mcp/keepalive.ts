@@ -34,6 +34,7 @@ export interface McpKeepaliveOptions extends McpServerOptions {
   publicEndpoint?: string;
   checkIntervalMs?: number;
   restartDelayMs?: number;
+  unhealthyRestartWindowMs?: number;
   localUi?: boolean;
   localUiHost?: string;
   localUiPort?: number;
@@ -47,7 +48,21 @@ const STARTUP_HEALTH_GRACE_MS = 5_000;
 const STARTUP_HEALTH_RETRY_MS = 250;
 const LOCAL_FAILURE_THRESHOLD = 2;
 const PUBLIC_FAILURE_THRESHOLD = 2;
+export const DEFAULT_MCP_UNHEALTHY_RESTART_WINDOW_MS = 5 * 60_000;
+const LOCAL_HEALTH_WARNING_INTERVAL_MS = 60_000;
 const QUICK_TUNNEL_PATTERN = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/i;
+
+export function shouldRestartMcpServer(
+  childRunning: boolean,
+  failureCount: number,
+  unhealthySinceAt: number | undefined,
+  now: number,
+  unhealthyRestartWindowMs = DEFAULT_MCP_UNHEALTHY_RESTART_WINDOW_MS,
+): boolean {
+  if (!childRunning) return true;
+  if (failureCount < LOCAL_FAILURE_THRESHOLD || unhealthySinceAt === undefined) return false;
+  return now - unhealthySinceAt >= unhealthyRestartWindowMs;
+}
 
 export function extractCloudflareQuickTunnelUrl(text: string): string | undefined {
   return text.match(QUICK_TUNNEL_PATTERN)?.[0];
@@ -295,11 +310,15 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
   const cli = resolveSelfCliInvocation();
   const checkIntervalMs = rawOpts.checkIntervalMs ?? DEFAULT_CHECK_INTERVAL_MS;
   const restartDelayMs = rawOpts.restartDelayMs ?? DEFAULT_RESTART_DELAY_MS;
+  const unhealthyRestartWindowMs = rawOpts.unhealthyRestartWindowMs ?? DEFAULT_MCP_UNHEALTHY_RESTART_WINDOW_MS;
   if (!Number.isInteger(checkIntervalMs) || checkIntervalMs < 2_000) {
     throw new Error(`invalid --check-interval-ms "${String(rawOpts.checkIntervalMs)}"`);
   }
   if (!Number.isInteger(restartDelayMs) || restartDelayMs < 250) {
     throw new Error(`invalid --restart-delay-ms "${String(rawOpts.restartDelayMs)}"`);
+  }
+  if (!Number.isInteger(unhealthyRestartWindowMs) || unhealthyRestartWindowMs < checkIntervalMs) {
+    throw new Error(`invalid unhealthy restart window "${String(rawOpts.unhealthyRestartWindowMs)}"`);
   }
 
   let stopping = false;
@@ -307,6 +326,8 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
   let tunnelChild: ChildProcess | undefined;
   let localBridge: LocalBridgeServerHandle | undefined;
   let localFailureCount = 0;
+  let localUnhealthySinceAt: number | undefined;
+  let lastLocalHealthWarningAt: number | undefined;
   let publicFailureCount = 0;
   let currentQuickEndpoint: string | undefined;
   let tunnelStartedOnce = false;
@@ -392,6 +413,8 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
     if (!runtime.server.healthy) return false;
     runtime.server.lastHealthyAt = nowIso();
     localFailureCount = 0;
+    localUnhealthySinceAt = undefined;
+    lastLocalHealthWarningAt = undefined;
     if (tunnelMode !== 'none' && !isRunning(tunnelChild)) {
       spawnTunnel(tunnelStartedOnce);
       tunnelStartedOnce = true;
@@ -652,14 +675,41 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
     if (await probeLocalHealth()) {
       localFailureCount = 0;
     } else {
+      const now = Date.now();
       localFailureCount += 1;
-      if (!isRunning(serverChild) || localFailureCount >= LOCAL_FAILURE_THRESHOLD) {
+      localUnhealthySinceAt ??= now;
+      const childRunning = isRunning(serverChild);
+      if (shouldRestartMcpServer(
+        childRunning,
+        localFailureCount,
+        localUnhealthySinceAt,
+        now,
+        unhealthyRestartWindowMs,
+      )) {
         await restartServer(`local MCP health failed at ${localHealthUrl(host, port)}`);
         localFailureCount = 0;
+        localUnhealthySinceAt = undefined;
+        lastLocalHealthWarningAt = undefined;
         publicFailureCount = 0;
         updateStatus();
         persistRuntime();
         continue;
+      }
+      if (
+        localFailureCount === LOCAL_FAILURE_THRESHOLD
+        || lastLocalHealthWarningAt === undefined
+        || now - lastLocalHealthWarningAt >= LOCAL_HEALTH_WARNING_INTERVAL_MS
+      ) {
+        const elapsedMs = now - localUnhealthySinceAt;
+        const remainingSeconds = Math.ceil(Math.max(0, unhealthyRestartWindowMs - elapsedMs) / 1000);
+        const message = 'local MCP health is degraded at '
+          + localHealthUrl(host, port)
+          + '; preserving the live Gateway and its sessions for at least '
+          + remainingSeconds
+          + 's while health recovers';
+        console.error('[repo-harness mcp keepalive] ' + message);
+        recordError('health', message);
+        lastLocalHealthWarningAt = now;
       }
     }
 

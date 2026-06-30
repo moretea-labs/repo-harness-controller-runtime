@@ -2,8 +2,10 @@ import { describe, expect, test } from 'bun:test';
 import {
   extractCloudflareQuickTunnelUrl,
   inferMcpTunnelMode,
+  DEFAULT_MCP_UNHEALTHY_RESTART_WINDOW_MS,
   isExpectedLocalControllerHealth,
   normalizeKeepalivePublicEndpoint,
+  shouldRestartMcpServer,
 } from '../../src/cli/mcp/keepalive';
 import { runtimePolicy } from '../../src/cli/mcp/multi-repository';
 import { controllerExpectedToolNames } from '../../src/cli/mcp/tools';
@@ -34,6 +36,32 @@ describe('mcp keepalive helpers', () => {
     expect(() => normalizeKeepalivePublicEndpoint('https://repo-harness-mcp.example.com/not-mcp')).toThrow(
       'invalid --public-endpoint',
     );
+  });
+
+  test('does not restart a live gateway during transient health failures', () => {
+    const now = 1_000_000;
+    expect(shouldRestartMcpServer(true, 1, now, now)).toBe(false);
+    expect(shouldRestartMcpServer(true, 2, now, now + 30_000)).toBe(false);
+  });
+
+  test('restarts immediately when the gateway process has exited', () => {
+    expect(shouldRestartMcpServer(false, 0, undefined, Date.now())).toBe(true);
+  });
+
+  test('restarts a live gateway only after the continuous unhealthy window', () => {
+    const unhealthySinceAt = 2_000_000;
+    expect(shouldRestartMcpServer(
+      true,
+      2,
+      unhealthySinceAt,
+      unhealthySinceAt + DEFAULT_MCP_UNHEALTHY_RESTART_WINDOW_MS - 1,
+    )).toBe(false);
+    expect(shouldRestartMcpServer(
+      true,
+      2,
+      unhealthySinceAt,
+      unhealthySinceAt + DEFAULT_MCP_UNHEALTHY_RESTART_WINDOW_MS,
+    )).toBe(true);
   });
 
   test('recognizes the expected local controller health payload', () => {
