@@ -293,13 +293,14 @@
       "notes": [
         "Accepted RUN-iss-20260626-a674de-t6-1782737103800-ec52e510 for asynchronous launch.",
         "Dispatched RUN-iss-20260626-a674de-t6-1782737103800-ec52e510 to codex.",
-        "RUN-iss-20260626-a674de-t6-1782737103800-ec52e510 ended as unknown; explicit retry is required. Controller process 83217 is no longer running"
+        "RUN-iss-20260626-a674de-t6-1782737103800-ec52e510 ended as unknown; explicit retry is required. Controller process 83217 is no longer running",
+        "RUN-iss-20260626-a674de-t6-1782737103800-ec52e510 cancelled; explicit retry is required before another Run can be created."
       ],
       "runIds": [
         "RUN-iss-20260626-a674de-t6-1782737103800-ec52e510"
       ],
       "createdAt": "2026-06-26T15:05:42.497Z",
-      "updatedAt": "2026-06-29T12:51:03.247Z",
+      "updatedAt": "2026-06-30T08:21:56.150Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     },
     {
@@ -407,7 +408,7 @@
       "id": "T9",
       "title": "修复 MCP 会话频繁终止与自动恢复",
       "objective": "定位并消除 ChatGPT connector 经常返回 Session terminated 的根因，确保 Gateway/keepalive/Controller 重启、长任务、测试子进程异常和认证刷新期间 MCP 会话可恢复，且持久 Job 可在新会话中无损继续读取。",
-      "status": "ready",
+      "status": "blocked",
       "dependsOn": [],
       "allowedPaths": [
         "src/cli/mcp/**",
@@ -438,13 +439,14 @@
         "Accepted RUN-iss-20260626-a674de-t9-1782737614585-39d2d551 for asynchronous launch.",
         "Dispatched RUN-iss-20260626-a674de-t9-1782737614585-39d2d551 to codex.",
         "RUN-iss-20260626-a674de-t9-1782737614585-39d2d551 ended as unknown; explicit retry is required. Controller process 88424 is no longer running",
-        "本地 Codex 与 direct-edit 多次被 MCP Session terminated 中断。已确认 GitHub 认证和 cloud agent 可用，改由 GitHub Copilot 在远程分支实现 keepalive 会话保护修复并创建 PR。"
+        "本地 Codex 与 direct-edit 多次被 MCP Session terminated 中断。已确认 GitHub 认证和 cloud agent 可用，改由 GitHub Copilot 在远程分支实现 keepalive 会话保护修复并创建 PR。",
+        "RUN-iss-20260626-a674de-t9-1782737614585-39d2d551 cancelled; explicit retry is required before another Run can be created."
       ],
       "runIds": [
         "RUN-iss-20260626-a674de-t9-1782737614585-39d2d551"
       ],
       "createdAt": "2026-06-29T12:38:10.025Z",
-      "updatedAt": "2026-06-29T13:25:23.528Z",
+      "updatedAt": "2026-06-30T08:22:10.598Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     },
     {
@@ -481,6 +483,6 @@
     }
   ],
   "createdAt": "2026-06-26T15:05:42.497Z",
-  "updatedAt": "2026-06-30T06:17:02.945Z",
+  "updatedAt": "2026-06-30T08:22:10.598Z",
   "repoId": "repo_123b7cf58b6b17b5cbe46a56"
 }

@@ -2,7 +2,7 @@
 id: "ISS-20260626-A674DE"
 kind: "bug"
 status: "in_progress"
-updated_at: "2026-06-30T06:17:02.945Z"
+updated_at: "2026-06-30T08:22:10.598Z"
 source: "repo-harness-controller-v8"
 ---
 
@@ -116,7 +116,7 @@ source: "repo-harness-controller-v8"
 
 ### T9 — 修复 MCP 会话频繁终止与自动恢复
 
-- Status: `ready`
+- Status: `blocked`
 - Objective: 定位并消除 ChatGPT connector 经常返回 Session terminated 的根因，确保 Gateway/keepalive/Controller 重启、长任务、测试子进程异常和认证刷新期间 MCP 会话可恢复，且持久 Job 可在新会话中无损继续读取。
 - Depends on: none
 - Allowed paths: `src/cli/mcp/**`, `src/runtime/gateway/**`, `src/cli/controller/**`, `scripts/controller-runtime.sh`, `tests/cli/**`, `tests/runtime/**`, `docs/**`
