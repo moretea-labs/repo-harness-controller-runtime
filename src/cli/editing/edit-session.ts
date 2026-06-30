@@ -217,6 +217,53 @@ function changedLineEstimate(before: string, after: string): number {
   return Math.max(removed, added);
 }
 
+function changedLinesByPathFromPatch(patch: string): Map<string, number> {
+  const changedLines = new Map<string, number>();
+  let currentPath: string | undefined;
+  let inHunk = false;
+  let removed = 0;
+  let added = 0;
+
+  const flushBlock = () => {
+    if (currentPath && (removed > 0 || added > 0)) {
+      changedLines.set(
+        currentPath,
+        (changedLines.get(currentPath) ?? 0) + Math.max(removed, added),
+      );
+    }
+    removed = 0;
+    added = 0;
+  };
+
+  for (const line of patch.split(/\r?\n/)) {
+    if (line.startsWith('diff --git ')) {
+      flushBlock();
+      inHunk = false;
+      const newPathMarker = line.lastIndexOf(' b/');
+      currentPath = newPathMarker >= 0 ? line.slice(newPathMarker + 3) : undefined;
+      continue;
+    }
+    if (line.startsWith('@@ ')) {
+      flushBlock();
+      inHunk = true;
+      continue;
+    }
+    if (!inHunk) continue;
+    if (line.startsWith('-')) {
+      removed += 1;
+      continue;
+    }
+    if (line.startsWith('+')) {
+      added += 1;
+      continue;
+    }
+    if (line.startsWith('\\ No newline at end of file')) continue;
+    flushBlock();
+  }
+  flushBlock();
+  return changedLines;
+}
+
 function pathAllowed(path: string, allowedPaths: string[]): boolean {
   return allowedPaths.length === 0 || allowedPaths.some((pattern) => globMatches(pattern, path));
 }
@@ -569,13 +616,24 @@ export function applyEditOperations(repoRoot: string, policy: McpPolicy, session
     return { operation, relativePath: decision.relativePath, absolutePath: decision.absolutePath, before, after, beforeExists: true, afterExists: true };
   });
 
-  const batchChangedLines = prepared.reduce((sum, item) => sum + changedLineEstimate(item.before, item.after), 0);
-  const cumulativeChangedLines = session.operations.reduce((sum, operation) => sum + operation.changedLines, 0) + batchChangedLines;
-  if (cumulativeChangedLines > session.maxChangedLines) throw new Error(`estimated cumulative changed lines ${cumulativeChangedLines} exceeds session limit ${session.maxChangedLines}`);
   const noChange = prepared.filter((item) => item.beforeExists === item.afterExists && item.before === item.after).map((item) => item.relativePath);
   if (noChange.length) throw new Error(`edit operation produced no change: ${noChange.join(', ')}`);
 
   const revision = session.currentRevision + 1;
+  const revisionPatch = buildLocalizedPatch(repoRoot, session.sessionId, `revision-${revision}`, prepared.map((item) => ({
+    relativePath: item.relativePath,
+    before: item.before,
+    after: item.after,
+    beforeExists: item.beforeExists,
+    afterExists: item.afterExists,
+  })));
+  const changedLinesByPath = changedLinesByPathFromPatch(revisionPatch);
+  const changedLinesFor = (item: typeof prepared[number]) =>
+    changedLinesByPath.get(item.relativePath) ?? changedLineEstimate(item.before, item.after);
+  const batchChangedLines = prepared.reduce((sum, item) => sum + changedLinesFor(item), 0);
+  const cumulativeChangedLines = session.operations.reduce((sum, operation) => sum + operation.changedLines, 0) + batchChangedLines;
+  if (cumulativeChangedLines > session.maxChangedLines) throw new Error(`estimated cumulative changed lines ${cumulativeChangedLines} exceeds session limit ${session.maxChangedLines}`);
+
   const firstRevision = session.operations.length === 0;
   const records: EditSessionOperationRecord[] = [];
   try {
@@ -595,7 +653,7 @@ export function applyEditOperations(repoRoot: string, policy: McpPolicy, session
         beforeSha256: item.beforeExists ? hash(item.before) : undefined,
         afterSha256: item.afterExists ? hash(item.after) : undefined,
         backupPath: item.beforeExists ? backupRelative : undefined,
-        changedLines: changedLineEstimate(item.before, item.after),
+        changedLines: changedLinesFor(item),
       });
     });
   } catch (error) {
@@ -607,13 +665,6 @@ export function applyEditOperations(repoRoot: string, policy: McpPolicy, session
     throw error;
   }
 
-  const revisionPatch = buildLocalizedPatch(repoRoot, session.sessionId, `revision-${revision}`, prepared.map((item) => ({
-    relativePath: item.relativePath,
-    before: item.before,
-    after: item.after,
-    beforeExists: item.beforeExists,
-    afterExists: item.afterExists,
-  })));
   const absoluteRevisionPatch = revisionPatchPath(repoRoot, session.sessionId, revision);
   mkdirSync(dirname(absoluteRevisionPatch), { recursive: true });
   writeFileSync(absoluteRevisionPatch, revisionPatch, 'utf-8');

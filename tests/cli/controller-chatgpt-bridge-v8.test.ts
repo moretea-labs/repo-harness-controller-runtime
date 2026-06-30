@@ -99,6 +99,35 @@ describe("Controller V8 ChatGPT execution bridge", () => {
     expect(listEditSessions(root)[0]?.changedLines).toBe(1);
   });
 
+  test("counts disjoint Direct Edit replacements by actual diff lines", () => {
+    const { root, ctx } = repo();
+    const path = join(root, "src/large.ts");
+    const initial = Array.from(
+      { length: 700 },
+      (_, index) => `export const line${index + 1} = ${index + 1};`,
+    ).join("\n") + "\n";
+    writeFileSync(path, initial);
+    const session = beginEditSession(root, {
+      purpose: "Small disjoint replacements",
+      allowedPaths: ["src/**"],
+      maxChangedLines: 2,
+    });
+
+    const applied = applyEditOperations(root, ctx.policy, session.sessionId, [{
+      type: "replace",
+      path: "src/large.ts",
+      expectedSha256: sha(initial),
+      replacements: [
+        { oldText: "export const line10 = 10;", newText: "export const line10 = 1000;" },
+        { oldText: "export const line690 = 690;", newText: "export const line690 = 6900;" },
+      ],
+    }]);
+
+    expect(applied.revisions[0]?.changedLines).toBe(2);
+    expect(applied.operations[0]?.changedLines).toBe(2);
+    expect(readFileSync(path, "utf-8")).toContain("line690 = 6900");
+  });
+
   test("closes zero-change Direct Edit sessions without fabricating revisions or running checks", () => {
     const { root } = repo();
     const finalizedSession = beginEditSession(root, { purpose: "No-op finalized", checks: ["package:test"] });
