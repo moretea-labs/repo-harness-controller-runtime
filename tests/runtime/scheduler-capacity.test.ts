@@ -7,6 +7,7 @@ import {
   GlobalScheduler,
   isSchedulerResourcePressured,
   parseDarwinAvailableMemoryMb,
+  sampleDarwinAvailableMemoryMb,
 } from '../../src/runtime/control-plane/global-scheduler/scheduler';
 import { attachExecutionWorker, createExecutionJob, getExecutionJob } from '../../src/runtime/execution/jobs/store';
 
@@ -80,6 +81,19 @@ Pages occupied by compressor:            999999.
 
   test('fails closed to the caller fallback when vm_stat cannot be parsed', () => {
     expect(parseDarwinAvailableMemoryMb('unrecognized output')).toBeUndefined();
+  });
+
+  test('samples macOS memory asynchronously and preserves the fallback contract', async () => {
+    const output = `Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                               32768.
+Pages inactive:                          16384.
+Pages speculative:                        4096.
+Pages purgeable:                           2048.
+`;
+    expect(await sampleDarwinAvailableMemoryMb(128, (callback) => callback(null, output))).toBe(864);
+    expect(await sampleDarwinAvailableMemoryMb(128, (callback) => callback(null, 'invalid'))).toBe(128);
+    expect(await sampleDarwinAvailableMemoryMb(128, (callback) => callback(new Error('unavailable'), ''))).toBe(128);
+    expect(await sampleDarwinAvailableMemoryMb(128, () => { throw new Error('spawn failed'); })).toBe(128);
   });
 
   test('still applies real memory and load pressure limits', () => {

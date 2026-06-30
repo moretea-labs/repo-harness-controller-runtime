@@ -1,4 +1,4 @@
-import { execFileSync, spawn, type ChildProcess } from 'child_process';
+import { execFile, spawn, type ChildProcess } from 'child_process';
 import { fileURLToPath } from 'url';
 import { join } from 'path';
 import { cpus, freemem, loadavg } from 'os';
@@ -47,6 +47,35 @@ export function isSchedulerResourcePressured(
   limits: { minFreeMemoryMb: number; maxLoadPerCpu: number },
 ): boolean {
   return snapshot.freeMemoryMb < limits.minFreeMemoryMb || snapshot.loadPerCpu > limits.maxLoadPerCpu;
+}
+
+type DarwinMemorySampler = (
+  callback: (error: Error | null, stdout: string) => void,
+) => void;
+
+export function sampleDarwinAvailableMemoryMb(
+  fallback: number,
+  sampler: DarwinMemorySampler = (callback) => {
+    execFile('vm_stat', [], {
+      encoding: 'utf8',
+      timeout: 2_000,
+      maxBuffer: 64 * 1024,
+    }, (error, stdout) => callback(error, stdout));
+  },
+): Promise<number> {
+  return new Promise((resolve) => {
+    try {
+      sampler((error, stdout) => {
+        if (error) {
+          resolve(fallback);
+          return;
+        }
+        resolve(parseDarwinAvailableMemoryMb(stdout) ?? fallback);
+      });
+    } catch {
+      resolve(fallback);
+    }
+  });
 }
 
 interface SchedulerState {
@@ -120,6 +149,7 @@ export class GlobalScheduler {
   private runtimeCleanup = cleanupControllerRuntimeState;
   private lastDarwinMemorySampleAt = 0;
   private cachedDarwinAvailableMemoryMb: number | undefined;
+  private darwinMemorySampleInFlight: Promise<void> | undefined;
 
   constructor(
     controllerHome: string,
@@ -231,28 +261,31 @@ export class GlobalScheduler {
     return true;
   }
 
+  private refreshDarwinAvailableMemoryMb(fallback: number): void {
+    if (this.darwinMemorySampleInFlight) return;
+    this.lastDarwinMemorySampleAt = Date.now();
+    this.darwinMemorySampleInFlight = sampleDarwinAvailableMemoryMb(fallback)
+      .then((availableMemoryMb) => {
+        this.cachedDarwinAvailableMemoryMb = availableMemoryMb;
+      })
+      .catch(() => {
+        this.cachedDarwinAvailableMemoryMb = fallback;
+      })
+      .finally(() => {
+        this.darwinMemorySampleInFlight = undefined;
+      });
+  }
+
   private availableMemoryMb(now = Date.now()): number {
     const fallback = freemem() / (1024 * 1024);
     if (process.platform !== 'darwin') return fallback;
-    if (
-      this.cachedDarwinAvailableMemoryMb !== undefined
-      && now - this.lastDarwinMemorySampleAt < DARWIN_MEMORY_SAMPLE_TTL_MS
-    ) {
-      return this.cachedDarwinAvailableMemoryMb;
+    const cached = this.cachedDarwinAvailableMemoryMb;
+    if (cached !== undefined && now - this.lastDarwinMemorySampleAt < DARWIN_MEMORY_SAMPLE_TTL_MS) {
+      return cached;
     }
 
-    this.lastDarwinMemorySampleAt = now;
-    try {
-      const output = execFileSync('vm_stat', [], {
-        encoding: 'utf8',
-        timeout: 2_000,
-        maxBuffer: 64 * 1024,
-      });
-      this.cachedDarwinAvailableMemoryMb = parseDarwinAvailableMemoryMb(output) ?? fallback;
-    } catch {
-      this.cachedDarwinAvailableMemoryMb = fallback;
-    }
-    return this.cachedDarwinAvailableMemoryMb;
+    this.refreshDarwinAvailableMemoryMb(fallback);
+    return cached ?? fallback;
   }
 
   private resourcePressure(): { pressured: boolean; freeMemoryMb: number; loadPerCpu: number } {
