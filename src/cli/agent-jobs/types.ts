@@ -43,6 +43,8 @@ export interface AgentJobEvent {
     | "run_succeeded"
     | "run_failed"
     | "run_cancelled"
+    | "run_cleanup_completed"
+    | "run_cleanup_failed"
     | "run_integrated"
     | "run_auto_integrated"
     | "run_worktree_cleaned"
@@ -94,6 +96,12 @@ export interface AgentJobMeta {
   worktreeCleanedAt?: string;
   diffArtifactPath?: string;
   terminationReason?: "timeout" | "cancelled" | "signal" | "spawn_error";
+  cancellationRequestedAt?: string;
+  cancellationPids?: number[];
+  cleanupPending?: boolean;
+  cleanupStartedAt?: string;
+  cleanupFinishedAt?: string;
+  cleanupError?: string;
   createdAt: string;
   startedAt?: string;
   finishedAt?: string;

@@ -643,6 +643,11 @@ persistJson(config.resultPath, {
 
 const finalMeta = tryReadMeta();
 if (!finalMeta) process.exit(1);
+if (finalMeta.status === "cancelled" || finalMeta.terminationReason === "cancelled") {
+  stopWorkerLoops();
+  clearTerminationTimers();
+  process.exit(0);
+}
 const currentOwnershipError = ownershipFailure(finalMeta);
 if (currentOwnershipError) {
   process.exit(1);

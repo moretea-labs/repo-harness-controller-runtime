@@ -356,6 +356,142 @@ function terminateRunProcesses(meta: Pick<AgentJobMeta, "agentPid" | "workerPid"
   }
 }
 
+function cancellationCleanupClaimPath(repoRoot: string, runId: string): string {
+  return join(jobDir(repoRoot, runId), "cancel-cleanup.lock.json");
+}
+
+function cancellationProcessIds(meta: Pick<AgentJobMeta, "agentPid" | "workerPid" | "launchPid" | "cancellationPids">): number[] {
+  return [...new Set([
+    ...(meta.cancellationPids ?? []),
+    meta.agentPid,
+    meta.workerPid,
+    meta.launchPid,
+  ].filter((pid): pid is number => Boolean(pid && pid > 0 && pid !== process.pid)))];
+}
+
+function claimCancellationCleanup(repoRoot: string, runId: string): boolean {
+  const path = cancellationCleanupClaimPath(repoRoot, runId);
+  const claim = () => atomicCreateJson(path, {
+    pid: process.pid,
+    runId,
+    claimedAt: new Date().toISOString(),
+  });
+  if (claim()) return true;
+  try {
+    const existing = readJson<{ pid?: number }>(path);
+    if (isAlive(existing.pid)) return false;
+  } catch (_error) {
+    /* malformed or partially written claims are stale */
+  }
+  rmSync(path, { force: true });
+  return claim();
+}
+
+function requestCancellationCleanup(repoRoot: string, runId: string): void {
+  try {
+    const existingPath = cancellationCleanupClaimPath(repoRoot, runId);
+    if (existsSync(existingPath)) {
+      try {
+        const existing = readJson<{ pid?: number }>(existingPath);
+        if (isAlive(existing.pid)) return;
+      } catch (_error) {
+        /* the detached cleaner will repair a stale claim */
+      }
+    }
+    const cleaner = spawn(
+      process.execPath,
+      [fileURLToPath(new URL("./job-manager.ts", import.meta.url)), "cancel-cleanup", repoRoot, runId],
+      { cwd: repoRoot, detached: true, stdio: "ignore" },
+    );
+    cleaner.unref();
+    cleaner.once("error", (error) => {
+      try {
+        const current = getAgentJob(repoRoot, runId);
+        if (current.status !== "cancelled" || !current.cleanupPending) return;
+        const { stdoutTail: _stdout, stderrTail: _stderr, ...meta } = current;
+        meta.cleanupError = error.message;
+        writeAgentMeta(repoRoot, metaPath(repoRoot, runId), meta);
+      } catch (_nested) {
+        /* cancellation intent is already durable; a later retry can restart cleanup */
+      }
+    });
+  } catch (error) {
+    const current = getAgentJob(repoRoot, runId);
+    if (current.status !== "cancelled" || !current.cleanupPending) return;
+    const { stdoutTail: _stdout, stderrTail: _stderr, ...meta } = current;
+    meta.cleanupError = error instanceof Error ? error.message : String(error);
+    writeAgentMeta(repoRoot, metaPath(repoRoot, runId), meta);
+  }
+}
+
+export function completeAgentJobCancellation(repoRoot: string, runId: string): AgentJobMeta {
+  const claimPath = cancellationCleanupClaimPath(repoRoot, runId);
+  if (!claimCancellationCleanup(repoRoot, runId)) return getAgentJob(repoRoot, runId);
+  try {
+    const current = getAgentJob(repoRoot, runId);
+    if (current.status !== "cancelled" || !current.cleanupPending) return current;
+    const { stdoutTail: _stdout, stderrTail: _stderr, ...meta } = current;
+    meta.cleanupStartedAt = meta.cleanupStartedAt ?? new Date().toISOString();
+    meta.cleanupError = undefined;
+    writeAgentMeta(repoRoot, metaPath(repoRoot, runId), meta);
+
+    for (const pid of cancellationProcessIds(meta)) terminateRunProcess(pid);
+
+    const latest = getAgentJob(repoRoot, runId);
+    if (latest.status !== "cancelled") return latest;
+    const { stdoutTail: _latestStdout, stderrTail: _latestStderr, ...cleaned } = latest;
+    cleaned.agentPid = undefined;
+    cleaned.workerPid = undefined;
+    cleaned.launchPid = undefined;
+    cleaned.cancellationPids = [];
+    cleaned.cleanupPending = false;
+    cleaned.cleanupFinishedAt = new Date().toISOString();
+    cleaned.cleanupError = undefined;
+    writeAgentMeta(repoRoot, metaPath(repoRoot, runId), cleaned);
+    appendAgentJobEvent(repoRoot, runId, {
+      type: "run_cleanup_completed",
+      message: "Cancelled Run process cleanup completed.",
+    });
+    try {
+      const issue = getIssue(repoRoot, cleaned.issueId);
+      const task = issue.tasks.find((entry) => entry.id === cleaned.taskId);
+      if (task) {
+        const state = resolveEffectiveTaskState({ issue, task, runs: readTaskRunEvidence(repoRoot, task) });
+        if (!state.terminal && !state.inactive && (task.supersededBy?.length ?? 0) === 0) {
+          updateTask(repoRoot, cleaned.issueId, cleaned.taskId, {
+            status: "blocked",
+            transition: "run_sync",
+            note: `${runId} cancelled; explicit retry is required before another Run can be created.`,
+          });
+        }
+      }
+    } catch (_error) {
+      /* Run cancellation remains authoritative if Task state has moved or disappeared. */
+    }
+    return cleaned;
+  } catch (error) {
+    try {
+      const current = getAgentJob(repoRoot, runId);
+      if (current.status === "cancelled") {
+        const { stdoutTail: _stdout, stderrTail: _stderr, ...meta } = current;
+        meta.cleanupPending = true;
+        meta.cleanupError = error instanceof Error ? error.message : String(error);
+        writeAgentMeta(repoRoot, metaPath(repoRoot, runId), meta);
+        appendAgentJobEvent(repoRoot, runId, {
+          type: "run_cleanup_failed",
+          message: meta.cleanupError,
+        });
+        return meta;
+      }
+      return current;
+    } catch (_nested) {
+      throw error;
+    }
+  } finally {
+    rmSync(claimPath, { force: true });
+  }
+}
+
 function markRunUnknown(
   repoRoot: string,
   path: string,
@@ -1613,37 +1749,42 @@ export function cancelAgentJob(repoRoot: string, runId: string): AgentJobMeta {
     throw new Error(
       "GitHub cloud sessions must currently be cancelled from the GitHub Agents UI; the public agent-task API does not expose a stable cancellation contract here.",
     );
-  if (!["queued", "running", "unknown"].includes(current.status))
+  if (current.status === "cancelled") {
+    if (current.cleanupPending) requestCancellationCleanup(repoRoot, runId);
     return current;
-  terminateRunProcesses(current);
+  }
+  if (!["queued", "starting", "running", "unknown", "waiting_for_user"].includes(current.status))
+    return current;
+
   const { stdoutTail: _stdout, stderrTail: _stderr, ...meta } = current;
+  const requestedAt = new Date().toISOString();
+  meta.status = "cancelled";
+  meta.terminationReason = "cancelled";
+  meta.cancellationRequestedAt = requestedAt;
+  meta.cancellationPids = cancellationProcessIds(current);
+  meta.cleanupPending = true;
+  meta.cleanupStartedAt = undefined;
+  meta.cleanupFinishedAt = undefined;
+  meta.cleanupError = undefined;
   meta.agentPid = undefined;
   meta.workerPid = undefined;
   meta.launchPid = undefined;
-  meta.status = "cancelled";
-  meta.terminationReason = "cancelled";
-  meta.finishedAt = new Date().toISOString();
+  meta.finishedAt = requestedAt;
+  meta.lastHeartbeatAt = requestedAt;
+  meta.progress = {
+    phase: "finalizing",
+    percent: 100,
+    currentActivity: "Cancellation persisted; process cleanup continues independently.",
+    lastActivityAt: requestedAt,
+    activityCount: (meta.progress?.activityCount ?? 0) + 1,
+  };
   writeAgentMeta(repoRoot, metaPath(repoRoot, runId), meta);
   appendAgentJobEvent(repoRoot, runId, {
     type: "run_cancelled",
-    message: "Local Run cancelled.",
+    message: "Local Run cancellation persisted; process cleanup scheduled.",
+    data: { cleanupPending: true, processCount: meta.cancellationPids.length },
   });
-  try {
-    const issue = getIssue(repoRoot, meta.issueId);
-    const task = issue.tasks.find((entry) => entry.id === meta.taskId);
-    if (task) {
-      const state = resolveEffectiveTaskState({ issue, task, runs: readTaskRunEvidence(repoRoot, task) });
-      if (!state.terminal && !state.inactive && (task.supersededBy?.length ?? 0) === 0) {
-        updateTask(repoRoot, meta.issueId, meta.taskId, {
-          status: "blocked",
-          transition: "run_sync",
-          note: `${runId} cancelled; explicit retry is required before another Run can be created.`,
-        });
-      }
-    }
-  } catch (_error) {
-    /* Task may have been removed or explicitly terminated; the Run remains cancelled evidence. */
-  }
+  requestCancellationCleanup(repoRoot, runId);
   return meta;
 }
 
@@ -1722,31 +1863,44 @@ export function markAgentJobIntegrated(
   return meta;
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url) && process.argv[2] === "launch") {
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  const command = process.argv[2];
   const repoRoot = process.argv[3];
   const runId = process.argv[4];
-  if (!repoRoot || !runId) process.exit(1);
-  void (async () => {
+  if ((command === "launch" || command === "cancel-cleanup") && (!repoRoot || !runId)) process.exit(1);
+
+  if (command === "cancel-cleanup" && repoRoot && runId) {
     try {
-      startAcceptedTaskJob(repoRoot, runId);
-      while (true) {
-        const current = getAgentJob(repoRoot, runId);
-        if (
-          !["queued", "starting", "running", "waiting_for_user"].includes(current.status) ||
-          !isAlive(current.workerPid)
-        ) {
-          break;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 1_000));
-      }
+      completeAgentJobCancellation(repoRoot, runId);
       process.exit(0);
-    } catch (error) {
-      try {
-        failAcceptedTaskJob(repoRoot, runId, error);
-      } catch (_nested) {
-        /* Best effort launcher failure persistence. */
-      }
+    } catch (_error) {
       process.exit(1);
     }
-  })();
+  }
+
+  if (command === "launch" && repoRoot && runId) {
+    void (async () => {
+      try {
+        startAcceptedTaskJob(repoRoot, runId);
+        while (true) {
+          const current = getAgentJob(repoRoot, runId);
+          if (
+            !["queued", "starting", "running", "waiting_for_user"].includes(current.status) ||
+            !isAlive(current.workerPid)
+          ) {
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 1_000));
+        }
+        process.exit(0);
+      } catch (error) {
+        try {
+          failAcceptedTaskJob(repoRoot, runId, error);
+        } catch (_nested) {
+          /* Best effort launcher failure persistence. */
+        }
+        process.exit(1);
+      }
+    })();
+  }
 }
