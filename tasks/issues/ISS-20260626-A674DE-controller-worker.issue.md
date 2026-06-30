@@ -2,7 +2,7 @@
 id: "ISS-20260626-A674DE"
 kind: "bug"
 status: "in_progress"
-updated_at: "2026-06-29T13:26:56.663Z"
+updated_at: "2026-06-30T06:17:02.945Z"
 source: "repo-harness-controller-v8"
 ---
 

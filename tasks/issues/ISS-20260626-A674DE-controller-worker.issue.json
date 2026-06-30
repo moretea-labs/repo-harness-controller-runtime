@@ -346,15 +346,21 @@
         "Accepted RUN-iss-20260626-a674de-t7-1782732514544-221ae671 for asynchronous launch.",
         "Dispatched RUN-iss-20260626-a674de-t7-1782732514544-221ae671 to codex.",
         "RUN-iss-20260626-a674de-t7-1782732514544-221ae671 ended as failed; explicit retry is required. Reading additional input from stdin...\n2026-06-29T11:28:38.081292Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when Auth(AuthorizationRequired)",
-        "重启后确认：ChatGPT 侧收到 Session terminated 时，Durable Execution Job 与 Local Job 仍在后台持续运行，最终 10 分钟超时；说明主要故障在 MCP/Gateway 会话层，持久 Job 未丢失。触发窗口与 legacy worker 父进程异常测试卡死重合，但尚不能断言测试直接杀死 Gateway。需将会话自动恢复、Gateway 进程身份保护和测试隔离提升为最高优先级。"
+        "重启后确认：ChatGPT 侧收到 Session terminated 时，Durable Execution Job 与 Local Job 仍在后台持续运行，最终 10 分钟超时；说明主要故障在 MCP/Gateway 会话层，持久 Job 未丢失。触发窗口与 legacy worker 父进程异常测试卡死重合，但尚不能断言测试直接杀死 Gateway。需将会话自动恢复、Gateway 进程身份保护和测试隔离提升为最高优先级。",
+        "Explicit retry requested from RUN-iss-20260626-a674de-t7-1782732514544-221ae671.",
+        "Accepted RUN-iss-20260626-a674de-t7-1782799836625-94a8ffa3 for asynchronous launch.",
+        "Dispatched RUN-iss-20260626-a674de-t7-1782799836625-94a8ffa3 to codex.",
+        "RUN-iss-20260626-a674de-t7-1782799836625-94a8ffa3 ended as failed; explicit retry is required. Reading additional input from stdin...\n2026-06-30T06:10:43.208099Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when Auth(AuthorizationRequired)",
+        "RUN-iss-20260626-a674de-t7-1782799836625-94a8ffa3 cancelled; explicit retry is required before another Run can be created."
       ],
       "runIds": [
         "RUN-iss-20260626-a674de-t7-1782703492885-0f014afa",
         "RUN-iss-20260626-a674de-t7-1782705655356-1e77b9e7",
-        "RUN-iss-20260626-a674de-t7-1782732514544-221ae671"
+        "RUN-iss-20260626-a674de-t7-1782732514544-221ae671",
+        "RUN-iss-20260626-a674de-t7-1782799836625-94a8ffa3"
       ],
       "createdAt": "2026-06-29T03:18:01.909Z",
-      "updatedAt": "2026-06-29T12:37:42.661Z",
+      "updatedAt": "2026-06-30T06:17:02.945Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     },
     {
@@ -475,6 +481,6 @@
     }
   ],
   "createdAt": "2026-06-26T15:05:42.497Z",
-  "updatedAt": "2026-06-29T13:26:56.663Z",
+  "updatedAt": "2026-06-30T06:17:02.945Z",
   "repoId": "repo_123b7cf58b6b17b5cbe46a56"
 }
