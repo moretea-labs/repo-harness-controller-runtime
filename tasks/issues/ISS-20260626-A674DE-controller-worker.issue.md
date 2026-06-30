@@ -2,7 +2,7 @@
 id: "ISS-20260626-A674DE"
 kind: "bug"
 status: "in_progress"
-updated_at: "2026-06-29T04:01:01.470Z"
+updated_at: "2026-06-29T13:26:56.663Z"
 source: "repo-harness-controller-v8"
 ---
 
@@ -89,7 +89,7 @@ source: "repo-harness-controller-v8"
 
 ### T6 — 复验 502 与整体性能
 
-- Status: `ready`
+- Status: `blocked`
 - Objective: 在全部生命周期修复后复验响应上限、CPU、进程数、临时目录和完整门禁。
 - Depends on: none
 - Allowed paths: `src/**`, `tests/**`, `scripts/**`, `tasks/reports/**`
@@ -113,6 +113,24 @@ source: "repo-harness-controller-v8"
 - Allowed paths: `src/cli/**`, `src/runtime/**`, `scripts/**`, `tests/**`, `package.json`, `.repo-harness/checks.json`, `docs/**`
 - Checks: `package:check:type`
 - Execution hint: agent / codex
+
+### T9 — 修复 MCP 会话频繁终止与自动恢复
+
+- Status: `ready`
+- Objective: 定位并消除 ChatGPT connector 经常返回 Session terminated 的根因，确保 Gateway/keepalive/Controller 重启、长任务、测试子进程异常和认证刷新期间 MCP 会话可恢复，且持久 Job 可在新会话中无损继续读取。
+- Depends on: none
+- Allowed paths: `src/cli/mcp/**`, `src/runtime/gateway/**`, `src/cli/controller/**`, `scripts/controller-runtime.sh`, `tests/cli/**`, `tests/runtime/**`, `docs/**`
+- Checks: `package:check:type`, `package:check:mcp-compatibility`, `package:check:controller-v8`
+- Execution hint: selected at runtime
+
+### T10 — 通过 GitHub PR 修复 MCP 会话终止
+
+- Status: `ready`
+- Objective: 在 GitHub 远程分支修复 keepalive 对仍存活 MCP Gateway 的激进重启：短暂 /health 失败仅标记 degraded 并保留现有 session；Gateway 进程退出时立即重启；仅持续失联超过约 5 分钟才重启仍存活 Gateway。补充定向回归测试并创建 PR 到 main。
+- Depends on: none
+- Allowed paths: `src/cli/mcp/keepalive.ts`, `tests/cli/mcp-keepalive.test.ts`
+- Checks: `package:check:type`
+- Execution hint: agent / github-copilot
 
 ## Related Artifacts
 

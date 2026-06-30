@@ -56,8 +56,9 @@ afterEach(async () => {
       }
     }
   }
-  await terminateProcessesByCommand(cleanupRoots);
-  await waitForNoProcessesByCommand(cleanupRoots);
+  const cleanupPaths = [...new Set([...cleanupRoots, ...roots])];
+  await terminateProcessesByCommand(cleanupPaths);
+  await waitForNoProcessesByCommand(cleanupPaths);
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
   if (originalControllerHome === undefined) delete process.env.REPO_HARNESS_CONTROLLER_HOME;
   else process.env.REPO_HARNESS_CONTROLLER_HOME = originalControllerHome;
