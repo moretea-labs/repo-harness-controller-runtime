@@ -1,0 +1,76 @@
+diff --git a/src/cli/editing/edit-session.ts b/src/cli/editing/edit-session.ts
+index 1db53e8..5555555 100644
+--- a/src/cli/editing/edit-session.ts
++++ b/src/cli/editing/edit-session.ts
+@@ -202,21 +202,34 @@ function normalizeStoredSession(value: Partial<EditSession> & { sessionId: string
+   };
+ }
+ 
+-function changedLineEstimate(before: string, after: string): number {
++export function changedLineEstimate(before: string, after: string): number {
+   if (before === after) return 0;
+   const beforeLines = before.split(/\r?\n/);
+   const afterLines = after.split(/\r?\n/);
+-  let prefix = 0;
+-  while (prefix < beforeLines.length && prefix < afterLines.length && beforeLines[prefix] === afterLines[prefix]) prefix += 1;
+-  let suffix = 0;
+-  while (
+-    suffix < beforeLines.length - prefix
+-    && suffix < afterLines.length - prefix
+-    && beforeLines[beforeLines.length - 1 - suffix] === afterLines[afterLines.length - 1 - suffix]
+-  ) suffix += 1;
+-  const removed = beforeLines.length - prefix - suffix;
+-  const added = afterLines.length - prefix - suffix;
+-  return Math.max(removed, added);
++  const beforeLength = beforeLines.length;
++  const afterLength = afterLines.length;
++  const maximumDistance = beforeLength + afterLength;
++  const furthest = new Map<number, number>([[1, 0]]);
++  for (let distance = 0; distance <= maximumDistance; distance += 1) {
++    for (let diagonal = -distance; diagonal <= distance; diagonal += 2) {
++      const down = furthest.get(diagonal + 1) ?? Number.NEGATIVE_INFINITY;
++      const right = furthest.get(diagonal - 1) ?? Number.NEGATIVE_INFINITY;
++      let x = diagonal === -distance || (diagonal !== distance && right < down)
++        ? Math.max(0, down)
++        : Math.max(0, right + 1);
++      let y = x - diagonal;
++      while (x < beforeLength && y < afterLength && beforeLines[x] === afterLines[y]) {
++        x += 1;
++        y += 1;
++      }
++      furthest.set(diagonal, x);
++      if (x >= beforeLength && y >= afterLength) {
++        const delta = afterLength - beforeLength;
++        const added = (distance + delta) / 2;
++        const removed = distance - added;
++        return Math.max(added, removed);
++      }
++    }
++  }
++  return Math.max(beforeLength, afterLength);
+ }
+ 
+ function pathAllowed(path: string, allowedPaths: string[]): boolean {
+diff --git a/tests/cli/edit-session-changed-lines.test.ts b/tests/cli/edit-session-changed-lines.test.ts
+new file mode 100644
+index 0000000..6666666
+--- /dev/null
++++ b/tests/cli/edit-session-changed-lines.test.ts
+@@ -0,0 +1,22 @@
++import { describe, expect, test } from 'bun:test';
++import { changedLineEstimate } from '../../src/cli/editing/edit-session';
++
++describe('direct edit changed-line accounting', () => {
++  test('counts separated replacements without charging unchanged middle lines', () => {
++    const before = Array.from({ length: 700 }, (_, index) => `line-${index}`).join('\n');
++    const lines = before.split('\n');
++    lines[10] = 'line-10-updated';
++    lines[680] = 'line-680-updated';
++    expect(changedLineEstimate(before, lines.join('\n'))).toBe(2);
++  });
++
++  test('counts insertions and deletions by the larger actual diff side', () => {
++    expect(changedLineEstimate('a\nb\nc', 'a\ninserted\nb\nc')).toBe(1);
++    expect(changedLineEstimate('a\nb\nc', 'a\nc')).toBe(1);
++  });
++});
