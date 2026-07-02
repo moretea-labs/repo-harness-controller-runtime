@@ -57,6 +57,7 @@ describe("mcp setup", () => {
       });
       expect(config.chatgpt.serverName).toBe("repo-harness-controller-v8");
       expect(config.profile).toBe("controller");
+      expect(config.toolset).toBe("core");
       expect(config.localController).toEqual({
         enabled: true,
         host: "127.0.0.1",
@@ -92,6 +93,7 @@ describe("mcp setup", () => {
         runMcpDoctor({ repo: repoRoot, json: true }).lines[0],
       );
       expect(doctor.mcp.authConfigured).toBe(true);
+      expect(doctor.mcp.toolset).toBe("core");
       expect(doctor.mcp.devMode.agentRunner).toBe(true);
       expect(doctor.chatgpt.serverName).toBe("repo-harness-controller-v8");
       expect(doctor.chatgpt.localEndpoint).toBe("http://127.0.0.1:8765/mcp");

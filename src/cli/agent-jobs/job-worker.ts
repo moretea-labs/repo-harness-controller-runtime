@@ -466,6 +466,10 @@ function consumeLines(stream: "stdout" | "stderr", chunk: Buffer): void {
   buffer = lines.pop() ?? "";
   if (stream === "stdout") stdoutLineBuffer = buffer;
   else stderrLineBuffer = buffer;
+  // Node may emit the final stdout/stderr chunks after the child `exit` event.
+  // Keep persisting those bytes, but never let late activity overwrite the
+  // authoritative finalizing/completed lifecycle phase.
+  if (childExited) return;
   for (const line of lines) {
     const activity =
       config.agent === "codex"

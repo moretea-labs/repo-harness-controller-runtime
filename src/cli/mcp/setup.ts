@@ -197,7 +197,7 @@ For a shared editable installation, keep the repo-harness checkout at a stable p
 
 \`\`\`bash
 repo-harness mcp setup chatgpt --repo .
-repo-harness mcp keepalive --repo . --profile controller --enable-dev-runner --dev-runner-agents codex,claude --tunnel quick
+repo-harness mcp keepalive --repo . --profile controller --toolset core --enable-dev-runner --dev-runner-agents codex,claude --tunnel quick
 \`\`\`
 
 The \`controller\` profile starts a localhost-only visual controller at \`http://127.0.0.1:8766/\` by default. It is separate from the public MCP tunnel. Use it to launch ready Tasks, create small Codex/Claude sessions, approve local Jobs, inspect live logs, and run named checks. Add \`--open-local-ui\` to open it automatically, or \`--no-local-ui\` to disable it.
@@ -227,7 +227,7 @@ Quick tunnels are useful for one-off smoke tests, but their URL may change. For 
 cloudflared tunnel login
 cloudflared tunnel create repo-harness-mcp
 cloudflared tunnel route dns repo-harness-mcp ${CHATGPT_NAMED_TUNNEL_HOST_PLACEHOLDER}
-repo-harness mcp keepalive --repo . --profile controller --enable-dev-runner --dev-runner-agents codex,claude --tunnel named --cloudflare-tunnel-name repo-harness-mcp --public-endpoint https://${CHATGPT_NAMED_TUNNEL_HOST_PLACEHOLDER}/mcp
+repo-harness mcp keepalive --repo . --profile controller --toolset core --enable-dev-runner --dev-runner-agents codex,claude --tunnel named --cloudflare-tunnel-name repo-harness-mcp --public-endpoint https://${CHATGPT_NAMED_TUNNEL_HOST_PLACEHOLDER}/mcp
 \`\`\`
 
 Regenerate this guide with the stable endpoint:
@@ -413,6 +413,7 @@ export function runMcpSetupChatgpt(opts: {
       ...(endpoint ? { endpoint } : {}),
     },
     profile: existingConfig?.profile ?? "controller",
+    toolset: existingConfig?.toolset ?? "core",
     localController: existingConfig?.localController ?? {
       enabled: true,
       host: "127.0.0.1",
@@ -460,6 +461,7 @@ export function runMcpSetupChatgpt(opts: {
     lines: [
       `[repo-harness mcp] Repo: ${repoRoot}`,
       "[repo-harness mcp] Profile: controller",
+      `[repo-harness mcp] Toolset: ${config.toolset}`,
       `[repo-harness mcp] ChatGPT MCP server name: ${serverName}`,
       `[repo-harness mcp] Local endpoint: http://${host}:${port}/mcp`,
       `[repo-harness mcp] Local Controller: http://${config.localController.host}:${config.localController.port}/`,
@@ -472,7 +474,7 @@ export function runMcpSetupChatgpt(opts: {
       `[repo-harness mcp] Config: ${relative(repoRoot, configPath)}`,
       `[repo-harness mcp] Guide: ${relative(repoRoot, guidePath)} (generic; endpoint stays in ignored local config)`,
       `[repo-harness mcp] Runtime state: ${relative(repoRoot, mcpRuntimeStatePath(repoRoot))}`,
-      `Next: repo-harness mcp keepalive --repo . --host ${host} --port ${port} --profile controller --enable-dev-runner --dev-runner-agents codex --tunnel quick`,
+      `Next: repo-harness mcp keepalive --repo . --host ${host} --port ${port} --profile controller --toolset ${config.toolset} --enable-dev-runner --dev-runner-agents codex --tunnel quick`,
     ],
   };
 }
@@ -751,6 +753,7 @@ export function runMcpDoctor(opts: {
       : "not_adopted",
     repo: repoRoot,
     mcp: {
+      toolset: localConfig?.toolset === "full" ? "full" : "core",
       localConfig: existsSync(
         join(repoRoot, ".repo-harness", "mcp.local.json"),
       ),
@@ -826,6 +829,7 @@ export function runMcpDoctor(opts: {
               `missing (run setup; default is ${DEFAULT_CHATGPT_MCP_SERVER_NAME})`
             }`,
             `[repo-harness mcp] ChatGPT guide: ${report.mcp.guide ? "present" : "missing"}`,
+            `[repo-harness mcp] Toolset: ${report.mcp.toolset}`,
             `[repo-harness mcp] Local Controller: ${report.mcp.localController.enabled ? report.chatgpt.localController : "disabled"}`,
             `[repo-harness mcp] ChatGPT auth: ${report.mcp.authConfigured ? `${authMode} present` : "missing"}`,
             `[repo-harness mcp] Runtime: ${

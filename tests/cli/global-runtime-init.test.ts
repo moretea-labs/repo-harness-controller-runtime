@@ -70,7 +70,16 @@ describe('init command global runtime bootstrap', () => {
       mkdirSync(fakeBin, { recursive: true });
       setupFakeSource(source);
       writeFakeCodegraph(fakeBin, codegraphLog);
-      writeExecutable(join(fakeBin, 'bun'), `#!/bin/bash\nprintf '%s\\n' "$*" >> "${bunLog}"\nexit 0\n`);
+      writeExecutable(
+        join(fakeBin, 'bun'),
+        [
+          '#!/bin/bash',
+          'set -euo pipefail',
+          'if [[ "${1:-}" == "add" && "${2:-}" == "-g" ]]; then printf \'%s\\n\' "$*" >> ' + JSON.stringify(bunLog) + '; exit 0; fi',
+          `exec ${JSON.stringify(process.execPath)} "$@"`,
+          '',
+        ].join('\n'),
+      );
       writeExecutable(
         join(fakeBin, 'npx'),
         [

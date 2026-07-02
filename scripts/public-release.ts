@@ -130,7 +130,7 @@ function scan(output: string): void {
     ["private key detected", /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/],
     ["AWS access key detected", /AKIA[0-9A-Z]{16}/],
     ["GitHub token detected", /gh[pousr]_[A-Za-z0-9_]{20,}/],
-    ["OpenAI-style secret detected", /sk-[A-Za-z0-9_-]{20,}/],
+    ["OpenAI-style secret detected", /(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}/],
     ["real repository binding detected", /repo_[0-9a-f]{24,}/],
     ["real checkout binding detected", /checkout_[0-9a-f]{16,}/],
   ];

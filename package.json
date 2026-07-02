@@ -72,6 +72,7 @@
     "check:release": "bash scripts/check-npm-release.sh",
     "check:release-surface": "bash scripts/check-public-release-surface.sh",
     "check:public-export": "bun scripts/public-release.ts",
+    "package:source-zip": "bash scripts/package-source-archive.sh",
     "check:release-published": "bash scripts/check-release-published.sh",
     "smoke:tarball-install": "bash scripts/check-tarball-install-smoke.sh",
     "check:brain-manifest": "repo-harness run check-brain-manifest",

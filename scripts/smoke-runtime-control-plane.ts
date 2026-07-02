@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { ensureControllerDaemon, readControllerDaemonStatus } from '../src/runtime/control-plane/daemon-client';
-import { createExecutionJob, getExecutionJob } from '../src/runtime/execution/jobs/store';
+import { createExecutionJob, getExecutionJob, listExecutionJobs } from '../src/runtime/execution/jobs/store';
 import { listActiveLeases } from '../src/runtime/resources/leases/store';
 import { readRepositoryProjection } from '../src/runtime/projections/materialized-view';
 import { registerRepository } from '../src/cli/repositories/registry';
@@ -93,6 +93,7 @@ try {
   const bridgeStatus = bridgeStatusResult.structuredContent as Record<string, unknown>;
   if (bridgeStatus.nonBlocking !== true) throw new Error('LOCAL_BRIDGE_STATUS_NOT_MATERIALIZED');
 
+  const jobsBeforeContext = listExecutionJobs(controllerHome, repository.repoId, 100).map((entry) => entry.jobId);
   const contextStartedAt = Date.now();
   const firstContextResult = await callRuntimeTool(mcpContext, 'controller_context', {});
   const contextLatencyMs = Date.now() - contextStartedAt;
@@ -100,20 +101,16 @@ try {
   if (contextLatencyMs > 1_500) throw new Error(`CONTROLLER_CONTEXT_BLOCKED_GATEWAY: ${contextLatencyMs}ms`);
   const firstContext = firstContextResult.structuredContent as Record<string, unknown>;
   const contextProjection = firstContext.contextProjection as Record<string, unknown> | undefined;
-  const refreshJobId = typeof contextProjection?.refreshJobId === 'string' ? contextProjection.refreshJobId : undefined;
-  if (!refreshJobId) throw new Error('CONTROLLER_CONTEXT_REFRESH_JOB_MISSING');
-  let contextRefreshJob = getExecutionJob(controllerHome, repository.repoId, refreshJobId);
-  const contextRefreshDeadline = Date.now() + 30_000;
-  while (Date.now() < contextRefreshDeadline) {
-    contextRefreshJob = getExecutionJob(controllerHome, repository.repoId, refreshJobId);
-    if (['succeeded', 'failed', 'timed_out', 'cancelled', 'orphaned', 'stale', 'human_attention_required'].includes(contextRefreshJob.status)) break;
-    await sleep(100);
+  if (contextProjection?.refreshJobId !== undefined) throw new Error('CONTROLLER_CONTEXT_CREATED_REFRESH_JOB');
+  if (contextProjection?.strategy !== 'event-driven' || contextProjection.readOnly !== true || contextProjection.nonBlocking !== true) {
+    throw new Error(`CONTROLLER_CONTEXT_NOT_READ_ONLY: ${JSON.stringify(contextProjection)}`);
   }
-  if (contextRefreshJob.status !== 'succeeded') throw new Error(`CONTROLLER_CONTEXT_REFRESH_FAILED: ${contextRefreshJob.status}`);
+  const jobsAfterContext = listExecutionJobs(controllerHome, repository.repoId, 100).map((entry) => entry.jobId);
+  if (JSON.stringify(jobsAfterContext) !== JSON.stringify(jobsBeforeContext)) throw new Error('CONTROLLER_CONTEXT_MUTATED_JOB_INDEX');
   const secondContextResult = await callRuntimeTool(mcpContext, 'controller_context', {});
   const secondContext = secondContextResult?.structuredContent as Record<string, unknown> | undefined;
   const secondProjection = secondContext?.contextProjection as Record<string, unknown> | undefined;
-  if (!secondProjection?.generatedAt || secondProjection.stale !== false) throw new Error('CONTROLLER_CONTEXT_PROJECTION_NOT_REUSED');
+  if (secondProjection?.strategy !== 'event-driven' || secondProjection.readOnly !== true) throw new Error('CONTROLLER_CONTEXT_READ_CONTRACT_CHANGED');
 
   const projection = readRepositoryProjection(controllerHome, repository.repoId);
   if (projection.activeJobs.some((entry) => entry.jobId === job.jobId)) throw new Error('TERMINAL_JOB_REMAINED_ACTIVE');
@@ -131,7 +128,7 @@ try {
     workbenchStatus: workbenchJob.status,
     localBridgeStatusLatencyMs: bridgeLatencyMs,
     controllerContextLatencyMs: contextLatencyMs,
-    controllerContextRefresh: contextRefreshJob.status,
+    controllerContextStrategy: contextProjection?.strategy,
     activeLeases: 0,
   }, null, 2));
 } finally {

@@ -20,6 +20,7 @@ export interface McpLocalConfig {
     endpoint?: string;
   };
   profile?: string;
+  toolset?: 'core' | 'full';
   devMode?: {
     agentRunner?: boolean;
     allowedAgents?: string[];
@@ -59,6 +60,8 @@ export interface McpRuntimeState {
     schemaVersion?: number;
     toolSurfaceVersion?: number;
     toolSurfaceFingerprint?: string;
+    runtimeToolSurfaceFingerprint?: string;
+    toolset?: 'core' | 'full';
     toolCount?: number;
     repoId?: string;
     defaultTimeoutMs?: number;

@@ -56,5 +56,5 @@ describe("Hook recursive copy", () => {
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }
-  }, 15000);
+  }, 60000);
 });

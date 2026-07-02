@@ -20,8 +20,8 @@ import { createMcpOAuthProvider, McpOAuthTokenStore } from '../oauth';
 import { resolveMcpRepoRoot } from '../repo';
 import { buildMcpToolDefinitions, controllerExpectedToolNames } from '../tools';
 import { repositoryToolDefinitions } from '../repository-tools';
-import { runtimeToolDefinitions } from '../../../runtime/gateway/mcp/runtime-tools';
 import { injectDurableCommandFields } from '../../../runtime/gateway/mcp/router';
+import { exposedControllerToolDefinitions } from '../toolset';
 import { ensureControllerDaemon, readControllerDaemonStatus } from '../../../runtime/control-plane/daemon-client';
 import { rebuildRepositoryProjection } from '../../../runtime/projections/materialized-view';
 import { getRepository } from '../../repositories/registry';
@@ -504,7 +504,7 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   if (runtimeControllerHome) ensureControllerDaemon(runtimeControllerHome);
   const compatibilityToolDefinitions = buildMcpToolDefinitions(toolContext.policy, { enableChatgptBrowser: opts.enableChatgptBrowser === true });
   const toolDefinitions = 'controllerHome' in toolContext
-    ? runtimeToolDefinitions.concat(repositoryToolDefinitions, buildMultiRepositoryToolDefinitions(toolContext)).map(injectDurableCommandFields)
+    ? exposedControllerToolDefinitions(toolContext).map(injectDurableCommandFields)
     : compatibilityToolDefinitions;
   const controllerToolNames = toolContext.policy.profile === 'controller'
     ? controllerExpectedToolNames(toolContext.policy, { enableChatgptBrowser: opts.enableChatgptBrowser === true })
@@ -528,6 +528,8 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
     res.setHeader('x-repo-harness-tool-surface', toolSurface);
     res.setHeader('x-repo-harness-tool-surface-version', String(toolSurfaceVersion));
     res.setHeader('x-repo-harness-schema-version', String(toolSurfaceSchemaVersion));
+    if ('controllerHome' in toolContext) res.setHeader('x-repo-harness-toolset', toolContext.toolset);
+    if (runtimeToolSurfaceFingerprint) res.setHeader('x-repo-harness-runtime-tool-surface-fingerprint', runtimeToolSurfaceFingerprint);
     if (toolSurfaceFingerprint) res.setHeader('x-repo-harness-tool-surface-fingerprint', toolSurfaceFingerprint);
     res.json({
       status: 'ok',
@@ -539,6 +541,7 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
       toolSurfaceVersion,
       toolSurfaceFingerprint,
       runtimeToolSurfaceFingerprint,
+      toolset: 'controllerHome' in toolContext ? toolContext.toolset : 'full',
       toolCount: toolDefinitions.length,
       compatibilityToolCount: compatibilityToolDefinitions.length,
       repoId,
@@ -640,6 +643,8 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
     res.setHeader('x-repo-harness-tool-surface', toolSurface);
     res.setHeader('x-repo-harness-tool-surface-version', String(toolSurfaceVersion));
     res.setHeader('x-repo-harness-schema-version', String(toolSurfaceSchemaVersion));
+    if ('controllerHome' in toolContext) res.setHeader('x-repo-harness-toolset', toolContext.toolset);
+    if (runtimeToolSurfaceFingerprint) res.setHeader('x-repo-harness-runtime-tool-surface-fingerprint', runtimeToolSurfaceFingerprint);
     if (toolSurfaceFingerprint) res.setHeader('x-repo-harness-tool-surface-fingerprint', toolSurfaceFingerprint);
     next();
   });

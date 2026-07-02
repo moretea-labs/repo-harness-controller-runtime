@@ -2,7 +2,7 @@ import { loadMcpLocalConfig } from './auth';
 import { getMcpPolicy, parseMcpProfile } from './policy';
 import { buildMcpToolDefinitions, callMcpTool, type CallToolResult, type McpToolContext, type McpToolDefinition } from './tools';
 import { DEFAULT_AGENT_TIMEOUT_MS, MAX_AGENT_TIMEOUT_MS, normalizeAgentTimeoutMs } from '../controller/runtime-config';
-import type { McpAgentRunnerName } from './types';
+import type { McpAgentRunnerName, McpToolset } from './types';
 import { ensureControllerHome } from '../repositories/controller-home';
 import { bindRepositoryEntities } from '../repositories/entity-migration';
 import { withControllerLockAsync } from '../repositories/locks';
@@ -19,11 +19,13 @@ export interface McpServerOptions {
   devRunnerAgents?: string;
   devRunnerTimeoutMs?: number;
   devRunnerMaxTimeoutMs?: number;
+  toolset?: McpToolset | string;
 }
 
 export interface MultiRepositoryMcpToolContext extends McpToolContext {
   controllerHome: string;
   explicitRepository?: RepositoryRecord;
+  toolset: McpToolset;
 }
 
 type ToolResult = CallToolResult;
@@ -61,6 +63,15 @@ const REPOSITORY_LOCKED_TOOLS = new Set([
   'close_github_issue',
   'configure_github_plugin',
 ]);
+
+
+export function parseMcpToolset(value: unknown, profile: string): McpToolset {
+  if (profile !== 'controller') return 'full';
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (!normalized) return 'core';
+  if (normalized === 'core' || normalized === 'full') return normalized;
+  throw new Error(`invalid MCP toolset "${String(value)}" (expected: core or full)`);
+}
 
 function parseBooleanSetting(value: string | undefined): boolean | undefined {
   if (value === undefined) return undefined;
@@ -212,11 +223,18 @@ export function createMcpToolContext(opts: McpServerOptions): MultiRepositoryMcp
     ? registerRepository({ path: opts.repo, controllerHome })
     : undefined;
   const policyRoot = explicitRepository?.canonicalRoot ?? controllerHome;
+  const policy = runtimePolicy(policyRoot, opts);
+  const config = loadMcpLocalConfig(policyRoot);
+  const toolset = parseMcpToolset(
+    opts.toolset ?? process.env.REPO_HARNESS_MCP_TOOLSET ?? config?.toolset,
+    policy.profile,
+  );
   return {
     controllerHome,
     explicitRepository,
     repoRoot: policyRoot,
-    policy: runtimePolicy(policyRoot, opts),
+    policy,
+    toolset,
     enableChatgptBrowser: opts.enableChatgptBrowser === true,
   };
 }

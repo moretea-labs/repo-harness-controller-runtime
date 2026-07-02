@@ -13,6 +13,7 @@ import {
 import { callRepositoryTool, repositoryToolDefinitions } from './repository-tools';
 import { callRuntimeTool, runtimeToolDefinitions } from '../../runtime/gateway/mcp/runtime-tools';
 import { injectDurableCommandFields, routeDurableMcpCall } from '../../runtime/gateway/mcp/router';
+import { exposedControllerToolDefinitions, isControllerToolExposed } from './toolset';
 
 export type { McpServerOptions } from './multi-repository';
 export { buildMultiRepositoryToolDefinitions, callMultiRepositoryTool } from './multi-repository';
@@ -41,13 +42,17 @@ export function createRepoHarnessMcpServerFromContext(ctx: ServerToolContext): S
   );
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: isMultiRepositoryContext(ctx)
-      ? runtimeToolDefinitions.concat(repositoryToolDefinitions, buildMultiRepositoryToolDefinitions(ctx)).map(injectDurableCommandFields)
+      ? exposedControllerToolDefinitions(ctx).map(injectDurableCommandFields)
       : buildMcpToolDefinitions(ctx.policy, { enableChatgptBrowser: ctx.enableChatgptBrowser === true }),
   }));
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const name = request.params.name;
     const args = (request.params.arguments ?? {}) as Record<string, unknown>;
     if (isMultiRepositoryContext(ctx)) {
+      if (!isControllerToolExposed(ctx, name)) {
+        const value = { error: { code: 'TOOL_NOT_EXPOSED', message: `${name} is not exposed by the ${ctx.toolset} MCP toolset.` } };
+        return { content: [{ type: 'text', text: JSON.stringify(value, null, 2) }], structuredContent: value, isError: true };
+      }
       const runtimeResult = await callRuntimeTool(ctx, name, args);
       if (runtimeResult) return runtimeResult;
       const durableResult = await routeDurableMcpCall(ctx, name, args);

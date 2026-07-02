@@ -88,7 +88,9 @@ import { loadRepositoryRegistry } from "../repositories/registry";
 import { resolveControllerHome } from "../repositories/controller-home";
 import { readControllerDaemonStatus } from "../../runtime/control-plane/daemon-client";
 import { listExecutionJobs } from "../../runtime/execution/jobs/store";
-import { readRepositoryProjection } from "../../runtime/projections/materialized-view";
+import { readRepositoryProjectionSnapshot } from "../../runtime/projections/materialized-view";
+import { runtimeToolDefinitions } from "../../runtime/gateway/mcp/runtime-tools";
+import { CORE_CONTROLLER_TOOL_NAMES } from "../mcp/toolset";
 
 export interface LocalBridgeServerOptions {
   repoRoot: string;
@@ -240,13 +242,52 @@ function runtimeControllerSnapshot(repoRoot: string) {
     repoId: repository.repoId,
     checkoutId: repository.activeCheckoutId,
     daemon: readControllerDaemonStatus(controllerHome),
-    projection: readRepositoryProjection(controllerHome, repository.repoId),
+    projection: readRepositoryProjectionSnapshot(controllerHome, repository.repoId).projection,
     executionJobs: listExecutionJobs(controllerHome, repository.repoId, 30),
   };
 }
 
 export function buildLocalControllerSnapshot(repoRoot: string) {
   const runs = listAgentJobs(repoRoot, 30);
+  const editSessions = listEditSessions(repoRoot, 30);
+  const localJobs = listLocalBridgeJobs(repoRoot, 30);
+  const board = projectBoard(repoRoot);
+  const runtime = runtimeControllerSnapshot(repoRoot);
+  const executionJobs = "executionJobs" in runtime ? (runtime.executionJobs ?? []) : [];
+  const boardIssues = board.issues as Array<{
+    id: string;
+    tasks?: Array<{ id: string; title: string; effectiveStatus: string }>;
+  }>;
+  const reviewTasks = boardIssues.flatMap((issue) => (issue.tasks ?? [])
+    .filter((task) => ["review", "verified", "changes_requested"].includes(task.effectiveStatus))
+    .map((task) => ({ kind: "task", issueId: issue.id, taskId: task.id, title: task.title, status: task.effectiveStatus })));
+  const decisionQueues = {
+    needsAttention: [
+      ...runs.filter((run) => ["failed", "waiting_for_user", "unknown"].includes(run.status))
+        .map((run) => ({ kind: "run", id: run.runId, title: run.progress?.currentActivity ?? run.runId, status: run.status, updatedAt: run.lastHeartbeatAt })),
+      ...editSessions.filter((session) => session.status === "check_failed")
+        .map((session) => ({ kind: "edit", id: session.sessionId, title: session.purpose, status: session.status, updatedAt: session.updatedAt })),
+      ...executionJobs.filter((job) => ["human_attention_required", "failed", "orphaned", "stale"].includes(job.status))
+        .map((job) => ({ kind: "work", id: job.jobId, title: String(job.payload.operation ?? job.type), status: job.status, updatedAt: job.updatedAt })),
+    ].slice(0, 12),
+    runningNow: [
+      ...runs.filter((run) => ["queued", "starting", "running"].includes(run.status))
+        .map((run) => ({ kind: "run", id: run.runId, title: run.progress?.currentActivity ?? run.runId, status: run.status, updatedAt: run.lastHeartbeatAt })),
+      ...editSessions.filter((session) => !["finalized", "rolled_back", "check_failed"].includes(session.status))
+        .map((session) => ({ kind: "edit", id: session.sessionId, title: session.purpose, status: session.status, updatedAt: session.updatedAt })),
+      ...executionJobs.filter((job) => ["queued", "dispatched", "running", "waiting_for_dependency", "waiting_for_workspace", "waiting_for_heavy_check", "waiting_for_integration"].includes(job.status))
+        .map((job) => ({ kind: "work", id: job.jobId, title: String(job.payload.operation ?? job.type), status: job.status, updatedAt: job.updatedAt })),
+    ].slice(0, 12),
+    readyForReview: reviewTasks.slice(0, 12),
+    recentlyCompleted: [
+      ...runs.filter((run) => ["succeeded", "cancelled"].includes(run.status))
+        .map((run) => ({ kind: "run", id: run.runId, title: run.progress?.currentActivity ?? run.runId, status: run.status, updatedAt: run.finishedAt ?? run.lastHeartbeatAt })),
+      ...editSessions.filter((session) => ["finalized", "rolled_back"].includes(session.status))
+        .map((session) => ({ kind: "edit", id: session.sessionId, title: session.purpose, status: session.status, updatedAt: session.updatedAt })),
+      ...executionJobs.filter((job) => ["succeeded", "cancelled", "timed_out"].includes(job.status))
+        .map((job) => ({ kind: "work", id: job.jobId, title: String(job.payload.operation ?? job.type), status: job.status, updatedAt: job.updatedAt })),
+    ].sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? ""))).slice(0, 12),
+  };
   const mcpConfig = loadMcpLocalConfig(repoRoot);
   const mcpRuntime = loadMcpRuntimeState(repoRoot);
   const expectedPolicy = runtimePolicy(repoRoot, { profile: "controller" });
@@ -255,7 +296,14 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
   const runtimeSchemaVersion = mcpRuntime?.server?.schemaVersion;
   const runtimeSurfaceVersion = mcpRuntime?.server?.toolSurfaceVersion;
   const runtimeFingerprint = mcpRuntime?.server?.toolSurfaceFingerprint;
+  const runtimeToolset = mcpRuntime?.server?.toolset;
+  const configuredToolset = mcpConfig?.toolset === "full" ? "full" : "core";
+  const runtimeToolFingerprint = mcpRuntime?.server?.runtimeToolSurfaceFingerprint;
   const expectedFingerprint = controllerToolSurfaceFingerprint(expectedToolNames);
+  const expectedRuntimeNames = configuredToolset === "core"
+    ? [...CORE_CONTROLLER_TOOL_NAMES]
+    : [...expectedToolNames, ...runtimeToolDefinitions.map((tool) => tool.name)];
+  const expectedRuntimeFingerprint = controllerToolSurfaceFingerprint(expectedRuntimeNames);
   const runtimeProfile = mcpRuntime?.server?.profile;
   const connectorHealthy =
     mcpRuntime?.server?.healthy === true &&
@@ -263,6 +311,8 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
     runtimeSchemaVersion === CONTROLLER_SCHEMA_VERSION &&
     runtimeSurfaceVersion === CONTROLLER_TOOL_SURFACE_VERSION &&
     runtimeFingerprint === expectedFingerprint &&
+    runtimeToolFingerprint === expectedRuntimeFingerprint &&
+    runtimeToolset === configuredToolset &&
     runtimeProfile === "controller";
   return {
     generatedAt: new Date().toISOString(),
@@ -282,17 +332,22 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
       runtimeSurfaceVersion,
       runtimeFingerprint,
       expectedFingerprint,
+      runtimeToolset,
+      configuredToolset,
+      runtimeToolFingerprint,
+      expectedRuntimeFingerprint,
       toolCount: mcpRuntime?.server?.toolCount,
       healthy: connectorHealthy,
       needsReconnect: mcpRuntime?.tunnel?.connectorNeedsReconnect === true,
       mismatch:
         mcpRuntime?.server?.healthMismatch ??
         (mcpRuntime && !connectorHealthy
-          ? `expected controller / ${CONTROLLER_TOOL_SURFACE} / schema ${CONTROLLER_SCHEMA_VERSION} / surface ${CONTROLLER_TOOL_SURFACE_VERSION} / ${expectedFingerprint}`
+          ? `expected controller / ${CONTROLLER_TOOL_SURFACE} / schema ${CONTROLLER_SCHEMA_VERSION} / surface ${CONTROLLER_TOOL_SURFACE_VERSION} / ${configuredToolset} / ${expectedRuntimeFingerprint}`
           : undefined),
     },
     timeoutPolicy: localBridgeTimeoutPolicy(repoRoot),
-    runtime: runtimeControllerSnapshot(repoRoot),
+    runtime,
+    decisionQueues,
     execution: {
       defaultMode: "direct-edit",
       agentRunner: mcpConfig?.devMode?.agentRunner === true,
@@ -300,7 +355,7 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
       taskAgentBinding: false,
       localRiskApprovalGate: false,
     },
-    board: projectBoard(repoRoot),
+    board,
     projectState: loadControllerProjectState(repoRoot),
     governance: inspectProjectGovernance(repoRoot),
     progress: getProjectProgress(repoRoot),
@@ -311,8 +366,8 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
       counts[run.status] = (counts[run.status] ?? 0) + 1;
       return counts;
     }, {}),
-    localJobs: listLocalBridgeJobs(repoRoot, 30),
-    editSessions: listEditSessions(repoRoot, 30),
+    localJobs,
+    editSessions,
     checks: listControllerChecks(repoRoot),
   };
 }
@@ -405,6 +460,10 @@ export async function startLocalBridgeServer(
   });
   app.get("/health", (_request, response) => {
     const toolNames = controllerExpectedToolNames(runtimePolicy(options.repoRoot, { profile: "controller" }));
+    const configuredToolset = loadMcpLocalConfig(options.repoRoot)?.toolset === "full" ? "full" : "core";
+    const runtimeNames = configuredToolset === "core"
+      ? [...CORE_CONTROLLER_TOOL_NAMES]
+      : [...toolNames, ...runtimeToolDefinitions.map((tool) => tool.name)];
     response.json({
       status: "ok",
       localOnly: true,
@@ -412,6 +471,9 @@ export async function startLocalBridgeServer(
       schemaVersion: CONTROLLER_SCHEMA_VERSION,
       toolSurfaceVersion: CONTROLLER_TOOL_SURFACE_VERSION,
       toolSurfaceFingerprint: controllerToolSurfaceFingerprint(toolNames),
+      runtimeToolSurfaceFingerprint: controllerToolSurfaceFingerprint(runtimeNames),
+      toolset: configuredToolset,
+      toolCount: runtimeNames.length,
     });
   });
 

@@ -23,14 +23,16 @@ function projectionPath(controllerHome: string, repoId: string): string {
   return join(repositoryControllerRoot(controllerHome, repoId), 'projections', 'runtime.json');
 }
 
-export function rebuildRepositoryProjection(controllerHome: string, repoId: string): RepositoryRuntimeProjection {
-  const dirtyMarker = readRepositoryProjectionDirty(controllerHome, repoId);
-  const previous = readJsonFile<RepositoryRuntimeProjection | undefined>(projectionPath(controllerHome, repoId), undefined);
+function buildRepositoryProjection(
+  controllerHome: string,
+  repoId: string,
+  previous?: RepositoryRuntimeProjection,
+): RepositoryRuntimeProjection {
   const activeJobs = listActiveExecutionJobs(controllerHome, repoId);
   const leases = listActiveLeases(controllerHome, repoId);
   const attentionJobs = listExecutionJobs(controllerHome, repoId, 100)
     .filter((job) => ['orphaned', 'human_attention_required', 'stale'].includes(job.status));
-  const projection: RepositoryRuntimeProjection = {
+  return {
     schemaVersion: 1,
     repoId,
     generatedAt: new Date().toISOString(),
@@ -50,9 +52,47 @@ export function rebuildRepositoryProjection(controllerHome: string, repoId: stri
     attention: attentionJobs
       .map((job) => ({ jobId: job.jobId, status: job.status, message: job.error?.message })),
   };
+}
+
+export function rebuildRepositoryProjection(controllerHome: string, repoId: string): RepositoryRuntimeProjection {
+  const dirtyMarker = readRepositoryProjectionDirty(controllerHome, repoId);
+  const previous = readJsonFile<RepositoryRuntimeProjection | undefined>(projectionPath(controllerHome, repoId), undefined);
+  const projection = buildRepositoryProjection(controllerHome, repoId, previous);
   writeJsonAtomic(projectionPath(controllerHome, repoId), projection);
   clearRepositoryProjectionDirty(controllerHome, repoId, dirtyMarker);
   return projection;
+}
+
+export interface RepositoryRuntimeProjectionSnapshot {
+  projection: RepositoryRuntimeProjection;
+  stale: boolean;
+  persisted: boolean;
+}
+
+export function readRepositoryProjectionSnapshot(
+  controllerHome: string,
+  repoId: string,
+): RepositoryRuntimeProjectionSnapshot {
+  const stale = repositoryProjectionIsDirty(controllerHome, repoId);
+  let persisted: RepositoryRuntimeProjection | undefined;
+  try {
+    persisted = readJsonFile<RepositoryRuntimeProjection>(projectionPath(controllerHome, repoId));
+  } catch {
+    // No persisted projection exists yet.
+  }
+
+  if (!stale && persisted) {
+    return { projection: persisted, stale: false, persisted: true };
+  }
+
+  // A hot read must remain read-only. When persisted state is dirty (or absent),
+  // build a bounded current snapshot in memory without clearing the dirty marker
+  // or rewriting the projection file.
+  return {
+    projection: buildRepositoryProjection(controllerHome, repoId, persisted),
+    stale,
+    persisted: Boolean(persisted),
+  };
 }
 
 export function readRepositoryProjection(controllerHome: string, repoId: string): RepositoryRuntimeProjection {

@@ -3,7 +3,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { RepoActor } from '../src/runtime/control-plane/repo-actor/actor';
 import { reconcileExecutionJobs } from '../src/runtime/control-plane/global-scheduler/reconciliation';
-import { createExecutionJob, getExecutionJob, heartbeatExecutionJob, transitionExecutionJobFromWorker, updateExecutionJob } from '../src/runtime/execution/jobs/store';
+import { attachExecutionWorker, createExecutionJob, getExecutionJob, heartbeatExecutionJob, transitionExecutionJobFromWorker, updateExecutionJob } from '../src/runtime/execution/jobs/store';
 import { markOperationCompleted, markOperationStarted } from '../src/runtime/execution/jobs/receipt-store';
 import { readRepositoryProjection } from '../src/runtime/projections/materialized-view';
 import { createSchedule } from '../src/runtime/workflow/schedules/store';
@@ -25,8 +25,10 @@ try {
   }).job;
   const claimed = new RepoActor(controllerHome, 'repo-a').tryClaimNext();
   assert(claimed?.job.jobId === mutating.jobId, 'mutating job was not claimed');
-  markOperationStarted(controllerHome, claimed.job, 99999999);
-  updateExecutionJob(controllerHome, 'repo-a', mutating.jobId, (job) => ({ ...job, workerPid: 99999999, heartbeatAt: '2000-01-01T00:00:00.000Z' }));
+  const mutatingRunning = attachExecutionWorker(controllerHome, 'repo-a', mutating.jobId, 99999999);
+  assert(mutatingRunning?.status === 'running', 'mutating worker was not attached');
+  markOperationStarted(controllerHome, mutatingRunning, 99999999);
+  updateExecutionJob(controllerHome, 'repo-a', mutating.jobId, (job) => ({ ...job, heartbeatAt: '2000-01-01T00:00:00.000Z' }));
   reconcileExecutionJobs(controllerHome);
   const ambiguous = getExecutionJob(controllerHome, 'repo-a', mutating.jobId);
   assert(ambiguous.status === 'human_attention_required', `ambiguous mutation was replayed as ${ambiguous.status}`);
@@ -38,11 +40,13 @@ try {
   }).job;
   const readClaimed = new RepoActor(controllerHome, 'repo-b').tryClaimNext();
   assert(readClaimed?.job.jobId === recoverable.jobId, 'read job was not claimed');
-  markOperationStarted(controllerHome, readClaimed.job, 99999998);
-  markOperationCompleted(controllerHome, readClaimed.job, 99999998, {
+  const recoverableRunning = attachExecutionWorker(controllerHome, 'repo-b', recoverable.jobId, 99999998);
+  assert(recoverableRunning?.status === 'running', 'recoverable worker was not attached');
+  markOperationStarted(controllerHome, recoverableRunning, 99999998);
+  markOperationCompleted(controllerHome, recoverableRunning, 99999998, {
     outcome: 'succeeded', result: { recovered: true }, evidenceIds: ['EVD-recovered'],
   });
-  updateExecutionJob(controllerHome, 'repo-b', recoverable.jobId, (job) => ({ ...job, workerPid: 99999998, heartbeatAt: '2000-01-01T00:00:00.000Z' }));
+  updateExecutionJob(controllerHome, 'repo-b', recoverable.jobId, (job) => ({ ...job, heartbeatAt: '2000-01-01T00:00:00.000Z' }));
   const recovery = reconcileExecutionJobs(controllerHome);
   const recovered = getExecutionJob(controllerHome, 'repo-b', recoverable.jobId);
   assert(recovered.status === 'succeeded', `completed receipt was not recovered: ${recovered.status}`);
@@ -75,15 +79,19 @@ try {
   }).job;
   const zombieFirst = new RepoActor(controllerHome, 'repo-zombie').tryClaimNext();
   assert(zombieFirst?.job.jobId === zombie.jobId, 'zombie test first attempt was not claimed');
-  const oldLeaseRefs = zombieFirst.job.leaseRefs.map((ref) => ({ leaseId: ref.leaseId, fencingToken: ref.fencingToken }));
-  updateExecutionJob(controllerHome, 'repo-zombie', zombie.jobId, (job) => ({ ...job, workerPid: 99999997, heartbeatAt: '2000-01-01T00:00:00.000Z' }));
+  const zombieFirstRunning = attachExecutionWorker(controllerHome, 'repo-zombie', zombie.jobId, 99999997);
+  assert(zombieFirstRunning?.status === 'running', 'zombie first worker was not attached');
+  const oldLeaseRefs = zombieFirstRunning.leaseRefs.map((ref) => ({ leaseId: ref.leaseId, fencingToken: ref.fencingToken }));
+  updateExecutionJob(controllerHome, 'repo-zombie', zombie.jobId, (job) => ({ ...job, heartbeatAt: '2000-01-01T00:00:00.000Z' }));
   reconcileExecutionJobs(controllerHome);
   const zombieSecond = new RepoActor(controllerHome, 'repo-zombie').tryClaimNext();
-  assert(zombieSecond?.job.attempt === zombieFirst.job.attempt + 1, 'zombie test second attempt was not claimed');
-  const newLeaseRefs = zombieSecond.job.leaseRefs.map((ref) => ({ leaseId: ref.leaseId, fencingToken: ref.fencingToken }));
-  heartbeatExecutionJob(controllerHome, 'repo-zombie', zombie.jobId, 99999996, zombieSecond.job.attempt);
+  assert(zombieSecond?.job.attempt === zombieFirstRunning.attempt + 1, 'zombie test second attempt was not claimed');
+  const zombieSecondRunning = attachExecutionWorker(controllerHome, 'repo-zombie', zombie.jobId, 99999996);
+  assert(zombieSecondRunning?.status === 'running', 'zombie replacement worker was not attached');
+  const newLeaseRefs = zombieSecondRunning.leaseRefs.map((ref) => ({ leaseId: ref.leaseId, fencingToken: ref.fencingToken }));
+  heartbeatExecutionJob(controllerHome, 'repo-zombie', zombie.jobId, 99999996, zombieSecondRunning.attempt);
   let staleHeartbeatRejected = false;
-  try { heartbeatExecutionJob(controllerHome, 'repo-zombie', zombie.jobId, 99999997, zombieFirst.job.attempt); }
+  try { heartbeatExecutionJob(controllerHome, 'repo-zombie', zombie.jobId, 99999997, zombieFirstRunning.attempt); }
   catch { staleHeartbeatRejected = true; }
   assert(staleHeartbeatRejected, 'stale Worker heartbeat was accepted');
   let staleRenewRejected = false;
@@ -95,7 +103,7 @@ try {
   let staleCompletionRejected = false;
   try {
     transitionExecutionJobFromWorker(controllerHome, 'repo-zombie', zombie.jobId, {
-      workerPid: 99999997, attempt: zombieFirst.job.attempt, leaseRefs: oldLeaseRefs,
+      workerPid: 99999997, attempt: zombieFirstRunning.attempt, leaseRefs: oldLeaseRefs,
     }, 'succeeded');
   } catch { staleCompletionRejected = true; }
   assert(staleCompletionRejected, 'stale Worker published a terminal result');

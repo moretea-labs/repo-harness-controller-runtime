@@ -1064,7 +1064,8 @@ printf '%s\n' '{"type":"turn.completed"}'
     }).then((response) => response.json());
     expect(finalized.status).toBe("finalized");
     const dashboard = await fetch(handle.url).then((response) => response.text());
-    expect(dashboard).toContain("开放 Direct Edit");
+    expect(dashboard).toContain("Ready for Review");
+    expect(dashboard).toContain("Needs Attention");
     expect(dashboard).toContain("Direct Edit");
   });
 

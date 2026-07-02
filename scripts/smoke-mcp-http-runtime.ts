@@ -69,7 +69,8 @@ try {
 
   const health = await waitJson(`http://127.0.0.1:${port}/health`, 20_000);
   if (health.status !== 200 || health.body.status !== 'ok') throw new Error(`HEALTH_FAILED: ${JSON.stringify(health)} ${stderr}`);
-  if (health.body.toolCount !== 114) throw new Error(`TOOL_COUNT_CHANGED: ${String(health.body.toolCount)}`);
+  if (health.body.toolset !== 'core') throw new Error(`TOOLSET_CHANGED: ${String(health.body.toolset)}`);
+  if (health.body.toolCount !== 12) throw new Error(`TOOL_COUNT_CHANGED: ${String(health.body.toolCount)}`);
   if (health.body.compatibilityToolCount !== 86) throw new Error(`LEGACY_MCP_TOOL_COUNT_CHANGED: ${String(health.body.compatibilityToolCount)}`);
   if (health.body.toolSurfaceFingerprint !== '2f4977857957118e') throw new Error(`FINGERPRINT_CHANGED: ${String(health.body.toolSurfaceFingerprint)}`);
 
@@ -86,7 +87,9 @@ try {
 
   console.log(JSON.stringify({
     status: 'ok', port, repoId: repository.repoId,
+    toolset: health.body.toolset,
     toolCount: health.body.toolCount,
+    runtimeFingerprint: health.body.runtimeToolSurfaceFingerprint,
     compatibilityToolCount: health.body.compatibilityToolCount,
     fingerprint: health.body.toolSurfaceFingerprint,
     ready: ready.body.ready,

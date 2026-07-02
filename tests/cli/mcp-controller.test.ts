@@ -14,6 +14,8 @@ import { join } from "path";
 import { writeJsonAtomic } from "../../src/runtime/shared/json-files";
 import { appendControllerWorklogEvent } from "../../src/cli/controller/worklog";
 import { createExecutionJob, updateExecutionJob } from "../../src/runtime/execution/jobs/store";
+import { readControllerDaemonStatus } from "../../src/runtime/control-plane/daemon-client";
+import { terminateProcessTree } from "../../src/runtime/shared/process-tree";
 import { callRuntimeTool } from "../../src/runtime/gateway/mcp/runtime-tools";
 import { getMcpPolicy } from "../../src/cli/mcp/policy";
 import { createMcpToolContext as createMultiRepositoryContext } from "../../src/cli/mcp/multi-repository";
@@ -26,6 +28,7 @@ import {
   type McpToolContext,
 } from "../../src/cli/mcp/tools";
 import { controllerToolSurfaceFingerprint } from "../../src/cli/controller/runtime-config";
+import { exposedControllerToolDefinitions } from "../../src/cli/mcp/toolset";
 
 async function jsonTool(
   ctx: McpToolContext,
@@ -447,6 +450,88 @@ describe("MCP controller profile", () => {
     });
   });
 
+  test("exposes a 12-tool core surface and resumes idempotent Work by request id", async () => {
+    await withController(async (repoRoot, _ctx) => {
+      const controllerHome = join(repoRoot, ".controller-home");
+      const repository = registerRepository({ path: repoRoot, controllerHome });
+      const core = createMultiRepositoryContext({ repo: repoRoot, profile: "controller", toolset: "core", controllerHome });
+      const full = createMultiRepositoryContext({ repo: repoRoot, profile: "controller", toolset: "full", controllerHome });
+      expect(exposedControllerToolDefinitions(core)).toHaveLength(12);
+      expect(exposedControllerToolDefinitions(full).length).toBeGreaterThan(100);
+
+      let daemonPid: number | undefined;
+      try {
+        const first = await callRuntimeTool(core, "work_submit", {
+          repo_id: repository.repoId,
+          request_id: "work-resume-idempotent",
+          operation: "create_issue",
+          arguments: { title: "Work resume fixture", kind: "feature" },
+        });
+        const second = await callRuntimeTool(core, "work_submit", {
+          repo_id: repository.repoId,
+          request_id: "work-resume-idempotent",
+          operation: "create_issue",
+          arguments: { title: "Work resume fixture", kind: "feature" },
+        });
+        const firstValue = JSON.parse(first!.content[0].text);
+        const secondValue = JSON.parse(second!.content[0].text);
+        expect(secondValue.deduplicated).toBe(true);
+        expect(secondValue.work.workId).toBe(firstValue.work.workId);
+
+        const resumed = await callRuntimeTool(core, "work_get", {
+          repo_id: repository.repoId,
+          request_id: "work-resume-idempotent",
+        });
+        const resumedValue = JSON.parse(resumed!.content[0].text);
+        expect(resumedValue.work.workId).toBe(firstValue.work.workId);
+        expect(resumedValue.work.requestId).toBe("work-resume-idempotent");
+        daemonPid = readControllerDaemonStatus(controllerHome).pid;
+      } finally {
+        if (daemonPid && daemonPid !== process.pid) {
+          await terminateProcessTree(daemonPid, { gracePeriodMs: 200, killAfterMs: 1_500 });
+        }
+      }
+    });
+  });
+
+  test("rejects cross-repository Work reuse for the same request id", async () => {
+    await withController(async (repoRoot, _ctx) => {
+      const controllerHome = join(repoRoot, ".controller-home");
+      const firstRepository = registerRepository({ path: repoRoot, controllerHome });
+      const secondRoot = mkdtempSync(join(tmpdir(), "repo-harness-controller-second-"));
+      let daemonPid: number | undefined;
+      try {
+        mkdirSync(join(secondRoot, "src"), { recursive: true });
+        writeFileSync(join(secondRoot, "src/example.ts"), "export const second = true;\n");
+        spawnSync("git", ["init", "-b", "main"], { cwd: secondRoot, stdio: "ignore" });
+        const secondRepository = registerRepository({ path: secondRoot, controllerHome });
+        const core = createMultiRepositoryContext({ repo: repoRoot, profile: "controller", toolset: "core", controllerHome });
+        const first = await callRuntimeTool(core, "work_submit", {
+          repo_id: firstRepository.repoId,
+          request_id: "work-cross-repo-conflict",
+          operation: "create_issue",
+          arguments: { title: "First repository Work", kind: "feature" },
+        });
+        expect(first?.isError).not.toBe(true);
+        const conflict = await callRuntimeTool(core, "work_submit", {
+          repo_id: secondRepository.repoId,
+          request_id: "work-cross-repo-conflict",
+          operation: "create_issue",
+          arguments: { title: "Second repository Work", kind: "feature" },
+        });
+        const conflictValue = JSON.parse(conflict!.content[0].text);
+        expect(conflict?.isError).toBe(true);
+        expect(conflictValue.error.code).toBe("REQUEST_ID_REPO_CONFLICT");
+        daemonPid = readControllerDaemonStatus(controllerHome).pid;
+      } finally {
+        if (daemonPid && daemonPid !== process.pid) {
+          await terminateProcessTree(daemonPid, { gracePeriodMs: 200, killAfterMs: 1_500 });
+        }
+        rmSync(secondRoot, { recursive: true, force: true });
+      }
+    });
+  });
+
   test("reports degraded controller readiness when queued durable work has no scheduler progress", async () => {
     await withController(async (repoRoot, _ctx) => {
       const controllerHome = join(repoRoot, ".controller-home");
@@ -490,7 +575,9 @@ describe("MCP controller profile", () => {
       const context = await callRuntimeTool(multi, "controller_context", { repo_id: repository.repoId });
       const contextValue = JSON.parse(context!.content[0].text);
       expect(contextValue.contextProjection.refreshJobId).toBeUndefined();
-      expect(["DISPATCH_LOOP_STALLED", "DAEMON_NOT_READY"]).toContain(contextValue.contextProjection.refreshBlockedReason);
+      expect(contextValue.contextProjection.strategy).toBe("event-driven");
+      expect(contextValue.contextProjection.readOnly).toBe(true);
+      expect(contextValue.controllerReady.ready).toBe(false);
     });
   });
 

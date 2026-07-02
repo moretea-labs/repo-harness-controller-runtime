@@ -3,9 +3,11 @@ import {
   extractCloudflareQuickTunnelUrl,
   inferMcpTunnelMode,
   DEFAULT_MCP_UNHEALTHY_RESTART_WINDOW_MS,
+  DEFAULT_MCP_TUNNEL_UNHEALTHY_RESTART_WINDOW_MS,
   isExpectedLocalControllerHealth,
   normalizeKeepalivePublicEndpoint,
   shouldRestartMcpServer,
+  shouldRestartMcpTunnel,
 } from '../../src/cli/mcp/keepalive';
 import { runtimePolicy } from '../../src/cli/mcp/multi-repository';
 import { controllerExpectedToolNames } from '../../src/cli/mcp/tools';
@@ -62,6 +64,18 @@ describe('mcp keepalive helpers', () => {
       unhealthySinceAt,
       unhealthySinceAt + DEFAULT_MCP_UNHEALTHY_RESTART_WINDOW_MS,
     )).toBe(true);
+  });
+
+  test('does not restart a live tunnel while the local gateway is unhealthy', () => {
+    const now = 3_000_000;
+    expect(shouldRestartMcpTunnel(false, true, 20, now - 60_000, now)).toBe(false);
+  });
+
+  test('restarts a dead tunnel immediately and a live unhealthy tunnel only after its window', () => {
+    const since = 4_000_000;
+    expect(shouldRestartMcpTunnel(true, false, 0, undefined, since)).toBe(true);
+    expect(shouldRestartMcpTunnel(true, true, 2, since, since + DEFAULT_MCP_TUNNEL_UNHEALTHY_RESTART_WINDOW_MS - 1)).toBe(false);
+    expect(shouldRestartMcpTunnel(true, true, 2, since, since + DEFAULT_MCP_TUNNEL_UNHEALTHY_RESTART_WINDOW_MS)).toBe(true);
   });
 
   test('recognizes the expected local controller health payload', () => {

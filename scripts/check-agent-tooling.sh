@@ -1,17 +1,18 @@
 #!/bin/bash
 set -euo pipefail
 
-if command -v node >/dev/null 2>&1; then
-  RUNTIME_BIN="$(command -v node)"
-elif command -v bun >/dev/null 2>&1; then
+if command -v bun >/dev/null 2>&1; then
   RUNTIME_BIN="$(command -v bun)"
 elif [[ -x "${HOME}/.bun/bin/bun" ]]; then
   RUNTIME_BIN="${HOME}/.bun/bin/bun"
+elif command -v node >/dev/null 2>&1; then
+  RUNTIME_BIN="$(command -v node)"
 else
-  echo "check-agent-tooling.sh requires node or bun" >&2
+  echo "check-agent-tooling.sh requires bun or node" >&2
   exit 1
 fi
 
+export REPO_HARNESS_TOOLING_PATH_SNAPSHOT="${PATH:-}"
 exec "$RUNTIME_BIN" - "$@" <<'NODE_EOF'
 const fs = require("fs");
 const crypto = require("crypto");
@@ -138,7 +139,21 @@ function fileIsExecutable(filePath) {
 
 function detectTimeoutBin() {
   if (timeoutBin !== undefined) return timeoutBin;
-  timeoutBin = resolvePathCommand("timeout") || "";
+  const candidate = resolvePathCommand("timeout");
+  if (!candidate) {
+    timeoutBin = "";
+    return timeoutBin;
+  }
+
+  const capability = spawnSync(candidate, ["--version"], {
+    encoding: "utf8",
+    timeout: 500,
+    env: process.env,
+  });
+  const output = `${capability.stdout || ""}\n${capability.stderr || ""}`;
+  timeoutBin = capability.status === 0 && /GNU coreutils|coreutils/i.test(output)
+    ? candidate
+    : "";
   return timeoutBin;
 }
 
@@ -1159,7 +1174,7 @@ function parseCodeGraphProjectStatus(output) {
 }
 
 function resolvePathCommand(command) {
-  const pathValue = process.env.PATH || "";
+  const pathValue = process.env.REPO_HARNESS_TOOLING_PATH_SNAPSHOT || process.env.PATH || "";
   for (const dir of pathValue.split(path.delimiter)) {
     if (!dir) continue;
     const candidate = path.join(dir, command);

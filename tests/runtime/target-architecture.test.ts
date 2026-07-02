@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { RepoActor } from '../../src/runtime/control-plane/repo-actor/actor';
@@ -13,6 +13,8 @@ import {
   claimExecutionJobForDispatch,
   createExecutionJob,
   getExecutionJob,
+  getExecutionJobByRequestId,
+  heartbeatExecutionJob,
   listExecutionJobs,
   updateExecutionJob,
 } from '../../src/runtime/execution/jobs/store';
@@ -30,6 +32,7 @@ import { createSchedule, listActiveOccurrences, listOccurrences } from '../../sr
 import { createPortfolioWorkflow } from '../../src/runtime/workflow/portfolio/store';
 import { recordCandidateFinding } from '../../src/runtime/workflow/findings/store';
 import { invalidateExecutionWorker } from '../../src/runtime/execution/workers/ownership';
+import { rebuildRepositoryProjection, readRepositoryProjectionSnapshot } from '../../src/runtime/projections/materialized-view';
 
 const homes: string[] = [];
 function home(): string {
@@ -59,6 +62,67 @@ describe('target architecture runtime', () => {
     expect(second.job.jobId).toBe(first.job.jobId);
     expect(listExecutionJobs(controllerHome, 'repo-a', 10).map((job) => job.jobId)).toContain(first.job.jobId);
     expect(() => createExecutionJob(controllerHome, { ...input, semanticKey: 'different' })).toThrow('REQUEST_ID_CONFLICT');
+  });
+
+  test('keeps heartbeat record-only and request recovery repository-scoped', async () => {
+    const controllerHome = home();
+    const created = createExecutionJob(controllerHome, {
+      repoId: 'repo-a',
+      type: 'check',
+      requestId: 'heartbeat-record-only',
+      semanticKey: 'check:heartbeat-record-only',
+      origin: { surface: 'mcp' },
+      payload: { operation: 'run_check', target: 'mcp-tool' },
+    }).job;
+    claimExecutionJobForDispatch(controllerHome, 'repo-a', created.jobId, []);
+    const running = attachExecutionWorker(controllerHome, 'repo-a', created.jobId, process.pid)!;
+    const activePath = join(controllerHome, 'indexes', 'execution-jobs', 'active.json');
+    const recentPath = join(controllerHome, 'indexes', 'execution-jobs', 'recent.json');
+    const dirtyPath = join(controllerHome, 'repositories', 'repo-a', 'projections', 'runtime.dirty.json');
+    const before = {
+      active: readFileSync(activePath, 'utf-8'),
+      recent: readFileSync(recentPath, 'utf-8'),
+      dirty: readFileSync(dirtyPath, 'utf-8'),
+    };
+    await Bun.sleep(5);
+    const heartbeat = heartbeatExecutionJob(controllerHome, 'repo-a', created.jobId, process.pid, running.attempt);
+    expect(heartbeat.revision).toBeGreaterThan(running.revision);
+    expect(readFileSync(activePath, 'utf-8')).toBe(before.active);
+    expect(readFileSync(recentPath, 'utf-8')).toBe(before.recent);
+    expect(readFileSync(dirtyPath, 'utf-8')).toBe(before.dirty);
+    expect(getExecutionJobByRequestId(controllerHome, created.requestId, 'repo-a')?.jobId).toBe(created.jobId);
+    expect(getExecutionJobByRequestId(controllerHome, created.requestId, 'repo-b')).toBeUndefined();
+  });
+
+  test('returns a fresh read-only projection when persisted state is dirty', () => {
+    const controllerHome = home();
+    createExecutionJob(controllerHome, {
+      repoId: 'repo-a',
+      type: 'mcp-tool',
+      requestId: 'projection-first',
+      semanticKey: 'projection:first',
+      origin: { surface: 'mcp' },
+      payload: { operation: 'create_issue', target: 'mcp-tool' },
+    });
+    rebuildRepositoryProjection(controllerHome, 'repo-a');
+    createExecutionJob(controllerHome, {
+      repoId: 'repo-a',
+      type: 'mcp-tool',
+      requestId: 'projection-second',
+      semanticKey: 'projection:second',
+      origin: { surface: 'mcp' },
+      payload: { operation: 'create_issue', target: 'mcp-tool' },
+    });
+    const projectionPath = join(controllerHome, 'repositories', 'repo-a', 'projections', 'runtime.json');
+    const dirtyPath = join(controllerHome, 'repositories', 'repo-a', 'projections', 'runtime.dirty.json');
+    const beforeProjection = readFileSync(projectionPath, 'utf-8');
+    const beforeDirty = readFileSync(dirtyPath, 'utf-8');
+    const snapshot = readRepositoryProjectionSnapshot(controllerHome, 'repo-a');
+    expect(snapshot.stale).toBe(true);
+    expect(snapshot.persisted).toBe(true);
+    expect(snapshot.projection.activeJobs).toHaveLength(2);
+    expect(readFileSync(projectionPath, 'utf-8')).toBe(beforeProjection);
+    expect(readFileSync(dirtyPath, 'utf-8')).toBe(beforeDirty);
   });
 
   test('uses leases and fencing tokens for long-running ownership', () => {

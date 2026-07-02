@@ -31,3 +31,10 @@
 - Mistake pattern: Treating planning and governance metadata as authoritative execution locks, then duplicating readiness logic across preview, dispatch, Local UI, and Run reconciliation.
 - Prevention rule: Use one Task-local execution policy and one effective-state resolver. Planning, focus, missing optional evidence, runtime directories, and stale recovery context are advisory. Only path escape/sensitivity, active write conflicts, destructive or remote effects, real failed checks, and high-risk data evidence remain hard gates.
 - Where to apply next time: Controller readiness/dispatch, Local Bridge, MCP tools, hooks, workflow checks, generated project policy, and Connector health identity.
+
+## Durable execution identity must not depend on transport or read-side refresh
+- Date: 2026-07-02
+- Triggered by correction: Frequent MCP `Session terminated` errors occurred while durable Jobs continued running, and status reads could create additional refresh Jobs.
+- Mistake pattern: Coupling a transport Session, process Supervisor, cached Controller context and execution identity; using high-frequency heartbeats to rewrite global indexes; allowing test cleanup to identify processes by broad command matching.
+- Prevention rule: Treat MCP transport as replaceable. Persist execution identity behind repository-scoped `request_id`/`work_id`; make read paths bounded and side-effect free; keep Gateway, Tunnel, daemon and UI restart boundaries independent; use fencing tokens and exact process ancestry for ownership; update global indexes only on lifecycle transitions, never on heartbeats.
+- Where to apply next time: MCP Gateway, Execution Job store, Controller projections/context, process cleanup, Local Controller UI and all failure-injection tests.

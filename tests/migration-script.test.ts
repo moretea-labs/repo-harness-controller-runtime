@@ -827,6 +827,8 @@ describe("Migration script contract", () => {
     try {
       writeFileSync(join(repo, "package.json"), JSON.stringify({ name: "demo", private: true }, null, 2));
       expect(spawnSync("git", ["init", "-q"], { cwd: repo }).status).toBe(0);
+      expect(spawnSync("git", ["config", "user.email", "repo-harness-test@example.com"], { cwd: repo }).status).toBe(0);
+      expect(spawnSync("git", ["config", "user.name", "Repo Harness Test"], { cwd: repo }).status).toBe(0);
       expect(spawnSync("git", ["add", "package.json"], { cwd: repo }).status).toBe(0);
       expect(spawnSync("git", ["commit", "-qm", "initial"], { cwd: repo }).status).toBe(0);
 
@@ -834,7 +836,9 @@ describe("Migration script contract", () => {
         cwd: ROOT,
         encoding: "utf-8",
       });
-      expect(firstApply.status).toBe(0);
+      if (firstApply.status !== 0) {
+        throw new Error(`first migration apply failed (${String(firstApply.status)}):\n${firstApply.stdout}\n${firstApply.stderr}`);
+      }
       const firstStamp = readFileSync(join(repo, ".claude/.skill-version"), "utf-8");
       expect(spawnSync("git", ["add", "-A"], { cwd: repo }).status).toBe(0);
       expect(spawnSync("git", ["commit", "-qm", "after migration"], { cwd: repo }).status).toBe(0);
@@ -852,7 +856,7 @@ describe("Migration script contract", () => {
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }
-  }, 30000);
+  }, MIGRATION_INTEGRATION_TIMEOUT);
 
   test("should remove repo-local legacy skill factory assets during migration", () => {
     const repo = mkdtempSync(join(tmpdir(), "migration-self-"));

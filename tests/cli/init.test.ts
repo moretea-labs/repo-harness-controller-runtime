@@ -569,7 +569,7 @@ describe("init command", () => {
       mkdirSync(home, { recursive: true });
       mkdirSync(fakeBin, { recursive: true });
       setupFakeSource(source);
-      makeExecutable(join(fakeBin, "node"), "#!/bin/bash\necho 'not json'\nexit 0\n");
+      makeExecutable(join(fakeBin, "bun"), "#!/bin/bash\necho 'not json'\nexit 0\n");
 
       const result = runInit({
         repo,

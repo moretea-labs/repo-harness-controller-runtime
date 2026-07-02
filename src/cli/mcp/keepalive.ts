@@ -22,6 +22,9 @@ import {
   repositoryIdentity,
 } from '../controller/runtime-config';
 import { controllerExpectedToolNames } from './tools';
+import { CORE_CONTROLLER_TOOL_NAMES } from './toolset';
+import { parseMcpToolset } from './multi-repository';
+import { runtimeToolDefinitions } from '../../runtime/gateway/mcp/runtime-tools';
 
 export interface McpKeepaliveOptions extends McpServerOptions {
   repo?: string;
@@ -35,6 +38,8 @@ export interface McpKeepaliveOptions extends McpServerOptions {
   checkIntervalMs?: number;
   restartDelayMs?: number;
   unhealthyRestartWindowMs?: number;
+  tunnelUnhealthyRestartWindowMs?: number;
+  toolset?: 'core' | 'full' | string;
   localUi?: boolean;
   localUiHost?: string;
   localUiPort?: number;
@@ -49,6 +54,7 @@ const STARTUP_HEALTH_RETRY_MS = 250;
 const LOCAL_FAILURE_THRESHOLD = 2;
 const PUBLIC_FAILURE_THRESHOLD = 2;
 export const DEFAULT_MCP_UNHEALTHY_RESTART_WINDOW_MS = 5 * 60_000;
+export const DEFAULT_MCP_TUNNEL_UNHEALTHY_RESTART_WINDOW_MS = 2 * 60_000;
 const LOCAL_HEALTH_WARNING_INTERVAL_MS = 60_000;
 const QUICK_TUNNEL_PATTERN = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/i;
 
@@ -61,6 +67,20 @@ export function shouldRestartMcpServer(
 ): boolean {
   if (!childRunning) return true;
   if (failureCount < LOCAL_FAILURE_THRESHOLD || unhealthySinceAt === undefined) return false;
+  return now - unhealthySinceAt >= unhealthyRestartWindowMs;
+}
+
+export function shouldRestartMcpTunnel(
+  localHealthy: boolean,
+  childRunning: boolean,
+  failureCount: number,
+  unhealthySinceAt: number | undefined,
+  now: number,
+  unhealthyRestartWindowMs = DEFAULT_MCP_TUNNEL_UNHEALTHY_RESTART_WINDOW_MS,
+): boolean {
+  if (!childRunning) return true;
+  if (!localHealthy) return false;
+  if (failureCount < PUBLIC_FAILURE_THRESHOLD || unhealthySinceAt === undefined) return false;
   return now - unhealthySinceAt >= unhealthyRestartWindowMs;
 }
 
@@ -257,8 +277,10 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
   const host = rawOpts.host ?? localConfig?.server?.host ?? '127.0.0.1';
   const port = rawOpts.port ?? localConfig?.server?.port ?? 8765;
   const profile = rawOpts.profile ?? localConfig?.profile ?? 'controller';
+  const toolset = parseMcpToolset(rawOpts.toolset ?? localConfig?.toolset ?? 'core', profile);
   const policy = runtimePolicy(repoRoot, {
     profile,
+    toolset,
     enableDevRunner: rawOpts.enableDevRunner,
     devRunnerAgents: rawOpts.devRunnerAgents,
     devRunnerTimeoutMs: rawOpts.devRunnerTimeoutMs,
@@ -267,8 +289,19 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
   const expectedToolSurface = profile === 'controller' ? CONTROLLER_TOOL_SURFACE : `${profile}-legacy-v1`;
   const expectedSchemaVersion = profile === 'controller' ? CONTROLLER_SCHEMA_VERSION : 1;
   const expectedToolSurfaceVersion = profile === 'controller' ? CONTROLLER_TOOL_SURFACE_VERSION : 1;
+  const compatibilityToolNames = profile === 'controller'
+    ? controllerExpectedToolNames(policy, { enableChatgptBrowser: rawOpts.enableChatgptBrowser === true })
+    : [];
   const expectedToolSurfaceFingerprint = profile === 'controller'
-    ? controllerToolSurfaceFingerprint(controllerExpectedToolNames(policy))
+    ? controllerToolSurfaceFingerprint(compatibilityToolNames)
+    : undefined;
+  const expectedRuntimeToolNames = profile === 'controller'
+    ? (toolset === 'core'
+      ? [...CORE_CONTROLLER_TOOL_NAMES]
+      : [...compatibilityToolNames, ...runtimeToolDefinitions.map((tool) => tool.name)])
+    : [];
+  const expectedRuntimeToolSurfaceFingerprint = profile === 'controller'
+    ? controllerToolSurfaceFingerprint(expectedRuntimeToolNames)
     : undefined;
   const expectedRepoId = repositoryIdentity(repoRoot);
   const previousRuntime = loadMcpRuntimeState(repoRoot);
@@ -278,6 +311,8 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
       && existingHealth.schemaVersion === expectedSchemaVersion
       && existingHealth.toolSurfaceVersion === expectedToolSurfaceVersion
       && (expectedToolSurfaceFingerprint === undefined || existingHealth.toolSurfaceFingerprint === expectedToolSurfaceFingerprint)
+      && (expectedRuntimeToolSurfaceFingerprint === undefined || existingHealth.runtimeToolSurfaceFingerprint === expectedRuntimeToolSurfaceFingerprint)
+      && existingHealth.toolset === toolset
       && existingHealth.profile === profile
       && existingHealth.repoId === expectedRepoId;
     const previousPid = previousRuntime?.server.pid;
@@ -311,6 +346,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
   const checkIntervalMs = rawOpts.checkIntervalMs ?? DEFAULT_CHECK_INTERVAL_MS;
   const restartDelayMs = rawOpts.restartDelayMs ?? DEFAULT_RESTART_DELAY_MS;
   const unhealthyRestartWindowMs = rawOpts.unhealthyRestartWindowMs ?? DEFAULT_MCP_UNHEALTHY_RESTART_WINDOW_MS;
+  const tunnelUnhealthyRestartWindowMs = rawOpts.tunnelUnhealthyRestartWindowMs ?? DEFAULT_MCP_TUNNEL_UNHEALTHY_RESTART_WINDOW_MS;
   if (!Number.isInteger(checkIntervalMs) || checkIntervalMs < 2_000) {
     throw new Error(`invalid --check-interval-ms "${String(rawOpts.checkIntervalMs)}"`);
   }
@@ -319,6 +355,9 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
   }
   if (!Number.isInteger(unhealthyRestartWindowMs) || unhealthyRestartWindowMs < checkIntervalMs) {
     throw new Error(`invalid unhealthy restart window "${String(rawOpts.unhealthyRestartWindowMs)}"`);
+  }
+  if (!Number.isInteger(tunnelUnhealthyRestartWindowMs) || tunnelUnhealthyRestartWindowMs < checkIntervalMs) {
+    throw new Error(`invalid tunnel unhealthy restart window "${String(rawOpts.tunnelUnhealthyRestartWindowMs)}"`);
   }
 
   let stopping = false;
@@ -329,6 +368,8 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
   let localUnhealthySinceAt: number | undefined;
   let lastLocalHealthWarningAt: number | undefined;
   let publicFailureCount = 0;
+  let publicUnhealthySinceAt: number | undefined;
+  let lastPublicHealthWarningAt: number | undefined;
   let currentQuickEndpoint: string | undefined;
   let tunnelStartedOnce = false;
 
@@ -394,6 +435,8 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
         localHealth.schemaVersion === expectedSchemaVersion ? null : `schema ${String(localHealth.schemaVersion ?? 'missing')} != ${expectedSchemaVersion}`,
         localHealth.toolSurfaceVersion === expectedToolSurfaceVersion ? null : `surface version ${String(localHealth.toolSurfaceVersion ?? 'missing')} != ${expectedToolSurfaceVersion}`,
         expectedToolSurfaceFingerprint === undefined || localHealth.toolSurfaceFingerprint === expectedToolSurfaceFingerprint ? null : `surface fingerprint ${String(localHealth.toolSurfaceFingerprint ?? 'missing')} != ${expectedToolSurfaceFingerprint}`,
+        expectedRuntimeToolSurfaceFingerprint === undefined || localHealth.runtimeToolSurfaceFingerprint === expectedRuntimeToolSurfaceFingerprint ? null : `runtime fingerprint ${String(localHealth.runtimeToolSurfaceFingerprint ?? 'missing')} != ${expectedRuntimeToolSurfaceFingerprint}`,
+        localHealth.toolset === toolset ? null : `toolset ${String(localHealth.toolset ?? 'missing')} != ${toolset}`,
         localHealth.profile === profile ? null : `profile ${String(localHealth.profile ?? 'missing')} != ${profile}`,
         localHealth.repoId === expectedRepoId ? null : `repository identity ${String(localHealth.repoId ?? 'missing')} != ${expectedRepoId}`,
       ].filter(Boolean).join('; ')
@@ -404,6 +447,8 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
     runtime.server.schemaVersion = typeof localHealth?.schemaVersion === 'number' ? localHealth.schemaVersion : undefined;
     runtime.server.toolSurfaceVersion = typeof localHealth?.toolSurfaceVersion === 'number' ? localHealth.toolSurfaceVersion : undefined;
     runtime.server.toolSurfaceFingerprint = typeof localHealth?.toolSurfaceFingerprint === 'string' ? localHealth.toolSurfaceFingerprint : undefined;
+    runtime.server.runtimeToolSurfaceFingerprint = typeof localHealth?.runtimeToolSurfaceFingerprint === 'string' ? localHealth.runtimeToolSurfaceFingerprint : undefined;
+    runtime.server.toolset = localHealth?.toolset === 'core' || localHealth?.toolset === 'full' ? localHealth.toolset : undefined;
     runtime.server.toolCount = typeof localHealth?.toolCount === 'number' ? localHealth.toolCount : undefined;
     runtime.server.repoId = typeof localHealth?.repoId === 'string' ? localHealth.repoId : undefined;
     const runner = localHealth?.runner && typeof localHealth.runner === 'object' ? localHealth.runner as Record<string, unknown> : undefined;
@@ -468,6 +513,8 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
       String(port),
       '--profile',
       profile,
+      '--toolset',
+      toolset,
       '--auth',
       auth,
     ];
@@ -556,17 +603,13 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
 
   const restartServer = async (reason: string): Promise<void> => {
     recordError('server', reason);
-    await stopChild(tunnelChild, 'cloudflared');
+    // Keep the tunnel process and public URL alive while the local Gateway is
+    // replaced. cloudflared will reconnect to the same local port, avoiding a
+    // quick-tunnel URL rotation and preserving the Connector endpoint.
     await stopChild(serverChild, 'mcp serve');
-    tunnelChild = undefined;
     serverChild = undefined;
     runtime.server.running = false;
     runtime.server.healthy = false;
-    if (runtime.tunnel) {
-      runtime.tunnel.running = false;
-      runtime.tunnel.healthy = false;
-    }
-    currentQuickEndpoint = undefined;
     await sleep(restartDelayMs);
     spawnServer(true);
     await warmServerHealth();
@@ -672,7 +715,8 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
   await warmServerHealth();
 
   while (!stopping) {
-    if (await probeLocalHealth()) {
+    const localHealthy = await probeLocalHealth();
+    if (localHealthy) {
       localFailureCount = 0;
     } else {
       const now = Date.now();
@@ -742,14 +786,34 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
       if (runtime.tunnel!.healthy) {
         runtime.tunnel!.lastHealthyAt = nowIso();
         publicFailureCount = 0;
+        publicUnhealthySinceAt = undefined;
+        lastPublicHealthWarningAt = undefined;
       } else {
+        const now = Date.now();
         publicFailureCount += 1;
-        if (!isRunning(tunnelChild) || publicFailureCount >= PUBLIC_FAILURE_THRESHOLD) {
-          await restartTunnel(`public MCP discovery failed at ${oauthResourceUrl(activePublicEndpoint)}`);
+        publicUnhealthySinceAt ??= now;
+        if (shouldRestartMcpTunnel(
+          localHealthy,
+          isRunning(tunnelChild),
+          publicFailureCount,
+          publicUnhealthySinceAt,
+          now,
+          tunnelUnhealthyRestartWindowMs,
+        )) {
+          await restartTunnel(`public MCP discovery failed continuously at ${oauthResourceUrl(activePublicEndpoint)}`);
           publicFailureCount = 0;
+          publicUnhealthySinceAt = undefined;
+          lastPublicHealthWarningAt = undefined;
           updateStatus();
           persistRuntime();
           continue;
+        }
+        if (lastPublicHealthWarningAt === undefined || now - lastPublicHealthWarningAt >= LOCAL_HEALTH_WARNING_INTERVAL_MS) {
+          const reason = localHealthy
+            ? 'preserving the live tunnel during the bounded recovery window'
+            : 'preserving the live tunnel because the local Gateway is unhealthy';
+          recordError('health', `public MCP discovery is degraded at ${oauthResourceUrl(activePublicEndpoint)}; ${reason}`);
+          lastPublicHealthWarningAt = now;
         }
       }
     } else if (runtime.tunnelMode !== 'none') {

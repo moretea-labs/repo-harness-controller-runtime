@@ -26,6 +26,7 @@ export interface McpServeOptions {
   devRunnerAgents?: string;
   devRunnerTimeoutMs?: string;
   devRunnerMaxTimeoutMs?: string;
+  toolset?: 'core' | 'full';
 }
 
 interface McpKeepaliveOptions extends McpServeOptions {
@@ -151,6 +152,7 @@ export function buildMcpCommand(): Command {
     .option('--host <host>', 'HTTP bind host', '127.0.0.1')
     .option('--port <port>', 'HTTP bind port', '8765')
     .option('--profile <profile>', 'MCP profile: planner|executor|orchestrator|controller', 'controller')
+    .option('--toolset <toolset>', 'Controller toolset: core|full')
     .option('--auth <mode>', 'HTTP auth mode: oauth|bearer', 'oauth')
     .option('--enable-chatgpt-browser', 'Expose tools that operate the user logged-in ChatGPT Web browser session')
     .option('--enable-dev-runner', 'Enable local Codex/Claude task runners for controller or orchestrator profiles')
@@ -165,6 +167,7 @@ export function buildMcpCommand(): Command {
           await startMcpStdio({
             repo: rawOpts.repo,
             profile: rawOpts.profile,
+            toolset: rawOpts.toolset,
             enableChatgptBrowser: rawOpts.enableChatgptBrowser === true,
             enableDevRunner: rawOpts.enableDevRunner,
             devRunnerAgents: rawOpts.devRunnerAgents,
@@ -177,6 +180,7 @@ export function buildMcpCommand(): Command {
           await startMcpHttp({
             repo: rawOpts.repo,
             profile: rawOpts.profile,
+            toolset: rawOpts.toolset,
             host: rawOpts.host,
             port: parsePort(rawOpts.port),
             auth: rawOpts.auth,
@@ -199,6 +203,7 @@ export function buildMcpCommand(): Command {
     .option('--host <host>', 'HTTP bind host', '127.0.0.1')
     .option('--port <port>', 'HTTP bind port', '8765')
     .option('--profile <profile>', 'MCP profile: planner|executor|orchestrator|controller', 'controller')
+    .option('--toolset <toolset>', 'Controller toolset: core|full')
     .option('--auth <mode>', 'HTTP auth mode: oauth|bearer', 'oauth')
     .option('--enable-chatgpt-browser', 'Expose tools that operate the user logged-in ChatGPT Web browser session')
     .option('--enable-dev-runner', 'Enable local Codex/Claude task runners for controller or orchestrator profiles')
@@ -227,6 +232,7 @@ export function buildMcpCommand(): Command {
           host: rawOpts.host,
           port: parsePort(rawOpts.port),
           profile: rawOpts.profile,
+          toolset: rawOpts.toolset,
           auth: rawOpts.auth,
           enableChatgptBrowser: rawOpts.enableChatgptBrowser === true,
           enableDevRunner: rawOpts.enableDevRunner,

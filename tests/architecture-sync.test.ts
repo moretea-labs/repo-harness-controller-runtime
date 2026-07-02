@@ -185,10 +185,14 @@ function writeChangedFiles(cwd: string, paths: string[]) {
 describe("architecture sync gate", () => {
   test("capability resolver batches match results from stdin", () => {
     tmpRepo((cwd) => {
-      const res = run(
-        "bash",
-        ["-lc", "printf '%s\\n' apps/web/src/routes/account.tsx package.json | bun scripts/capability-resolver.ts match --paths-from - --format json"],
-        cwd,
+      const res = spawnSync(
+        process.execPath,
+        ["scripts/capability-resolver.ts", "match", "--paths-from", "-", "--format", "json"],
+        {
+          cwd,
+          encoding: "utf-8",
+          input: "apps/web/src/routes/account.tsx\npackage.json\n",
+        },
       );
       expect(res.status).toBe(0);
       const parsed = JSON.parse(res.stdout);

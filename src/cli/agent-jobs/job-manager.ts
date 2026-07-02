@@ -1638,6 +1638,14 @@ export function listAgentJobs(repoRoot: string, limit = 50): AgentJobMeta[] {
   return legacy;
 }
 
+export function listActiveAgentJobSnapshots(repoRoot: string, limit = 50): AgentJobMeta[] {
+  const boundedLimit = Math.min(Math.max(limit, 1), 500);
+  return readRunIndex(repoRoot, 'active').runs.slice(0, boundedLimit).flatMap((entry) => {
+    const meta = readRawAgentMeta(repoRoot, entry.runId);
+    return meta ? [meta] : [];
+  });
+}
+
 export function getAgentJobEvents(
   repoRoot: string,
   runId: string,

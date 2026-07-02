@@ -34,6 +34,11 @@ export interface ControllerServiceState {
     startedAt?: string;
     stoppedAt?: string;
   };
+  localController?: {
+    pid?: number;
+    startedAt?: string;
+    stoppedAt?: string;
+  };
   config: {
     mcpHost: string;
     mcpPort: number;
@@ -244,14 +249,33 @@ function listPortOwners(port: number): string[] {
     .slice(1);
 }
 
+function currentProcessAncestry(): Set<number> {
+  const protectedPids = new Set<number>([process.pid]);
+  let current = process.pid;
+  for (let depth = 0; depth < 16; depth += 1) {
+    const result = runProcess("ps", ["-o", "ppid=", "-p", String(current)], {
+      timeoutMs: 1_000,
+      maxOutputBytes: 1_024,
+    });
+    if (!result.ok) break;
+    const parent = Number(result.stdout.trim());
+    if (!Number.isInteger(parent) || parent <= 1 || protectedPids.has(parent)) break;
+    protectedPids.add(parent);
+    current = parent;
+  }
+  return protectedPids;
+}
+
 function collectControllerServiceProcesses(repoRoot: string, state: ControllerServiceState | null, controllerHome: string): ControllerServiceProcess[] {
   const seen = new Map<number, ControllerServiceProcess>();
+  const protectedPids = currentProcessAncestry();
   const add = (pid: number | undefined, command: string, kind: ControllerServiceProcess["kind"]) => {
-    if (!pid || pid <= 0 || pid === process.pid) return;
+    if (!pid || pid <= 0 || protectedPids.has(pid)) return;
     if (!seen.has(pid)) seen.set(pid, { pid, command, kind });
   };
 
   add(state?.supervisor.pid, "controller service supervisor", "supervisor");
+  add(state?.localController?.pid, "local controller", "local-controller");
   const runtime = loadMcpRuntimeState(repoRoot);
   add(runtime?.server.pid, "mcp serve", "mcp-serve");
   add(runtime?.localController?.pid, "local controller", "local-controller");
@@ -269,7 +293,7 @@ function collectControllerServiceProcesses(repoRoot: string, state: ControllerSe
     if (!match) continue;
     const pid = Number(match[1]);
     const commandLine = match[2];
-    if (!Number.isInteger(pid) || pid === process.pid) continue;
+    if (!Number.isInteger(pid) || protectedPids.has(pid)) continue;
     if (!processMatchesRepoHarness(commandLine, repoRoot)) continue;
     add(pid, commandLine, detectProcessKind(commandLine));
   }
@@ -285,6 +309,7 @@ function resolveServiceConfig(repoRoot: string, explicitLogFile?: string): {
   localControllerHost: string;
   localControllerPort: number;
   tunnelMode: "none" | "quick" | "named";
+  toolset: "core" | "full";
   logPath: string;
 } {
   const localConfig = loadMcpLocalConfig(repoRoot);
@@ -302,6 +327,7 @@ function resolveServiceConfig(repoRoot: string, explicitLogFile?: string): {
     localControllerHost: localConfig?.localController?.host ?? "127.0.0.1",
     localControllerPort: localConfig?.localController?.port ?? 8766,
     tunnelMode,
+    toolset: localConfig?.toolset === "full" ? "full" : "core",
     logPath: resolve(explicitLogFile ?? defaultControllerServiceLogPath(repoRoot)),
   };
 }
@@ -485,29 +511,50 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
   ensureControllerDaemon(config.controllerHome);
 
   const cli = resolveSelfCliInvocation();
-  const pid = spawnDetached(
+  const localControllerPid = spawnDetached(
     cli.command,
     [
       ...cli.args,
-      "mcp",
-      "keepalive",
+      "controller",
+      "ui",
       "--repo",
       repoRoot,
       "--host",
-      config.mcpHost,
-      "--port",
-      String(config.mcpPort),
-      "--local-ui",
-      "--local-ui-host",
       config.localControllerHost,
-      "--local-ui-port",
+      "--port",
       String(config.localControllerPort),
-      "--tunnel",
-      config.tunnelMode,
+      "--no-open",
     ],
     repoRoot,
     config.logPath,
   );
+  let pid: number;
+  try {
+    pid = spawnDetached(
+      cli.command,
+      [
+        ...cli.args,
+        "mcp",
+        "keepalive",
+        "--repo",
+        repoRoot,
+        "--host",
+        config.mcpHost,
+        "--port",
+        String(config.mcpPort),
+        "--toolset",
+        config.toolset,
+        "--no-local-ui",
+        "--tunnel",
+        config.tunnelMode,
+      ],
+      repoRoot,
+      config.logPath,
+    );
+  } catch (error) {
+    await stopPid(localControllerPid, opts.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS);
+    throw error;
+  }
   writeControllerServiceState(repoRoot, {
     schemaVersion: 1,
     repoRoot,
@@ -519,6 +566,10 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
     supervisor: {
       pid,
       logPath: config.logPath,
+      startedAt: nowIso(),
+    },
+    localController: {
+      pid: localControllerPid,
       startedAt: nowIso(),
     },
     config: {
@@ -552,6 +603,11 @@ export async function stopControllerService(opts: ControllerServiceOptions = {})
           pid: undefined,
           stoppedAt: nowIso(),
         },
+        localController: {
+          ...state.localController,
+          pid: undefined,
+          stoppedAt: nowIso(),
+        },
       });
     }
     return { action: "already_stopped", cleanedPids: [], status };
@@ -565,6 +621,11 @@ export async function stopControllerService(opts: ControllerServiceOptions = {})
       status: "stopped",
       supervisor: {
         ...state.supervisor,
+        pid: undefined,
+        stoppedAt: nowIso(),
+      },
+      localController: {
+        ...state.localController,
         pid: undefined,
         stoppedAt: nowIso(),
       },

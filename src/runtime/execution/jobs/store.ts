@@ -125,8 +125,13 @@ function upsertIndexes(controllerHome: string, job: ExecutionJob): void {
   }, 10_000);
 }
 
-function persistJob(controllerHome: string, job: ExecutionJob): ExecutionJob {
+function persistJobRecord(controllerHome: string, job: ExecutionJob): ExecutionJob {
   writeJsonAtomic(jobPath(controllerHome, job.repoId, job.jobId), job);
+  return job;
+}
+
+function persistJob(controllerHome: string, job: ExecutionJob): ExecutionJob {
+  persistJobRecord(controllerHome, job);
   upsertIndexes(controllerHome, job);
   markRepositoryProjectionDirty(controllerHome, job.repoId, `job:${job.jobId}:${job.status}`);
   return job;
@@ -134,6 +139,25 @@ function persistJob(controllerHome: string, job: ExecutionJob): ExecutionJob {
 
 export function getExecutionJob(controllerHome: string, repoId: string, jobId: string): ExecutionJob {
   return readJsonFile<ExecutionJob>(jobPath(controllerHome, repoId, jobId));
+}
+
+export function getExecutionJobByRequestId(
+  controllerHome: string,
+  requestId: string,
+  expectedRepoId?: string,
+): ExecutionJob | undefined {
+  const normalizedRequestId = requestId.trim();
+  if (!normalizedRequestId) return undefined;
+  const recordPath = requestPath(controllerHome, normalizedRequestId);
+  if (!existsSync(recordPath)) return undefined;
+  try {
+    const record = readJsonFile<RequestIndexRecord>(recordPath);
+    if (record.requestId !== normalizedRequestId) return undefined;
+    if (expectedRepoId && record.repoId !== expectedRepoId) return undefined;
+    return getExecutionJob(controllerHome, record.repoId, record.jobId);
+  } catch {
+    return undefined;
+  }
 }
 
 export function findExecutionJob(controllerHome: string, jobId: string): ExecutionJob | undefined {
@@ -377,7 +401,8 @@ export function heartbeatExecutionJob(
   workerPid: number,
   expectedAttempt?: number,
 ): ExecutionJob {
-  return updateExecutionJob(controllerHome, repoId, jobId, (current) => {
+  return withControllerLock(controllerHome, { scope: 'task', repoId, taskId: `execution-job-${jobId}` }, `heartbeat-job:${jobId}`, () => {
+    const current = getExecutionJob(controllerHome, repoId, jobId);
     if (current.status !== 'running') throw new Error(`WORKER_OWNERSHIP_LOST: ${jobId} is ${current.status}`);
     if (expectedAttempt !== undefined && current.attempt !== expectedAttempt) {
       throw new Error(`WORKER_OWNERSHIP_LOST: ${jobId} attempt ${expectedAttempt} was replaced by ${current.attempt}`);
@@ -385,8 +410,18 @@ export function heartbeatExecutionJob(
     if (current.workerPid !== undefined && current.workerPid !== workerPid) {
       throw new Error(`WORKER_OWNERSHIP_LOST: ${jobId} belongs to PID ${current.workerPid}`);
     }
-    return { ...current, heartbeatAt: now(), workerPid };
-  });
+    const next: ExecutionJob = {
+      ...current,
+      revision: current.revision + 1,
+      updatedAt: now(),
+      heartbeatAt: now(),
+      workerPid,
+    };
+    // Heartbeats are intentionally record-only. They must not rewrite the global
+    // active/recent indexes, dirty the repository projection, emit evidence, or
+    // wake the scheduler every few seconds.
+    return persistJobRecord(controllerHome, next);
+  }, 10_000);
 }
 
 export function transitionExecutionJobFromWorker(
@@ -451,11 +486,9 @@ export function listExecutionJobs(controllerHome: string, repoId: string, limit 
       .map((name) => readJsonFile<ExecutionJob>(join(records, name)))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, boundedLimit);
-    if (legacy.length > 0) {
-      withControllerLock(controllerHome, { scope: 'global', resource: 'execution-index' }, `execution-index-backfill:${repoId}`, () => {
-        for (const job of legacy) upsertIndexesUnlocked(controllerHome, job);
-      }, 10_000);
-    }
+    // Keep this fallback read-only. Index migration belongs to an explicit
+    // maintenance path; a status/read request must never acquire the global
+    // execution-index lock or rewrite thousands of entries.
     return legacy;
   } catch { return []; }
 }

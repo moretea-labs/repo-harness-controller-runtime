@@ -1,24 +1,29 @@
 import { createHash } from 'crypto';
+import { existsSync } from 'fs';
 import type { McpToolDefinition, CallToolResult } from '../../../cli/mcp/tools';
 import type { MultiRepositoryMcpToolContext } from '../../../cli/mcp/multi-repository';
 import { listRepositories, repositorySummary, resolveRepositorySelection } from '../../../cli/repositories/registry';
-import { cancelExecutionJob, createExecutionJob, findExecutionJob, getExecutionJob, listExecutionJobs } from '../../execution/jobs/store';
+import { repositoryControllerRoot } from '../../../cli/repositories/controller-home';
+import { cancelExecutionJob, createExecutionJob, findExecutionJob, getExecutionJob, getExecutionJobByRequestId, listExecutionJobs } from '../../execution/jobs/store';
 import type { ExecutionJob } from '../../execution/jobs/types';
 import { readJobEvents } from '../../evidence/event-ledger';
 import { readExecutionArtifact } from '../../evidence/artifact-store';
 import { ensureControllerDaemon, readControllerDaemonStatus } from '../../control-plane/daemon-client';
 import { readSchedulerHealthSnapshot } from '../../control-plane/global-scheduler/scheduler';
-import { rebuildRepositoryProjection } from '../../projections/materialized-view';
+import { rebuildRepositoryProjection, readRepositoryProjectionSnapshot } from '../../projections/materialized-view';
 import { createSchedule, getSchedule, getScheduleDecision, listOccurrences, listSchedules, saveSchedule } from '../../workflow/schedules/store';
 import { evaluateSchedule } from '../../workflow/schedules/engine';
 import { createPortfolioWorkflow, getPortfolioWorkflow, listPortfolioWorkflows } from '../../workflow/portfolio/store';
 import { claimsForMcpOperation } from './resource-policy';
+import { routeDurableMcpCall } from './router';
 import { assertAutomatedOperationAllowed } from '../../control-plane/governance/external-effects';
 import { getCandidateFinding, listCandidateFindings, recordCandidateFinding, updateCandidateFinding } from '../../workflow/findings/store';
 import { ensureRepositoryRuntimeStorage } from '../../../cli/repositories/runtime-storage';
 import { assessWorkMode } from '../../../cli/controller/work-mode';
+import { projectBoard } from '../../../cli/controller/issue-store';
+import { listControllerChecks } from '../../../cli/controller/check-runner';
+import { listActiveAgentJobSnapshots } from '../../../cli/agent-jobs/job-manager';
 import type { TaskRisk } from '../../../cli/controller/types';
-import { readRepositoryProjection } from '../../projections/materialized-view';
 import { controllerContextProjectionAgeMs, readControllerContextProjection } from '../../projections/controller-context';
 import { loadMcpRuntimeState } from '../../../cli/mcp/auth';
 import { redactMcpText } from '../../../cli/mcp/redaction';
@@ -39,6 +44,29 @@ function definition(name: string, description: string, properties: Record<string
 }
 const repoId = { type: 'string', description: 'Stable repository id.' };
 export const runtimeToolDefinitions: McpToolDefinition[] = [
+  definition('work_submit', 'Submit one durable repository operation and return a resumable Work handle.', {
+    repo_id: repoId,
+    request_id: { type: 'string', description: 'Stable idempotency key used to resume the same Work after reconnecting.' },
+    operation: { type: 'string', description: 'Existing durable controller operation, for example run_check, dispatch_task, or create_issue.' },
+    arguments: { type: 'object', description: 'Arguments passed to the durable operation.' },
+    timeout_ms: { type: 'number' },
+  }, ['request_id', 'operation'], false),
+  definition('work_get', 'Resume one Work by work_id or request_id. Repository scope is always enforced.', {
+    repo_id: repoId,
+    work_id: { type: 'string' },
+    request_id: { type: 'string' },
+    include_events: { type: 'boolean' },
+  }),
+  definition('work_list', 'List recent resumable Work for one repository.', {
+    repo_id: repoId,
+    limit: { type: 'number' },
+  }),
+  definition('work_cancel', 'Cancel one queued or running Work by work_id or request_id.', {
+    repo_id: repoId,
+    work_id: { type: 'string' },
+    request_id: { type: 'string' },
+    reason: { type: 'string' },
+  }, [], false),
   definition('get_job', 'Read one durable Execution Job. Summary is the default; opt in to full state only when needed.', {
     job_id: { type: 'string' },
     repo_id: repoId,
@@ -251,7 +279,7 @@ function ageMs(value: string | undefined): number | undefined {
 function controllerReadiness(ctx: MultiRepositoryMcpToolContext, repository = ctx.explicitRepository) {
   const daemon = readControllerDaemonStatus(ctx.controllerHome);
   const scheduler = readSchedulerHealthSnapshot(ctx.controllerHome);
-  const projection = repository ? readRepositoryProjection(ctx.controllerHome, repository.repoId) : undefined;
+  const projection = repository ? readRepositoryProjectionSnapshot(ctx.controllerHome, repository.repoId).projection : undefined;
   const localBridge = repository ? loadMcpRuntimeState(repository.canonicalRoot)?.localController : undefined;
   const schedulerHeartbeatAgeMs = ageMs(scheduler.lastTickAt);
   const dispatchHeartbeatAgeMs = ageMs(scheduler.lastDispatchAt);
@@ -318,9 +346,100 @@ function controllerReadiness(ctx: MultiRepositoryMcpToolContext, repository = ct
   };
 }
 
+function workPhase(status: ExecutionJob['status']): 'queued' | 'running' | 'attention' | 'completed' {
+  if (['succeeded', 'failed', 'cancelled', 'timed_out'].includes(status)) return 'completed';
+  if (['orphaned', 'stale', 'human_attention_required'].includes(status)) return 'attention';
+  if (status === 'running' || status === 'dispatched') return 'running';
+  return 'queued';
+}
+
+function summarizeWork(job: ExecutionJob, repoRoot?: string): Record<string, unknown> {
+  const summary = summarizeExecutionJob(job, repoRoot);
+  return {
+    workId: job.jobId,
+    requestId: job.requestId,
+    repoId: job.repoId,
+    operation: typeof job.payload?.operation === 'string' ? job.payload.operation : job.type,
+    phase: workPhase(job.status),
+    resumable: true,
+    ...summary,
+  };
+}
+
+function resolveWorkJob(
+  ctx: MultiRepositoryMcpToolContext,
+  repoId: string,
+  args: Record<string, unknown>,
+): ExecutionJob | undefined {
+  const workId = typeof args.work_id === 'string' ? args.work_id.trim() : '';
+  const requestId = typeof args.request_id === 'string' ? args.request_id.trim() : '';
+  if (!workId && !requestId) throw new Error('WORK_ID_REQUIRED: provide work_id or request_id');
+  if (workId) {
+    try { return getExecutionJob(ctx.controllerHome, repoId, workId); }
+    catch { return undefined; }
+  }
+  return getExecutionJobByRequestId(ctx.controllerHome, requestId, repoId);
+}
+
 export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: string, args: Record<string, unknown>): Promise<CallToolResult | undefined> {
   try {
     switch (name) {
+      case 'work_submit': {
+        const repository = selected(ctx, args);
+        const requestId = String(args.request_id ?? '').trim();
+        const operation = String(args.operation ?? '').trim();
+        if (!requestId) throw new Error('REQUEST_ID_REQUIRED: work_submit requires request_id');
+        if (!operation || operation.startsWith('work_')) throw new Error('WORK_OPERATION_INVALID: choose an existing durable controller operation');
+        const operationArgs = args.arguments && typeof args.arguments === 'object' && !Array.isArray(args.arguments)
+          ? args.arguments as Record<string, unknown>
+          : {};
+        const existingRequest = getExecutionJobByRequestId(ctx.controllerHome, requestId);
+        if (existingRequest && existingRequest.repoId !== repository.repoId) {
+          throw new Error(`REQUEST_ID_REPO_CONFLICT: ${requestId} already belongs to repository ${existingRequest.repoId}`);
+        }
+        const routed = await routeDurableMcpCall(ctx, operation, {
+          ...operationArgs,
+          repo_id: repository.repoId,
+          request_id: requestId,
+          ...(typeof args.timeout_ms === 'number' ? { timeout_ms: args.timeout_ms } : {}),
+        });
+        if (!routed?.structuredContent || routed.isError) {
+          throw new Error(`WORK_OPERATION_NOT_DURABLE: ${operation} is unknown, read-only, or not eligible for durable execution`);
+        }
+        const accepted = routed.structuredContent as Record<string, unknown>;
+        const workId = String(accepted.jobId ?? '').trim();
+        const job = workId
+          ? getExecutionJob(ctx.controllerHome, repository.repoId, workId)
+          : getExecutionJobByRequestId(ctx.controllerHome, requestId, repository.repoId);
+        if (!job) throw new Error('WORK_ACCEPTANCE_LOST: durable operation was accepted without a readable Work record');
+        return result({ accepted: true, deduplicated: accepted.deduplicated === true, work: summarizeWork(job, repository.canonicalRoot) });
+      }
+      case 'work_get': {
+        const repository = selected(ctx, args);
+        const job = resolveWorkJob(ctx, repository.repoId, args);
+        if (!job) return result({ error: { code: 'WORK_NOT_FOUND', message: 'No Work matched this repository and identifier.' } }, true);
+        return result({
+          work: summarizeWork(job, repository.canonicalRoot),
+          ...(args.include_events === true ? { events: summarizeJobEvents(ctx.controllerHome, job.repoId, job.jobId) } : {}),
+        });
+      }
+      case 'work_list': {
+        const repository = selected(ctx, args);
+        const jobs = listExecutionJobs(ctx.controllerHome, repository.repoId, typeof args.limit === 'number' ? args.limit : 50);
+        return result({ works: jobs.map((job) => summarizeWork(job, repository.canonicalRoot)) });
+      }
+      case 'work_cancel': {
+        const repository = selected(ctx, args);
+        const job = resolveWorkJob(ctx, repository.repoId, args);
+        if (!job) return result({ error: { code: 'WORK_NOT_FOUND', message: 'No Work matched this repository and identifier.' } }, true);
+        const cancelled = await cancelExecutionJob(
+          ctx.controllerHome,
+          repository.repoId,
+          job.jobId,
+          typeof args.reason === 'string' ? args.reason : undefined,
+        );
+        return result({ work: summarizeWork(cancelled, repository.canonicalRoot) });
+      }
       case 'local_bridge_status': {
         const repository = selected(ctx, args);
         const runtime = loadMcpRuntimeState(repository.canonicalRoot);
@@ -391,81 +510,108 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
       }
       case 'controller_context': {
         const repository = selected(ctx, args);
-        const runtimeStorage = ensureRepositoryRuntimeStorage(repository, ctx.controllerHome);
-        const runtimeProjection = readRepositoryProjection(ctx.controllerHome, repository.repoId);
+        const runtimeRoot = repositoryControllerRoot(ctx.controllerHome, repository.repoId);
+        const runtimeStorage = {
+          repoId: repository.repoId,
+          controllerRoot: runtimeRoot,
+          readyForExecution: existsSync(runtimeRoot),
+          readOnly: true,
+        };
+        const runtimeSnapshot = readRepositoryProjectionSnapshot(ctx.controllerHome, repository.repoId);
+        const runtimeProjection = runtimeSnapshot.projection;
         const cached = readControllerContextProjection(ctx.controllerHome, repository.repoId);
-        const ageMs = controllerContextProjectionAgeMs(cached);
-        const stale = ageMs > 10_000;
+        const projectionAgeMs = controllerContextProjectionAgeMs(cached);
+        const stale = projectionAgeMs > 10_000;
         const readiness = controllerReadiness(ctx, repository);
-        let refreshJobId: string | undefined;
-        let refreshError: string | undefined;
-        let refreshBlockedReason: string | undefined;
-        if (stale) {
-          if (!readiness.ready) {
-            refreshBlockedReason = readiness.reasons[0]?.code;
-            refreshError = readiness.reasons[0]?.message;
-          } else {
-            try {
-              const requestId = `projection:controller-context:${repository.repoId}:${Math.floor(Date.now() / 10_000)}`;
-              const created = createExecutionJob(ctx.controllerHome, {
-                repoId: repository.repoId,
-                checkoutId: repository.activeCheckoutId,
-                type: 'mcp-tool',
-                requestId,
-                semanticKey: `projection:controller-context:${repository.repoId}`,
-                origin: { surface: 'mcp', actor: 'controller_context', correlationId: requestId },
-                payload: {
-                  operation: 'controller_context',
-                  arguments: {},
-                  target: 'mcp-tool',
-                  profile: ctx.policy.profile,
-                  enableChatgptBrowser: ctx.enableChatgptBrowser === true,
-                  enableDevRunner: ctx.policy.execution.agentRunner,
-                  allowedAgents: [...ctx.policy.execution.allowedAgents],
-                  runnerTimeoutMs: ctx.policy.execution.runnerTimeoutMs,
-                  runnerMaxTimeoutMs: ctx.policy.execution.runnerMaxTimeoutMs,
-                },
-                priority: 'P1',
-                resourceClaims: [],
-                timeoutMs: 45_000,
-                maxAttempts: 1,
-              });
-              refreshJobId = created.job.jobId;
-              ensureControllerDaemon(ctx.controllerHome);
-            } catch (error) {
-              refreshError = error instanceof Error ? error.message : String(error);
-            }
-          }
-        }
         const activeCheckout = repository.checkouts.find((checkout) => checkout.checkoutId === repository.activeCheckoutId);
-        const fallback: Record<string, unknown> = {
-          git: {
+        const board = projectBoard(repository.canonicalRoot);
+        const currentIssueRecord = board.currentIssueId
+          ? board.issues.find((issue) => issue.id === board.currentIssueId)
+          : undefined;
+        const currentIssue = currentIssueRecord ? {
+          id: currentIssueRecord.id,
+          title: currentIssueRecord.title,
+          status: currentIssueRecord.status,
+          lifecycleStatus: currentIssueRecord.lifecycleStatus,
+          updatedAt: currentIssueRecord.updatedAt,
+          tasks: Array.isArray(currentIssueRecord.tasks)
+            ? currentIssueRecord.tasks.slice(0, 20).map((task) => {
+              const item = task as Record<string, unknown>;
+              return {
+                id: item.id,
+                title: item.title,
+                effectiveStatus: item.effectiveStatus,
+                latestRunStatus: item.latestRunStatus,
+              };
+            })
+            : [],
+        } : undefined;
+        const activeRuns = listActiveAgentJobSnapshots(repository.canonicalRoot, 20).map((run) => ({
+          runId: run.runId,
+          issueId: run.issueId,
+          taskId: run.taskId,
+          status: run.status,
+          agent: run.agent,
+          provider: run.provider,
+          executionMode: run.executionMode,
+          progress: run.progress,
+          lastHeartbeatAt: run.lastHeartbeatAt,
+          error: run.error,
+        }));
+        const localJobs = listLocalBridgeJobSnapshots(repository.canonicalRoot, 12);
+        const activeLocalJobs = localJobs.filter((job) => ['approved', 'running', 'dispatched'].includes(job.status)).length;
+        const recentLocalJobs = localJobs.map((job) => ({
+          jobId: job.jobId,
+          action: job.action,
+          status: job.status,
+          runId: job.runId,
+          issueId: job.issueId,
+          taskId: job.taskId,
+          createdAt: job.createdAt,
+          updatedAt: job.updatedAt,
+          finishedAt: job.finishedAt,
+          error: job.error?.slice(0, 300),
+        }));
+        const checks = listControllerChecks(repository.canonicalRoot).map((check) => ({
+          id: check.id,
+          description: check.description,
+          timeoutMs: check.timeoutMs,
+          source: check.source,
+        }));
+        const cachedPayload = cached?.payload ?? {};
+        return result({
+          ...cachedPayload,
+          git: cached?.payload.git ?? {
             branch: activeCheckout?.branch ?? null,
-            status: 'Materialized context is being refreshed by an isolated Worker.',
+            status: 'No cached repository scan is available; showing bounded runtime state only.',
             diffStat: '',
           },
-          currentIssueId: undefined,
-          currentIssue: undefined,
-          readyTasks: [],
-          activeRuns: runtimeProjection.activeJobs,
-          localBridge: { reconciliation: { scanned: 0, active: 0, terminalized: 0 }, recentJobs: [] },
-          checks: [],
+          currentIssueId: board.currentIssueId,
+          currentIssue,
+          readyTasks: board.readyTasks.slice(0, 20),
+          activeRuns,
+          localBridge: {
+            reconciliation: { scanned: localJobs.length, active: activeLocalJobs, terminalized: 0 },
+            recentJobs: recentLocalJobs,
+          },
+          checks,
           repoId: repository.repoId,
           repository: repositorySummary(repository),
           runtimeStorage,
-        };
-        return result({
-          ...(cached?.payload ?? fallback),
           recommendedExecution: controllerContextAssessment(args),
           runtimeProjection,
           contextProjection: {
             generatedAt: cached?.generatedAt,
-            ageMs: Number.isFinite(ageMs) ? ageMs : undefined,
+            ageMs: Number.isFinite(projectionAgeMs) ? projectionAgeMs : undefined,
             stale,
-            refreshJobId,
-            refreshBlockedReason,
-            refreshError,
+            strategy: 'event-driven',
+            refreshJobId: undefined,
+            readOnly: true,
             nonBlocking: true,
+          },
+          runtimeProjectionState: {
+            stale: runtimeSnapshot.stale,
+            persisted: runtimeSnapshot.persisted,
           },
           controllerReady: readiness,
         });
