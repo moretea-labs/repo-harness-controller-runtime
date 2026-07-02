@@ -419,3 +419,13 @@ The Gateway does not infer execution failure from a disconnected request. Caller
 - external effects are reconciled rather than blindly retried;
 - repository A recovery does not require locking repository B;
 - bounded projections remain readable while Workers execute.
+
+## Campaign Recovery
+
+Campaign state survives Gateway, MCP, ChatGPT, scheduler, and worker restarts. Reconciliation treats persisted Execution Jobs and Agent Runs as the execution source of truth. Missing, orphaned, timed-out, or human-attention child work becomes a bounded Campaign task failure and may open a Supervisor Checkpoint.
+
+No in-memory ChatGPT conversation is required for recovery. Duplicate review delivery and scheduler delivery are idempotent. A stale checkpoint nonce, stale goal revision, or conflicting request-ID reuse is rejected rather than replayed against newer state.
+
+### Campaign checkout recovery
+
+Campaign worktree identity is stored in Controller Home with its request id, branch, path, and original base revision. Repeated creation reuses this manifest and registered checkout even if the source checkout advances. A missing directory is reconstructed from the retained branch after stale Git worktree metadata is pruned.

@@ -18,6 +18,11 @@ import { claimsForMcpOperation } from './resource-policy';
 import { routeDurableMcpCall } from './router';
 import { assertAutomatedOperationAllowed } from '../../control-plane/governance/external-effects';
 import { getCandidateFinding, listCandidateFindings, recordCandidateFinding, updateCandidateFinding } from '../../workflow/findings/store';
+import { addCampaignTask, createCampaign, getCampaign, listCampaigns, setCampaignStatus, validateCreateCampaignTasks } from '../../workflow/campaigns/store';
+import { reconcileCampaign } from '../../workflow/campaigns/engine';
+import { submitCampaignReview } from '../../workflow/campaigns/review';
+import type { CampaignReviewPolicy, CampaignSupervisorAction, CreateCampaignTaskInput } from '../../workflow/campaigns/types';
+import { currentCampaignWorkspace, ensureCampaignWorkspace } from '../../workflow/campaigns/workspace';
 import { ensureRepositoryRuntimeStorage } from '../../../cli/repositories/runtime-storage';
 import { assessWorkMode } from '../../../cli/controller/work-mode';
 import { projectBoard } from '../../../cli/controller/issue-store';
@@ -82,6 +87,62 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
   definition('cancel_job', 'Cancel one queued or running durable Execution Job.', { job_id: { type: 'string' }, repo_id: repoId, reason: { type: 'string' } }, ['job_id'], false),
   definition('controller_ready', 'Return Gateway, Controller Daemon, Worker isolation, queue, and repository projection readiness.', { repo_id: repoId }),
   definition('repository_runtime_snapshot', 'Read the materialized runtime projection without scanning historical state.', { repo_id: repoId }),
+  definition('create_campaign', 'Create a durable ChatGPT-supervised repository campaign.', {
+    repo_id: repoId,
+    checkout_id: { type: 'string', description: 'Optional source checkout used to create the Campaign workspace.' },
+    request_id: { type: 'string' },
+    semantic_key: { type: 'string' },
+    title: { type: 'string' },
+    goal: { type: 'string' },
+    acceptance_criteria: { type: 'array', items: { type: 'string' } },
+    non_goals: { type: 'array', items: { type: 'string' } },
+    review_policy: { type: 'string', enum: ['every_task', 'failures_and_final', 'final_only'] },
+    tasks: { type: 'array', items: { type: 'object' } },
+    budget: { type: 'object' },
+    supervisor: { type: 'object' },
+    workspace: { type: 'object', description: 'Workspace policy. Defaults to an isolated long-lived Campaign worktree. Set mode=current to opt out.' },
+  }, ['request_id', 'title', 'goal', 'tasks'], false),
+  definition('list_campaigns', 'List durable campaigns for one repository.', { repo_id: repoId, limit: { type: 'number' } }),
+  definition('get_campaign', 'Read one durable campaign.', { repo_id: repoId, campaign_id: { type: 'string' } }, ['campaign_id']),
+  definition('add_campaign_task', 'Add one task to a non-terminal campaign.', {
+    repo_id: repoId,
+    campaign_id: { type: 'string' },
+    request_id: { type: 'string' },
+    expected_revision: { type: 'number' },
+    task: { type: 'object' },
+  }, ['campaign_id', 'request_id', 'task'], false),
+  definition('pause_campaign', 'Pause a campaign without holding execution resources.', {
+    repo_id: repoId, campaign_id: { type: 'string' }, request_id: { type: 'string' }, expected_revision: { type: 'number' }, reason: { type: 'string' },
+  }, ['campaign_id', 'request_id'], false),
+  definition('resume_campaign', 'Resume a paused or supervisor-waiting campaign.', {
+    repo_id: repoId, campaign_id: { type: 'string' }, request_id: { type: 'string' }, expected_revision: { type: 'number' },
+  }, ['campaign_id', 'request_id'], false),
+  definition('cancel_campaign', 'Cancel a campaign. Existing child Jobs remain independently cancellable.', {
+    repo_id: repoId, campaign_id: { type: 'string' }, request_id: { type: 'string' }, expected_revision: { type: 'number' }, reason: { type: 'string' },
+  }, ['campaign_id', 'request_id'], false),
+  definition('get_campaign_review_packet', 'Read one bounded open review packet for ChatGPT or another supervisor.', {
+    repo_id: repoId, campaign_id: { type: 'string' }, checkpoint_id: { type: 'string' },
+  }, ['campaign_id']),
+  definition('submit_campaign_review', 'Submit one nonce- and goal-revision-bound supervisor decision.', {
+    repo_id: repoId,
+    campaign_id: { type: 'string' },
+    checkpoint_id: { type: 'string' },
+    checkpoint_nonce: { type: 'string' },
+    goal_revision: { type: 'number' },
+    expected_campaign_revision: { type: 'number' },
+    request_id: { type: 'string' },
+    action: { type: 'string', enum: ['accept', 'request_changes', 'retry', 'skip', 'pause', 'resume', 'approve_final', 'revise_goal', 'escalate'] },
+    summary: { type: 'string' },
+    instructions: { type: 'string' },
+    revised_goal: { type: 'object' },
+    submitted_by: { type: 'string' },
+  }, ['campaign_id', 'checkpoint_id', 'checkpoint_nonce', 'goal_revision', 'request_id', 'action', 'summary'], false),
+  definition('accept_campaign', 'Record human acceptance after final supervisor approval.', {
+    repo_id: repoId, campaign_id: { type: 'string' }, request_id: { type: 'string' }, expected_revision: { type: 'number' },
+  }, ['campaign_id', 'request_id'], false),
+  definition('reconcile_campaign', 'Run one bounded campaign reconciliation pass immediately.', {
+    repo_id: repoId, campaign_id: { type: 'string' },
+  }, ['campaign_id'], false),
   definition('create_schedule', 'Create a bounded repository Schedule. Shadow mode defaults to true.', {
     repo_id: repoId,
     request_id: { type: 'string' },
@@ -261,10 +322,69 @@ function controllerContextAssessment(args: Record<string, unknown>) {
 function selected(ctx: MultiRepositoryMcpToolContext, args: Record<string, unknown>) {
   return resolveRepositorySelection({
     repoId: typeof args.repo_id === 'string' ? args.repo_id : undefined,
+    checkoutId: typeof args.checkout_id === 'string' ? args.checkout_id : undefined,
     explicitPath: ctx.explicitRepository?.canonicalRoot,
     controllerHome: ctx.controllerHome,
     allowSoleRepository: true,
   });
+}
+
+const CAMPAIGN_AGENT_OPERATIONS = new Set(['dispatch_task', 'launch_issue', 'dispatch_ready_tasks', 'retry_task_run', 'quick_agent_session']);
+const CAMPAIGN_CONTROL_OPERATIONS = new Set(['create_campaign', 'add_campaign_task', 'pause_campaign', 'resume_campaign', 'cancel_campaign', 'submit_campaign_review', 'accept_campaign', 'reconcile_campaign']);
+
+function campaignTaskInput(
+  raw: unknown,
+  repoIdValue: string,
+  checkoutId?: string,
+): CreateCampaignTaskInput {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('CAMPAIGN_TASK_INVALID');
+  const value = raw as Record<string, unknown>;
+  const taskId = String(value.task_id ?? value.taskId ?? '').trim();
+  const title = String(value.title ?? '').trim();
+  const operation = String(value.operation ?? '').trim();
+  if (!taskId || !title || !operation) throw new Error('CAMPAIGN_TASK_INVALID: task_id, title, and operation are required');
+  if (CAMPAIGN_CONTROL_OPERATIONS.has(operation)) throw new Error(`CAMPAIGN_RECURSIVE_OPERATION_DENIED: ${operation}`);
+  const argumentsValue = value.arguments && typeof value.arguments === 'object' && !Array.isArray(value.arguments)
+    ? { ...(value.arguments as Record<string, unknown>) }
+    : {};
+  if (CAMPAIGN_AGENT_OPERATIONS.has(operation)) argumentsValue.isolate = true;
+  assertAutomatedOperationAllowed(operation, argumentsValue);
+  const requestedClaims = Array.isArray(value.resource_claims)
+    ? value.resource_claims.flatMap((rawClaim) => {
+      if (!rawClaim || typeof rawClaim !== 'object') return [];
+      const claim = rawClaim as Record<string, unknown>;
+      const resourceKey = String(claim.resource_key ?? claim.resourceKey ?? '').trim();
+      const mode = String(claim.mode ?? 'write');
+      if (!resourceKey || !['read', 'write', 'exclusive'].includes(mode)) return [];
+      return [{ resourceKey, mode: mode as 'read' | 'write' | 'exclusive' }];
+    })
+    : [];
+  const executor = value.executor && typeof value.executor === 'object' && !Array.isArray(value.executor)
+    ? value.executor as Record<string, unknown>
+    : undefined;
+  return {
+    taskId,
+    title,
+    objective: typeof value.objective === 'string' ? value.objective : undefined,
+    operation,
+    arguments: argumentsValue,
+    dependsOn: Array.isArray(value.depends_on ?? value.dependsOn) ? ((value.depends_on ?? value.dependsOn) as unknown[]).map(String) : [],
+    priority: ['P0', 'P1', 'P2', 'P3', 'P4'].includes(String(value.priority)) ? String(value.priority) as 'P0' | 'P1' | 'P2' | 'P3' | 'P4' : 'P1',
+    resourceClaims: requestedClaims.length > 0 ? requestedClaims : claimsForMcpOperation(operation, argumentsValue, repoIdValue, checkoutId),
+    reviewRequired: value.review_required === undefined ? true : value.review_required === true,
+    maxAttempts: typeof value.max_attempts === 'number' ? value.max_attempts : undefined,
+    executor: executor ? {
+      enableDevRunner: executor.enable_dev_runner === undefined ? undefined : executor.enable_dev_runner === true,
+      enableChatgptBrowser: executor.enable_chatgpt_browser === true,
+      allowedAgents: Array.isArray(executor.allowed_agents) ? executor.allowed_agents.map(String) : undefined,
+      runnerTimeoutMs: typeof executor.runner_timeout_ms === 'number' ? executor.runner_timeout_ms : undefined,
+      runnerMaxTimeoutMs: typeof executor.runner_max_timeout_ms === 'number' ? executor.runner_max_timeout_ms : undefined,
+    } : undefined,
+  };
+}
+
+function expectedRevision(args: Record<string, unknown>, key = 'expected_revision'): number | undefined {
+  return typeof args[key] === 'number' ? Math.trunc(args[key] as number) : undefined;
 }
 
 const SCHEDULER_HEARTBEAT_STALE_MS = 5_000;
@@ -675,6 +795,193 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
       case 'repository_runtime_snapshot': {
         const repository = selected(ctx, args);
         return result({ snapshot: rebuildRepositoryProjection(ctx.controllerHome, repository.repoId) });
+      }
+      case 'create_campaign': {
+        const repository = selected(ctx, args);
+        const rawTasks = Array.isArray(args.tasks) ? args.tasks : [];
+        const requestId = String(args.request_id ?? '').trim();
+        const title = String(args.title ?? '').trim();
+        const goal = String(args.goal ?? '').trim();
+        if (!requestId) throw new Error('CAMPAIGN_REQUEST_ID_REQUIRED');
+        if (!title) throw new Error('CAMPAIGN_TITLE_REQUIRED');
+        if (!goal) throw new Error('CAMPAIGN_GOAL_REQUIRED');
+        const budget = args.budget && typeof args.budget === 'object' && !Array.isArray(args.budget)
+          ? args.budget as Record<string, unknown>
+          : {};
+        const budgetInput = {
+          maxParallelTasks: typeof budget.max_parallel_tasks === 'number' ? budget.max_parallel_tasks : undefined,
+          maxExecutionJobs: typeof budget.max_execution_jobs === 'number' ? budget.max_execution_jobs : undefined,
+          maxSupervisorReviews: typeof budget.max_supervisor_reviews === 'number' ? budget.max_supervisor_reviews : undefined,
+          defaultTaskMaxAttempts: typeof budget.default_task_max_attempts === 'number' ? budget.default_task_max_attempts : undefined,
+          taskTimeoutMs: typeof budget.task_timeout_ms === 'number' ? budget.task_timeout_ms : undefined,
+          retryBaseDelayMs: typeof budget.retry_base_delay_ms === 'number' ? budget.retry_base_delay_ms : undefined,
+          retryMaxDelayMs: typeof budget.retry_max_delay_ms === 'number' ? budget.retry_max_delay_ms : undefined,
+          reviewPacketMaxBytes: typeof budget.review_packet_max_bytes === 'number' ? budget.review_packet_max_bytes : undefined,
+        };
+        // Validate task shape, DAG, and governance before creating any Git refs or worktrees.
+        const sourceTasks = rawTasks.map((task) => campaignTaskInput(task, repository.repoId, repository.activeCheckoutId));
+        validateCreateCampaignTasks(sourceTasks, budgetInput);
+        const workspaceInput = args.workspace && typeof args.workspace === 'object' && !Array.isArray(args.workspace)
+          ? args.workspace as Record<string, unknown>
+          : {};
+        const workspaceMode = workspaceInput.mode === 'current' ? 'current' : 'isolated';
+        const workspace = workspaceMode === 'current'
+          ? currentCampaignWorkspace(repository)
+          : ensureCampaignWorkspace(ctx.controllerHome, repository, {
+            requestId,
+            title,
+            baseRef: typeof workspaceInput.base_ref === 'string'
+              ? workspaceInput.base_ref
+              : typeof workspaceInput.baseRef === 'string' ? workspaceInput.baseRef : undefined,
+            branchName: typeof workspaceInput.branch_name === 'string'
+              ? workspaceInput.branch_name
+              : typeof workspaceInput.branchName === 'string' ? workspaceInput.branchName : undefined,
+          });
+        const campaignCheckoutId = workspace.checkoutId ?? repository.activeCheckoutId;
+        const supervisor = args.supervisor && typeof args.supervisor === 'object' && !Array.isArray(args.supervisor)
+          ? args.supervisor as Record<string, unknown>
+          : {};
+        const supervisorMode = supervisor.mode === 'operation'
+          ? 'operation'
+          : supervisor.mode === 'workspace_agent' ? 'workspace_agent' : 'pull';
+        const supervisorOperation = typeof supervisor.operation === 'string' ? supervisor.operation.trim() : undefined;
+        const workspaceAgentId = typeof supervisor.workspace_agent_id === 'string'
+          ? supervisor.workspace_agent_id.trim()
+          : typeof supervisor.workspaceAgentId === 'string' ? supervisor.workspaceAgentId.trim() : undefined;
+        const conversationKey = typeof supervisor.conversation_key === 'string'
+          ? supervisor.conversation_key.trim()
+          : typeof supervisor.conversationKey === 'string' ? supervisor.conversationKey.trim() : undefined;
+        const supervisorArguments = supervisor.arguments && typeof supervisor.arguments === 'object' && !Array.isArray(supervisor.arguments)
+          ? supervisor.arguments as Record<string, unknown>
+          : undefined;
+        if (supervisorOperation) {
+          if (CAMPAIGN_CONTROL_OPERATIONS.has(supervisorOperation)) throw new Error(`CAMPAIGN_RECURSIVE_OPERATION_DENIED: ${supervisorOperation}`);
+          assertAutomatedOperationAllowed(supervisorOperation, supervisorArguments ?? {});
+        }
+        const campaign = createCampaign(ctx.controllerHome, {
+          repoId: repository.repoId,
+          checkoutId: campaignCheckoutId,
+          workspace,
+          requestId,
+          semanticKey: typeof args.semantic_key === 'string' && args.semantic_key.trim()
+            ? args.semantic_key.trim()
+            : `campaign:${repository.repoId}:${createHash('sha256').update(`${String(args.title ?? '')}:${String(args.goal ?? '')}`).digest('hex').slice(0, 20)}`,
+          title,
+          goal,
+          acceptanceCriteria: stringList(args.acceptance_criteria),
+          nonGoals: stringList(args.non_goals),
+          reviewPolicy: ['every_task', 'failures_and_final', 'final_only'].includes(String(args.review_policy))
+            ? String(args.review_policy) as CampaignReviewPolicy
+            : 'every_task',
+          tasks: rawTasks.map((task) => campaignTaskInput(task, repository.repoId, campaignCheckoutId)),
+          budget: budgetInput,
+          supervisor: {
+            mode: supervisorMode,
+            operation: supervisorMode === 'operation' ? supervisorOperation : undefined,
+            workspaceAgentId: supervisorMode === 'workspace_agent' ? workspaceAgentId : undefined,
+            conversationKey: supervisorMode === 'workspace_agent' ? conversationKey : undefined,
+            arguments: supervisorMode === 'operation' ? supervisorArguments : undefined,
+            priority: ['P0', 'P1', 'P2', 'P3', 'P4'].includes(String(supervisor.priority)) ? String(supervisor.priority) as 'P0' | 'P1' | 'P2' | 'P3' | 'P4' : undefined,
+            resourceClaims: supervisorMode === 'operation' && supervisorOperation
+              ? claimsForMcpOperation(supervisorOperation, supervisorArguments ?? {}, repository.repoId, campaignCheckoutId)
+              : undefined,
+            triggerCooldownMs: typeof supervisor.trigger_cooldown_ms === 'number' ? supervisor.trigger_cooldown_ms : undefined,
+            maxTriggerAttempts: typeof supervisor.max_trigger_attempts === 'number' ? supervisor.max_trigger_attempts : undefined,
+            decisionTimeoutMs: typeof supervisor.decision_timeout_ms === 'number' ? supervisor.decision_timeout_ms : undefined,
+          },
+          createdBy: 'chatgpt',
+        });
+        const daemon = ensureControllerDaemon(ctx.controllerHome);
+        return result({ ...campaign, daemon: { status: daemon.status, pid: daemon.pid }, next: 'Use get_campaign_review_packet when the campaign opens a checkpoint.' });
+      }
+      case 'list_campaigns': {
+        const repository = selected(ctx, args);
+        return result({ campaigns: listCampaigns(ctx.controllerHome, repository.repoId, typeof args.limit === 'number' ? args.limit : 100) });
+      }
+      case 'get_campaign': {
+        const repository = selected(ctx, args);
+        return result({ campaign: getCampaign(ctx.controllerHome, repository.repoId, String(args.campaign_id ?? '')) });
+      }
+      case 'add_campaign_task': {
+        const repository = selected(ctx, args);
+        const campaignId = String(args.campaign_id ?? '');
+        const existingCampaign = getCampaign(ctx.controllerHome, repository.repoId, campaignId);
+        const campaign = addCampaignTask(
+          ctx.controllerHome,
+          repository.repoId,
+          campaignId,
+          String(args.request_id ?? ''),
+          campaignTaskInput(args.task, repository.repoId, existingCampaign.checkoutId),
+          expectedRevision(args),
+        );
+        ensureControllerDaemon(ctx.controllerHome);
+        return result({ campaign });
+      }
+      case 'pause_campaign': {
+        const repository = selected(ctx, args);
+        return result({ campaign: setCampaignStatus(ctx.controllerHome, repository.repoId, String(args.campaign_id ?? ''), String(args.request_id ?? ''), 'paused', typeof args.reason === 'string' ? args.reason : undefined, expectedRevision(args)) });
+      }
+      case 'resume_campaign': {
+        const repository = selected(ctx, args);
+        const campaign = setCampaignStatus(ctx.controllerHome, repository.repoId, String(args.campaign_id ?? ''), String(args.request_id ?? ''), 'active', undefined, expectedRevision(args));
+        ensureControllerDaemon(ctx.controllerHome);
+        return result({ campaign });
+      }
+      case 'cancel_campaign': {
+        const repository = selected(ctx, args);
+        return result({ campaign: setCampaignStatus(ctx.controllerHome, repository.repoId, String(args.campaign_id ?? ''), String(args.request_id ?? ''), 'cancelled', typeof args.reason === 'string' ? args.reason : undefined, expectedRevision(args)) });
+      }
+      case 'get_campaign_review_packet': {
+        const repository = selected(ctx, args);
+        const campaign = getCampaign(ctx.controllerHome, repository.repoId, String(args.campaign_id ?? ''));
+        const checkpointId = typeof args.checkpoint_id === 'string' && args.checkpoint_id.trim()
+          ? args.checkpoint_id.trim()
+          : campaign.checkpoints.filter((checkpoint) => checkpoint.status === 'open').at(-1)?.checkpointId;
+        if (!checkpointId) throw new Error('CAMPAIGN_OPEN_CHECKPOINT_NOT_FOUND');
+        const checkpoint = campaign.checkpoints.find((entry) => entry.checkpointId === checkpointId);
+        if (!checkpoint || checkpoint.status !== 'open') throw new Error(`CAMPAIGN_OPEN_CHECKPOINT_NOT_FOUND: ${checkpointId}`);
+        return result({ campaignId: campaign.campaignId, campaignRevision: campaign.revision, checkpoint: { ...checkpoint, packet: checkpoint.packet } });
+      }
+      case 'submit_campaign_review': {
+        const repository = selected(ctx, args);
+        const revised = args.revised_goal && typeof args.revised_goal === 'object' && !Array.isArray(args.revised_goal)
+          ? args.revised_goal as Record<string, unknown>
+          : undefined;
+        const campaign = submitCampaignReview(ctx.controllerHome, {
+          repoId: repository.repoId,
+          campaignId: String(args.campaign_id ?? ''),
+          checkpointId: String(args.checkpoint_id ?? ''),
+          nonce: String(args.checkpoint_nonce ?? ''),
+          goalRevision: Number(args.goal_revision),
+          expectedCampaignRevision: expectedRevision(args, 'expected_campaign_revision'),
+          requestId: String(args.request_id ?? ''),
+          decision: {
+            action: String(args.action ?? '') as CampaignSupervisorAction,
+            summary: String(args.summary ?? ''),
+            instructions: typeof args.instructions === 'string' ? args.instructions : undefined,
+            revisedGoal: revised ? {
+              statement: String(revised.statement ?? ''),
+              acceptanceCriteria: stringList(revised.acceptance_criteria),
+              nonGoals: stringList(revised.non_goals),
+              reason: typeof revised.reason === 'string' ? revised.reason : undefined,
+            } : undefined,
+            submittedBy: typeof args.submitted_by === 'string' ? args.submitted_by : 'chatgpt',
+          },
+        });
+        ensureControllerDaemon(ctx.controllerHome);
+        return result({ campaign });
+      }
+      case 'accept_campaign': {
+        const repository = selected(ctx, args);
+        const current = getCampaign(ctx.controllerHome, repository.repoId, String(args.campaign_id ?? ''));
+        if (current.status !== 'ready_for_human_acceptance') throw new Error(`CAMPAIGN_NOT_READY_FOR_ACCEPTANCE: ${current.status}`);
+        return result({ campaign: setCampaignStatus(ctx.controllerHome, repository.repoId, current.campaignId, String(args.request_id ?? ''), 'completed', 'Accepted by human.', expectedRevision(args)) });
+      }
+      case 'reconcile_campaign': {
+        const repository = selected(ctx, args);
+        const reconciliation = reconcileCampaign(ctx.controllerHome, repository.repoId, String(args.campaign_id ?? ''));
+        ensureControllerDaemon(ctx.controllerHome);
+        return result({ reconciliation, campaign: getCampaign(ctx.controllerHome, repository.repoId, reconciliation.campaignId) });
       }
       case 'create_schedule': {
         const repository = selected(ctx, args);

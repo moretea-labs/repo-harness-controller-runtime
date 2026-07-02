@@ -16,6 +16,17 @@ export const CORE_CONTROLLER_TOOL_NAMES = [
   'work_cancel',
   'get_job',
   'get_artifact',
+  'create_campaign',
+  'list_campaigns',
+  'get_campaign',
+  'add_campaign_task',
+  'pause_campaign',
+  'resume_campaign',
+  'cancel_campaign',
+  'get_campaign_review_packet',
+  'submit_campaign_review',
+  'accept_campaign',
+  'reconcile_campaign',
   'harness_doctor',
 ] as const;
 

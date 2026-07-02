@@ -27,6 +27,7 @@
     "docs/public-usage-guide.zh-CN.md",
     "docs/repo-harness-chatgpt-browser-engine.md",
     "docs/repo-harness-chatgpt-controller.md",
+    "docs/repo-harness-chatgpt-supervised-automation.md",
     "docs/repo-harness-chatgpt-mcp-setup.md",
     "docs/repo-harness-github-issue-launcher.md",
     "docs/repo-harness-local-execution-bridge.md",
@@ -92,7 +93,8 @@
     "check:controller-v8": "bash scripts/verify-controller-v8.sh",
     "repo:registry": "bun src/cli/v81-entry.ts repo",
     "repo:rollout": "bash scripts/rollout-all-registered-repos.sh",
-    "smoke:schedule-engine": "node --loader ./src/runtime/shared/node-ts-loader.mjs scripts/smoke-schedule-engine.ts"
+    "smoke:schedule-engine": "node --loader ./src/runtime/shared/node-ts-loader.mjs scripts/smoke-schedule-engine.ts",
+    "smoke:supervised-automation": "node --loader ./src/runtime/shared/node-ts-loader.mjs scripts/smoke-chatgpt-supervised-automation.ts"
   },
   "devDependencies": {
     "@colbymchenry/codegraph": "1.0.1",

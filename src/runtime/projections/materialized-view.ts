@@ -5,6 +5,7 @@ import { listActiveLeases } from '../resources/leases/store';
 import { readJsonFile, writeJsonAtomic } from '../shared/json-files';
 import { repositoryControllerRoot } from '../../cli/repositories/controller-home';
 import { clearRepositoryProjectionDirty, readRepositoryProjectionDirty, repositoryProjectionIsDirty } from './invalidation';
+import { listCampaigns } from '../workflow/campaigns/store';
 
 export interface RepositoryRuntimeProjection {
   schemaVersion: 1;
@@ -17,6 +18,12 @@ export interface RepositoryRuntimeProjection {
   runningWorkers: number;
   activeLeases: number;
   attention: Array<{ jobId: string; status: string; message?: string }>;
+  campaigns?: {
+    active: number;
+    waitingForSupervisor: number;
+    pendingReviews: number;
+    readyForHumanAcceptance: number;
+  };
 }
 
 function projectionPath(controllerHome: string, repoId: string): string {
@@ -32,6 +39,7 @@ function buildRepositoryProjection(
   const leases = listActiveLeases(controllerHome, repoId);
   const attentionJobs = listExecutionJobs(controllerHome, repoId, 100)
     .filter((job) => ['orphaned', 'human_attention_required', 'stale'].includes(job.status));
+  const campaigns = listCampaigns(controllerHome, repoId, 1_000);
   return {
     schemaVersion: 1,
     repoId,
@@ -51,6 +59,12 @@ function buildRepositoryProjection(
     activeLeases: leases.length,
     attention: attentionJobs
       .map((job) => ({ jobId: job.jobId, status: job.status, message: job.error?.message })),
+    campaigns: {
+      active: campaigns.filter((campaign) => campaign.status === 'active').length,
+      waitingForSupervisor: campaigns.filter((campaign) => campaign.status === 'waiting_for_supervisor').length,
+      pendingReviews: campaigns.reduce((count, campaign) => count + campaign.checkpoints.filter((checkpoint) => checkpoint.status === 'open').length, 0),
+      readyForHumanAcceptance: campaigns.filter((campaign) => campaign.status === 'ready_for_human_acceptance').length,
+    },
   };
 }
 

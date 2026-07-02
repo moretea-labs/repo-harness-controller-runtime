@@ -450,13 +450,15 @@ describe("MCP controller profile", () => {
     });
   });
 
-  test("exposes a 12-tool core surface and resumes idempotent Work by request id", async () => {
+  test("exposes the supervised core surface and resumes idempotent Work by request id", async () => {
     await withController(async (repoRoot, _ctx) => {
       const controllerHome = join(repoRoot, ".controller-home");
       const repository = registerRepository({ path: repoRoot, controllerHome });
       const core = createMultiRepositoryContext({ repo: repoRoot, profile: "controller", toolset: "core", controllerHome });
       const full = createMultiRepositoryContext({ repo: repoRoot, profile: "controller", toolset: "full", controllerHome });
-      expect(exposedControllerToolDefinitions(core)).toHaveLength(12);
+      expect(exposedControllerToolDefinitions(core)).toHaveLength(23);
+      expect(exposedControllerToolDefinitions(core).map((tool) => tool.name)).toContain("create_campaign");
+      expect(exposedControllerToolDefinitions(core).map((tool) => tool.name)).toContain("submit_campaign_review");
       expect(exposedControllerToolDefinitions(full).length).toBeGreaterThan(100);
 
       let daemonPid: number | undefined;

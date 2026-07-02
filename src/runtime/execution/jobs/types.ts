@@ -47,7 +47,7 @@ export interface ExecutionJobOrigin {
 export interface ExecutionJobPayload {
   operation: string;
   arguments?: Record<string, unknown>;
-  target?: 'repository-tool' | 'mcp-tool' | 'runtime';
+  target?: 'repository-tool' | 'mcp-tool' | 'runtime' | 'workspace-agent';
   profile?: string;
   timeoutMs?: number;
   maxOutputBytes?: number;

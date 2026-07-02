@@ -437,3 +437,17 @@ Schedules may perform bounded repository work but cannot push, merge, publish, d
 ## 25. Rollout Rule
 
 New mutation Schedules begin in Shadow Mode until their decisions are reviewed. This is an operational rollout rule, not an implementation gap.
+
+## 26. ChatGPT-Supervised Campaigns
+
+Campaigns complement Schedules. A Schedule answers *when should a bounded occurrence run*; a Campaign answers *how should a multi-step goal progress across many bounded Jobs and review checkpoints*.
+
+Campaign reconciliation is event-driven and restart-safe. It uses short per-Campaign mutations, deterministic child request IDs, persisted retry timestamps, bounded parallelism, and the existing global scheduler/resource-claim system. It does not hold locks while ChatGPT, Codex, browser automation, or a human is working.
+
+A failed task blocks only descendants in the Campaign DAG. Independent tasks remain dispatchable. Pull-mode Supervisor waiting creates no periodic write loop. Agent operations force worktree isolation while preserving the executor's normal engineering and Computer Use capabilities.
+
+Campaigns stop at `ready_for_human_acceptance`; remote merge, publish, deploy, and release authority remain outside the autonomous loop.
+
+### Campaign workspace hierarchy
+
+A supervised Campaign defaults to a deterministic long-lived feature worktree. Its checkout identity is persisted on the Campaign and copied to every child ExecutionJob. Agent Runs may create short-lived task worktrees, but their automatic integration target is the Campaign checkout, never the repository's unrelated active checkout. Human acceptance does not merge or remove the Campaign worktree.

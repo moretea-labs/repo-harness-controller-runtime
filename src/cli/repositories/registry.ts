@@ -52,6 +52,13 @@ interface UpdateRepositoryInput {
   github?: RepositoryRecord['github'];
 }
 
+export interface AddRepositoryCheckoutInput {
+  repoId: string;
+  path: string;
+  controllerHome?: string;
+  activate?: boolean;
+}
+
 function validBranch(value: string | undefined): boolean {
   if (!value) return true;
   return /^(?!\/)(?!.*(?:\/\/|\.\.))(?!.*\/$)[A-Za-z0-9._/-]+$/.test(value);
@@ -381,6 +388,49 @@ export function registerRepository(input: RegisterRepositoryInput): RepositoryRe
   ensureRepositoryControllerLayout(home, repoId);
   writeLocalIdentity(record);
   return record;
+}
+
+export function addRepositoryCheckout(input: AddRepositoryCheckoutInput): RepositoryRecord {
+  const home = ensureControllerHome(input.controllerHome);
+  const canonicalRoot = resolveGitRoot(input.path);
+  const registry = loadRepositoryRegistry(home);
+  const index = registry.repositories.findIndex((record) => record.repoId === input.repoId);
+  if (index < 0) throw new Error(`repository not found: ${input.repoId}`);
+  const current = registry.repositories[index];
+  const rawRemote = git(canonicalRoot, ['config', '--get', 'remote.origin.url']);
+  const canonicalRemote = normalizeRemoteUrl(rawRemote);
+  if (current.canonicalRemote && canonicalRemote !== current.canonicalRemote) {
+    throw new Error(`CHECKOUT_REPOSITORY_MISMATCH: ${canonicalRoot}`);
+  }
+  const timestamp = now();
+  const checkoutId = stableCheckoutId(current.repoId, canonicalRoot);
+  const checkout: RepositoryCheckout = {
+    checkoutId,
+    localRoot: canonicalRoot,
+    canonicalRoot,
+    worktree: Boolean(git(canonicalRoot, ['rev-parse', '--git-common-dir']) && git(canonicalRoot, ['rev-parse', '--git-dir']) !== git(canonicalRoot, ['rev-parse', '--git-common-dir'])),
+    branch: git(canonicalRoot, ['branch', '--show-current']) ?? null,
+    createdAt: current.checkouts.find((value) => value.checkoutId === checkoutId)?.createdAt ?? timestamp,
+    updatedAt: timestamp,
+    lastSeenAt: timestamp,
+  };
+  const activate = input.activate === true;
+  const next: RepositoryRecord = {
+    ...current,
+    ...(activate ? { localRoot: canonicalRoot, canonicalRoot, activeCheckoutId: checkoutId } : {}),
+    checkouts: [...current.checkouts.filter((value) => value.checkoutId !== checkoutId), checkout],
+    updatedAt: timestamp,
+    lastSeenAt: timestamp,
+  };
+  registry.repositories[index] = next;
+  saveRepositoryRegistry(registry, home);
+  atomicJson(join(canonicalRoot, LOCAL_CONFIG), {
+    schemaVersion: 1,
+    repoId: next.repoId,
+    checkoutId,
+    stateStorageStrategy: next.stateStorageStrategy,
+  });
+  return next;
 }
 
 export function updateRepository(repoId: string, patch: UpdateRepositoryInput, controllerHome?: string): RepositoryRecord {

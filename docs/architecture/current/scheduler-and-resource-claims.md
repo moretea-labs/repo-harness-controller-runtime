@@ -420,3 +420,13 @@ The runtime now implements:
 - owner-bound Worker heartbeat, Lease renewal, release and terminal writes.
 
 New concurrency features must express their resources through this model. Additional ad-hoc long-lived locks require an ADR and may not execute on the Gateway event loop.
+
+## Campaign Scheduling
+
+The global scheduler runs bounded Campaign reconciliation outside the global dispatch reservation lock. Campaigns use one short lock per Campaign identity, while child Jobs continue to use normal resource claims and fencing tokens. This prevents one slow review or failed task from serializing unrelated Campaigns or repositories.
+
+Agent Campaign tasks are normalized to `isolate: true` and therefore claim a task worktree rather than the active production workspace. Waiting Checkpoints carry no lease. Retry timestamps are durable and include bounded backoff and jitter to avoid retry storms.
+
+### Campaign creation claims
+
+`create_campaign` briefly claims repository state and `git-refs:<repoId>` while creating or recovering the deterministic Campaign worktree. Normal Campaign reconciliation uses short per-Campaign locks. Supervisor triggers claim no repository resource, and implementation Jobs claim the Campaign checkout or a task-specific child worktree.

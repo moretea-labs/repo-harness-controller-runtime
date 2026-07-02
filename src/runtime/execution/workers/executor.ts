@@ -1,5 +1,5 @@
 import { bindRepositoryEntities } from '../../../cli/repositories/entity-migration';
-import { getRepository, repositorySummary } from '../../../cli/repositories/registry';
+import { getRepository, repositorySummary, selectRepositoryCheckout } from '../../../cli/repositories/registry';
 import { callRepositoryTool } from '../../../cli/mcp/repository-tools';
 import { callMcpTool, type CallToolResult, type McpToolContext } from '../../../cli/mcp/tools';
 import { runtimePolicy } from '../../../cli/mcp/multi-repository';
@@ -11,6 +11,7 @@ import type { ExecutionJob } from '../jobs/types';
 import { assertAutomatedOperationAllowed } from '../../control-plane/governance/external-effects';
 import { recordCandidateFinding, updateCandidateFinding } from '../../workflow/findings/store';
 import { writeControllerContextProjection } from '../../projections/controller-context';
+import { triggerWorkspaceAgent } from '../../workflow/campaigns/workspace-agent';
 
 
 async function settleLegacyLocalJob(repoRoot: string, jobId: string, timeoutMs = 15 * 60_000) {
@@ -75,8 +76,33 @@ export async function executeExecutionJob(controllerHome: string, job: Execution
         : { ok: true, result: record, repoRoot: controllerHome };
     }
 
-    const repository = getRepository(job.repoId, controllerHome, { includeRemoved: true });
+    const repository = selectRepositoryCheckout(
+      getRepository(job.repoId, controllerHome, { includeRemoved: true }),
+      job.checkoutId,
+    );
     const repoRoot = repository.canonicalRoot;
+    if (job.payload.target === 'workspace-agent') {
+      const args = job.payload.arguments ?? {};
+      const output = await triggerWorkspaceAgent({
+        agentId: String(args.agentId ?? args.agent_id ?? ''),
+        input: String(args.input ?? ''),
+        conversationKey: typeof args.conversationKey === 'string'
+          ? args.conversationKey
+          : typeof args.conversation_key === 'string' ? args.conversation_key : undefined,
+        idempotencyKey: typeof args.idempotencyKey === 'string'
+          ? args.idempotencyKey
+          : typeof args.idempotency_key === 'string' ? args.idempotency_key : undefined,
+        timeoutMs: typeof args.timeoutMs === 'number'
+          ? args.timeoutMs
+          : typeof args.timeout_ms === 'number' ? args.timeout_ms : job.payload.timeoutMs,
+      });
+      return { ok: true, result: { workspaceAgent: output }, repoRoot };
+    }
+
+    const runtimeStorage = ensureRepositoryRuntimeStorage(repository, controllerHome);
+    if (!runtimeStorage.readyForExecution) {
+      throw new Error(`RUNTIME_STORAGE_NOT_READY: ${runtimeStorage.warnings.join('; ') || repository.activeCheckoutId}`);
+    }
     bindRepositoryEntities(repository);
 
     if (job.payload.target === 'runtime' && job.payload.operation === 'legacy-local-job') {
@@ -132,7 +158,6 @@ export async function executeExecutionJob(controllerHome: string, job: Execution
       enableChatgptBrowser: job.payload.enableChatgptBrowser === true,
     };
     const result = await callMcpTool(context, job.payload.operation, job.payload.arguments ?? {});
-    const runtimeStorage = ensureRepositoryRuntimeStorage(repository, controllerHome);
     let record: Record<string, unknown> = {
       ...toolResultRecord(result),
       repoId: repository.repoId,

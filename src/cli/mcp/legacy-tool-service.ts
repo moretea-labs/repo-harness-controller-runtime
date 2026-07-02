@@ -1525,6 +1525,10 @@ export function buildMcpToolDefinitions(
               description:
                 "Optional. Omit for automatic placement: use the current workspace when no local Run is active and a worktree only for concurrency. false forces the current workspace and is rejected during concurrency; true forces a worktree.",
             },
+            supervisor_instructions: {
+              type: "string",
+              description: "Optional follow-up guidance from a supervising ChatGPT review. Appended to the retried Run prompt without narrowing normal executor capabilities.",
+            },
             timeout_ms: agentTimeoutSchema,
             github_repo: { type: "string" },
             base_ref: { type: "string" },
@@ -4127,6 +4131,9 @@ export async function callMcpTool(
               ? undefined
               : runnerTimeoutMs(ctx, args.timeout_ms),
           isolate: typeof args.isolate === "boolean" ? args.isolate : undefined,
+          supervisorInstructions: typeof args.supervisor_instructions === "string"
+            ? args.supervisor_instructions
+            : undefined,
         });
         audit(
           ctx,

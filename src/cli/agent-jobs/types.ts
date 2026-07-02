@@ -58,6 +58,7 @@ export interface AgentJobMeta {
   repoId?: string;
   checkoutId?: string;
   requestId?: string;
+  supervisorInstructions?: string;
   runId: string;
   issueId: string;
   taskId: string;

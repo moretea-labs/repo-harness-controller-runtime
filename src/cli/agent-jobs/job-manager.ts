@@ -892,6 +892,7 @@ export interface StartTaskJobOptions {
   model?: string;
   createPullRequest?: boolean;
   retryFromRunId?: string;
+  supervisorInstructions?: string;
   requestId?: string;
   approveRisk?: boolean;
   approveDestructive?: boolean;
@@ -1063,6 +1064,7 @@ function baseMeta(
     repoId: identity.repoId,
     checkoutId: identity.checkoutId,
     requestId: opts.requestId,
+    supervisorInstructions: opts.supervisorInstructions?.trim() || undefined,
     runId,
     issueId: opts.issueId,
     taskId: opts.taskId,
@@ -1212,7 +1214,15 @@ export function launchAcceptedTaskJob(
   meta.worktreePath = isolation.path;
   meta.branch = isolation.branch;
   meta.baseRevision = isolation.baseRevision;
-  const prompt = taskPrompt(issue.title, issue.summary, task, repoRoot, isolation.path, provider, executionMode);
+  const basePrompt = taskPrompt(issue.title, issue.summary, task, repoRoot, isolation.path, provider, executionMode);
+  const prompt = meta.supervisorInstructions
+    ? `${basePrompt}
+
+## Supervisor follow-up
+
+${meta.supervisorInstructions}
+`
+    : basePrompt;
   writeFileSync(paths.promptPath, prompt, "utf-8");
   writeAgentMeta(repoRoot, absoluteMetaPath, meta);
 
@@ -1799,7 +1809,7 @@ export function cancelAgentJob(repoRoot: string, runId: string): AgentJobMeta {
 export function retryAgentJob(
   repoRoot: string,
   runId: string,
-  options: { timeoutMs?: number; isolate?: boolean } = {},
+  options: { timeoutMs?: number; isolate?: boolean; supervisorInstructions?: string } = {},
 ): AgentJobMeta {
   const previous = getAgentJob(repoRoot, runId);
   if (
@@ -1838,6 +1848,7 @@ export function retryAgentJob(
     agent: previous.agent,
     timeoutMs,
     retryFromRunId: previous.runId,
+    supervisorInstructions: options.supervisorInstructions,
     approveRisk: true,
     approveDestructive: previous.status === "cancelled" ? false : undefined,
     isolate: options.isolate,

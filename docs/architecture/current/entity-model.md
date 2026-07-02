@@ -561,3 +561,18 @@ Durable workflow and evidence entities are normally archived, not deleted.
 Ephemeral Quick Agent Issue metadata may be cleaned after terminal completion, but Run and Job evidence remains durable according to retention policy.
 
 Runtime projections, expired Leases, caches, and disposable Worktrees may be removed after durable terminal evidence and cleanup records exist.
+
+## ChatGPT-Supervised Campaign
+
+A Campaign is a durable project-level objective that coordinates existing Tasks, Execution Jobs, Agent Runs, Evidence, and human acceptance without replacing their lifecycles.
+
+- A Campaign has revisioned goals and a stable goal hash.
+- A Campaign Task references one existing MCP operation and explicit dependencies.
+- A Checkpoint is a persisted ChatGPT review boundary, not a running Job.
+- A Supervisor Decision is bound to one checkpoint nonce and goal revision.
+- `waiting_for_supervisor` holds no worker or resource lease.
+- `ready_for_human_acceptance` is not completion; only explicit human acceptance transitions to `completed`.
+
+Campaign records are repository-scoped. Execution remains delegated to the existing durable Job and Agent Run models.
+
+A Campaign owns an immutable `workspace` binding containing mode, checkout id, branch, root, original base revision, and whether repo-harness manages the worktree. ExecutionJob workers must resolve `job.checkoutId`; falling back to the active checkout is an identity violation.
