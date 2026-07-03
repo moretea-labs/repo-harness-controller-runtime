@@ -53,20 +53,21 @@ A rule that protects existing tools, stored state and callers while the runtime 
 Read the architecture in this order:
 
 1. `system-overview.md` — boundary, layers, and process topology.
-2. `architecture-invariants.md` — non-negotiable rules.
-3. `entity-model.md` — durable entity meanings and ownership.
-4. `job-and-run-lifecycle.md` — execution, retry, cancellation, and terminal-state semantics.
-5. `dispatch-and-agent-strategy.md` — selection of Direct Edit, Quick Agent, durable Tasks, and Agent roles.
-6. `scheduler-and-resource-claims.md` — repository actors, claims, leases, workspace conflicts, and integration queues.
-7. `multi-repository-execution.md` — cross-repository quotas, fairness, DAGs, and failure isolation.
-8. `automation-and-schedule-engine.md` — schedules, bounded occurrences, deduplication, budgets, and stop conditions.
-9. `failure-recovery.md` — Gateway, Controller, Worker, orphan, stale, timeout, and reconciliation behavior.
-10. `verification-and-release-gates.md` — exact-revision verification, acceptance, release freeze, and human authorization.
-11. `implementation-status.md` — verified implementation coverage and compatibility boundaries.
-12. `migration-roadmap.md` — completed phase record and maintenance gates.
-13. `runtime-directory-map.md` — executable module boundaries.
-14. `operations-runbook.md` — health, recovery and release operations.
-15. `governance.md` — ownership, ADR, drift, and maintenance rules.
+2. `personal-assistant-plugin-baseline.md` — concrete assistant/plugin/GitHub/Gmail/Calendar boundary and migration baseline.
+3. `architecture-invariants.md` — non-negotiable rules.
+4. `entity-model.md` — durable entity meanings and ownership.
+5. `job-and-run-lifecycle.md` — execution, retry, cancellation, and terminal-state semantics.
+6. `dispatch-and-agent-strategy.md` — selection of Direct Edit, Quick Agent, durable Tasks, and Agent roles.
+7. `scheduler-and-resource-claims.md` — repository actors, claims, leases, workspace conflicts, and integration queues.
+8. `multi-repository-execution.md` — cross-repository quotas, fairness, DAGs, and failure isolation.
+9. `automation-and-schedule-engine.md` — schedules, bounded occurrences, deduplication, budgets, and stop conditions.
+10. `failure-recovery.md` — Gateway, Controller, Worker, orphan, stale, timeout, and reconciliation behavior.
+11. `verification-and-release-gates.md` — exact-revision verification, acceptance, release freeze, and human authorization.
+12. `implementation-status.md` — verified implementation coverage and compatibility boundaries.
+13. `migration-roadmap.md` — completed phase record and maintenance gates.
+14. `runtime-directory-map.md` — executable module boundaries.
+15. `operations-runbook.md` — health, recovery and release operations.
+16. `governance.md` — ownership, ADR, drift, and maintenance rules.
 
 
 ## Architecture Layers
@@ -150,4 +151,5 @@ See [Architecture Governance Contract](governance.md).
 
 
 - [Approved target architecture (zh-CN)](approved-target-architecture.zh-CN.md)
+- [Personal assistant/plugin baseline](personal-assistant-plugin-baseline.md)
 - [Target requirements traceability](target-requirements-traceability.md)

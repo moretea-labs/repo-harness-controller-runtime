@@ -15,6 +15,8 @@ import { openCampaignCheckpoint } from '../../src/runtime/workflow/campaigns/rev
 import { reconcileCampaign } from '../../src/runtime/workflow/campaigns/engine';
 import { cancelCampaign } from '../../src/runtime/workflow/campaigns/cleanup';
 import { createExecutionJob, getExecutionJob, transitionExecutionJob } from '../../src/runtime/execution/jobs/store';
+import { legacySettlementTimeoutMs } from '../../src/runtime/execution/jobs/legacy-adapter';
+import type { LocalBridgeJob } from '../../src/cli/local-bridge/types';
 
 const roots: string[] = [];
 function temporary(prefix: string): string {
@@ -115,6 +117,16 @@ describe('runtime consistency hardening', () => {
     expect(projectAgentRunToLocalBridgeStatus('starting')).toBe('running');
     expect(projectAgentRunToLocalBridgeStatus('queued')).toBe('dispatched');
     expect(projectAgentRunToLocalBridgeStatus('succeeded')).toBe('succeeded');
+  });
+
+  test('gives durable legacy settlement more time than the inner operation timeout', () => {
+    const job = {
+      payload: { timeoutMs: 8_000 },
+    } as unknown as LocalBridgeJob;
+    expect(legacySettlementTimeoutMs(job)).toBe(38_000);
+
+    const defaulted = { payload: {} } as unknown as LocalBridgeJob;
+    expect(legacySettlementTimeoutMs(defaulted)).toBe(60 * 60_000 + 30_000);
   });
 
   test('executes an immutable check snapshot after the registry changes', async () => {

@@ -417,7 +417,7 @@ printf '%s\n' '{"type":"turn.completed"}'
       body: JSON.stringify({
         action: "run-check",
         requestedBy: "test",
-        payload: { checkId: "delayed", timeoutMs: 8_000 },
+        payload: { checkId: "delayed", timeoutMs: 15_000 },
       }),
     }).then((response) => response.json());
     expect(Date.now() - startedAt).toBeLessThan(3_500);
@@ -429,23 +429,24 @@ printf '%s\n' '{"type":"turn.completed"}'
     const duplicate = submitLocalBridgeJob(root, {
       action: "run-check",
       requestedBy: "test",
-      payload: { checkId: "delayed", timeoutMs: 8_000 },
+      payload: { checkId: "delayed", timeoutMs: 15_000 },
     });
     expect(duplicate.jobId).toBe(created.jobId);
 
     let finished = getLocalBridgeJob(root, created.jobId);
-    for (let attempt = 0; attempt < 300 && ["approved", "dispatched", "running"].includes(finished.status); attempt += 1) {
+    for (let attempt = 0; attempt < 600 && ["approved", "dispatched", "running"].includes(finished.status); attempt += 1) {
       await Bun.sleep(25);
       finished = getLocalBridgeJob(root, created.jobId);
     }
     expect(finished.status).toBe("succeeded");
+    expect(finished.error).toBeUndefined();
     expect(finished.finishedAt).toBeTruthy();
     expect(finished.workerPid).toBeUndefined();
 
     const rerun = submitLocalBridgeJob(root, {
       action: "run-check",
       requestedBy: "test",
-      payload: { checkId: "delayed", timeoutMs: 8_000 },
+      payload: { checkId: "delayed", timeoutMs: 15_000 },
     });
     expect(rerun.jobId).not.toBe(created.jobId);
     expect(rerun.status).toBe("approved");

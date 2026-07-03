@@ -57,6 +57,7 @@ The current set is introduced incrementally under governance Issue `ISS-20260625
 - `README.md` — map, status labels, and reading order;
 - `governance.md` — authority, ownership, ADR, and drift rules;
 - `system-overview.md` — system boundary and process topology;
+- `personal-assistant-plugin-baseline.md` — concrete assistant/plugin/provider boundary, threat model, capability matrix, and migration baseline;
 - `architecture-invariants.md` — rules implementations must not violate;
 - `entity-model.md` — Issue, Task, Job, Run, Edit Session, Verification, Schedule, Occurrence, Claim, and Lease semantics;
 - `job-and-run-lifecycle.md` — durable execution and retry state machines;

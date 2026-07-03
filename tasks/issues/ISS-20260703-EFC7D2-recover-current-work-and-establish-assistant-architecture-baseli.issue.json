@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 5,
+  "id": "ISS-20260703-EFC7D2",
+  "title": "Recover current work and establish assistant architecture baseline",
+  "slug": "recover-current-work-and-establish-assistant-architecture-baseli",
+  "kind": "investigation",
+  "status": "completed",
+  "summary": "Work directly in the current checkout. Inspect branch history, all dirty files, existing assistant/Gmail/Calendar/plugin code, and runtime architecture. Preserve every legitimate existing change. Finalize incomplete MCP lifecycle/source packaging edits, document the concrete personal-assistant plugin architecture, threat model, capability matrix and migration plan, run focused checks, and commit a coherent baseline. Do not reset, stash away, or overwrite user work.",
+  "goals": [
+    "Work directly in the current checkout. Inspect branch history, all dirty files, existing assistant/Gmail/Calendar/plugin code, and runtime architecture. Preserve every legitimate existing change. Finalize incomplete MCP lifecycle/source packaging edits, document the concrete personal-assistant plugin architecture, threat model, capability matrix and migration plan, run focused checks, and commit a coherent baseline. Do not reset, stash away, or overwrite user work."
+  ],
+  "nonGoals": [
+    "Do not make unrelated changes outside the declared Task scope."
+  ],
+  "acceptanceCriteria": [
+    "No existing user changes lost.",
+    "Dirty files reviewed and committed coherently.",
+    "Architecture and threat model are concrete and source-aligned.",
+    "Focused checks pass."
+  ],
+  "relatedArtifacts": [
+    "docs/architecture/current/personal-assistant-plugin-baseline.md"
+  ],
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Recover current work and establish assistant architecture baseline",
+      "objective": "Work directly in the current checkout. Inspect branch history, all dirty files, existing assistant/Gmail/Calendar/plugin code, and runtime architecture. Preserve every legitimate existing change. Finalize incomplete MCP lifecycle/source packaging edits, document the concrete personal-assistant plugin architecture, threat model, capability matrix and migration plan, run focused checks, and commit a coherent baseline. Do not reset, stash away, or overwrite user work.",
+      "status": "done",
+      "dependsOn": [],
+      "allowedPaths": [],
+      "forbiddenPaths": [],
+      "checks": [
+        "package:check:type",
+        "package:check:mcp-compatibility",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "No existing user changes lost.",
+        "Dirty files reviewed and committed coherently.",
+        "Architecture and threat model are concrete and source-aligned.",
+        "Focused checks pass."
+      ],
+      "risk": "high",
+      "recommendedAgent": "codex",
+      "notes": [
+        "Accepted RUN-iss-20260703-efc7d2-t1-1783085639766-50f61077 for asynchronous launch.",
+        "Dispatched RUN-iss-20260703-efc7d2-t1-1783085639766-50f61077 to codex."
+      ],
+      "runIds": [
+        "RUN-iss-20260703-efc7d2-t1-1783085639766-50f61077"
+      ],
+      "createdAt": "2026-07-03T13:33:59.744Z",
+      "updatedAt": "2026-07-03T14:35:00.000Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    }
+  ],
+  "createdAt": "2026-07-03T13:33:59.744Z",
+  "updatedAt": "2026-07-03T14:35:00.000Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+}

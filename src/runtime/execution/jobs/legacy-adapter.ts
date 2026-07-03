@@ -1,9 +1,21 @@
 import { ensureControllerHome } from '../../../cli/repositories/controller-home';
 import { registerRepository } from '../../../cli/repositories/registry';
 import type { LocalBridgeJob } from '../../../cli/local-bridge/types';
+import { DEFAULT_AGENT_TIMEOUT_MS, MAX_AGENT_TIMEOUT_MS } from '../../../cli/controller/runtime-config';
 import { ensureControllerDaemon } from '../../control-plane/daemon-client';
 import { createExecutionJob } from './store';
 import type { ResourceClaimSpec } from './types';
+
+const LEGACY_SETTLEMENT_GRACE_MS = 30_000;
+const MAX_DURABLE_EXECUTION_TIMEOUT_MS = 24 * 60 * 60_000;
+
+export function legacySettlementTimeoutMs(job: LocalBridgeJob): number {
+  const payload = job.payload as { timeoutMs?: unknown };
+  const requested = typeof payload.timeoutMs === 'number' && Number.isFinite(payload.timeoutMs)
+    ? Math.max(1_000, Math.min(payload.timeoutMs, MAX_AGENT_TIMEOUT_MS))
+    : DEFAULT_AGENT_TIMEOUT_MS;
+  return Math.min(requested + LEGACY_SETTLEMENT_GRACE_MS, MAX_DURABLE_EXECUTION_TIMEOUT_MS);
+}
 
 function requestId(job: LocalBridgeJob): string {
   const payload = job.payload as { requestId?: string };
@@ -20,6 +32,7 @@ function claims(job: LocalBridgeJob, repoId: string, checkoutId: string): Resour
 }
 
 export function dispatchLegacyLocalJob(repoRoot: string, legacyJob: LocalBridgeJob) {
+  const settlementTimeoutMs = legacySettlementTimeoutMs(legacyJob);
   const controllerHome = ensureControllerHome(
     legacyJob.action === 'repository-command' && 'controllerHome' in legacyJob.payload
       ? String(legacyJob.payload.controllerHome)
@@ -44,9 +57,10 @@ export function dispatchLegacyLocalJob(repoRoot: string, legacyJob: LocalBridgeJ
       operation: 'legacy-local-job',
       target: 'runtime',
       arguments: { localJobId: legacyJob.jobId },
-      timeoutMs: 'timeoutMs' in legacyJob.payload && typeof legacyJob.payload.timeoutMs === 'number' ? legacyJob.payload.timeoutMs : undefined,
+      timeoutMs: settlementTimeoutMs,
     },
     resourceClaims: claims(legacyJob, repository.repoId, repository.activeCheckoutId),
+    timeoutMs: settlementTimeoutMs,
     maxAttempts: 2,
   });
   const daemon = ensureControllerDaemon(controllerHome);
