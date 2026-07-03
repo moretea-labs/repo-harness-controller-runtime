@@ -20,6 +20,12 @@ export interface ControllerCheck {
   source: 'repo-config' | 'package-script';
 }
 
+export interface ControllerCheckSnapshot extends ControllerCheck {
+  schemaVersion: 1;
+  registryRevision: string;
+  definitionDigest: string;
+}
+
 interface CheckConfig {
   version?: number;
   checks?: Record<string, {
@@ -191,6 +197,43 @@ export function currentControllerCheckRevision(repoRoot: string): string {
   return revision.digest('hex').slice(0, 24);
 }
 
+function checkDefinitionDigest(check: ControllerCheck): string {
+  return createHash('sha256').update(JSON.stringify({
+    id: check.id,
+    description: check.description,
+    command: check.command,
+    cwd: check.cwd,
+    timeoutMs: check.timeoutMs,
+    source: check.source,
+  })).digest('hex');
+}
+
+export function snapshotControllerCheck(repoRoot: string, id: string): ControllerCheckSnapshot {
+  const check = listControllerChecks(repoRoot).find((entry) => entry.id === id);
+  if (!check) throw new Error(`check not found: ${id}`);
+  return {
+    ...structuredClone(check),
+    schemaVersion: 1,
+    registryRevision: currentControllerCheckRevision(repoRoot),
+    definitionDigest: checkDefinitionDigest(check),
+  };
+}
+
+function validateControllerCheckSnapshot(repoRoot: string, snapshot: ControllerCheckSnapshot): ControllerCheck {
+  if (snapshot.schemaVersion !== 1 || snapshot.definitionDigest !== checkDefinitionDigest(snapshot)) {
+    throw new Error(`CHECK_SNAPSHOT_INVALID: ${snapshot.id}`);
+  }
+  // Re-run cwd validation even for persisted input so snapshots cannot escape the checkout.
+  return {
+    id: snapshot.id,
+    description: snapshot.description,
+    command: [...snapshot.command],
+    cwd: normalizeCwd(repoRoot, snapshot.cwd),
+    timeoutMs: boundedTimeout(snapshot.timeoutMs),
+    source: snapshot.source,
+  };
+}
+
 function checkEnvironmentFingerprint(): string {
   return createHash('sha256')
     .update(JSON.stringify({
@@ -257,9 +300,9 @@ export function readLatestControllerCheckEvidence(repoRoot: string, id: string):
   }
 }
 
-export function runControllerCheck(repoRoot: string, id: string, requestedTimeoutMs?: number): ControllerCheckResult {
-  const check = listControllerChecks(repoRoot).find((entry) => entry.id === id);
-  if (!check) throw new Error(`check not found: ${id}`);
+export function runControllerCheck(repoRoot: string, id: string, requestedTimeoutMs?: number, snapshot?: ControllerCheckSnapshot): ControllerCheckResult {
+  const check = snapshot ? validateControllerCheckSnapshot(repoRoot, snapshot) : listControllerChecks(repoRoot).find((entry) => entry.id === id);
+  if (!check || check.id !== id) throw new Error(`check not found: ${id}`);
   const timeoutMs = requestedTimeoutMs === undefined ? check.timeoutMs : Math.min(check.timeoutMs, boundedTimeout(requestedTimeoutMs));
   const revision = currentControllerCheckRevision(repoRoot);
   const cacheKey = buildCheckCacheKey(check, timeoutMs, revision);
@@ -317,6 +360,7 @@ export function runControllerCheck(repoRoot: string, id: string, requestedTimeou
 }
 
 export interface AsyncControllerCheckOptions {
+  snapshot?: ControllerCheckSnapshot;
   requestedTimeoutMs?: number;
   onSpawn?: (pid: number) => void;
   subscriberId?: string;
@@ -571,8 +615,13 @@ export function runControllerCheckAsync(
   id: string,
   options: AsyncControllerCheckOptions = {},
 ): Promise<ControllerCheckResult> {
-  const check = listControllerChecks(repoRoot).find((entry) => entry.id === id);
-  if (!check) return Promise.reject(new Error(`check not found: ${id}`));
+  let check: ControllerCheck | undefined;
+  try {
+    check = options.snapshot ? validateControllerCheckSnapshot(repoRoot, options.snapshot) : listControllerChecks(repoRoot).find((entry) => entry.id === id);
+  } catch (error) {
+    return Promise.reject(error);
+  }
+  if (!check || check.id !== id) return Promise.reject(new Error(`check not found: ${id}`));
   const timeoutMs = options.requestedTimeoutMs === undefined
     ? check.timeoutMs
     : Math.min(check.timeoutMs, boundedTimeout(options.requestedTimeoutMs));

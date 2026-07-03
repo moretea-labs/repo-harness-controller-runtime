@@ -383,3 +383,9 @@ Runtime and release checks cover:
 - release Lease blocks new writes;
 - a successful Gate does not execute an external side effect;
 - partial external outcomes never become global success.
+
+## 21. Immutable Check Definition Snapshot
+
+A scheduled check stores the normalized command, cwd, timeout, source, registry revision, and definition digest at admission time. Execution validates the digest and repository-relative cwd, then uses that snapshot even if another checkout or a later commit changes the check registry.
+
+The snapshot stabilizes check identity; the produced evidence is still bound to the revision observed when execution starts and becomes stale if repository content changes while the command runs. This prevents both `check not found` after checkout switching and accidental reuse of evidence from a different repository revision.

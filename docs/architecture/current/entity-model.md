@@ -576,3 +576,29 @@ A Campaign is a durable project-level objective that coordinates existing Tasks,
 Campaign records are repository-scoped. Execution remains delegated to the existing durable Job and Agent Run models.
 
 A Campaign owns an immutable `workspace` binding containing mode, checkout id, branch, root, original base revision, and whether repo-harness manages the worktree. ExecutionJob workers must resolve `job.checkoutId`; falling back to the active checkout is an identity violation.
+
+## 22. Structured Execution Outcome
+
+A Job result and a Job failure are separate concepts. Durable execution records may contain all of the following independently:
+
+```text
+result                 bounded operation-specific value
+outcome.process        exit code, timeout, stdout/stderr artifact paths
+outcome.policy         allowed, approval-required, or rejected decision
+outcome.infrastructure storage, spawn, transport, or runtime failure
+error                  terminal workflow error when the Job did not succeed
+```
+
+Successful stdout is never stored in `error`. Compatibility Local Jobs project the durable Execution Job status, result, and structured outcome without becoming a second source of lifecycle truth.
+
+## 23. Campaign Completion Outcome
+
+A Campaign Task distinguishes an implementation change from an already-satisfied objective:
+
+```text
+succeeded              completed with changes or a non-repository result
+succeeded_no_change    completed with a proven empty repository diff
+failed_no_effect       changes were required but the Run produced no diff
+```
+
+`requiresChanges` is part of Task intent. A no-change Task never opens a review solely because it completed, and it is never rescheduled after reaching a terminal no-change outcome. A Campaign whose Tasks are all `succeeded_no_change` or `skipped` becomes ready for human acceptance with `completionOutcome=already_satisfied`.

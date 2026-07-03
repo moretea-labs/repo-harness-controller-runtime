@@ -61,6 +61,12 @@ export interface ExecutionJobLeaseRef {
   expiresAt: string;
 }
 
+export interface ExecutionJobOutcome {
+  process?: { exitCode?: number | null; timedOut?: boolean; stdoutPath?: string; stderrPath?: string };
+  policy?: { decision: 'allowed' | 'approval_required' | 'rejected'; repositoryChanged?: boolean; changedPaths?: string[] };
+  infrastructureError?: { code: string; message: string };
+}
+
 export interface ExecutionJob {
   schemaVersion: 1;
   revision: number;
@@ -88,6 +94,7 @@ export interface ExecutionJob {
   attempt: number;
   maxAttempts: number;
   result?: Record<string, unknown>;
+  outcome?: ExecutionJobOutcome;
   error?: { code: string; message: string; retryable: boolean; details?: Record<string, unknown> };
   evidenceIds: string[];
 }

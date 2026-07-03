@@ -34,3 +34,15 @@ Legacy code remains under `src/cli/` for public compatibility:
 - Local Jobs project into `ExecutionJob` while retaining their original IDs and UI contract.
 
 New scheduling ownership must be added under `src/runtime/`, never inside MCP transport handlers.
+
+## Runtime Storage Ownership and Quarantine
+
+Each bound directory under Controller Home contains `.repo-harness-owner.json` with `repoId`, binding name, and management identity. Repository-local `.ai/harness/<binding>` paths are links to these owned directories.
+
+When legacy and Controller Home directories both contain data, non-conflicting entries are merged. Conflicting source entries are preserved under:
+
+```text
+<controller-home>/repositories/<repoId>/quarantine/runtime-storage/<binding>/
+```
+
+Execution readiness remains false for active/unreadable Run or Local Job state and for non-directory/path conflicts. A non-empty worktree directory by itself is not a reason to perform an unsafe move or to block forever.

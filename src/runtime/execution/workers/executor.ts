@@ -7,7 +7,7 @@ import { ensureRepositoryRuntimeStorage } from '../../../cli/repositories/runtim
 import { evaluateReleaseGate } from '../../release/release-gate';
 import { executeLocalBridgeJobInline, getLocalBridgeJob } from '../../../cli/local-bridge/job-store';
 import { settleScheduledExecution } from '../../workflow/schedules/settlement';
-import type { ExecutionJob } from '../jobs/types';
+import type { ExecutionJob, ExecutionJobOutcome } from '../jobs/types';
 import { assertAutomatedOperationAllowed } from '../../control-plane/governance/external-effects';
 import { recordCandidateFinding, updateCandidateFinding } from '../../workflow/findings/store';
 import { writeControllerContextProjection } from '../../projections/controller-context';
@@ -23,7 +23,7 @@ async function settleLegacyLocalJob(repoRoot: string, jobId: string, timeoutMs =
   if (current.status === 'approved' || projectedExecutionPending) {
     current = executeLocalBridgeJobInline(repoRoot, jobId);
   }
-  while (current.status === 'running') {
+  while (['approved', 'dispatched', 'running'].includes(current.status)) {
     if (Date.now() - started >= timeoutMs) throw new Error(`LEGACY_JOB_TIMEOUT: ${jobId}`);
     await new Promise((resolve) => setTimeout(resolve, 250));
     current = getLocalBridgeJob(repoRoot, jobId);
@@ -43,6 +43,7 @@ function legacyJobIdFromResult(record: Record<string, unknown>): string | undefi
 export interface WorkerExecutionResult {
   ok: boolean;
   result?: Record<string, unknown>;
+  outcome?: ExecutionJobOutcome;
   error?: { code: string; message: string; retryable: boolean; details?: Record<string, unknown> };
   repoRoot: string;
 }
@@ -109,10 +110,9 @@ export async function executeExecutionJob(controllerHome: string, job: Execution
       const localJobId = String(job.payload.arguments?.localJobId ?? '').trim();
       if (!localJobId) throw new Error('LEGACY_JOB_ID_REQUIRED');
       const localJob = await settleLegacyLocalJob(repoRoot, localJobId, typeof job.payload.timeoutMs === 'number' ? job.payload.timeoutMs : undefined);
-      const ok = localJob.status === 'succeeded' || localJob.status === 'dispatched';
-      return ok
-        ? { ok: true, result: { localJob }, repoRoot }
-        : { ok: false, error: { code: 'LEGACY_JOB_FAILED', message: localJob.error ?? `Local Job ended as ${localJob.status}`, retryable: false, details: { localJob } }, repoRoot };
+      return localJob.status === 'succeeded'
+        ? { ok: true, result: { localJob }, outcome: localJob.outcome, repoRoot }
+        : { ok: false, outcome: localJob.outcome, error: { code: 'LEGACY_JOB_FAILED', message: localJob.error ?? `Local Job ended as ${localJob.status}`, retryable: false, details: { localJob } }, repoRoot };
     }
 
     if (job.type === 'release-gate') {
@@ -167,12 +167,14 @@ export async function executeExecutionJob(controllerHome: string, job: Execution
     if (job.payload.operation === 'controller_context' && !result.isError) {
       writeControllerContextProjection(controllerHome, repository.repoId, record);
     }
+    let outcome: ExecutionJobOutcome | undefined;
     const legacyJobId = legacyJobIdFromResult(record);
     if (legacyJobId) {
       try {
         const localJob = await settleLegacyLocalJob(repoRoot, legacyJobId, typeof job.payload.timeoutMs === 'number' ? job.payload.timeoutMs : undefined);
         record = { ...record, localJob };
-        if (!['succeeded', 'dispatched'].includes(localJob.status)) {
+        outcome = localJob.outcome;
+        if (localJob.status !== 'succeeded') {
           return { ok: false, error: { code: 'LEGACY_JOB_FAILED', message: localJob.error ?? `Local Job ended as ${localJob.status}`, retryable: false, details: { localJob } }, repoRoot };
         }
       } catch {
@@ -204,7 +206,7 @@ export async function executeExecutionJob(controllerHome: string, job: Execution
     if (result.isError) {
       return { ok: false, error: { code: 'MCP_TOOL_FAILED', message: JSON.stringify(record), retryable: false }, repoRoot };
     }
-    return { ok: true, result: record, repoRoot };
+    return { ok: true, result: record, outcome, repoRoot };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const retryable = /ECONN|EPIPE|temporar|timeout|worker|network/i.test(message);

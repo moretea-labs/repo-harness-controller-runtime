@@ -399,3 +399,15 @@ occurredAt
 ```
 
 Lifecycle transitions without an audit event are recovery anomalies and must be detectable by governance checks.
+
+## 21. Controller Ownership Fencing
+
+Repository controller ownership is a stable lease identity, not a per-Task token. Heartbeat or sibling dispatch renews/reuses the live owner and does not rotate its epoch. The epoch changes only on a proven takeover after the previous owner is dead or its record is malformed. Epoch writes are serialized and atomic.
+
+A child Worker receives the current controller PID and epoch as a derived execution capability. It may publish heartbeats or terminal state only while that capability still matches the durable owner record. Parallel sibling Runs therefore cannot invalidate each other by reacquiring repository ownership.
+
+## 22. Local Job Projection
+
+Local Bridge states are compatibility projections of Agent Runs or durable Execution Jobs. `starting` is active and maps to `running`; it is never interpreted as terminal failure. A projected Local Job synchronizes its durable Job before applying action-specific orphan or timeout rules, preventing a compatibility projection from masking a terminal durable result.
+
+Runtime storage is bound before the first Local Job is persisted. This prevents the Job from blocking migration of the directory that contains its own state.

@@ -20,7 +20,7 @@ const AGENT_OPERATIONS = new Set(['dispatch_task', 'launch_issue', 'dispatch_rea
 const CAMPAIGN_CONTROL_OPERATIONS = new Set(['create_campaign', 'add_campaign_task', 'pause_campaign', 'resume_campaign', 'cancel_campaign', 'submit_campaign_review', 'accept_campaign', 'reconcile_campaign']);
 const TERMINAL_JOB_FAILURES = new Set(['failed', 'timed_out', 'cancelled', 'orphaned', 'stale', 'human_attention_required']);
 const ACTIVE_TASK_STATUSES = new Set<CampaignTask['status']>(['queued', 'running']);
-const SUCCESS_TASK_STATUSES = new Set<CampaignTask['status']>(['succeeded', 'skipped']);
+const SUCCESS_TASK_STATUSES = new Set<CampaignTask['status']>(['succeeded', 'succeeded_no_change', 'skipped']);
 
 function now(): string { return new Date().toISOString(); }
 
@@ -107,10 +107,28 @@ function markExecutionFailure(campaign: Campaign, task: CampaignTask, code: stri
   return 0;
 }
 
-function taskExecutionCompleted(campaign: Campaign, task: CampaignTask): number {
+function taskExecutionCompleted(campaign: Campaign, task: CampaignTask, outcome: 'changed' | 'no_change' = 'changed'): number {
   task.executionFinishedAt = now();
   task.error = undefined;
   task.nextAttemptAt = undefined;
+  if (outcome === 'no_change') {
+    if (task.requiresChanges) {
+      task.status = 'failed_no_effect';
+      task.outcome = 'no_effect';
+      task.error = {
+        code: 'CAMPAIGN_NO_EFFECT',
+        message: 'Task required repository changes but the completed Run produced no diff.',
+        retryable: false,
+      };
+      task.completedAt = task.executionFinishedAt;
+      return 0;
+    }
+    task.status = 'succeeded_no_change';
+    task.outcome = 'already_satisfied';
+    task.completedAt = task.executionFinishedAt;
+    return 0;
+  }
+  task.outcome = 'changed';
   const requiresReview = task.reviewRequired && campaign.reviewPolicy === 'every_task';
   if (!requiresReview) {
     task.status = 'succeeded';
@@ -186,9 +204,12 @@ function synchronizeTask(controllerHome: string, campaign: Campaign, task: Campa
       return { changed: true, checkpointsOpened };
     }
     if (run.status !== 'succeeded') return { changed: false, checkpointsOpened: 0 };
+    const checkpointsOpened = taskExecutionCompleted(campaign, task, run.changeOutcome === 'no_change' ? 'no_change' : 'changed');
+    return { changed: true, checkpointsOpened };
   }
 
-  const checkpointsOpened = taskExecutionCompleted(campaign, task);
+  const changeOutcome = readNestedString(job.result, 'changeOutcome');
+  const checkpointsOpened = taskExecutionCompleted(campaign, task, changeOutcome === 'no_change' ? 'no_change' : 'changed');
   return { changed: true, checkpointsOpened };
 }
 
@@ -197,7 +218,7 @@ function dependencyState(campaign: Campaign, task: CampaignTask): 'ready' | 'wai
     const dependency = campaign.tasks.find((entry) => entry.taskId === dependencyId);
     if (!dependency) return 'blocked';
     if (SUCCESS_TASK_STATUSES.has(dependency.status)) continue;
-    if (['failed', 'blocked', 'cancelled'].includes(dependency.status)) return 'blocked';
+    if (['failed', 'failed_no_effect', 'blocked', 'cancelled'].includes(dependency.status)) return 'blocked';
     return 'waiting';
   }
   return 'ready';
@@ -274,6 +295,12 @@ function dispatchTask(controllerHome: string, campaign: Campaign, task: Campaign
 
 function openFinalCheckpointIfReady(campaign: Campaign): number {
   if (!campaign.tasks.every((task) => SUCCESS_TASK_STATUSES.has(task.status))) return 0;
+  if (campaign.tasks.length > 0 && campaign.tasks.every((task) => task.status === 'succeeded_no_change' || task.status === 'skipped')) {
+    campaign.status = 'ready_for_human_acceptance';
+    campaign.completionOutcome = 'already_satisfied';
+    return 0;
+  }
+  campaign.completionOutcome = 'changed';
   const currentGoalRevision = campaign.goals.at(-1)?.revision;
   const existing = campaign.checkpoints.find((checkpoint) => checkpoint.kind === 'final' && checkpoint.goalRevision === currentGoalRevision);
   if (existing?.status === 'open') {
@@ -302,7 +329,7 @@ function triggerSupervisor(controllerHome: string, campaign: Campaign, checkpoin
     const terminal = current?.status === 'succeeded' || (current ? TERMINAL_JOB_FAILURES.has(current.status) : false);
     if (current && !terminal) return false;
     if (current?.status === 'succeeded') {
-      const triggeredAt = Date.parse(current.finishedAt ?? checkpoint.triggeredAt ?? current.updatedAt);
+      const triggeredAt = Date.parse(checkpoint.triggeredAt ?? current.finishedAt ?? current.updatedAt);
       const responseDeadline = Number.isFinite(triggeredAt)
         ? triggeredAt + campaign.supervisor.decisionTimeoutMs
         : Date.now();
@@ -386,10 +413,14 @@ function campaignHasRunnableTask(campaign: Campaign): boolean {
 }
 
 function setDerivedCampaignStatus(campaign: Campaign): void {
-  if (['paused', 'ready_for_human_acceptance', 'completed', 'failed', 'cancelled'].includes(campaign.status)) return;
+  if (['paused', 'ready_for_human_acceptance', 'completed', 'failed', 'cancelling', 'cancelled', 'cancelled_with_leaks'].includes(campaign.status)) return;
   const openCheckpoints = campaign.checkpoints.some((checkpoint) => checkpoint.status === 'open');
   const activeTasks = campaign.tasks.some((task) => ACTIVE_TASK_STATUSES.has(task.status));
-  if (openCheckpoints && !activeTasks && !campaignHasRunnableTask(campaign)) campaign.status = 'waiting_for_supervisor';
+  const runnable = campaignHasRunnableTask(campaign);
+  if (!activeTasks && !runnable && campaign.tasks.some((task) => task.status === 'failed_no_effect')) {
+    campaign.status = 'failed';
+    campaign.failureReason = 'At least one task required repository changes but completed with no effect.';
+  } else if (openCheckpoints && !activeTasks && !runnable) campaign.status = 'waiting_for_supervisor';
   else campaign.status = 'active';
 }
 

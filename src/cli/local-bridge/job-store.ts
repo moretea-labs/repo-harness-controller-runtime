@@ -17,6 +17,7 @@ import {
   currentControllerCheckRevision,
   releaseControllerCheckSubscription,
   runControllerCheckAsync,
+  snapshotControllerCheck,
 } from "../controller/check-runner";
 import {
   DEFAULT_AGENT_TIMEOUT_MS,
@@ -29,11 +30,12 @@ import {
   executeRepositoryCommandAsync,
 } from "../repositories/command-executor";
 import { withControllerLockAsync } from "../repositories/locks";
-import { resolveRepositorySelection } from "../repositories/registry";
+import { registerRepository, resolveRepositorySelection } from "../repositories/registry";
 import type { ControllerAgent, ControllerTask } from "../controller/types";
 import { taskExecutionPolicy } from "../controller/execution-policy";
 import { tryAppendControllerWorklogEvent } from "../controller/worklog";
 import { resolveControllerHome } from "../repositories/controller-home";
+import { ensureRepositoryRuntimeStorage } from "../repositories/runtime-storage";
 import { dispatchLegacyLocalJob } from "../../runtime/execution/jobs/legacy-adapter";
 import { findExecutionJob } from "../../runtime/execution/jobs/store";
 import type {
@@ -484,10 +486,35 @@ export function submitLocalBridgeJob(
       `unsupported local bridge action: ${String(request.action)}`,
     );
   }
+
+  // Bind runtime storage before the first Local Job is persisted. Deferring this
+  // until the durable worker starts creates a self-deadlock: the just-created
+  // active Local Job is then treated as a legacy-storage migration blocker.
+  const controllerHome = resolveControllerHome(
+    request.action === "repository-command" &&
+      "controllerHome" in request.payload &&
+      typeof (request.payload as RepositoryCommandPayload).controllerHome === "string"
+      ? (request.payload as RepositoryCommandPayload).controllerHome
+      : undefined,
+  );
+  const repository = registerRepository({ path: repoRoot, controllerHome });
+  const runtimeStorage = ensureRepositoryRuntimeStorage(repository, controllerHome);
+  if (!runtimeStorage.readyForExecution) {
+    throw new Error(`RUNTIME_STORAGE_NOT_READY: ${runtimeStorage.warnings.join("; ") || repository.activeCheckoutId}`);
+  }
+  repoRoot = repository.canonicalRoot;
   let revision: string | undefined;
   if (request.action === "run-check") {
     const payload = request.payload as RunCheckPayload;
-    revision = currentControllerCheckRevision(repoRoot);
+    let snapshot = payload.checkSnapshot;
+    if (!snapshot) {
+      try { snapshot = snapshotControllerCheck(repoRoot, payload.checkId); }
+      catch (error) {
+        if (!(error instanceof Error) || !error.message.startsWith("check not found:")) throw error;
+      }
+    }
+    if (snapshot) payload.checkSnapshot = snapshot;
+    revision = snapshot?.registryRevision ?? currentControllerCheckRevision(repoRoot);
     const duplicate = findExistingRunCheckJob(repoRoot, payload, revision);
     if (duplicate) return duplicate;
   }
@@ -645,6 +672,13 @@ function syncProjectedExecutionJob(repoRoot: string, job: LocalBridgeJob): Local
   const previous = job.status;
   job.deadlineAt = execution.deadlineAt ?? job.deadlineAt;
   job.workerPid = execution.workerPid;
+  job.result = {
+    ...(job.result ?? {}),
+    executionJobId: execution.jobId,
+    executionStatus: execution.status,
+    ...(execution.result ? { executionResult: execution.result } : {}),
+  };
+  job.outcome = execution.outcome ?? job.outcome;
   if (execution.status === "running") {
     job.status = "running";
     job.startedAt = execution.startedAt ?? job.startedAt;
@@ -656,10 +690,10 @@ function syncProjectedExecutionJob(repoRoot: string, job: LocalBridgeJob): Local
       });
       return saveJob(repoRoot, job);
     }
-    return job;
+    return saveJob(repoRoot, job);
   }
   if (["queued", "waiting_for_dependency", "waiting_for_workspace", "waiting_for_heavy_check", "waiting_for_integration", "waiting_for_release_barrier", "dispatched"].includes(execution.status)) {
-    return job;
+    return saveJob(repoRoot, job);
   }
   job.status = execution.status === "succeeded"
     ? "succeeded"
@@ -674,12 +708,7 @@ function syncProjectedExecutionJob(repoRoot: string, job: LocalBridgeJob): Local
             : "failed";
   job.finishedAt = execution.finishedAt ?? now();
   job.workerPid = undefined;
-  job.error = execution.error?.message;
-  job.result = {
-    ...(job.result ?? {}),
-    executionJobId: execution.jobId,
-    executionStatus: execution.status,
-  };
+  job.error = execution.error?.message ?? execution.outcome?.infrastructureError?.message;
   if (previous !== job.status) {
     appendEvent(repoRoot, job.jobId, {
       type: job.status === "succeeded"
@@ -690,9 +719,8 @@ function syncProjectedExecutionJob(repoRoot: string, job: LocalBridgeJob): Local
       message: `Durable Execution Job ${execution.jobId} ended as ${execution.status}.`,
       data: { executionJobId: execution.jobId, executionStatus: execution.status, error: execution.error?.code },
     });
-    return saveJob(repoRoot, job);
   }
-  return job;
+  return saveJob(repoRoot, job);
 }
 
 function refreshLongRunningJob(repoRoot: string, job: LocalBridgeJob): LocalBridgeJob {
@@ -724,11 +752,26 @@ function refreshLongRunningJob(repoRoot: string, job: LocalBridgeJob): LocalBrid
   return job;
 }
 
+export function projectAgentRunToLocalBridgeStatus(
+  status: import("../agent-jobs/types").AgentJobStatus,
+): LocalBridgeJob["status"] {
+  if (status === "queued") return "dispatched";
+  if (["starting", "running", "waiting_for_user"].includes(status)) return "running";
+  if (status === "succeeded") return "succeeded";
+  if (status === "cancelled") return "cancelled";
+  return "failed";
+}
+
 function refreshLocalBridgeJob(
   repoRoot: string,
   job: LocalBridgeJob,
   checkRevision?: string,
 ): LocalBridgeJob {
+  if (projectedExecutionJobId(job) && ["dispatched", "running"].includes(job.status)) {
+    const synced = syncProjectedExecutionJob(repoRoot, job);
+    if (!["dispatched", "running"].includes(synced.status)) return synced;
+    job = synced;
+  }
   if (job.action === "run-check" && job.status === "running") {
     const startedAt = Date.parse(job.startedAt ?? job.updatedAt);
     const configuredTimeout = resolvedJobTimeout(repoRoot, (job.payload as RunCheckPayload).timeoutMs);
@@ -767,23 +810,15 @@ function refreshLocalBridgeJob(
   if ((job.action === "verify-edit-session" || job.action === "repository-command") && job.status === "running") {
     return refreshLongRunningJob(repoRoot, job);
   }
-  if (projectedExecutionJobId(job) && ["dispatched", "running"].includes(job.status)) {
-    const synced = syncProjectedExecutionJob(repoRoot, job);
-    if (synced.status !== "dispatched") return synced;
-  }
   if (!job.runId || !["dispatched", "running"].includes(job.status)) return job;
   try {
     const run = getAgentJob(repoRoot, job.runId);
     const previous = job.status;
-    if (["queued", "running", "waiting_for_user"].includes(run.status)) {
-      job.status = run.status === "queued" ? "dispatched" : "running";
+    if (["queued", "starting", "running", "waiting_for_user"].includes(run.status)) {
+      job.status = projectAgentRunToLocalBridgeStatus(run.status);
       delete job.finishedAt;
     } else {
-      job.status = run.status === "succeeded"
-        ? "succeeded"
-        : run.status === "cancelled"
-          ? "cancelled"
-          : "failed";
+      job.status = projectAgentRunToLocalBridgeStatus(run.status);
       job.finishedAt = run.finishedAt ?? now();
       job.error = run.status === "succeeded" ? undefined : run.error ?? `Run ended as ${run.status}`;
       job.result = {
@@ -792,6 +827,15 @@ function refreshLocalBridgeJob(
         runStatus: run.status,
         exitCode: run.exitCode,
         integratedSessionId: run.integratedSessionId,
+        changeOutcome: run.changeOutcome,
+        changedFiles: run.changedFiles,
+      };
+      job.outcome = {
+        process: { exitCode: run.exitCode },
+        infrastructureError: run.status === "succeeded" ? undefined : {
+          code: `AGENT_RUN_${run.status.toUpperCase()}`,
+          message: run.error ?? `Run ended as ${run.status}`,
+        },
       };
       cleanupEphemeralJob(repoRoot, job);
     }
@@ -1101,6 +1145,7 @@ async function executeRunCheck(
   try {
     const timeoutMs = resolvedJobTimeout(repoRoot, payload.timeoutMs);
     const result = await runControllerCheckAsync(repoRoot, payload.checkId, {
+      snapshot: payload.checkSnapshot,
       requestedTimeoutMs: timeoutMs,
       onSpawn: (pid) => {
         const current = tryReadLocalBridgeJob(repoRoot, jobId);
@@ -1120,8 +1165,15 @@ async function executeRunCheck(
     job.status = result.ok ? "succeeded" : "failed";
     job.finishedAt = now();
     job.result = result as unknown as Record<string, unknown>;
+    job.outcome = {
+      process: { exitCode: result.status, timedOut: result.timedOut },
+      infrastructureError: result.ok ? undefined : {
+        code: result.timedOut ? "CHECK_TIMED_OUT" : "CHECK_FAILED",
+        message: result.stderr || `check failed: ${payload.checkId}`,
+      },
+    };
     job.workerPid = undefined;
-    if (!result.ok) job.error = result.stderr || `check failed: ${payload.checkId}`;
+    if (!result.ok) job.error = job.outcome.infrastructureError?.message;
     appendEvent(repoRoot, job.jobId, {
       type: result.ok ? "job_succeeded" : "job_failed",
       message: result.ok
@@ -1281,12 +1333,25 @@ async function executeRepositoryCommand(
     job.finishedAt = now();
     job.workerPid = undefined;
     job.result = execution as unknown as Record<string, unknown>;
+    const stdoutPath = `.ai/harness/local-jobs/${job.jobId}/stdout.log`;
+    const stderrPath = `.ai/harness/local-jobs/${job.jobId}/stderr.log`;
     job.result = {
       ...job.result,
-      stdoutPath: `.ai/harness/local-jobs/${job.jobId}/stdout.log`,
-      stderrPath: `.ai/harness/local-jobs/${job.jobId}/stderr.log`,
+      stdoutPath,
+      stderrPath,
     };
-    job.error = execution.ok ? undefined : execution.stderr || `repository command exited with ${String(execution.exitCode ?? 1)}`;
+    job.outcome = {
+      process: { exitCode: execution.exitCode, timedOut: execution.timedOut, stdoutPath, stderrPath },
+      policy: {
+        decision: execution.status === "approval_required" ? "approval_required" : "allowed",
+        repositoryChanged: execution.repositoryChanged,
+        changedPaths: execution.changedPaths,
+      },
+      infrastructureError: execution.infrastructureError,
+    };
+    job.error = execution.ok ? undefined : execution.infrastructureError?.message
+      ?? execution.stderr
+      ?? `repository command exited with ${String(execution.exitCode ?? 1)}`;
     appendEvent(repoRoot, job.jobId, {
       type: job.status === "succeeded" ? "job_succeeded" : "job_failed",
       message: job.status === "succeeded"

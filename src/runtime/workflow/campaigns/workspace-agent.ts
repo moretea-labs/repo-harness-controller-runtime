@@ -22,8 +22,10 @@ export interface WorkspaceAgentTriggerResult {
   triggeredAt: string;
 }
 
+export type WorkspaceAgentFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
 export interface WorkspaceAgentTriggerOptions {
-  fetchImpl?: typeof fetch;
+  fetchImpl?: WorkspaceAgentFetch;
   token?: string;
   endpoint?: string;
   now?: () => Date;
@@ -91,7 +93,7 @@ export async function triggerWorkspaceAgent(
 
   const token = accessToken(options.token);
   const endpoint = (options.endpoint ?? DEFAULT_ENDPOINT).replace(/\/$/, '');
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const fetchImpl: WorkspaceAgentFetch = options.fetchImpl ?? ((input, init) => fetch(input, init));
   const sleep = options.sleep ?? ((value: number) => new Promise((resolve) => setTimeout(resolve, value)));
   const maximumAttempts = transportAttempts(options.maxTransportAttempts);
   const deadline = Date.now() + timeoutMs(request.timeoutMs);

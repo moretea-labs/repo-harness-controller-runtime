@@ -132,12 +132,14 @@ async function main(): Promise<void> {
   if (execution.ok) {
     transitionExecutionJobFromWorker(controllerHome, repoId, jobId, owner, 'succeeded', {
       result: bounded?.result,
+      outcome: execution.outcome,
       evidenceIds,
       leaseRefs: [],
     }, { evidenceId: evidence.evidenceId });
   } else {
     transitionExecutionJobFromWorker(controllerHome, repoId, jobId, owner, 'failed', {
       error: terminalError,
+      outcome: execution.outcome ?? (terminalError ? { infrastructureError: { code: terminalError.code, message: terminalError.message } } : undefined),
       evidenceIds,
       leaseRefs: [],
     }, { evidenceId: evidence.evidenceId, error: execution.error });

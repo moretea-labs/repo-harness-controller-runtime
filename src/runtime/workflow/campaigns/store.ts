@@ -186,6 +186,7 @@ function normalizeTask(input: CreateCampaignTaskInput, budget: CampaignBudget): 
     priority: input.priority ?? 'P1',
     resourceClaims: structuredClone(input.resourceClaims ?? []),
     reviewRequired: input.reviewRequired ?? true,
+    requiresChanges: input.requiresChanges ?? false,
     maxAttempts: boundedInteger(input.maxAttempts, budget.defaultTaskMaxAttempts, 1, 10),
     status: 'pending',
     attempt: 0,
@@ -472,7 +473,7 @@ export function addCampaignTask(
   expectedRevision?: number,
 ): Campaign {
   return updateCampaign(controllerHome, repoId, campaignId, requestId, (campaign) => {
-    if (['completed', 'cancelled'].includes(campaign.status)) throw new Error(`CAMPAIGN_TERMINAL: ${campaign.status}`);
+    if (['completed', 'cancelled', 'cancelled_with_leaks'].includes(campaign.status)) throw new Error(`CAMPAIGN_TERMINAL: ${campaign.status}`);
     const task = normalizeTask(input, campaign.budget);
     if (campaign.tasks.some((entry) => entry.taskId === task.taskId)) throw new Error(`CAMPAIGN_TASK_DUPLICATE: ${task.taskId}`);
     campaign.tasks.push(task);
@@ -496,7 +497,7 @@ export function setCampaignStatus(
     campaign.status = status;
     campaign.pauseReason = status === 'paused' ? reason || 'Paused by supervisor.' : undefined;
     campaign.failureReason = status === 'failed' ? reason || 'Campaign failed.' : campaign.failureReason;
-    if (status === 'completed') campaign.completedAt = now();
+    if (['completed', 'cancelled', 'cancelled_with_leaks'].includes(status)) campaign.completedAt = now();
     if (status === 'active') campaign.nextReconcileAt = undefined;
     return campaign;
   }, { expectedRevision, eventType: `campaign_${status}`, eventData: { reason } });

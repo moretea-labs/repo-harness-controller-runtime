@@ -7,7 +7,9 @@ export type CampaignStatus =
   | 'ready_for_human_acceptance'
   | 'completed'
   | 'failed'
-  | 'cancelled';
+  | 'cancelling'
+  | 'cancelled'
+  | 'cancelled_with_leaks';
 
 export type CampaignTaskStatus =
   | 'pending'
@@ -16,7 +18,9 @@ export type CampaignTaskStatus =
   | 'waiting_review'
   | 'changes_requested'
   | 'succeeded'
+  | 'succeeded_no_change'
   | 'failed'
+  | 'failed_no_effect'
   | 'blocked'
   | 'skipped'
   | 'cancelled';
@@ -63,6 +67,7 @@ export interface CampaignTask {
   priority: ExecutionJobPriority;
   resourceClaims: ResourceClaimSpec[];
   reviewRequired: boolean;
+  requiresChanges: boolean;
   maxAttempts: number;
   status: CampaignTaskStatus;
   attempt: number;
@@ -76,6 +81,7 @@ export interface CampaignTask {
   supervisorInstructions?: string;
   error?: { code: string; message: string; retryable: boolean };
   evidenceIds: string[];
+  outcome?: 'changed' | 'already_satisfied' | 'no_effect';
   executor?: CampaignExecutorOptions;
 }
 
@@ -199,6 +205,21 @@ export interface CampaignCounters {
   supervisorDecisionsAccepted: number;
 }
 
+export interface CampaignCleanupResource {
+  kind: 'job' | 'checkpoint' | 'worktree' | 'branch' | 'lease' | 'process';
+  id: string;
+  status: 'cleaned' | 'preserved' | 'missing' | 'failed';
+  message?: string;
+}
+
+export interface CampaignCleanupReport {
+  schemaVersion: 1;
+  startedAt: string;
+  finishedAt?: string;
+  resources: CampaignCleanupResource[];
+  leaks: string[];
+}
+
 export interface Campaign {
   schemaVersion: 1;
   revision: number;
@@ -224,6 +245,8 @@ export interface Campaign {
   createdAt: string;
   updatedAt: string;
   completedAt?: string;
+  completionOutcome?: 'changed' | 'already_satisfied';
+  cleanup?: CampaignCleanupReport;
 }
 
 export interface CreateCampaignTaskInput {
@@ -236,6 +259,7 @@ export interface CreateCampaignTaskInput {
   priority?: ExecutionJobPriority;
   resourceClaims?: ResourceClaimSpec[];
   reviewRequired?: boolean;
+  requiresChanges?: boolean;
   maxAttempts?: number;
   executor?: CampaignExecutorOptions;
 }

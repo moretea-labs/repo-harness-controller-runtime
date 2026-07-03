@@ -1,4 +1,5 @@
 import type { ControllerAgent, TaskRisk } from "../controller/types";
+import type { ControllerCheckSnapshot } from "../controller/check-runner";
 
 export type LocalBridgeApproval = "auto" | "confirm" | "manual-only";
 export type LocalExecutionPreference = "auto" | "workspace" | "worktree";
@@ -58,6 +59,8 @@ export interface RunCheckPayload {
   checkId: string;
   requestId?: string;
   timeoutMs?: number;
+  /** Immutable definition captured when the Job is accepted. */
+  checkSnapshot?: ControllerCheckSnapshot;
 }
 
 export interface VerifyEditSessionPayload {
@@ -110,6 +113,21 @@ export interface LocalBridgeJobEvent {
   data?: Record<string, unknown>;
 }
 
+export interface LocalBridgeJobOutcome {
+  process?: {
+    exitCode?: number | null;
+    timedOut?: boolean;
+    stdoutPath?: string;
+    stderrPath?: string;
+  };
+  policy?: {
+    decision: "allowed" | "approval_required" | "rejected";
+    repositoryChanged?: boolean;
+    changedPaths?: string[];
+  };
+  infrastructureError?: { code: string; message: string };
+}
+
 export interface LocalBridgeJob {
   schemaVersion: 1;
   jobId: string;
@@ -127,6 +145,8 @@ export interface LocalBridgeJob {
   issueId?: string;
   taskId?: string;
   result?: Record<string, unknown>;
+  /** Structured process/policy outcome. `error` is retained for compatibility. */
+  outcome?: LocalBridgeJobOutcome;
   error?: string;
   revision?: string;
   ownerPid?: number;

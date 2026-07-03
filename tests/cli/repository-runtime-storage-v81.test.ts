@@ -197,7 +197,7 @@ describe('v8.1 repository runtime storage isolation', () => {
     }
   });
 
-  test('preserves non-empty legacy worktree storage and reports an explicit blocker', () => {
+  test('migrates non-empty legacy worktree storage without blocking execution', () => {
     const fixture = repositoryFixture();
     try {
       const worktree = join(fixture.repoA.canonicalRoot, '.ai', 'harness', 'worktrees', 'active-worktree');
@@ -205,8 +205,9 @@ describe('v8.1 repository runtime storage isolation', () => {
       writeFileSync(join(worktree, 'marker.txt'), 'do not move\n', 'utf-8');
       const storage = ensureRepositoryRuntimeStorage(fixture.repoA, fixture.controllerHome);
       const binding = storage.bindings.find((entry) => entry.name === 'worktrees');
-      expect(storage.readyForExecution).toBe(false);
-      expect(binding?.status).toBe('legacy-active');
+      expect(storage.readyForExecution).toBe(true);
+      expect(binding?.status).toBe('migrated');
+      expect(lstatSync(join(fixture.repoA.canonicalRoot, '.ai', 'harness', 'worktrees')).isSymbolicLink()).toBe(true);
       expect(existsSync(join(worktree, 'marker.txt'))).toBe(true);
     } finally {
       fixture.cleanup();

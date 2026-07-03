@@ -1,13 +1,27 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "fs";
 import { dirname, join } from "path";
 import type { AgentJobMeta } from "./types";
 
 const CONTROLLER_EPOCH_PATH = ".ai/harness/controller/runtime-owner.json";
+const CONTROLLER_EPOCH_LOCK_SUFFIX = ".lock";
+const CONTROLLER_EPOCH_LOCK_TIMEOUT_MS = 5_000;
+const CONTROLLER_EPOCH_STALE_LOCK_MS = 30_000;
 
 export interface ControllerEpochRecord {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   pid: number;
   epoch: string;
+  revision?: number;
   startedAt: string;
   updatedAt: string;
 }
@@ -48,6 +62,54 @@ function readJson<T>(path: string): T {
   return JSON.parse(readFileSync(path, "utf-8")) as T;
 }
 
+function sleepSync(milliseconds: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+function withEpochLock<T>(path: string, action: () => T): T {
+  mkdirSync(dirname(path), { recursive: true });
+  const lockPath = `${path}${CONTROLLER_EPOCH_LOCK_SUFFIX}`;
+  const deadline = Date.now() + CONTROLLER_EPOCH_LOCK_TIMEOUT_MS;
+  let fd: number | undefined;
+  while (fd === undefined) {
+    try {
+      fd = openSync(lockPath, "wx", 0o600);
+      writeFileSync(fd, `${process.pid}\n`, "utf-8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      try {
+        if (Date.now() - statSync(lockPath).mtimeMs > CONTROLLER_EPOCH_STALE_LOCK_MS) {
+          rmSync(lockPath, { force: true });
+          continue;
+        }
+      } catch (_readError) {
+        rmSync(lockPath, { force: true });
+        continue;
+      }
+      if (Date.now() >= deadline) throw new Error(`CONTROLLER_EPOCH_LOCK_TIMEOUT: ${lockPath}`);
+      sleepSync(10);
+    }
+  }
+  try {
+    return action();
+  } finally {
+    closeSync(fd);
+    rmSync(lockPath, { force: true });
+  }
+}
+
+function validEpochRecord(value: unknown): value is ControllerEpochRecord {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Partial<ControllerEpochRecord>;
+  return (record.schemaVersion === 1 || record.schemaVersion === 2)
+    && Number.isInteger(record.pid)
+    && Number(record.pid) > 0
+    && typeof record.epoch === "string"
+    && record.epoch.length > 0
+    && typeof record.startedAt === "string"
+    && typeof record.updatedAt === "string";
+}
+
 export function isPidAlive(pid: number | undefined): boolean {
   if (!pid || pid <= 0) return false;
   try {
@@ -62,36 +124,62 @@ export function controllerEpochPath(repoRoot: string): string {
   return join(repoRoot, CONTROLLER_EPOCH_PATH);
 }
 
-export function ensureControllerEpoch(repoRoot: string): ControllerEpochRecord & { path: string } {
+/**
+ * Acquire or renew the repository controller owner without rotating the epoch
+ * for ordinary sibling work. A live owner remains authoritative; only a real
+ * takeover from a dead/malformed owner increments the fencing revision.
+ */
+export function ensureControllerEpoch(
+  repoRoot: string,
+  ownerPid = process.pid,
+): ControllerEpochRecord & { path: string } {
   const path = controllerEpochPath(repoRoot);
-  const now = new Date().toISOString();
-  if (existsSync(path)) {
-    try {
-      const current = readJson<ControllerEpochRecord>(path);
-      if (current.pid === process.pid && current.epoch) {
-        const next: ControllerEpochRecord = { ...current, updatedAt: now };
-        writeJsonAtomic(path, next);
-        return { ...next, path };
+  return withEpochLock(path, () => {
+    const timestamp = new Date().toISOString();
+    let current: ControllerEpochRecord | undefined;
+    if (existsSync(path)) {
+      try {
+        const candidate = readJson<unknown>(path);
+        if (validEpochRecord(candidate)) current = candidate;
+      } catch (_error) {
+        current = undefined;
       }
-    } catch (_error) {
-      // Fall through and replace malformed state.
     }
-  }
-  const record: ControllerEpochRecord = {
-    schemaVersion: 1,
-    pid: process.pid,
-    epoch: randomEpoch(),
-    startedAt: now,
-    updatedAt: now,
-  };
-  writeJsonAtomic(path, record);
-  return { ...record, path };
+
+    if (current && isPidAlive(current.pid)) {
+      if (current.pid !== ownerPid) {
+        // Parallel MCP/Controller requests are children of the same repository
+        // controller lease. Reuse the live fencing token instead of stealing it.
+        return { ...current, path };
+      }
+      const renewed: ControllerEpochRecord = {
+        ...current,
+        schemaVersion: 2,
+        revision: Math.max(1, current.revision ?? 1),
+        updatedAt: timestamp,
+      };
+      writeJsonAtomic(path, renewed);
+      return { ...renewed, path };
+    }
+
+    const record: ControllerEpochRecord = {
+      schemaVersion: 2,
+      pid: ownerPid,
+      epoch: randomEpoch(),
+      revision: Math.max(1, (current?.revision ?? 0) + 1),
+      startedAt: timestamp,
+      updatedAt: timestamp,
+    };
+    writeJsonAtomic(path, record);
+    return { ...record, path };
+  });
 }
 
 export function readControllerEpoch(path: string | undefined): ControllerEpochRecord | undefined {
   if (!path || !existsSync(path)) return undefined;
   try {
-    return readJson<ControllerEpochRecord>(path);
+    const value = readJson<unknown>(path);
+    return validEpochRecord(value) ? value : undefined;
   } catch (_error) {
     return undefined;
   }

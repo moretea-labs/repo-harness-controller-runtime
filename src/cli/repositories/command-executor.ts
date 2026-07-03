@@ -1,7 +1,7 @@
 import { createHash } from 'crypto';
 import { spawn, spawnSync } from 'child_process';
-import { appendFileSync, mkdirSync } from 'fs';
-import { dirname, join } from 'path';
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync } from 'fs';
+import { dirname, join, resolve } from 'path';
 import { capProcessOutput, redactProcessOutput } from '../../effects/process-runner';
 import { repositoryControllerRoot } from './controller-home';
 import {
@@ -37,9 +37,12 @@ export interface ExecuteRepositoryCommandInput {
 export interface RepositoryCommandSnapshot {
   head: string | null;
   branch: string | null;
+  /** User-owned workspace state. Harness runtime storage is intentionally excluded. */
   status: string;
   dirty: boolean;
   refsHash: string;
+  paths: string[];
+  pathFingerprints: Record<string, string>;
 }
 
 export interface RepositoryCommandExecution {
@@ -59,6 +62,9 @@ export interface RepositoryCommandExecution {
   before: RepositoryCommandSnapshot;
   after?: RepositoryCommandSnapshot;
   repositoryChanged?: boolean;
+  changedPaths?: string[];
+  policyDecision?: 'allowed' | 'approval_required' | 'rejected';
+  infrastructureError?: { code: string; message: string };
 }
 
 export interface PreparedRepositoryCommandExecution {
@@ -237,17 +243,61 @@ function gitText(root: string, args: string[]): string {
   return output.ok ? output.stdout.trim() : '';
 }
 
+const REPOSITORY_SNAPSHOT_PATHS = [
+  '.',
+  ':(exclude).ai/harness/**',
+  ':(exclude)_ops/controller-home/**',
+];
+
+function statusPath(line: string): string | undefined {
+  if (!line.trim() || line.startsWith('##')) return undefined;
+  const raw = line.length > 3 ? line.slice(3) : '';
+  const path = raw.includes(' -> ') ? raw.split(' -> ').at(-1) : raw;
+  return path?.replace(/^"|"$/g, '');
+}
+
+function repositoryPathFingerprint(root: string, relativePath: string, statusLines: string[]): string {
+  const hash = createHash('sha256').update(statusLines.join('\n'));
+  const absolute = resolve(root, relativePath);
+  if (!existsSync(absolute)) return hash.update('\nmissing').digest('hex');
+  try {
+    const stat = lstatSync(absolute);
+    if (stat.isSymbolicLink()) hash.update(`\nsymlink:${readlinkSync(absolute)}`);
+    else if (stat.isFile()) hash.update('\nfile:').update(readFileSync(absolute));
+    else hash.update(`\nmode:${stat.mode}:size:${stat.size}`);
+  } catch (error) {
+    hash.update(`\nunreadable:${error instanceof Error ? error.message : String(error)}`);
+  }
+  return hash.digest('hex');
+}
+
 function repositorySnapshot(root: string): RepositoryCommandSnapshot {
   const head = gitText(root, ['rev-parse', '--verify', 'HEAD']) || null;
   const branch = gitText(root, ['branch', '--show-current']) || null;
-  const status = gitText(root, ['status', '--porcelain=v1', '--branch']);
+  const status = gitText(root, ['status', '--porcelain=v1', '--branch', '--untracked-files=all', '--', ...REPOSITORY_SNAPSHOT_PATHS]);
   const refs = gitText(root, ['show-ref']);
+  const lines = status.split(/\r?\n/).filter((line) => line && !line.startsWith('##'));
+  const statusByPath = new Map<string, string[]>();
+  for (const line of lines) {
+    const path = statusPath(line);
+    if (!path) continue;
+    const entries = statusByPath.get(path) ?? [];
+    entries.push(line);
+    statusByPath.set(path, entries);
+  }
+  const paths = [...statusByPath.keys()].sort();
+  const pathFingerprints = Object.fromEntries(paths.map((path) => [
+    path,
+    repositoryPathFingerprint(root, path, statusByPath.get(path) ?? []),
+  ]));
   return {
     head,
     branch,
     status,
-    dirty: status.split(/\r?\n/).some((line) => line.trim() && !line.startsWith('##')),
+    dirty: paths.length > 0,
     refsHash: createHash('sha256').update(refs).digest('hex'),
+    paths,
+    pathFingerprints,
   };
 }
 
@@ -269,11 +319,18 @@ function approvalToken(
   })).digest('hex');
 }
 
+function changedSnapshotPaths(before: RepositoryCommandSnapshot, after: RepositoryCommandSnapshot): string[] {
+  const paths = new Set([...before.paths, ...after.paths]);
+  return [...paths].filter((path) =>
+    before.pathFingerprints[path] !== after.pathFingerprints[path]
+  ).sort();
+}
+
 function snapshotChanged(before: RepositoryCommandSnapshot, after: RepositoryCommandSnapshot): boolean {
   return before.head !== after.head
     || before.branch !== after.branch
-    || before.status !== after.status
-    || before.refsHash !== after.refsHash;
+    || before.refsHash !== after.refsHash
+    || changedSnapshotPaths(before, after).length > 0;
 }
 
 function prepareRepositoryCommandExecution(
@@ -296,9 +353,13 @@ function prepareRepositoryCommandExecution(
     approvalToken: token,
     authorization: input.authorization,
     before,
+    policyDecision: input.dryRun === true || classification.risk === 'readonly'
+      ? 'allowed'
+      : 'approval_required',
   };
   const confirmed = input.authorization === 'confirmed_plan' && input.approvalToken === token;
   const executable = input.dryRun === true || classification.risk === 'readonly' || confirmed;
+  execution.policyDecision = executable ? 'allowed' : 'approval_required';
   return {
     root,
     cwd,
@@ -384,6 +445,12 @@ export function executeRepositoryCommand(
     ].filter(Boolean).join('\n')), maxOutputBytes),
     after,
     repositoryChanged: snapshotChanged(before, after),
+    changedPaths: changedSnapshotPaths(before, after),
+    policyDecision: 'allowed',
+    infrastructureError: result.error ? {
+      code: timedOut ? 'COMMAND_TIMED_OUT' : 'COMMAND_SPAWN_FAILED',
+      message: error || `repository command failed with exit ${String(result.status ?? 1)}`,
+    } : undefined,
   };
   auditCommand(controllerHome, repository, execution);
   return execution;
@@ -419,6 +486,12 @@ export async function executeRepositoryCommandAsync(
     stderr: result.stderr,
     after,
     repositoryChanged: snapshotChanged(before, after),
+    changedPaths: changedSnapshotPaths(before, after),
+    policyDecision: 'allowed',
+    infrastructureError: result.timedOut ? {
+      code: 'COMMAND_TIMED_OUT',
+      message: result.stderr || `repository command timed out after ${timeoutMs}ms`,
+    } : undefined,
   };
   auditCommand(controllerHome, repository, execution);
   return execution;

@@ -23,6 +23,7 @@ import { reconcileCampaign } from '../../workflow/campaigns/engine';
 import { submitCampaignReview } from '../../workflow/campaigns/review';
 import type { CampaignReviewPolicy, CampaignSupervisorAction, CreateCampaignTaskInput } from '../../workflow/campaigns/types';
 import { currentCampaignWorkspace, ensureCampaignWorkspace } from '../../workflow/campaigns/workspace';
+import { cancelCampaign } from '../../workflow/campaigns/cleanup';
 import { ensureRepositoryRuntimeStorage } from '../../../cli/repositories/runtime-storage';
 import { assessWorkMode } from '../../../cli/controller/work-mode';
 import { projectBoard } from '../../../cli/controller/issue-store';
@@ -117,7 +118,7 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
   definition('resume_campaign', 'Resume a paused or supervisor-waiting campaign.', {
     repo_id: repoId, campaign_id: { type: 'string' }, request_id: { type: 'string' }, expected_revision: { type: 'number' },
   }, ['campaign_id', 'request_id'], false),
-  definition('cancel_campaign', 'Cancel a campaign. Existing child Jobs remain independently cancellable.', {
+  definition('cancel_campaign', 'Cancel a campaign and reconcile child Jobs and managed workspace resources before reaching a terminal state.', {
     repo_id: repoId, campaign_id: { type: 'string' }, request_id: { type: 'string' }, expected_revision: { type: 'number' }, reason: { type: 'string' },
   }, ['campaign_id', 'request_id'], false),
   definition('get_campaign_review_packet', 'Read one bounded open review packet for ChatGPT or another supervisor.', {
@@ -274,6 +275,7 @@ function summarizeExecutionJob(job: ExecutionJob, repoRoot?: string): Record<str
     attempt: job.attempt,
     maxAttempts: job.maxAttempts,
     evidenceIds: job.evidenceIds,
+    outcome: job.outcome,
     result: resultPreview
       ? {
         preview: resultPreview.preview,
@@ -372,6 +374,7 @@ function campaignTaskInput(
     priority: ['P0', 'P1', 'P2', 'P3', 'P4'].includes(String(value.priority)) ? String(value.priority) as 'P0' | 'P1' | 'P2' | 'P3' | 'P4' : 'P1',
     resourceClaims: requestedClaims.length > 0 ? requestedClaims : claimsForMcpOperation(operation, argumentsValue, repoIdValue, checkoutId),
     reviewRequired: value.review_required === undefined ? true : value.review_required === true,
+    requiresChanges: value.requires_changes === true || value.requiresChanges === true,
     maxAttempts: typeof value.max_attempts === 'number' ? value.max_attempts : undefined,
     executor: executor ? {
       enableDevRunner: executor.enable_dev_runner === undefined ? undefined : executor.enable_dev_runner === true,
@@ -929,7 +932,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
       }
       case 'cancel_campaign': {
         const repository = selected(ctx, args);
-        return result({ campaign: setCampaignStatus(ctx.controllerHome, repository.repoId, String(args.campaign_id ?? ''), String(args.request_id ?? ''), 'cancelled', typeof args.reason === 'string' ? args.reason : undefined, expectedRevision(args)) });
+        return result({ campaign: await cancelCampaign(ctx.controllerHome, repository.repoId, String(args.campaign_id ?? ''), String(args.request_id ?? ''), typeof args.reason === 'string' ? args.reason : undefined, expectedRevision(args)) });
       }
       case 'get_campaign_review_packet': {
         const repository = selected(ctx, args);

@@ -41,10 +41,10 @@ function taskPacket(task: Campaign['tasks'][number] | undefined): CampaignReview
 export function campaignProgress(campaign: Campaign): CampaignReviewPacket['progress'] {
   return {
     total: campaign.tasks.length,
-    succeeded: campaign.tasks.filter((task) => task.status === 'succeeded' || task.status === 'skipped').length,
+    succeeded: campaign.tasks.filter((task) => ['succeeded', 'succeeded_no_change', 'skipped'].includes(task.status)).length,
     running: campaign.tasks.filter((task) => ['queued', 'running'].includes(task.status)).length,
     waitingReview: campaign.tasks.filter((task) => task.status === 'waiting_review').length,
-    failed: campaign.tasks.filter((task) => task.status === 'failed').length,
+    failed: campaign.tasks.filter((task) => ['failed', 'failed_no_effect'].includes(task.status)).length,
     blocked: campaign.tasks.filter((task) => task.status === 'blocked').length,
   };
 }

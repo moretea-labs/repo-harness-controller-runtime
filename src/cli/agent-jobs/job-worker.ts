@@ -723,7 +723,7 @@ if (ok && config.autoIntegrate && finalMeta.executionMode === "worktree") {
     assertOwnership();
     updateProgress("finalizing", "正在自动集成 worktree 修改", 96);
     const [
-      { integrateAgentJob, cleanupIntegratedWorktree, taskRunDiff },
+      { integrateAgentJob, cleanupIntegratedWorktree, cleanupNoChangeWorktree, taskRunDiff },
       { getMcpPolicy },
     ] = await Promise.all([import("./integration"), import("../mcp/policy")]);
     const archivedDiff = taskRunDiff(
@@ -749,46 +749,71 @@ if (ok && config.autoIntegrate && finalMeta.executionMode === "worktree") {
       diffArtifactPath,
     ).replace(/\\/g, "/");
     persistMeta(beforeIntegrationMeta);
-    const integrated = integrateAgentJob(
-      finalMeta.repoRoot,
-      getMcpPolicy("controller", { repoRoot: finalMeta.repoRoot }),
-      finalMeta.runId,
-    );
-    assertOwnership();
-    event(
-      "run_auto_integrated",
-      `Automatically integrated ${integrated.changedPaths.length} changed path(s).`,
-      {
-        changedPaths: integrated.changedPaths,
-        sessionId: integrated.session.sessionId,
-      },
-    );
-    const cleanup = cleanupIntegratedWorktree(
-      finalMeta.repoRoot,
-      finalMeta.runId,
-    );
-    const integratedMeta = JSON.parse(
-      readFileSync(config.metaPath, "utf-8"),
-    ) as AgentJobMeta;
-    const completedAt = new Date().toISOString();
-    integratedMeta.status = "succeeded";
-    integratedMeta.finishedAt = completedAt;
-    integratedMeta.lastHeartbeatAt = completedAt;
-    integratedMeta.worktreeCleanedAt = completedAt;
-    integratedMeta.progress = {
-      phase: "completed",
-      percent: 100,
-      currentActivity: "实现已完成并自动集成到当前工作区",
-      lastActivityAt: completedAt,
-      activityCount: (integratedMeta.progress?.activityCount ?? 0) + 1,
-    };
-    persistMeta(integratedMeta);
-    event(
-      "run_worktree_cleaned",
-      "Integrated worktree and temporary branch were removed.",
-      cleanup,
-    );
-    event("run_succeeded", "Agent process, automatic integration, and worktree cleanup completed.");
+    const noChanges = !archivedDiff.status && !archivedDiff.diff && archivedDiff.untracked.length === 0;
+    if (noChanges) {
+      const cleanup = cleanupNoChangeWorktree(finalMeta.repoRoot, finalMeta.runId);
+      const noChangeMeta = JSON.parse(readFileSync(config.metaPath, "utf-8")) as AgentJobMeta;
+      const completedAt = new Date().toISOString();
+      noChangeMeta.status = "succeeded";
+      noChangeMeta.changeOutcome = "no_change";
+      noChangeMeta.changedFiles = [];
+      noChangeMeta.finishedAt = completedAt;
+      noChangeMeta.lastHeartbeatAt = completedAt;
+      noChangeMeta.worktreeCleanedAt = completedAt;
+      noChangeMeta.progress = {
+        phase: "completed",
+        percent: 100,
+        currentActivity: "工作树无差异；任务已按无变更结果收敛",
+        lastActivityAt: completedAt,
+        activityCount: (noChangeMeta.progress?.activityCount ?? 0) + 1,
+      };
+      persistMeta(noChangeMeta);
+      event("run_worktree_cleaned", "No-change worktree and temporary branch were removed.", cleanup);
+      event("run_succeeded", "Agent completed with no repository changes.", { changeOutcome: "no_change" });
+    } else {
+      const integrated = integrateAgentJob(
+        finalMeta.repoRoot,
+        getMcpPolicy("controller", { repoRoot: finalMeta.repoRoot }),
+        finalMeta.runId,
+      );
+      assertOwnership();
+      event(
+        "run_auto_integrated",
+        `Automatically integrated ${integrated.changedPaths.length} changed path(s).`,
+        {
+          changedPaths: integrated.changedPaths,
+          sessionId: integrated.session.sessionId,
+        },
+      );
+      const cleanup = cleanupIntegratedWorktree(
+        finalMeta.repoRoot,
+        finalMeta.runId,
+      );
+      const integratedMeta = JSON.parse(
+        readFileSync(config.metaPath, "utf-8"),
+      ) as AgentJobMeta;
+      const completedAt = new Date().toISOString();
+      integratedMeta.status = "succeeded";
+      integratedMeta.changeOutcome = "changed";
+      integratedMeta.changedFiles = integrated.changedPaths;
+      integratedMeta.finishedAt = completedAt;
+      integratedMeta.lastHeartbeatAt = completedAt;
+      integratedMeta.worktreeCleanedAt = completedAt;
+      integratedMeta.progress = {
+        phase: "completed",
+        percent: 100,
+        currentActivity: "实现已完成并自动集成到当前工作区",
+        lastActivityAt: completedAt,
+        activityCount: (integratedMeta.progress?.activityCount ?? 0) + 1,
+      };
+      persistMeta(integratedMeta);
+      event(
+        "run_worktree_cleaned",
+        "Integrated worktree and temporary branch were removed.",
+        cleanup,
+      );
+      event("run_succeeded", "Agent process, automatic integration, and worktree cleanup completed.");
+    }
   } catch (integrationError) {
     const failedMeta = JSON.parse(
       readFileSync(config.metaPath, "utf-8"),

@@ -9,6 +9,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  writeFileSync,
 } from 'fs';
 import { dirname, join, resolve } from 'path';
 import { ensureRepositoryControllerLayout } from './controller-home';
@@ -18,6 +19,8 @@ export type RuntimeStorageBindingStatus =
   | 'linked'
   | 'already-linked'
   | 'migrated'
+  | 'merged'
+  | 'quarantined'
   | 'legacy-active'
   | 'conflict';
 
@@ -48,6 +51,7 @@ interface RuntimeStorageSpec {
 
 const ACTIVE_RUN_STATUSES = new Set(['queued', 'starting', 'running', 'waiting_for_user']);
 const ACTIVE_LOCAL_JOB_STATUSES = new Set(['pending_approval', 'approved', 'dispatched', 'running']);
+const OWNER_MARKER = '.repo-harness-owner.json';
 
 const RUNTIME_STORAGE_SPECS: RuntimeStorageSpec[] = [
   { name: 'runs', sourceName: 'jobs', controllerName: 'runs', detectActiveRuns: true },
@@ -63,7 +67,47 @@ const RUNTIME_STORAGE_SPECS: RuntimeStorageSpec[] = [
 
 function directoryEntries(path: string): string[] {
   if (!existsSync(path)) return [];
-  return readdirSync(path);
+  return readdirSync(path).filter((entry) => entry !== OWNER_MARKER);
+}
+
+function writeOwnerMarker(path: string, repoId: string, binding: string): void {
+  mkdirSync(path, { recursive: true });
+  writeFileSync(join(path, OWNER_MARKER), `${JSON.stringify({
+    schemaVersion: 1,
+    repoId,
+    binding,
+    managedBy: 'repo-harness',
+    updatedAt: new Date().toISOString(),
+  }, null, 2)}\n`, 'utf-8');
+}
+
+function quarantinePath(controllerRoot: string, spec: RuntimeStorageSpec, entry: string): string {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  return join(controllerRoot, 'quarantine', 'runtime-storage', spec.name, `${stamp}-${entry}`);
+}
+
+function mergeRuntimeDirectory(
+  source: string,
+  target: string,
+  controllerRoot: string,
+  spec: RuntimeStorageSpec,
+): { merged: number; quarantined: string[] } {
+  let merged = 0;
+  const quarantined: string[] = [];
+  for (const entry of directoryEntries(source)) {
+    const sourceEntry = join(source, entry);
+    const targetEntry = join(target, entry);
+    if (!existsSync(targetEntry)) {
+      renameSync(sourceEntry, targetEntry);
+      merged += 1;
+      continue;
+    }
+    const quarantine = quarantinePath(controllerRoot, spec, entry);
+    mkdirSync(dirname(quarantine), { recursive: true });
+    renameSync(sourceEntry, quarantine);
+    quarantined.push(quarantine);
+  }
+  return { merged, quarantined };
 }
 
 function sameCanonicalPath(left: string, right: string): boolean {
@@ -130,10 +174,6 @@ function legacyRuntimeBlocker(repositoryPath: string, spec: RuntimeStorageSpec):
   const sourceEntries = directoryEntries(repositoryPath);
   if (sourceEntries.length === 0) return undefined;
 
-  if (spec.preserveNonEmpty) {
-    return 'non-empty worktree storage cannot be moved safely; clean or integrate existing worktrees first';
-  }
-
   if (spec.detectActiveRuns && hasActiveRuns(repositoryPath)) {
     return 'active or unreadable legacy Runs must finish before runtime storage can be relocated';
   }
@@ -148,11 +188,13 @@ function legacyRuntimeBlocker(repositoryPath: string, spec: RuntimeStorageSpec):
 function bindRuntimeDirectory(
   harnessRoot: string,
   controllerRoot: string,
+  repoId: string,
   spec: RuntimeStorageSpec,
 ): RuntimeStorageBinding {
   const repositoryPath = join(harnessRoot, spec.sourceName);
   const controllerPath = join(controllerRoot, spec.controllerName);
   mkdirSync(controllerPath, { recursive: true });
+  writeOwnerMarker(controllerPath, repoId, spec.name);
 
   if (!existsSync(repositoryPath)) {
     createDirectoryLink(controllerPath, repositoryPath);
@@ -189,18 +231,22 @@ function bindRuntimeDirectory(
       };
     }
 
-    if (directoryEntries(controllerPath).length > 0) {
-      return {
-        name: spec.name,
-        repositoryPath,
-        controllerPath,
-        status: 'conflict',
-        message: 'both repository-local and Controller Home runtime directories contain data',
-      };
-    }
-
     if (directoryEntries(repositoryPath).length > 0) {
+      const targetHasData = directoryEntries(controllerPath).length > 0;
+      if (targetHasData) {
+        const outcome = mergeRuntimeDirectory(legacyTarget, controllerPath, controllerRoot, spec);
+        rmSync(repositoryPath, { recursive: true, force: true });
+        createDirectoryLink(controllerPath, repositoryPath);
+        return {
+          name: spec.name, repositoryPath, controllerPath,
+          status: outcome.quarantined.length > 0 ? 'quarantined' : 'merged',
+          message: outcome.quarantined.length > 0
+            ? `merged ${outcome.merged} entry(s); quarantined ${outcome.quarantined.length} conflicting entry(s)`
+            : `merged ${outcome.merged} legacy entry(s)`,
+        };
+      }
       moveDirectory(legacyTarget, controllerPath);
+      writeOwnerMarker(controllerPath, repoId, spec.name);
       rmSync(repositoryPath, { recursive: true, force: true });
       createDirectoryLink(controllerPath, repositoryPath);
       return { name: spec.name, repositoryPath, controllerPath, status: 'migrated' };
@@ -240,16 +286,20 @@ function bindRuntimeDirectory(
   }
 
   if (directoryEntries(controllerPath).length > 0) {
+    const outcome = mergeRuntimeDirectory(repositoryPath, controllerPath, controllerRoot, spec);
+    rmSync(repositoryPath, { recursive: true, force: true });
+    createDirectoryLink(controllerPath, repositoryPath);
     return {
-      name: spec.name,
-      repositoryPath,
-      controllerPath,
-      status: 'conflict',
-      message: 'both repository-local and Controller Home runtime directories contain data',
+      name: spec.name, repositoryPath, controllerPath,
+      status: outcome.quarantined.length > 0 ? 'quarantined' : 'merged',
+      message: outcome.quarantined.length > 0
+        ? `merged ${outcome.merged} entry(s); quarantined ${outcome.quarantined.length} conflicting entry(s)`
+        : `merged ${outcome.merged} legacy entry(s)`,
     };
   }
 
   moveDirectory(repositoryPath, controllerPath);
+  writeOwnerMarker(controllerPath, repoId, spec.name);
   createDirectoryLink(controllerPath, repositoryPath);
   return { name: spec.name, repositoryPath, controllerPath, status: 'migrated' };
 }
@@ -262,7 +312,7 @@ export function ensureRepositoryRuntimeStorage(
   const harnessRoot = join(repository.canonicalRoot, '.ai', 'harness');
   mkdirSync(harnessRoot, { recursive: true });
 
-  const bindings = RUNTIME_STORAGE_SPECS.map((spec) => bindRuntimeDirectory(harnessRoot, controllerRoot, spec));
+  const bindings = RUNTIME_STORAGE_SPECS.map((spec) => bindRuntimeDirectory(harnessRoot, controllerRoot, repository.repoId, spec));
   const warnings = bindings
     .filter((binding) => binding.status === 'legacy-active' || binding.status === 'conflict')
     .map((binding) => `${binding.name}: ${binding.message ?? binding.status}`);

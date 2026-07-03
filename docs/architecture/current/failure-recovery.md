@@ -429,3 +429,23 @@ No in-memory ChatGPT conversation is required for recovery. Duplicate review del
 ### Campaign checkout recovery
 
 Campaign worktree identity is stored in Controller Home with its request id, branch, path, and original base revision. Repeated creation reuses this manifest and registered checkout even if the source checkout advances. A missing directory is reconstructed from the retained branch after stale Git worktree metadata is pruned.
+
+## 25. Campaign Cancellation Finalizer
+
+Campaign cancellation is a two-phase state transition:
+
+```text
+active / paused / waiting_for_supervisor
+  -> cancelling
+  -> cancelled | cancelled_with_leaks
+```
+
+Entering `cancelling` blocks new Task dispatch, supersedes open checkpoints, and marks non-terminal Tasks cancelled. The finalizer then cancels Task and Supervisor Execution Jobs, which terminate owned process trees and release Leases. A managed Campaign worktree is removed only when its path and branch identity match and the workspace is clean. Unknown, dirty, or committed resources are preserved and reported as leaks.
+
+`cancelled` is written only after the cleanup report is durable. Cleanup is idempotent; a Campaign in `cancelled_with_leaks` may be reconciled again after an operator resolves the preserved resource.
+
+## 26. Runtime Storage Recovery
+
+Every Controller Home runtime directory carries a repository/binding owner marker. Empty or terminal legacy storage is migrated and replaced with a repository-local link. Non-conflicting entries are merged. Name collisions are moved to a repository-scoped quarantine with a diagnostic path rather than overwritten or deleted.
+
+Active or unreadable Run and Local Job directories remain fail-closed. Worktree storage is recoverable because stale and partial entries can be preserved or quarantined without claiming execution readiness based on deletion.

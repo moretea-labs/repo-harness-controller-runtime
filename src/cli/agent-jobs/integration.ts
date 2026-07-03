@@ -268,6 +268,34 @@ export function cleanupIntegratedWorktree(
   return { removed, branchDeleted };
 }
 
+export function cleanupNoChangeWorktree(
+  repoRoot: string,
+  runId: string,
+): { removed: boolean; branchDeleted: boolean } {
+  const run = getAgentJob(repoRoot, runId);
+  if (run.provider !== "local" || run.executionMode !== "worktree")
+    return { removed: false, branchDeleted: false };
+  const diff = taskRunDiff(repoRoot, runId);
+  if (diff.status || diff.diff || diff.untracked.length > 0) {
+    throw new Error("cannot discard a worktree that contains changes");
+  }
+  let removed = !existsSync(run.worktree);
+  if (!removed) {
+    const remove = gitBuffer(repoRoot, ["worktree", "remove", "--force", run.worktree]);
+    if (!remove.ok) throw new Error(`failed to remove no-change worktree: ${remove.stderr}`);
+    removed = !existsSync(run.worktree);
+  }
+  let branchDeleted = !run.branch;
+  if (run.branch) {
+    const deleted = gitBuffer(repoRoot, ["branch", "-D", run.branch]);
+    if (!deleted.ok && !deleted.stderr.includes("not found")) {
+      throw new Error(`failed to delete no-change worktree branch: ${deleted.stderr}`);
+    }
+    branchDeleted = true;
+  }
+  return { removed, branchDeleted };
+}
+
 export function taskRunDiff(
   repoRoot: string,
   runId: string,
