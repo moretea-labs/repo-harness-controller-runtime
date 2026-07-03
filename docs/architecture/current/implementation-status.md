@@ -39,6 +39,7 @@ The migration preserves the existing Issue, Task, Run, Edit Session, Local Job, 
 | Schedule, Trigger, Decision and Occurrence | Implemented | interval/manual/UTC cron/calendar/condition/event/dependency triggers, bounded Occurrence and persisted Decision |
 | Schedule safety policy | Implemented | Shadow Mode, max-active, daily budget, cooldown, exponential backoff, failure circuit breaker and stop conditions |
 | Candidate Finding governance | Implemented | semantic dedupe, evidence, observation count and explicit human promotion |
+| Personal-assistant plugin manifests and registry | Implemented | `src/runtime/plugins/`, Controller Home `plugins/`, MCP and Local Controller discovery |
 | Portfolio DAG and Saga | Implemented | dependency-cycle rejection, deterministic stop and compensation under `src/runtime/workflow/portfolio/` |
 | Evidence Plane | Implemented | unified append-only events, exact-revision evidence, Operation Receipts and bounded Artifacts |
 | Materialized projections | Implemented | dirty-marker invalidation, indexed runtime projections and non-blocking Controller Context refresh |
@@ -56,7 +57,7 @@ The compatibility baseline contains **97 original Controller tools**: 86 legacy 
 2f4977857957118e
 ```
 
-The target runtime adds **17 control tools** for durable Jobs, Artifacts, readiness, Schedules, Portfolio workflows, Candidate Findings and release gates. With the development runner enabled, the Controller profile exposes **114 tools total**. Existing names were not removed or renamed.
+The target runtime adds **20 control tools** for durable Jobs, Artifacts, readiness, plugin runtime discovery/action dispatch, Schedules, Portfolio workflows, Candidate Findings and release gates. With the development runner enabled, the Controller profile exposes **117 tools total**. Existing names were not removed or renamed.
 
 Potentially long or mutating legacy calls now acknowledge a durable Job. The operation result remains available through `get_job`; repository identity and runtime-storage envelope fields are preserved in the Worker result.
 
@@ -67,6 +68,7 @@ Controller Home owns runtime state:
 ```text
 repositories/<repoId>/
   execution-jobs/
+  plugins/
   leases/
   schedules/
     records/

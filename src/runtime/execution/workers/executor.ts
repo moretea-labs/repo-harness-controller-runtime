@@ -12,6 +12,7 @@ import { assertAutomatedOperationAllowed } from '../../control-plane/governance/
 import { recordCandidateFinding, updateCandidateFinding } from '../../workflow/findings/store';
 import { writeControllerContextProjection } from '../../projections/controller-context';
 import { triggerWorkspaceAgent } from '../../workflow/campaigns/workspace-agent';
+import { executeAssistantPluginAction } from '../../plugins/store';
 
 
 async function settleLegacyLocalJob(repoRoot: string, jobId: string, timeoutMs = 15 * 60_000) {
@@ -113,6 +114,29 @@ export async function executeExecutionJob(controllerHome: string, job: Execution
       return localJob.status === 'succeeded'
         ? { ok: true, result: { localJob }, outcome: localJob.outcome, repoRoot }
         : { ok: false, outcome: localJob.outcome, error: { code: 'LEGACY_JOB_FAILED', message: localJob.error ?? `Local Job ended as ${localJob.status}`, retryable: false, details: { localJob } }, repoRoot };
+    }
+
+    if (job.payload.target === 'runtime' && job.payload.operation === 'plugin_action_execute') {
+      const args = job.payload.arguments ?? {};
+      const pluginId = String(args.pluginId ?? '').trim();
+      const actionId = String(args.actionId ?? '').trim();
+      const actionArguments = args.actionArguments && typeof args.actionArguments === 'object' && !Array.isArray(args.actionArguments)
+        ? args.actionArguments as Record<string, unknown>
+        : {};
+      if (!pluginId) throw new Error('PLUGIN_ID_REQUIRED');
+      if (!actionId) throw new Error('PLUGIN_ACTION_ID_REQUIRED');
+      const pluginResult = await executeAssistantPluginAction({
+        controllerHome,
+        repoId: job.repoId,
+        repoRoot,
+        pluginId,
+        actionId,
+        requestId: job.requestId,
+        args: actionArguments,
+        origin: job.origin,
+        jobId: job.jobId,
+      });
+      return { ok: true, result: pluginResult, repoRoot };
     }
 
     if (job.type === 'release-gate') {

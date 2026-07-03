@@ -13,6 +13,7 @@ src/runtime/
     schedules/                 Trigger, bounded Occurrence, persisted Decision and backoff
     portfolio/                 Cross-repository DAG and Saga
     findings/                  Deduplicated Candidate Finding and explicit promotion
+  plugins/                     Derived manifests, discovery registry, policy-typed actions and provider adapters
   execution/
     jobs/                      Durable Job schema, indexes, Operation Receipts and compatibility projection
     workers/                   Isolated one-Job process execution

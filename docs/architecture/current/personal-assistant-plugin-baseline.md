@@ -65,7 +65,7 @@ operations on top of that runtime, not as a second orchestrator.
 | Calendar time-based triggering | `src/runtime/workflow/schedules/store.ts`, `engine.ts` | Schedule, Decision, Occurrence records | Launches bounded runtime Jobs only | Implemented |
 | Calendar account read/write | none in repo source | none | none | Not implemented |
 | Gmail mailbox read/write | none in repo source | none | none | Not implemented |
-| Generic plugin manifest/registry for personal apps | none beyond GitHub plugin config and repository registry | none | none | Not implemented |
+| Generic plugin manifest/registry for personal apps | `src/runtime/plugins/`, `src/runtime/gateway/mcp/runtime-tools.ts`, `src/cli/local-bridge/server.ts` | Controller Home `plugins/` manifest/index projections derived from existing authority | Typed plugin action dispatch into durable Jobs | Implemented |
 
 ## 4. Packaging baseline
 
@@ -93,8 +93,8 @@ Compatibility rule:
 | Asset or boundary | Primary threat | Current controls | Remaining gap |
 | --- | --- | --- | --- |
 | Public `/mcp` endpoint and local Gateway | Remote callers trigger long or unsafe work through request lifetime coupling | Thin Gateway, durable acknowledgement, loopback local UI, auth, bounded toolsets, readiness checks | Tool-level capability descriptions are clearer than provider-level assistant semantics |
-| Controller Home runtime state | Replayed or stale ownership mutates state after disconnect or restart | request-id dedupe, Leases, fencing, Operation Receipts, reconciliation, append-only events | No assistant-specific provider registry yet |
-| GitHub plugin config and repo mapping | Wrong repository/project mapping or silent remote mutation | explicit config, readiness probe, registry sync, warnings on remote drift | Only GitHub is modeled; future personal-app adapters need the same guardrails |
+| Controller Home runtime state | Replayed or stale ownership mutates state after disconnect or restart | request-id dedupe, Leases, fencing, Operation Receipts, reconciliation, append-only events | Additional adapters beyond GitHub still need the same registry contract |
+| GitHub plugin config and repo mapping | Wrong repository/project mapping or silent remote mutation | explicit config, readiness probe, derived plugin manifests, action-scoped confirmation, warnings on remote drift | Only GitHub is modeled; future personal-app adapters need the same guardrails |
 | Browser-based ChatGPT automation | Session leakage, default-profile misuse, invisible side effects | dedicated profile guidance, CDP default-profile block, bounded capture, opt-in workflow, evidence records | Browser channel is still an execution transport, not a typed assistant-provider contract |
 | Future Gmail/Calendar adapters | Overbroad mailbox/calendar scope and opaque side effects | none in source today; must currently stay out of scope | Missing adapter contract, consent model, and evidence schema |
 | Local visual controller | Exposure beyond loopback or secret leakage in logs | loopback bind enforcement, token auth, bounded snapshots, redaction paths | Personal-app views do not exist yet, so no specialized redaction policy is defined |
@@ -109,6 +109,17 @@ Compatibility rule:
   source, tests, persistence, and governance exist.
 
 ### Phase B — Add a typed assistant-provider contract
+
+Current implementation:
+
+- The runtime now exposes a generic personal-assistant plugin contract with:
+  versioned manifests, derived registry/discovery, lifecycle/health, typed
+  action schemas, permission scopes, confirmation policies, idempotent durable
+  action dispatch, cancellation/timeout support through `ExecutionJob`, and
+  plugin audit events in the runtime ledger.
+- The first adapter is GitHub. Its configuration authority remains the existing
+  repository registry plus `.repo-harness/plugins/github.json`; the generic
+  manifest is a derived projection, not a second source of truth.
 
 - Introduce one provider contract for personal-app adapters with capability id,
   read/write scope declaration, persisted config shape, readiness probe,
@@ -139,7 +150,10 @@ The current source-aligned assistant baseline is:
 
 - Controller Runtime plus durable Jobs/campaigns/schedules are the assistant
   execution substrate.
-- GitHub is the only implemented persisted plugin.
+- GitHub is the only implemented persisted plugin adapter behind the generic
+  plugin runtime contract.
+- Generic plugin discovery, typed action execution, confirmation policy and
+  audit events are implemented through the runtime `plugins/` layer.
 - ChatGPT browser automation is an opt-in execution channel.
 - Calendar exists only as a scheduling primitive.
 - Gmail and Calendar account adapters are not implemented and must be treated as

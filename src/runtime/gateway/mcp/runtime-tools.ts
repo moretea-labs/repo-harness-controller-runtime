@@ -33,6 +33,7 @@ import type { TaskRisk } from '../../../cli/controller/types';
 import { controllerContextProjectionAgeMs, readControllerContextProjection } from '../../projections/controller-context';
 import { loadMcpRuntimeState } from '../../../cli/mcp/auth';
 import { redactMcpText } from '../../../cli/mcp/redaction';
+import { getAssistantPluginManifest, listAssistantPluginManifests, submitAssistantPluginAction } from '../../plugins/store';
 import {
   getLocalBridgeJobEventsSnapshot,
   getLocalBridgeJobSnapshot,
@@ -88,6 +89,23 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
   definition('cancel_job', 'Cancel one queued or running durable Execution Job.', { job_id: { type: 'string' }, repo_id: repoId, reason: { type: 'string' } }, ['job_id'], false),
   definition('controller_ready', 'Return Gateway, Controller Daemon, Worker isolation, queue, and repository projection readiness.', { repo_id: repoId }),
   definition('repository_runtime_snapshot', 'Read the materialized runtime projection without scanning historical state.', { repo_id: repoId }),
+  definition('list_plugins', 'List personal-assistant plugin manifests, lifecycle state, health, and action discovery for one repository.', {
+    repo_id: repoId,
+  }),
+  definition('get_plugin', 'Read one personal-assistant plugin manifest including action schemas and policy requirements.', {
+    repo_id: repoId,
+    plugin_id: { type: 'string' },
+  }, ['plugin_id']),
+  definition('plugin_action_execute', 'Submit one typed personal-assistant plugin action through the durable execution layer.', {
+    repo_id: repoId,
+    plugin_id: { type: 'string' },
+    action_id: { type: 'string' },
+    request_id: { type: 'string' },
+    arguments: { type: 'object' },
+    timeout_ms: { type: 'number' },
+    confirm_authorization: { type: 'boolean' },
+    confirmation_text: { type: 'string' },
+  }, ['plugin_id', 'action_id', 'request_id'], false),
   definition('create_campaign', 'Create a durable ChatGPT-supervised repository campaign.', {
     repo_id: repoId,
     checkout_id: { type: 'string', description: 'Optional source checkout used to create the Campaign workspace.' },
@@ -298,6 +316,38 @@ function summarizeExecutionJob(job: ExecutionJob, repoRoot?: string): Record<str
           : {}),
       }
       : undefined,
+  };
+}
+
+function summarizePlugin(manifest: ReturnType<typeof getAssistantPluginManifest>): Record<string, unknown> {
+  return {
+    pluginId: manifest.pluginId,
+    provider: manifest.provider,
+    displayName: manifest.displayName,
+    pluginVersion: manifest.pluginVersion,
+    revision: manifest.revision,
+    enabled: manifest.enabled,
+    lifecycle: manifest.lifecycle,
+    health: manifest.health,
+    authority: manifest.authority,
+    permissions: manifest.permissions,
+    capabilities: manifest.capabilities,
+    actions: manifest.actions.map((action) => ({
+      actionId: action.actionId,
+      title: action.title,
+      description: action.description,
+      readOnly: action.readOnly,
+      risk: action.risk,
+      confirmation: action.confirmation,
+      requiredConfirmationText: action.requiredConfirmationText,
+      defaultTimeoutMs: action.defaultTimeoutMs,
+      cancellable: action.cancellable,
+      idempotent: action.idempotent,
+      scopes: action.scopes,
+      resourceClaims: action.resourceClaims,
+      argumentsSchema: action.argumentsSchema,
+    })),
+    updatedAt: manifest.updatedAt,
   };
 }
 
@@ -701,6 +751,20 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           timeoutMs: check.timeoutMs,
           source: check.source,
         }));
+        const plugins = listAssistantPluginManifests(ctx.controllerHome, repository).map((plugin) => ({
+          pluginId: plugin.pluginId,
+          provider: plugin.provider,
+          enabled: plugin.enabled,
+          revision: plugin.revision,
+          lifecycle: plugin.lifecycle,
+          health: plugin.health,
+          actions: plugin.actions.map((action) => ({
+            actionId: action.actionId,
+            readOnly: action.readOnly,
+            risk: action.risk,
+            confirmation: action.confirmation,
+          })),
+        }));
         const cachedPayload = cached?.payload ?? {};
         return result({
           ...cachedPayload,
@@ -717,6 +781,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             reconciliation: { scanned: localJobs.length, active: activeLocalJobs, terminalized: 0 },
             recentJobs: recentLocalJobs,
           },
+          plugins,
           checks,
           repoId: repository.repoId,
           repository: repositorySummary(repository),
@@ -798,6 +863,44 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
       case 'repository_runtime_snapshot': {
         const repository = selected(ctx, args);
         return result({ snapshot: rebuildRepositoryProjection(ctx.controllerHome, repository.repoId) });
+      }
+      case 'list_plugins': {
+        const repository = selected(ctx, args);
+        return result({ plugins: listAssistantPluginManifests(ctx.controllerHome, repository).map(summarizePlugin) });
+      }
+      case 'get_plugin': {
+        const repository = selected(ctx, args);
+        return result({ plugin: summarizePlugin(getAssistantPluginManifest(ctx.controllerHome, repository, String(args.plugin_id ?? '').trim())) });
+      }
+      case 'plugin_action_execute': {
+        const repository = selected(ctx, args);
+        const submitted = submitAssistantPluginAction(ctx.controllerHome, repository, {
+          pluginId: String(args.plugin_id ?? '').trim(),
+          actionId: String(args.action_id ?? '').trim(),
+          requestId: String(args.request_id ?? '').trim(),
+          args: args.arguments && typeof args.arguments === 'object' && !Array.isArray(args.arguments)
+            ? args.arguments as Record<string, unknown>
+            : {},
+          timeoutMs: typeof args.timeout_ms === 'number' ? args.timeout_ms : undefined,
+          confirmAuthorization: args.confirm_authorization === true,
+          confirmationText: typeof args.confirmation_text === 'string' ? args.confirmation_text : undefined,
+          origin: { surface: 'mcp', actor: 'plugin_action_execute', correlationId: String(args.request_id ?? '').trim() },
+        });
+        const daemon = ensureControllerDaemon(ctx.controllerHome);
+        return result({
+          accepted: true,
+          deduplicated: submitted.deduplicated,
+          plugin: summarizePlugin(submitted.manifest),
+          action: {
+            actionId: submitted.action.actionId,
+            risk: submitted.action.risk,
+            confirmation: submitted.action.confirmation,
+            requiredConfirmationText: submitted.action.requiredConfirmationText,
+          },
+          job: summarizeWork(submitted.job, repository.canonicalRoot),
+          daemon: { status: daemon.status, pid: daemon.pid },
+          next: `Call get_job with job_id ${submitted.job.jobId}.`,
+        });
       }
       case 'create_campaign': {
         const repository = selected(ctx, args);

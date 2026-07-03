@@ -1021,6 +1021,42 @@ printf '%s\n' '{"type":"turn.completed"}'
     expect(existsSync(join(root, exported.path))).toBe(true);
   });
 
+  test("serves generic plugin discovery and durable plugin action submission APIs", async () => {
+    const root = repo();
+    const handle = await startLocalBridgeServer({ repoRoot: root, port: 0, openBrowser: false });
+    servers.push(handle);
+    const headers = { "x-repo-harness-local-token": handle.token };
+
+    const listed = await fetch(new URL("/api/plugins", handle.url), { headers }).then((response) => response.json());
+    expect(listed.plugins.map((plugin: { pluginId: string }) => plugin.pluginId)).toContain("github");
+
+    const denied = await fetch(new URL("/api/plugins/github/actions/configure", handle.url), {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({
+        requestId: "plugin-config-local-1",
+        arguments: { enabled: true, repository: "owner/repo", sync_mode: "checkpoint" },
+      }),
+    }).then((response) => response.json());
+    expect(denied.error).toContain("PLUGIN_CONFIRMATION_REQUIRED");
+
+    const accepted = await fetch(new URL("/api/plugins/github/actions/configure", handle.url), {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({
+        requestId: "plugin-config-local-1",
+        confirmAuthorization: true,
+        arguments: { enabled: true, repository: "owner/repo", sync_mode: "checkpoint" },
+      }),
+    }).then((response) => response.json());
+    expect(accepted.accepted).toBe(true);
+    expect(accepted.action.confirmation).toBe("authorization");
+    expect(accepted.job.type).toBe("plugin-action");
+
+    const plugin = await fetch(new URL("/api/plugins/github", handle.url), { headers }).then((response) => response.json());
+    expect(plugin.plugin.actions.some((action: { actionId: string; confirmation: string }) => action.actionId === "close_issue" && action.confirmation === "strong_confirmation")).toBe(true);
+  });
+
 
   test("shows direct edits as first-class file changes and completes them through the local API", async () => {
     const root = repo();

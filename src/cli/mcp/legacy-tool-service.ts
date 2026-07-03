@@ -2864,6 +2864,7 @@ export async function callMcpTool(
             persistedCheckReuse: true,
             directVerification: true,
             controllerContextAggregation: true,
+            assistantPluginRuntime: true,
           },
           runner: {
             enabled: ctx.policy.execution.agentRunner,

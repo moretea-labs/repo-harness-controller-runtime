@@ -84,12 +84,13 @@ import { getMcpPolicy } from "../mcp/policy";
 import { runtimePolicy } from "../mcp/multi-repository";
 import { controllerExpectedToolNames } from "../mcp/tools";
 import { loadMcpLocalConfig, loadMcpRuntimeState } from "../mcp/auth";
-import { loadRepositoryRegistry } from "../repositories/registry";
+import { loadRepositoryRegistry, registerRepository } from "../repositories/registry";
 import { resolveControllerHome } from "../repositories/controller-home";
 import { readControllerDaemonStatus } from "../../runtime/control-plane/daemon-client";
 import { listExecutionJobs } from "../../runtime/execution/jobs/store";
 import { readRepositoryProjectionSnapshot } from "../../runtime/projections/materialized-view";
 import { runtimeToolDefinitions } from "../../runtime/gateway/mcp/runtime-tools";
+import { getAssistantPluginManifest, listAssistantPluginManifests, submitAssistantPluginAction } from "../../runtime/plugins/store";
 import { CORE_CONTROLLER_TOOL_NAMES } from "../mcp/toolset";
 
 export interface LocalBridgeServerOptions {
@@ -892,6 +893,56 @@ export async function startLocalBridgeServer(
   });
   app.get("/api/github/plugin", (_request, response) => {
     response.json(getGitHubPluginStatus(options.repoRoot));
+  });
+  app.get("/api/plugins", (_request, response) => {
+    try {
+      const controllerHome = resolveControllerHome();
+      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      response.json({ plugins: listAssistantPluginManifests(controllerHome, repository) });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.get("/api/plugins/:pluginId", (request, response) => {
+    try {
+      const controllerHome = resolveControllerHome();
+      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      response.json({ plugin: getAssistantPluginManifest(controllerHome, repository, request.params.pluginId) });
+    } catch (error) {
+      response.status(404).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/plugins/:pluginId/actions/:actionId", (request, response) => {
+    try {
+      const controllerHome = resolveControllerHome();
+      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      const submitted = submitAssistantPluginAction(controllerHome, repository, {
+        pluginId: request.params.pluginId,
+        actionId: request.params.actionId,
+        requestId: queryString(request.body?.requestId) ?? '',
+        args: request.body?.arguments && typeof request.body.arguments === "object" && !Array.isArray(request.body.arguments)
+          ? request.body.arguments as Record<string, unknown>
+          : {},
+        timeoutMs: typeof request.body?.timeoutMs === "number" ? request.body.timeoutMs : undefined,
+        confirmAuthorization: request.body?.confirmAuthorization === true,
+        confirmationText: queryString(request.body?.confirmationText),
+        origin: { surface: "local-ui", actor: "local-controller", correlationId: queryString(request.body?.requestId) },
+      });
+      response.status(202).json({
+        accepted: true,
+        deduplicated: submitted.deduplicated,
+        plugin: submitted.manifest,
+        action: {
+          actionId: submitted.action.actionId,
+          risk: submitted.action.risk,
+          confirmation: submitted.action.confirmation,
+          requiredConfirmationText: submitted.action.requiredConfirmationText,
+        },
+        job: submitted.job,
+      });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
   });
   app.patch("/api/github/plugin", (request, response) => {
     try {

@@ -13,10 +13,11 @@ import { spawnSync } from "child_process";
 import { join } from "path";
 import { writeJsonAtomic } from "../../src/runtime/shared/json-files";
 import { appendControllerWorklogEvent } from "../../src/cli/controller/worklog";
-import { createExecutionJob, updateExecutionJob } from "../../src/runtime/execution/jobs/store";
+import { createExecutionJob, getExecutionJob, updateExecutionJob } from "../../src/runtime/execution/jobs/store";
 import { readControllerDaemonStatus } from "../../src/runtime/control-plane/daemon-client";
 import { terminateProcessTree } from "../../src/runtime/shared/process-tree";
 import { callRuntimeTool } from "../../src/runtime/gateway/mcp/runtime-tools";
+import { executeExecutionJob } from "../../src/runtime/execution/workers/executor";
 import { getMcpPolicy } from "../../src/cli/mcp/policy";
 import { createMcpToolContext as createMultiRepositoryContext } from "../../src/cli/mcp/multi-repository";
 import { callRepositoryTool } from "../../src/cli/mcp/repository-tools";
@@ -315,6 +316,63 @@ describe("MCP controller profile", () => {
     });
   });
 
+  test("lists plugin manifests and routes typed plugin actions through durable execution", async () => {
+    await withController(async (repoRoot) => {
+      const controllerHome = String(process.env.REPO_HARNESS_CONTROLLER_HOME);
+      const runtimeCtx = createMultiRepositoryContext({
+        repo: repoRoot,
+        controllerHome,
+        profile: "controller",
+        toolset: "full",
+      });
+      const listed = await callRuntimeTool(runtimeCtx, "list_plugins", {});
+      const listValue = JSON.parse(listed!.content[0].text);
+      expect(listValue.plugins.map((plugin: { pluginId: string }) => plugin.pluginId)).toContain("github");
+
+      const denied = await callRuntimeTool(runtimeCtx, "plugin_action_execute", {
+        plugin_id: "github",
+        action_id: "configure",
+        request_id: "plugin-config-runtime-1",
+        arguments: { enabled: true, repository: "owner/repo", sync_mode: "checkpoint" },
+      });
+      const deniedValue = JSON.parse(denied!.content[0].text);
+      expect(deniedValue.error.code).toBe("PLUGIN_CONFIRMATION_REQUIRED");
+      expect(denied!.isError).toBe(true);
+
+      const accepted = await callRuntimeTool(runtimeCtx, "plugin_action_execute", {
+        plugin_id: "github",
+        action_id: "configure",
+        request_id: "plugin-config-runtime-1",
+        arguments: { enabled: true, repository: "owner/repo", sync_mode: "checkpoint" },
+        confirm_authorization: true,
+      });
+      const acceptedValue = JSON.parse(accepted!.content[0].text);
+      expect(acceptedValue.accepted).toBe(true);
+      expect(acceptedValue.action.confirmation).toBe("authorization");
+
+      const repository = registerRepository({ path: repoRoot, controllerHome });
+      const job = getExecutionJob(controllerHome, repository.repoId, acceptedValue.job.jobId);
+      const execution = await executeExecutionJob(controllerHome, job);
+      expect(execution.ok).toBe(true);
+
+      const plugin = await callRuntimeTool(runtimeCtx, "get_plugin", { plugin_id: "github" });
+      const pluginValue = JSON.parse(plugin!.content[0].text);
+      expect(pluginValue.plugin.enabled).toBe(true);
+      expect(pluginValue.plugin.actions.some((action: { actionId: string; confirmation: string }) => action.actionId === "close_issue" && action.confirmation === "strong_confirmation")).toBe(true);
+
+      const deduped = await callRuntimeTool(runtimeCtx, "plugin_action_execute", {
+        plugin_id: "github",
+        action_id: "configure",
+        request_id: "plugin-config-runtime-1",
+        arguments: { enabled: true, repository: "owner/repo", sync_mode: "checkpoint" },
+        confirm_authorization: true,
+      });
+      const dedupedValue = JSON.parse(deduped!.content[0].text);
+      expect(dedupedValue.deduplicated).toBe(true);
+      expect(dedupedValue.job.jobId).toBe(acceptedValue.job.jobId);
+    });
+  });
+
   test("returns bounded issue summaries by default and keeps full detail opt-in", async () => {
     await withController(async (repoRoot, ctx) => {
       const created = await jsonTool(ctx, "create_issue", {
@@ -456,9 +514,12 @@ describe("MCP controller profile", () => {
       const repository = registerRepository({ path: repoRoot, controllerHome });
       const core = createMultiRepositoryContext({ repo: repoRoot, profile: "controller", toolset: "core", controllerHome });
       const full = createMultiRepositoryContext({ repo: repoRoot, profile: "controller", toolset: "full", controllerHome });
-      expect(exposedControllerToolDefinitions(core)).toHaveLength(23);
+      expect(exposedControllerToolDefinitions(core)).toHaveLength(26);
       expect(exposedControllerToolDefinitions(core).map((tool) => tool.name)).toContain("create_campaign");
       expect(exposedControllerToolDefinitions(core).map((tool) => tool.name)).toContain("submit_campaign_review");
+      expect(exposedControllerToolDefinitions(core).map((tool) => tool.name)).toContain("list_plugins");
+      expect(exposedControllerToolDefinitions(core).map((tool) => tool.name)).toContain("get_plugin");
+      expect(exposedControllerToolDefinitions(core).map((tool) => tool.name)).toContain("plugin_action_execute");
       expect(exposedControllerToolDefinitions(full).length).toBeGreaterThan(100);
 
       let daemonPid: number | undefined;

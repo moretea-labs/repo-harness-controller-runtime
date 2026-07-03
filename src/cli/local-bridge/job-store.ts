@@ -487,9 +487,10 @@ export function submitLocalBridgeJob(
     );
   }
 
-  // Bind runtime storage before the first Local Job is persisted. Deferring this
-  // until the durable worker starts creates a self-deadlock: the just-created
-  // active Local Job is then treated as a legacy-storage migration blocker.
+  // Bind runtime storage before the first Local Job is persisted when the
+  // action requires the durable runtime. Lightweight compatibility flows still
+  // need to work in temporary non-git fixtures and other legacy local-only
+  // contexts.
   const controllerHome = resolveControllerHome(
     request.action === "repository-command" &&
       "controllerHome" in request.payload &&
@@ -497,12 +498,19 @@ export function submitLocalBridgeJob(
       ? (request.payload as RepositoryCommandPayload).controllerHome
       : undefined,
   );
-  const repository = registerRepository({ path: repoRoot, controllerHome });
-  const runtimeStorage = ensureRepositoryRuntimeStorage(repository, controllerHome);
-  if (!runtimeStorage.readyForExecution) {
-    throw new Error(`RUNTIME_STORAGE_NOT_READY: ${runtimeStorage.warnings.join("; ") || repository.activeCheckoutId}`);
+  const requireRuntimeBinding = request.action === "run-check"
+    || request.action === "verify-edit-session"
+    || request.action === "repository-command";
+  try {
+    const repository = registerRepository({ path: repoRoot, controllerHome });
+    const runtimeStorage = ensureRepositoryRuntimeStorage(repository, controllerHome);
+    if (!runtimeStorage.readyForExecution) {
+      throw new Error(`RUNTIME_STORAGE_NOT_READY: ${runtimeStorage.warnings.join("; ") || repository.activeCheckoutId}`);
+    }
+    repoRoot = repository.canonicalRoot;
+  } catch (error) {
+    if (requireRuntimeBinding) throw error;
   }
-  repoRoot = repository.canonicalRoot;
   let revision: string | undefined;
   if (request.action === "run-check") {
     const payload = request.payload as RunCheckPayload;

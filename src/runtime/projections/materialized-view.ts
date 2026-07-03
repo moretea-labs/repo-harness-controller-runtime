@@ -4,8 +4,10 @@ import type { ExecutionJob } from '../execution/jobs/types';
 import { listActiveLeases } from '../resources/leases/store';
 import { readJsonFile, writeJsonAtomic } from '../shared/json-files';
 import { repositoryControllerRoot } from '../../cli/repositories/controller-home';
+import { listRepositories } from '../../cli/repositories/registry';
 import { clearRepositoryProjectionDirty, readRepositoryProjectionDirty, repositoryProjectionIsDirty } from './invalidation';
 import { listCampaigns } from '../workflow/campaigns/store';
+import { listAssistantPluginManifests } from '../plugins/store';
 
 export interface RepositoryRuntimeProjection {
   schemaVersion: 1;
@@ -18,6 +20,13 @@ export interface RepositoryRuntimeProjection {
   runningWorkers: number;
   activeLeases: number;
   attention: Array<{ jobId: string; status: string; message?: string }>;
+  plugins?: {
+    total: number;
+    enabled: number;
+    ready: number;
+    degraded: number;
+    error: number;
+  };
   campaigns?: {
     active: number;
     waitingForSupervisor: number;
@@ -40,6 +49,8 @@ function buildRepositoryProjection(
   const attentionJobs = listExecutionJobs(controllerHome, repoId, 100)
     .filter((job) => ['orphaned', 'human_attention_required', 'stale'].includes(job.status));
   const campaigns = listCampaigns(controllerHome, repoId, 1_000);
+  const repository = listRepositories(controllerHome).find((entry) => entry.repoId === repoId);
+  const plugins = repository ? listAssistantPluginManifests(controllerHome, repository) : [];
   return {
     schemaVersion: 1,
     repoId,
@@ -59,6 +70,13 @@ function buildRepositoryProjection(
     activeLeases: leases.length,
     attention: attentionJobs
       .map((job) => ({ jobId: job.jobId, status: job.status, message: job.error?.message })),
+    plugins: {
+      total: plugins.length,
+      enabled: plugins.filter((plugin) => plugin.enabled).length,
+      ready: plugins.filter((plugin) => plugin.health.state === 'ready').length,
+      degraded: plugins.filter((plugin) => plugin.health.state === 'degraded').length,
+      error: plugins.filter((plugin) => plugin.health.state === 'error').length,
+    },
     campaigns: {
       active: campaigns.filter((campaign) => campaign.status === 'active').length,
       waitingForSupervisor: campaigns.filter((campaign) => campaign.status === 'waiting_for_supervisor').length,

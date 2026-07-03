@@ -2,6 +2,7 @@ export type ExecutionJobPriority = 'P0' | 'P1' | 'P2' | 'P3' | 'P4';
 
 export type ExecutionJobType =
   | 'mcp-tool'
+  | 'plugin-action'
   | 'dispatch-task'
   | 'agent-run'
   | 'check'
