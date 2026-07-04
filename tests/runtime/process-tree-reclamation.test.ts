@@ -130,6 +130,99 @@ describe('worker process-tree reclamation', () => {
     expect(isProcessAlive(childPid)).toBe(false);
   });
 
+  test('reconcileExecutionJobs safely requeues a lost worker before retries are exhausted', async () => {
+    const controllerHome = tempRoot('repo-harness-worker-requeue-home-');
+    const created = createExecutionJob(controllerHome, {
+      repoId: 'repo-a',
+      type: 'check',
+      requestId: 'worker-lost-requeue',
+      semanticKey: 'check:worker-lost-requeue',
+      origin: { surface: 'mcp' },
+      payload: { operation: 'run_check', target: 'mcp-tool' },
+      resourceClaims: [{ resourceKey: 'repo-state', mode: 'read' }],
+      maxAttempts: 2,
+    }).job;
+    updateExecutionJob(controllerHome, 'repo-a', created.jobId, (job) => ({
+      ...job,
+      status: 'running',
+      workerPid: undefined,
+      attempt: 1,
+      startedAt: new Date(Date.now() - 5_000).toISOString(),
+      heartbeatAt: new Date(Date.now() - 60_000).toISOString(),
+    }));
+
+    const result = await reconcileExecutionJobsAsync(controllerHome);
+    const refreshed = getExecutionJob(controllerHome, 'repo-a', created.jobId);
+
+    expect(result.requeued).toBe(1);
+    expect(refreshed.status).toBe('queued');
+    expect(refreshed.error?.code).toBe('WORKER_LOST');
+    expect(refreshed.error?.retryable).toBe(true);
+  });
+
+  test('reconcileExecutionJobs marks worker-lost jobs failed after max attempts', async () => {
+    const controllerHome = tempRoot('repo-harness-worker-lost-home-');
+    const created = createExecutionJob(controllerHome, {
+      repoId: 'repo-a',
+      type: 'check',
+      requestId: 'worker-lost-terminal',
+      semanticKey: 'check:worker-lost-terminal',
+      origin: { surface: 'mcp' },
+      payload: { operation: 'run_check', target: 'mcp-tool' },
+      resourceClaims: [{ resourceKey: 'repo-state', mode: 'read' }],
+      maxAttempts: 1,
+    }).job;
+    updateExecutionJob(controllerHome, 'repo-a', created.jobId, (job) => ({
+      ...job,
+      status: 'running',
+      workerPid: undefined,
+      attempt: 1,
+      startedAt: new Date(Date.now() - 5_000).toISOString(),
+      heartbeatAt: new Date(Date.now() - 60_000).toISOString(),
+    }));
+
+    const result = await reconcileExecutionJobsAsync(controllerHome);
+    const refreshed = getExecutionJob(controllerHome, 'repo-a', created.jobId);
+
+    expect(result.terminal).toBe(1);
+    expect(refreshed.status).toBe('failed');
+    expect(refreshed.error?.code).toBe('WORKER_LOST');
+    expect(refreshed.error?.retryable).toBe(false);
+  });
+
+  test('stale heartbeats do not leave a live worker running forever', async () => {
+    const controllerHome = tempRoot('repo-harness-stale-heartbeat-home-');
+    const { leaderPid, childPid } = await spawnDetachedProcessTree();
+    const created = createExecutionJob(controllerHome, {
+      repoId: 'repo-a',
+      type: 'check',
+      requestId: 'stale-heartbeat-terminal',
+      semanticKey: 'check:stale-heartbeat-terminal',
+      origin: { surface: 'mcp' },
+      payload: { operation: 'run_check', target: 'mcp-tool' },
+      resourceClaims: [{ resourceKey: 'repo-state', mode: 'read' }],
+      maxAttempts: 1,
+    }).job;
+    updateExecutionJob(controllerHome, 'repo-a', created.jobId, (job) => ({
+      ...job,
+      status: 'running',
+      workerPid: leaderPid,
+      attempt: 1,
+      startedAt: new Date(Date.now() - 70_000).toISOString(),
+      heartbeatAt: new Date(Date.now() - 70_000).toISOString(),
+    }));
+
+    const result = await reconcileExecutionJobsAsync(controllerHome);
+    const refreshed = getExecutionJob(controllerHome, 'repo-a', created.jobId);
+
+    expect(result.terminal).toBe(1);
+    expect(refreshed.status).toBe('failed');
+    expect(refreshed.error?.code).toBe('WORKER_LOST');
+    expect(refreshed.error?.details?.["workerLostReason"]).toBe('stale_heartbeat');
+    expect(isProcessAlive(leaderPid)).toBe(false);
+    expect(isProcessAlive(childPid)).toBe(false);
+  });
+
   test('scheduler shutdown waits for spawned worker trees before returning', async () => {
     const controllerHome = tempRoot('repo-harness-scheduler-home-');
     const { leader, leaderPid, childPid } = await spawnDetachedProcessTree();

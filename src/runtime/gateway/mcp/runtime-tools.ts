@@ -692,8 +692,11 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         const jobId = String(args.job_id ?? '').trim();
         const job = getLocalBridgeJobSnapshot(repository.canonicalRoot, jobId);
         return result({
-          job,
-          ...(args.include_events === true ? { events: getLocalBridgeJobEventsSnapshot(repository.canonicalRoot, jobId) } : {}),
+          job: job.job,
+          lookup: job.status === 'ok' ? undefined : job,
+          ...(args.include_events === true && job.status === 'ok'
+            ? { events: getLocalBridgeJobEventsSnapshot(repository.canonicalRoot, jobId) }
+            : {}),
           ...(args.include_output === true ? { output: readLocalBridgeJobOutputSnapshot(repository.canonicalRoot, jobId, {
             stream: args.stream === 'stderr' ? 'stderr' : 'stdout',
             maxBytes: typeof args.max_bytes === 'number' ? args.max_bytes : undefined,

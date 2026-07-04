@@ -925,6 +925,43 @@ describe("MCP controller profile", () => {
     });
   });
 
+  test("returns structured local job output results through the controller tool layer", async () => {
+    await withController(async (repoRoot, ctx) => {
+      const jobDir = join(repoRoot, ".ai/harness/local-jobs", "JOB-output");
+      mkdirSync(jobDir, { recursive: true });
+      writeFileSync(join(jobDir, "job.json"), `${JSON.stringify({
+        schemaVersion: 1,
+        jobId: "JOB-output",
+        action: "repository-command",
+        payload: {
+          controllerHome: join(repoRoot, ".repo-harness-controller-home"),
+          repoId: "repo-test",
+          command: "printf 'hello\\n'",
+        },
+        requestedBy: "test",
+        approval: "auto",
+        status: "succeeded",
+        createdAt: "2026-07-05T00:00:00.000Z",
+        updatedAt: "2026-07-05T00:00:00.000Z",
+        finishedAt: "2026-07-05T00:00:01.000Z",
+      }, null, 2)}\n`);
+
+      const missing = await jsonTool(ctx, "get_local_job_output", {
+        job_id: "JOB-output",
+        stream: "stdout",
+      });
+      expect(missing.value.status).toBe("not_found");
+      expect(missing.value.error.code).toBe("LOCAL_JOB_OUTPUT_NOT_FOUND");
+
+      const traversal = await jsonTool(ctx, "get_local_job_output", {
+        job_id: "../escape",
+        stream: "stdout",
+      });
+      expect(traversal.value.status).toBe("rejected");
+      expect(traversal.value.error.code).toBe("LOCAL_JOB_PATH_INVALID");
+    });
+  });
+
   test("applies SHA-guarded bounded edits and rolls them back", async () => {
     await withController(async (repoRoot, ctx) => {
       const read = await jsonTool(ctx, "read_workflow_file", {

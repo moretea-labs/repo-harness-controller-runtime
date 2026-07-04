@@ -5,6 +5,8 @@ import { releaseExecutionLeases } from '../../resources/leases/store';
 import { isProcessAlive, terminateProcessTree, terminateProcessTreeSync, type ProcessTreeTerminationResult } from '../../shared/process-tree';
 import { settleScheduledExecution } from '../../workflow/schedules/settlement';
 
+const WORKER_HEARTBEAT_STALE_MS = 45_000;
+
 function hasPotentialSideEffects(job: ExecutionJob): boolean {
   return job.resourceClaims.some((claim) => claim.mode !== 'read');
 }
@@ -36,6 +38,52 @@ function ambiguousStartedOperation(controllerHome: string, job: ExecutionJob): b
 
 type ReconcileSummary = { inspected: number; requeued: number; terminal: number; recovered: number };
 
+function heartbeatAgeMs(heartbeatAt: string | undefined): number {
+  if (!heartbeatAt) return Number.POSITIVE_INFINITY;
+  const parsed = Date.parse(heartbeatAt);
+  if (!Number.isFinite(parsed)) return Number.POSITIVE_INFINITY;
+  return Date.now() - parsed;
+}
+
+function workerLossContext(job: ExecutionJob): {
+  workerLost: boolean;
+  heartbeatAgeMs: number;
+  reason: 'missing_worker' | 'stale_heartbeat' | 'process_missing';
+} {
+  const ageMs = heartbeatAgeMs(job.heartbeatAt);
+  if (job.workerPid === undefined) {
+    return { workerLost: true, heartbeatAgeMs: ageMs, reason: 'missing_worker' };
+  }
+  if (!isProcessAlive(job.workerPid)) {
+    return { workerLost: true, heartbeatAgeMs: ageMs, reason: 'process_missing' };
+  }
+  if (ageMs >= WORKER_HEARTBEAT_STALE_MS) {
+    return { workerLost: true, heartbeatAgeMs: ageMs, reason: 'stale_heartbeat' };
+  }
+  return { workerLost: false, heartbeatAgeMs: ageMs, reason: 'process_missing' };
+}
+
+function workerLostMessage(
+  reason: 'missing_worker' | 'stale_heartbeat' | 'process_missing',
+  heartbeatAge: number,
+  terminal: boolean,
+): string {
+  const staleHeartbeat = Number.isFinite(heartbeatAge)
+    ? `Worker heartbeat became stale after ${Math.max(0, Math.trunc(heartbeatAge))}ms.`
+    : 'Worker heartbeat was missing.';
+  const processMissing = reason === 'missing_worker'
+    ? 'Worker PID was missing.'
+    : 'Worker process was no longer alive.';
+  if (reason === 'stale_heartbeat') {
+    return terminal
+      ? `${staleHeartbeat} The job reached its final retry and was marked failed.`
+      : `${staleHeartbeat} The job was safely requeued before its outcome became ambiguous.`;
+  }
+  return terminal
+    ? `${processMissing} The job reached its final retry and was marked failed.`
+    : `${processMissing} The job was safely requeued before its outcome became ambiguous.`;
+}
+
 export function reconcileExecutionJobs(controllerHome: string): ReconcileSummary {
   return reconcileExecutionJobsWith(controllerHome, (pid) => terminateProcessTreeSync(pid));
 }
@@ -66,13 +114,12 @@ function reconcileExecutionJobsWith(
       continue;
     }
 
-    const heartbeatAge = job.heartbeatAt ? Date.now() - Date.parse(job.heartbeatAt) : Number.POSITIVE_INFINITY;
     const deadlineElapsed = Boolean(job.deadlineAt && Date.parse(job.deadlineAt) <= Date.now());
-    const workerLost = !isProcessAlive(job.workerPid) || heartbeatAge >= 45_000;
-    if (!deadlineElapsed && !workerLost) continue;
+    const loss = workerLossContext(job);
+    if (!deadlineElapsed && !loss.workerLost) continue;
 
     const termination = terminateWorker(job.workerPid);
-    const outcome = finalizeRunningJob(controllerHome, job, deadlineElapsed, termination);
+    const outcome = finalizeRunningJob(controllerHome, job, deadlineElapsed, termination, loss.reason, loss.heartbeatAgeMs);
     requeued += outcome.requeued;
     terminal += outcome.terminal;
     recovered += outcome.recovered;
@@ -102,13 +149,12 @@ async function reconcileExecutionJobsAsyncWith(
       continue;
     }
 
-    const heartbeatAge = job.heartbeatAt ? Date.now() - Date.parse(job.heartbeatAt) : Number.POSITIVE_INFINITY;
     const deadlineElapsed = Boolean(job.deadlineAt && Date.parse(job.deadlineAt) <= Date.now());
-    const workerLost = !isProcessAlive(job.workerPid) || heartbeatAge >= 45_000;
-    if (!deadlineElapsed && !workerLost) continue;
+    const loss = workerLossContext(job);
+    if (!deadlineElapsed && !loss.workerLost) continue;
 
     const termination = await terminateWorker(job.workerPid);
-    const outcome = finalizeRunningJob(controllerHome, job, deadlineElapsed, termination);
+    const outcome = finalizeRunningJob(controllerHome, job, deadlineElapsed, termination, loss.reason, loss.heartbeatAgeMs);
     requeued += outcome.requeued;
     terminal += outcome.terminal;
     recovered += outcome.recovered;
@@ -121,6 +167,8 @@ function finalizeRunningJob(
   job: ExecutionJob,
   deadlineElapsed: boolean,
   termination: ProcessTreeTerminationResult,
+  workerLostReason: 'missing_worker' | 'stale_heartbeat' | 'process_missing',
+  heartbeatAge: number,
 ): { requeued: number; terminal: number; recovered: number } {
   const receiptRecovery = recoverCompletedReceipt(controllerHome, job);
   if (receiptRecovery) {
@@ -164,23 +212,34 @@ function finalizeRunningJob(
       workerPid: undefined,
       heartbeatAt: undefined,
       leaseRefs: [],
-      error: { code: 'WORKER_LOST', message: 'Worker disappeared before a side effect became ambiguous; job was safely requeued.', retryable: true },
+      error: {
+        code: 'WORKER_LOST',
+        message: workerLostMessage(workerLostReason, heartbeatAge, false),
+        retryable: true,
+        details: { workerLostReason, heartbeatAgeMs: heartbeatAge, attempt: job.attempt, maxAttempts: job.maxAttempts },
+      },
     });
     return { requeued: 1, terminal: 0, recovered: 0 };
   }
-  const status = deadlineElapsed ? 'timed_out' : 'orphaned';
+  const status = deadlineElapsed ? 'timed_out' : 'failed';
   const terminalJob = transitionExecutionJob(controllerHome, job.repoId, job.jobId, status, {
     workerPid: undefined,
+    heartbeatAt: undefined,
     leaseRefs: [],
     error: deadlineElapsed
       ? { code: 'DEADLINE_EXCEEDED', message: 'Execution deadline elapsed.', retryable: false }
-      : { code: 'WORKER_LOST', message: 'Worker disappeared after maximum attempts.', retryable: false },
+      : {
+          code: 'WORKER_LOST',
+          message: workerLostMessage(workerLostReason, heartbeatAge, true),
+          retryable: false,
+          details: { workerLostReason, heartbeatAgeMs: heartbeatAge, attempt: job.attempt, maxAttempts: job.maxAttempts },
+        },
   });
   settleScheduledExecution(
     controllerHome,
     terminalJob,
     'failed',
-    deadlineElapsed ? 'Scheduled operation exceeded its execution deadline.' : 'Scheduled worker disappeared after maximum attempts.',
+    deadlineElapsed ? 'Scheduled operation exceeded its execution deadline.' : 'Scheduled worker was lost after retries were exhausted.',
   );
   return { requeued: 0, terminal: 1, recovered: 0 };
 }

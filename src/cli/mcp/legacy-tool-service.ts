@@ -111,8 +111,8 @@ import {
 } from "../github/plugin";
 import {
   executeLocalBridgeJob,
-  getLocalBridgeJob,
   getLocalBridgeJobEvents,
+  getLocalBridgeJobSnapshot,
   listLocalBridgeJobs,
   readLocalBridgeJobOutput,
   reconcileLocalBridgeJobs,
@@ -3060,9 +3060,11 @@ export async function callMcpTool(
         const jobId = String(args.job_id ?? "").trim();
         const includeEvents = args.include_events === true;
         const includeOutput = args.include_output === true;
+        const snapshot = getLocalBridgeJobSnapshot(ctx.repoRoot, jobId);
         const payload = {
-          job: getLocalBridgeJob(ctx.repoRoot, jobId),
-          ...(includeEvents ? { events: getLocalBridgeJobEvents(ctx.repoRoot, jobId) } : {}),
+          job: snapshot.job,
+          ...(snapshot.status !== "ok" ? { lookup: snapshot } : {}),
+          ...(includeEvents && snapshot.status === "ok" ? { events: getLocalBridgeJobEvents(ctx.repoRoot, jobId) } : {}),
           ...(includeOutput
             ? {
                 output: readLocalBridgeJobOutput(ctx.repoRoot, jobId, {

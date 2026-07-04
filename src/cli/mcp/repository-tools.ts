@@ -14,7 +14,7 @@ import {
   validateRepository,
 } from '../repositories/registry';
 import { buildControllerWorkbench } from '../repositories/workbench';
-import { executeLocalBridgeJob, submitLocalBridgeJob } from '../local-bridge/job-store';
+import { buildLocalBridgeJobHandoff, executeLocalBridgeJob, getLocalBridgeJobSnapshot, submitLocalBridgeJob } from '../local-bridge/job-store';
 import type { CallToolResult, McpToolDefinition } from './tools';
 
 export type RepositoryToolResult = CallToolResult;
@@ -108,6 +108,26 @@ function failure(error: unknown): RepositoryToolResult {
   const message = error instanceof Error ? error.message : String(error);
   const code = message.includes(':') ? message.slice(0, message.indexOf(':')) : 'REPOSITORY_TOOL_FAILED';
   return { ...result({ error: { code, message } }), isError: true };
+}
+
+function terminalLocalJobStatus(status: string): boolean {
+  return ['succeeded', 'failed', 'timed_out', 'orphaned', 'stale', 'cancelled'].includes(status);
+}
+
+async function waitForRepositoryCommandHandoff(
+  repoRoot: string,
+  jobId: string,
+  maxOutputBytes?: number,
+): Promise<ReturnType<typeof buildLocalBridgeJobHandoff>> {
+  const deadline = Date.now() + 400;
+  while (Date.now() < deadline) {
+    const snapshot = getLocalBridgeJobSnapshot(repoRoot, jobId);
+    if (snapshot.status !== 'ok' || !snapshot.job || terminalLocalJobStatus(snapshot.job.status)) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return buildLocalBridgeJobHandoff(repoRoot, jobId, { maxBytes: maxOutputBytes });
 }
 
 export async function callRepositoryTool(
@@ -222,13 +242,15 @@ export async function callRepositoryTool(
         const accepted = job.status === 'approved'
           ? executeLocalBridgeJob(repository.canonicalRoot, job.jobId)
           : job;
+        const handoff = await waitForRepositoryCommandHandoff(repository.canonicalRoot, accepted.jobId, maxOutputBytes);
         return result({
           accepted: true,
           repoId: repository.repoId,
           checkoutId: repository.activeCheckoutId,
           jobId: accepted.jobId,
-          status: accepted.status,
-          next: `Inspect Job ${accepted.jobId} with get_local_job.`,
+          status: handoff.status,
+          localJob: handoff,
+          next: handoff.nextLocalCommand ?? `Inspect Job ${accepted.jobId} with get_local_job.`,
         });
       }
       default:
