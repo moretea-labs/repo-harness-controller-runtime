@@ -79,6 +79,20 @@ function normalizePath(value: string | undefined): string | undefined {
   return value ? value.replace(/\\/g, '/') : undefined;
 }
 
+function normalizeRootForCompare(value: string | undefined): string | undefined {
+  let normalized = normalizePath(value);
+  while (normalized !== undefined && normalized.endsWith(String.fromCharCode(47))) normalized = normalized.slice(0, -1);
+  return normalized;
+}
+
+export function isHighCpuPeerMcpProcess(sample: RuntimeProcessSample, repoRoot: string): boolean {
+  if (!sample.highCpu) return false;
+  if (sample.kind !== 'mcp-server' && sample.kind !== 'mcp-keepalive') return false;
+  const currentRoot = normalizeRootForCompare(repoRoot);
+  const sampleRoot = normalizeRootForCompare(sample.repoRoot);
+  return currentRoot !== undefined && sampleRoot !== undefined && sampleRoot !== currentRoot;
+}
+
 function extractRepoRoot(command: string): string | undefined {
   const explicitRepo = extractFlag(command, '--repo');
   if (explicitRepo) return normalizePath(explicitRepo);
@@ -172,6 +186,7 @@ export function collectRuntimePerformanceDiagnostics(input: DiagnosticsInput): R
   const workers = repoProcesses.filter((process) => process.kind === 'worker');
   const orphanWorkers = workers.filter((process) => process.orphan);
   const highCpu = repoProcesses.filter((process) => process.highCpu);
+  const highCpuPeerMcp = repoProcesses.filter((process) => isHighCpuPeerMcpProcess(process, repoRoot));
   const localController = repoProcesses.find((process) => process.kind === 'local-controller');
   const localControllerRunning = localController !== undefined || input.localControllerRunning === true;
   const temp = input.includeTempDirs === false ? { roots: [] as string[], entries: [] as RuntimeTempEntry[] } : scanTempEntries(processes);
@@ -179,9 +194,13 @@ export function collectRuntimePerformanceDiagnostics(input: DiagnosticsInput): R
   if (orphanWorkers.length > 0) findings.push({ severity: orphanWorkers.length >= 3 ? 'critical' : 'warning', code: 'ORPHAN_WORKERS', message: 'Detected ' + orphanWorkers.length + ' orphan worker process(es).' });
   const totalCpu = Math.round(repoProcesses.reduce((sum, process) => sum + process.cpu, 0) * 10) / 10;
   if (totalCpu >= 100 || highCpu.length >= 3) findings.push({ severity: 'warning', code: 'HIGH_REPO_HARNESS_CPU', message: 'Repo-harness related CPU is ' + totalCpu + '%.' });
+  if (highCpuPeerMcp.length > 0) findings.push({ severity: 'warning', code: 'HIGH_CPU_PEER_MCP', message: 'Detected ' + highCpuPeerMcp.length + ' high-CPU MCP process(es) owned by another repository.' });
   if ((input.queueDepth ?? 0) === 0 && (input.runningWorkers ?? 0) === 0 && orphanWorkers.length > 0) findings.push({ severity: 'critical', code: 'CONTROL_PLANE_IDLE_HOST_BUSY', message: 'Controller queue is idle but host still has orphan worker process(es).' });
   if (temp.entries.length >= 100) findings.push({ severity: 'warning', code: 'TEMP_DIR_ACCUMULATION', message: 'Detected ' + temp.entries.length + ' repo-harness temp entries.' });
   if (!localController && input.localControllerRunning !== true) findings.push({ severity: 'info', code: 'LOCAL_CONTROLLER_NOT_IN_PROCESS_LIST', message: 'No Local Controller process was found for this repository.' });
+  const cleanupProcesses = [...orphanWorkers, ...highCpuPeerMcp]
+    .filter((sample, index, samples) => samples.findIndex((candidate) => candidate.pid === sample.pid) === index)
+    .slice(0, 50);
   const status: RuntimePerformanceDiagnostics['status'] = findings.some((finding) => finding.severity === 'critical') ? 'critical' : findings.some((finding) => finding.severity === 'warning') ? 'warning' : 'normal';
   return {
     schemaVersion: 1,
@@ -194,7 +213,7 @@ export function collectRuntimePerformanceDiagnostics(input: DiagnosticsInput): R
     processSummary: { totalRepoHarnessProcesses: repoProcesses.length, workerProcesses: workers.length, orphanWorkers: orphanWorkers.length, highCpuProcesses: highCpu.length, totalRepoHarnessCpu: totalCpu, localControllerRunning, localControllerPid: localController?.pid ?? input.localControllerPid },
     processes: repoProcesses.slice(0, 80),
     temp: { scannedRoots: temp.roots, totalEntries: temp.entries.length, cleanupCandidates: temp.entries.filter((entry) => entry.cleanupCandidate).length, entries: temp.entries.slice(0, 80) },
-    cleanupPreview: input.cleanupPreview === true ? { safeToTerminate: orphanWorkers.slice(0, 50), safeToRemoveTempEntries: temp.entries.filter((entry) => entry.cleanupCandidate).slice(0, 80), requiresConfirmation: true } : undefined,
+    cleanupPreview: input.cleanupPreview === true ? { safeToTerminate: cleanupProcesses, safeToRemoveTempEntries: temp.entries.filter((entry) => entry.cleanupCandidate).slice(0, 80), requiresConfirmation: true } : undefined,
     findings,
     recommendations: status === 'normal' ? ['No restart is recommended from this diagnostic snapshot.'] : [
       ...(orphanWorkers.length ? ['Terminate orphan workers only after reviewing cleanupPreview.safeToTerminate.'] : []),
