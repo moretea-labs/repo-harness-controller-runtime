@@ -29,6 +29,7 @@ let heartbeat: NodeJS.Timeout | undefined;
 let claimedAttempt: number | undefined;
 let claimedLeaseRefs: Array<{ leaseId: string; fencingToken: number }> = [];
 let exitingForOwnershipLoss = false;
+let executionStarted = false;
 
 function exitForOwnershipLoss(message: string): never {
   if (heartbeat) clearInterval(heartbeat);
@@ -36,7 +37,7 @@ function exitForOwnershipLoss(message: string): never {
     exitingForOwnershipLoss = true;
     try {
       const current = getExecutionJob(controllerHome, repoId, jobId);
-      const mutating = current.resourceClaims.some((claim) => claim.mode !== 'read');
+      const mutating = executionStarted && current.resourceClaims.some((claim) => claim.mode !== 'read');
       if (current.status === 'running' && current.workerPid === process.pid) {
         transitionExecutionJobFromWorker(
           controllerHome,
@@ -98,6 +99,7 @@ async function main(): Promise<void> {
   }, 5_000);
   heartbeat.unref();
 
+  executionStarted = true;
   const execution = await executeExecutionJob(controllerHome, job);
   const current = getExecutionJob(controllerHome, repoId, jobId);
   const completionInvalidation = invalidateExecutionWorker(controllerHome, repoId, jobId, {
@@ -151,7 +153,7 @@ main()
     const message = error instanceof Error ? error.message : String(error);
     try {
       const current = getExecutionJob(controllerHome, repoId, jobId);
-      const mutating = current.resourceClaims.some((claim) => claim.mode !== 'read');
+      const mutating = executionStarted && current.resourceClaims.some((claim) => claim.mode !== 'read');
       if (current.status === 'running' && current.workerPid === process.pid) {
         transitionExecutionJobFromWorker(
           controllerHome,

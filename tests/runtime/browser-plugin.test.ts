@@ -41,9 +41,10 @@ function writeBrowserConfig(repoRoot: string, value: Record<string, unknown>) {
   writeFileSync(join(repoRoot, '.repo-harness/plugins/browser.json'), `${JSON.stringify(value, null, 2)}\n`, 'utf-8');
 }
 
-function mockPlaywright(options: { finalUrl?: string; title?: string } = {}) {
+function mockPlaywright(options: { finalUrl?: string; title?: string; routeUrl?: string } = {}) {
   let currentUrl = 'https://example.com/';
   let currentTitle = options.title ?? 'Example';
+  const routeDecisions: string[] = [];
 
   const page = {
     async goto(url: string) {
@@ -90,10 +91,18 @@ function mockPlaywright(options: { finalUrl?: string; title?: string } = {}) {
             return page;
           },
           async close() {},
-          async route() {},
+          async route(_pattern: string, handler: (route: { request(): { url(): string }; continue(): Promise<void>; abort(code?: string): Promise<void> }) => Promise<void> | void) {
+            if (!options.routeUrl) return;
+            await handler({
+              request: () => ({ url: () => options.routeUrl ?? '' }),
+              continue: async () => { routeDecisions.push('continue'); },
+              abort: async (code?: string) => { routeDecisions.push(`abort:${code ?? ''}`); },
+            });
+          },
         };
       },
     },
+    routeDecisions,
   } as never;
 }
 
@@ -247,6 +256,99 @@ describe('browser plugin', () => {
     expect(readFileSync(String(screenshot.path), 'utf-8')).toBe('png');
     const session = result.session as Record<string, unknown>;
     expect(String(session.sessionId)).toContain('browser_');
+  });
+
+  test('wait_for_selector keeps authorization despite being read-only', () => {
+    const { repoRoot, controllerHome, repository } = repoFixture();
+    writeBrowserConfig(repoRoot, {
+      schemaVersion: 1,
+      enabled: true,
+      provider: 'playwright',
+      allowedDomains: ['example.com'],
+    });
+
+    setBrowserPluginRuntimeHooksForTest({
+      moduleAvailable: () => true,
+    });
+
+    expect(() => submitAssistantPluginAction(controllerHome, repository, {
+      pluginId: 'browser',
+      actionId: 'wait_for_selector',
+      requestId: 'browser-wait-missing-confirm',
+      args: { url: 'https://example.com/', selector: '#ready' },
+      origin: { surface: 'local-ui', actor: 'test' },
+    })).toThrow('PLUGIN_CONFIRMATION_REQUIRED');
+
+    const accepted = submitAssistantPluginAction(controllerHome, repository, {
+      pluginId: 'browser',
+      actionId: 'wait_for_selector',
+      requestId: 'browser-wait-confirmed',
+      args: { url: 'https://example.com/', selector: '#ready' },
+      confirmAuthorization: true,
+      origin: { surface: 'local-ui', actor: 'test' },
+    });
+    expect(accepted.action.readOnly).toBe(true);
+    expect(accepted.action.risk).toBe('workspace_write');
+    expect(accepted.action.confirmation).toBe('authorization');
+  });
+
+  test('rejects mismatched url when a session_id is supplied', async () => {
+    const { repoRoot } = repoFixture();
+    writeBrowserConfig(repoRoot, {
+      schemaVersion: 1,
+      enabled: true,
+      provider: 'playwright',
+      allowedDomains: ['example.com'],
+    });
+    mkdirSync(join(repoRoot, '.repo-harness/browser/sessions'), { recursive: true });
+    writeFileSync(join(repoRoot, '.repo-harness/browser/sessions/browser_saved.json'), JSON.stringify({
+      schemaVersion: 1,
+      sessionId: 'browser_saved',
+      url: 'https://example.com/',
+      title: 'Saved',
+      createdAt: '2026-07-04T00:00:00.000Z',
+      updatedAt: '2026-07-04T00:00:00.000Z',
+    }));
+
+    await expect(executeBrowserPluginAction({
+      controllerHome: repoRoot,
+      repoId: 'repo',
+      repoRoot,
+      pluginId: 'browser',
+      actionId: 'get_text',
+      requestId: 'browser-session-url-mismatch',
+      args: { session_id: 'browser_saved', url: 'https://evil.test/' },
+      origin: { surface: 'local-ui', actor: 'test' },
+    })).rejects.toThrow('url does not match the saved session');
+  });
+
+  test('route guard aborts requests outside allowed domains', async () => {
+    const { repoRoot } = repoFixture();
+    writeBrowserConfig(repoRoot, {
+      schemaVersion: 1,
+      enabled: true,
+      provider: 'playwright',
+      allowedDomains: ['example.com'],
+    });
+    const runtime = mockPlaywright({ routeUrl: 'https://tracker.evil/pixel' }) as unknown as { routeDecisions: string[] };
+
+    setBrowserPluginRuntimeHooksForTest({
+      moduleAvailable: () => true,
+      loadPlaywright: () => runtime as never,
+    });
+
+    await executeBrowserPluginAction({
+      controllerHome: repoRoot,
+      repoId: 'repo',
+      repoRoot,
+      pluginId: 'browser',
+      actionId: 'open_page',
+      requestId: 'browser-route-guard',
+      args: { url: 'https://example.com/' },
+      origin: { surface: 'local-ui', actor: 'test' },
+    });
+
+    expect(runtime.routeDecisions).toEqual(['abort:blockedbyclient']);
   });
 
   test('blocks interaction results that leave the allowed domain set', async () => {
