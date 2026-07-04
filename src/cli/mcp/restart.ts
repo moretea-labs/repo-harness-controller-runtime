@@ -162,6 +162,55 @@ function processMatchesRepoHarness(commandLine: string, repoRoot: string): boole
     || commandLine.includes('/src/cli/hook-entry.ts');
 }
 
+export interface McpProcessBindingConfig {
+  repoRoot: string;
+  host: string;
+  port: number;
+  profile: string;
+}
+
+function normalizeCommandPath(value: string | undefined): string | undefined {
+  return value?.replace(/\\/g, '/').replace(/\/+$/, '');
+}
+
+function extractCommandFlag(commandLine: string, flag: string): string | undefined {
+  const escaped = flag.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
+  return commandLine.match(new RegExp(escaped + '\\s+([^\\s]+)'))?.[1];
+}
+
+function commandHost(commandLine: string): string {
+  return extractCommandFlag(commandLine, '--host') ?? '127.0.0.1';
+}
+
+function commandPort(commandLine: string): number {
+  const parsed = Number(extractCommandFlag(commandLine, '--port') ?? '8765');
+  return Number.isInteger(parsed) ? parsed : 0;
+}
+
+function commandProfile(commandLine: string): string {
+  return extractCommandFlag(commandLine, '--profile') ?? 'controller';
+}
+
+export function isPeerMcpProcessForBinding(commandLine: string, config: McpProcessBindingConfig): boolean {
+  if (!commandLine.includes('mcp keepalive') && !commandLine.includes('mcp serve')) return false;
+  const processRepo = normalizeCommandPath(extractCommandFlag(commandLine, '--repo'));
+  const currentRepo = normalizeCommandPath(config.repoRoot);
+  if (!processRepo || !currentRepo || processRepo === currentRepo) return false;
+  return commandHost(commandLine) === config.host
+    && commandPort(commandLine) === config.port
+    && commandProfile(commandLine) === config.profile;
+}
+
+export function isStaleControllerDaemonForRestart(commandLine: string, repoRoot: string): boolean {
+  if (!commandLine.includes('daemon-entry.ts')) return false;
+  const controllerHome = normalizeCommandPath(extractCommandFlag(commandLine, '--controller-home'));
+  const currentRepo = normalizeCommandPath(repoRoot);
+  if (!controllerHome || !currentRepo) return false;
+  const currentControllerHome = currentRepo + '/_ops/controller-home';
+  if (controllerHome === currentControllerHome || controllerHome.startsWith(currentControllerHome + '/')) return false;
+  return controllerHome.includes('/.ai/local/controller-home') || controllerHome.includes('/repo-harness-controller-home-');
+}
+
 function launchctlDomain(): string {
   const uid = typeof process.getuid === 'function'
     ? process.getuid()
@@ -339,7 +388,8 @@ async function stopPid(pid: number): Promise<void> {
   }
 }
 
-function collectRepoHarnessPids(repoRoot: string, runtime: McpRuntimeState | null): number[] {
+function collectRepoHarnessPids(config: McpProcessBindingConfig, runtime: McpRuntimeState | null): number[] {
+  const repoRoot = config.repoRoot;
   const pids = new Set<number>();
   const addPid = (value: number | undefined): void => {
     if (!value || value === process.pid) return;
@@ -362,9 +412,14 @@ function collectRepoHarnessPids(repoRoot: string, runtime: McpRuntimeState | nul
     const pid = Number(match[1]);
     const commandLine = match[2];
     if (!Number.isInteger(pid) || pid === process.pid) continue;
-    if (!processMatchesRepoHarness(commandLine, repoRoot)) continue;
+    const repoLocal = processMatchesRepoHarness(commandLine, repoRoot);
+    const peerMcp = isPeerMcpProcessForBinding(commandLine, config);
+    const staleDaemon = isStaleControllerDaemonForRestart(commandLine, repoRoot);
+    if (!repoLocal && !peerMcp && !staleDaemon) continue;
     if (
-      commandLine.includes('mcp keepalive')
+      staleDaemon
+      || peerMcp
+      || commandLine.includes('mcp keepalive')
       || commandLine.includes('mcp serve')
       || commandLine.includes('controller ui')
     ) {
@@ -395,8 +450,11 @@ function collectKeepalivePids(repoRoot: string): number[] {
   return pids;
 }
 
-async function stopRepoHarnessProcesses(repoRoot: string, runtime: McpRuntimeState | null): Promise<number[]> {
-  const pids = collectRepoHarnessPids(repoRoot, runtime);
+async function stopRepoHarnessProcesses(configOrRepoRoot: McpProcessBindingConfig | string, runtime: McpRuntimeState | null): Promise<number[]> {
+  const config = typeof configOrRepoRoot === 'string'
+    ? { repoRoot: configOrRepoRoot, host: '127.0.0.1', port: 8765, profile: 'controller' }
+    : configOrRepoRoot;
+  const pids = collectRepoHarnessPids(config, runtime);
   for (const pid of pids) await stopPid(pid);
   return pids;
 }
@@ -712,7 +770,7 @@ export async function runMcpRestart(opts: McpRestartOptions): Promise<McpSetupRe
   }
 
   lines.push(...bootoutRepoLaunchAgents(launchAgents));
-  const stoppedPids = await stopRepoHarnessProcesses(repoRoot, runtimeBefore);
+  const stoppedPids = await stopRepoHarnessProcesses(config, runtimeBefore);
   lines.push(
     stoppedPids.length > 0
       ? `[repo-harness restart] stopped old repo-local MCP processes: ${stoppedPids.join(' ')}`

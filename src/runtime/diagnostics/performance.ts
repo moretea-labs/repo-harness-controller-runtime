@@ -93,6 +93,17 @@ export function isHighCpuPeerMcpProcess(sample: RuntimeProcessSample, repoRoot: 
   return currentRoot !== undefined && sampleRoot !== undefined && sampleRoot !== currentRoot;
 }
 
+export function isStaleControllerDaemonProcess(sample: RuntimeProcessSample, repoRoot: string): boolean {
+  if (sample.kind !== 'controller-daemon') return false;
+  if (sample.ppid !== 1) return false;
+  const controllerHome = normalizeRootForCompare(extractFlag(sample.command, '--controller-home'));
+  const currentRoot = normalizeRootForCompare(repoRoot);
+  if (!controllerHome || !currentRoot) return false;
+  const currentControllerHome = currentRoot + '/_ops/controller-home';
+  if (controllerHome === currentControllerHome || controllerHome.startsWith(currentControllerHome + '/')) return false;
+  return controllerHome.includes('/.ai/local/controller-home') || controllerHome.includes('/repo-harness-controller-home-');
+}
+
 function extractRepoRoot(command: string): string | undefined {
   const explicitRepo = extractFlag(command, '--repo');
   if (explicitRepo) return normalizePath(explicitRepo);
@@ -182,11 +193,18 @@ export function collectRuntimePerformanceDiagnostics(input: DiagnosticsInput): R
   const activeJobIds = input.activeJobIds ?? [];
   const processes = input.includeProcesses === false ? [] : collectRuntimeProcesses(activeJobIds);
   const repoRoot = normalizePath(input.repoRoot) ?? input.repoRoot;
-  const repoProcesses = processes.filter((process) => normalizePath(process.repoRoot) === repoRoot || process.command.includes(input.repoRoot));
+  const peerMcpProcesses = processes.filter((process) => isHighCpuPeerMcpProcess(process, repoRoot));
+  const staleControllerDaemons = processes.filter((process) => isStaleControllerDaemonProcess(process, repoRoot));
+  const repoProcesses = processes.filter((process) =>
+    normalizePath(process.repoRoot) === repoRoot
+    || process.command.includes(input.repoRoot)
+    || peerMcpProcesses.some((peer) => peer.pid === process.pid)
+    || staleControllerDaemons.some((daemon) => daemon.pid === process.pid),
+  );
   const workers = repoProcesses.filter((process) => process.kind === 'worker');
   const orphanWorkers = workers.filter((process) => process.orphan);
   const highCpu = repoProcesses.filter((process) => process.highCpu);
-  const highCpuPeerMcp = repoProcesses.filter((process) => isHighCpuPeerMcpProcess(process, repoRoot));
+  const highCpuPeerMcp = peerMcpProcesses;
   const localController = repoProcesses.find((process) => process.kind === 'local-controller');
   const localControllerRunning = localController !== undefined || input.localControllerRunning === true;
   const temp = input.includeTempDirs === false ? { roots: [] as string[], entries: [] as RuntimeTempEntry[] } : scanTempEntries(processes);
@@ -195,10 +213,11 @@ export function collectRuntimePerformanceDiagnostics(input: DiagnosticsInput): R
   const totalCpu = Math.round(repoProcesses.reduce((sum, process) => sum + process.cpu, 0) * 10) / 10;
   if (totalCpu >= 100 || highCpu.length >= 3) findings.push({ severity: 'warning', code: 'HIGH_REPO_HARNESS_CPU', message: 'Repo-harness related CPU is ' + totalCpu + '%.' });
   if (highCpuPeerMcp.length > 0) findings.push({ severity: 'warning', code: 'HIGH_CPU_PEER_MCP', message: 'Detected ' + highCpuPeerMcp.length + ' high-CPU MCP process(es) owned by another repository.' });
+  if (staleControllerDaemons.length > 0) findings.push({ severity: 'warning', code: 'STALE_CONTROLLER_DAEMONS', message: 'Detected ' + staleControllerDaemons.length + ' detached stale controller daemon(s).' });
   if ((input.queueDepth ?? 0) === 0 && (input.runningWorkers ?? 0) === 0 && orphanWorkers.length > 0) findings.push({ severity: 'critical', code: 'CONTROL_PLANE_IDLE_HOST_BUSY', message: 'Controller queue is idle but host still has orphan worker process(es).' });
   if (temp.entries.length >= 100) findings.push({ severity: 'warning', code: 'TEMP_DIR_ACCUMULATION', message: 'Detected ' + temp.entries.length + ' repo-harness temp entries.' });
   if (!localController && input.localControllerRunning !== true) findings.push({ severity: 'info', code: 'LOCAL_CONTROLLER_NOT_IN_PROCESS_LIST', message: 'No Local Controller process was found for this repository.' });
-  const cleanupProcesses = [...orphanWorkers, ...highCpuPeerMcp]
+  const cleanupProcesses = [...orphanWorkers, ...highCpuPeerMcp, ...staleControllerDaemons]
     .filter((sample, index, samples) => samples.findIndex((candidate) => candidate.pid === sample.pid) === index)
     .slice(0, 50);
   const status: RuntimePerformanceDiagnostics['status'] = findings.some((finding) => finding.severity === 'critical') ? 'critical' : findings.some((finding) => finding.severity === 'warning') ? 'warning' : 'normal';
