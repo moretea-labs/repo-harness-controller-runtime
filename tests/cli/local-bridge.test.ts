@@ -1102,8 +1102,31 @@ printf '%s\n' '{"type":"turn.completed"}'
     }).then((response) => response.json());
     expect(memory.entry.key).toBe("work.communication_style");
 
+    const gmailPlan = await fetch(new URL("/api/assistant/intent", handle.url), {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ utterance: "测试读取最近一周 Gmail", mode: "plan_only" }),
+    }).then((response) => response.json());
+    expect(gmailPlan.understoodIntent).toBe("read_gmail");
+    expect(gmailPlan.plan[0].pluginId).toBe("gmail");
+    expect(gmailPlan.plan[0].actionId).toBe("list_messages");
+
+    const readiness = await fetch(new URL("/api/assistant/readiness", handle.url), { headers }).then((response) => response.json());
+    expect(readiness.capabilities.map((capability: { capabilityId: string }) => capability.capabilityId)).toContain("gmail_read");
+    expect(readiness.assistantState.memoryEntries).toBe(1);
+
+    const cleanupPreview = await fetch(new URL("/api/assistant/maintenance/cleanup-preview", handle.url), {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ includeTempDirs: false, includeTerminalLocalJobs: false, includeHistoricalAttention: false }),
+    }).then((response) => response.json());
+    expect(cleanupPreview.mode).toBe("preview");
+    expect(cleanupPreview.summary.total).toBe(0);
+
     const openapi = await fetch(new URL("/api/assistant/openapi.json", handle.url), { headers }).then((response) => response.json());
     expect(openapi.paths["/api/assistant/intent"].post.operationId).toBe("submitAssistantIntent");
+    expect(openapi.paths["/api/assistant/readiness"].get.operationId).toBe("getAssistantReadiness");
+    expect(openapi.paths["/api/assistant/maintenance/cleanup-preview"].post.operationId).toBe("previewRuntimeCleanup");
 
     const inbox = await fetch(new URL("/api/assistant/inbox", handle.url), { headers }).then((response) => response.json());
     expect(inbox.items.length).toBeGreaterThan(0);

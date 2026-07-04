@@ -101,6 +101,8 @@ import {
 import { CORE_CONTROLLER_TOOL_NAMES } from "../mcp/toolset";
 import { submitAssistantIntent, runAssistantRoutineNow } from "../../runtime/assistant/intent";
 import { assistantOpenApiSchema } from "../../runtime/assistant/openapi";
+import { buildAssistantReadinessReport } from "../../runtime/assistant/readiness";
+import { applyRuntimeCleanup, previewRuntimeCleanup } from "../../runtime/maintenance/cleanup";
 import {
   listAssistantInbox,
   listAssistantMemory,
@@ -714,6 +716,34 @@ export async function startLocalBridgeServer(
     }
   });
 
+  app.get("/api/assistant/readiness", (_request, response) => {
+    try {
+      const controllerHome = resolveControllerHome();
+      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      response.json(buildAssistantReadinessReport(controllerHome, repository));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.post("/api/assistant/self-test/gmail-read", (request, response) => {
+    try {
+      const controllerHome = resolveControllerHome();
+      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      const query = queryString(request.body?.query) ?? "newer_than:1d";
+      const maxResults = typeof request.body?.maxResults === "number" ? Math.max(1, Math.min(Math.trunc(request.body.maxResults), 10)) : 3;
+      response.status(202).json(submitAssistantIntent(controllerHome, repository, {
+        utterance: `测试读取 Gmail：${query}`,
+        source: "local-ui",
+        mode: "execute",
+        requestId: queryString(request.body?.requestId),
+        context: { query, max_results: maxResults },
+      }));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
   app.get("/api/assistant/inbox", (request, response) => {
     try {
       const limit = Number(request.query.limit);
@@ -797,6 +827,35 @@ export async function startLocalBridgeServer(
   app.post("/api/assistant/routines/:routineId/delete", (request, response) => {
     try {
       response.json({ routine: updateAssistantRoutineStatus(options.repoRoot, request.params.routineId, "deleted") });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.post("/api/assistant/maintenance/cleanup-preview", (request, response) => {
+    try {
+      response.json(previewRuntimeCleanup(options.repoRoot, {
+        minAgeMinutes: typeof request.body?.minAgeMinutes === "number" ? request.body.minAgeMinutes : undefined,
+        includeTempDirs: request.body?.includeTempDirs !== false,
+        includeTerminalLocalJobs: request.body?.includeTerminalLocalJobs === true,
+        includeHistoricalAttention: request.body?.includeHistoricalAttention === true,
+        maxCandidates: typeof request.body?.maxCandidates === "number" ? request.body.maxCandidates : undefined,
+      }));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.post("/api/assistant/maintenance/cleanup-apply", (request, response) => {
+    try {
+      response.json(applyRuntimeCleanup(options.repoRoot, {
+        minAgeMinutes: typeof request.body?.minAgeMinutes === "number" ? request.body.minAgeMinutes : undefined,
+        includeTempDirs: request.body?.includeTempDirs !== false,
+        includeTerminalLocalJobs: request.body?.includeTerminalLocalJobs === true,
+        includeHistoricalAttention: request.body?.includeHistoricalAttention === true,
+        maxCandidates: typeof request.body?.maxCandidates === "number" ? request.body.maxCandidates : undefined,
+        confirmCleanup: request.body?.confirmCleanup === true,
+      }));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }

@@ -18,6 +18,13 @@ export function assistantOpenApiSchema(baseUrl = 'http://127.0.0.1:8766'): Recor
     },
     security: [{ localControllerToken: [] }],
     paths: {
+      '/api/assistant/readiness': {
+        get: {
+          operationId: 'getAssistantReadiness',
+          summary: 'Summarize which assistant capabilities are live, mock, disabled, or need configuration.',
+          responses: { '200': { description: 'Assistant readiness report.' } },
+        },
+      },
       '/api/assistant/intent': {
         post: {
           operationId: 'submitAssistantIntent',
@@ -74,6 +81,42 @@ export function assistantOpenApiSchema(baseUrl = 'http://127.0.0.1:8766'): Recor
       },
       '/api/assistant/inbox': {
         get: { operationId: 'listAssistantInbox', summary: 'List assistant inbox items and routine outputs.', responses: { '200': { description: 'Inbox items.' } } },
+      },
+      '/api/assistant/self-test/gmail-read': {
+        post: {
+          operationId: 'runGmailReadSelfTest',
+          summary: 'Submit a read-only Gmail list_messages self-test through the assistant intent layer.',
+          requestBody: {
+            required: false,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    query: { type: 'string' },
+                    maxResults: { type: 'number' },
+                    requestId: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+          responses: { '202': { description: 'Self-test execution plan submitted.' } },
+        },
+      },
+      '/api/assistant/maintenance/cleanup-preview': {
+        post: {
+          operationId: 'previewRuntimeCleanup',
+          summary: 'Preview stale repo-harness temp, terminal local job, and historical attention cleanup candidates.',
+          responses: { '200': { description: 'Cleanup preview; non-destructive.' } },
+        },
+      },
+      '/api/assistant/maintenance/cleanup-apply': {
+        post: {
+          operationId: 'applyRuntimeCleanup',
+          summary: 'Apply safe cleanup candidates. Requires confirmCleanup=true.',
+          responses: { '200': { description: 'Cleanup apply result.' } },
+        },
       },
       '/api/assistant/memory': {
         get: { operationId: 'listAssistantMemory', summary: 'List local assistant memory entries.', responses: { '200': { description: 'Memory entries.' } } },

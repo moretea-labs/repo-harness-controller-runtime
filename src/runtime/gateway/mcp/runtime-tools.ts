@@ -35,6 +35,8 @@ import { controllerContextProjectionAgeMs, readControllerContextProjection } fro
 import { loadMcpRuntimeState } from '../../../cli/mcp/auth';
 import { redactMcpText } from '../../../cli/mcp/redaction';
 import { getAssistantPluginManifest, listAssistantPluginManifests, submitAssistantPluginAction } from '../../plugins/store';
+import { buildAssistantReadinessReport } from '../../assistant/readiness';
+import { applyRuntimeCleanup, previewRuntimeCleanup } from '../../maintenance/cleanup';
 import {
   getLocalBridgeJobEventsSnapshot,
   getLocalBridgeJobSnapshot,
@@ -113,6 +115,26 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
     confirm_authorization: { type: 'boolean' },
     confirmation_text: { type: 'string' },
   }, ['plugin_id', 'action_id', 'request_id'], false),
+  definition('assistant_readiness', 'Summarize personal-assistant readiness, Google plugin state, routines, inbox, and recommended next actions.', {
+    repo_id: repoId,
+  }),
+  definition('runtime_cleanup_preview', 'Preview stale repo-harness temp directories, terminal local jobs, and historical attention cleanup candidates.', {
+    repo_id: repoId,
+    min_age_minutes: { type: 'number' },
+    include_temp_dirs: { type: 'boolean' },
+    include_terminal_local_jobs: { type: 'boolean' },
+    include_historical_attention: { type: 'boolean' },
+    max_candidates: { type: 'number' },
+  }),
+  definition('runtime_cleanup_apply', 'Apply safe cleanup candidates. Requires confirm_cleanup=true and remains limited to explicit repo-harness candidates.', {
+    repo_id: repoId,
+    min_age_minutes: { type: 'number' },
+    include_temp_dirs: { type: 'boolean' },
+    include_terminal_local_jobs: { type: 'boolean' },
+    include_historical_attention: { type: 'boolean' },
+    max_candidates: { type: 'number' },
+    confirm_cleanup: { type: 'boolean' },
+  }, [], false),
   definition('create_campaign', 'Create a durable ChatGPT-supervised repository campaign.', {
     repo_id: repoId,
     checkout_id: { type: 'string', description: 'Optional source checkout used to create the Campaign workspace.' },
@@ -908,6 +930,34 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
       case 'get_plugin': {
         const repository = selected(ctx, args);
         return result({ plugin: summarizePlugin(getAssistantPluginManifest(ctx.controllerHome, repository, String(args.plugin_id ?? '').trim())) });
+      }
+      case 'assistant_readiness': {
+        const repository = selected(ctx, args);
+        const readiness = buildAssistantReadinessReport(ctx.controllerHome, repository);
+        return result({ ...readiness });
+      }
+      case 'runtime_cleanup_preview': {
+        const repository = selected(ctx, args);
+        const preview = previewRuntimeCleanup(repository.canonicalRoot, {
+          minAgeMinutes: typeof args.min_age_minutes === 'number' ? args.min_age_minutes : undefined,
+          includeTempDirs: args.include_temp_dirs !== false,
+          includeTerminalLocalJobs: args.include_terminal_local_jobs === true,
+          includeHistoricalAttention: args.include_historical_attention === true,
+          maxCandidates: typeof args.max_candidates === 'number' ? args.max_candidates : undefined,
+        });
+        return result({ ...preview });
+      }
+      case 'runtime_cleanup_apply': {
+        const repository = selected(ctx, args);
+        const applied = applyRuntimeCleanup(repository.canonicalRoot, {
+          minAgeMinutes: typeof args.min_age_minutes === 'number' ? args.min_age_minutes : undefined,
+          includeTempDirs: args.include_temp_dirs !== false,
+          includeTerminalLocalJobs: args.include_terminal_local_jobs === true,
+          includeHistoricalAttention: args.include_historical_attention === true,
+          maxCandidates: typeof args.max_candidates === 'number' ? args.max_candidates : undefined,
+          confirmCleanup: args.confirm_cleanup === true,
+        });
+        return result({ ...applied });
       }
       case 'plugin_action_execute': {
         const repository = selected(ctx, args);

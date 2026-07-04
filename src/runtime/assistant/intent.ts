@@ -147,6 +147,28 @@ function inferMailSummaryStep(input: AssistantIntentInput): AssistantPlanStepInp
   };
 }
 
+function inferGmailReadStep(input: AssistantIntentInput): AssistantPlanStepInput | undefined {
+  const utterance = stringValue(input.utterance) ?? '';
+  if (!containsAny(utterance, ['gmail', '邮件', '邮箱', 'email', 'mail'])) return undefined;
+  if (containsAny(utterance, ['每天', '每日', '以后', 'daily', 'every day', 'routine'])) return undefined;
+  if (!containsAny(utterance, ['读取', '查看', '搜索', '测试', '模拟', 'list', 'read', 'search', 'test', 'simulate', '整理', '总结'])) return undefined;
+  return {
+    pluginId: 'gmail',
+    actionId: 'list_messages',
+    arguments: {
+      query: firstString(input.context?.query) ?? (containsAny(utterance, ['最近一周', '7天', '7 天', 'week']) ? 'newer_than:7d' : 'newer_than:1d'),
+      max_results: typeof input.context?.max_results === 'number' ? input.context.max_results : 10,
+    },
+  };
+}
+
+function intentNameForStep(step: AssistantPlanStepInput | undefined): string {
+  if (!step) return 'execute_plan';
+  if (step.pluginId === 'google_tasks' && step.actionId === 'create_task') return 'create_reminder';
+  if (step.pluginId === 'gmail' && step.actionId === 'list_messages') return 'read_gmail';
+  return `${step.pluginId}.${step.actionId}`;
+}
+
 function initialResult(input: AssistantIntentInput, source: AssistantIntentSource, mode: AssistantIntentMode, id: string): AssistantIntentResult {
   return {
     schemaVersion: 1,
@@ -272,7 +294,7 @@ export function submitAssistantIntent(
     };
   }
 
-  const inferredStep = inferReminderStep(input) ?? inferMailSummaryStep(input);
+  const inferredStep = inferReminderStep(input) ?? inferGmailReadStep(input) ?? inferMailSummaryStep(input);
   const steps = input.plan && input.plan.length > 0 ? input.plan : inferredStep ? [inferredStep] : [];
   if (steps.length === 0) return base;
   if (mode === 'plan_only') {
@@ -288,7 +310,7 @@ export function submitAssistantIntent(
     return {
       ...base,
       accepted: true,
-      understoodIntent: inferredStep ? (inferredStep.actionId === 'create_task' ? 'create_reminder' : 'summarize_email') : 'execute_plan',
+      understoodIntent: intentNameForStep(inferredStep),
       displayTitle: '已生成执行计划',
       displayText: `已生成 ${plan.length} 个本地执行步骤，尚未提交。`,
       requiresConfirmation: false,
