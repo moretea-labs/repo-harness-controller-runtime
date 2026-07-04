@@ -838,6 +838,7 @@ export async function startLocalBridgeServer(
         minAgeMinutes: typeof request.body?.minAgeMinutes === "number" ? request.body.minAgeMinutes : undefined,
         includeTempDirs: request.body?.includeTempDirs !== false,
         includeTerminalLocalJobs: request.body?.includeTerminalLocalJobs === true,
+        includeLegacyRuns: request.body?.includeLegacyRuns === true,
         includeHistoricalAttention: request.body?.includeHistoricalAttention === true,
         maxCandidates: typeof request.body?.maxCandidates === "number" ? request.body.maxCandidates : undefined,
       }));
@@ -852,6 +853,7 @@ export async function startLocalBridgeServer(
         minAgeMinutes: typeof request.body?.minAgeMinutes === "number" ? request.body.minAgeMinutes : undefined,
         includeTempDirs: request.body?.includeTempDirs !== false,
         includeTerminalLocalJobs: request.body?.includeTerminalLocalJobs === true,
+        includeLegacyRuns: request.body?.includeLegacyRuns === true,
         includeHistoricalAttention: request.body?.includeHistoricalAttention === true,
         maxCandidates: typeof request.body?.maxCandidates === "number" ? request.body.maxCandidates : undefined,
         confirmCleanup: request.body?.confirmCleanup === true,

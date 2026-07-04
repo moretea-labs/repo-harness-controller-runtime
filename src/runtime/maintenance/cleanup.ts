@@ -4,7 +4,7 @@ import { basename, dirname, join, relative, resolve } from 'path';
 import { tmpdir } from 'os';
 
 export interface RuntimeCleanupCandidate {
-  kind: 'temp_dir' | 'local_job' | 'attention_marker';
+  kind: 'temp_dir' | 'local_job' | 'legacy_run' | 'attention_marker';
   path?: string;
   id?: string;
   reason: string;
@@ -25,6 +25,7 @@ export interface RuntimeCleanupPreview {
     unsafe: number;
     tempDirs: number;
     localJobs: number;
+    legacyRuns: number;
     attentionMarkers: number;
   };
   warnings: string[];
@@ -39,6 +40,7 @@ export interface RuntimeCleanupOptions {
   minAgeMinutes?: number;
   includeTempDirs?: boolean;
   includeTerminalLocalJobs?: boolean;
+  includeLegacyRuns?: boolean;
   includeHistoricalAttention?: boolean;
   maxCandidates?: number;
   confirmCleanup?: boolean;
@@ -55,6 +57,7 @@ function normalizeOptions(options: RuntimeCleanupOptions): Required<Omit<Runtime
     minAgeMinutes: safeNumber(options.minAgeMinutes, 60),
     includeTempDirs: options.includeTempDirs !== false,
     includeTerminalLocalJobs: options.includeTerminalLocalJobs === true,
+    includeLegacyRuns: options.includeLegacyRuns === true,
     includeHistoricalAttention: options.includeHistoricalAttention === true,
     maxCandidates: Math.max(1, Math.min(safeNumber(options.maxCandidates, 200), 500)),
     confirmCleanup: options.confirmCleanup === true,
@@ -153,6 +156,68 @@ function scanTerminalLocalJobs(repoRoot: string, minAgeMinutes: number, limit: n
   return candidates.filter((candidate) => candidate.safe).slice(0, limit);
 }
 
+function textIncludesNoOpIntegrate(value: unknown): boolean {
+  const text = JSON.stringify(value ?? '').toLowerCase();
+  return text.includes('no changes to integrate')
+    || text.includes('nothing to integrate')
+    || text.includes('no diff')
+    || text.includes('没有可集成')
+    || text.includes('无变更');
+}
+
+function findRunState(path: string): Record<string, unknown> | undefined {
+  const candidateFiles = ['run.json', 'task-run.json', 'state.json', 'metadata.json'];
+  for (const file of candidateFiles) {
+    const state = readJson(join(path, file));
+    if (state && typeof state === 'object') return state as Record<string, unknown>;
+  }
+  for (const file of readdirSync(path).filter((entry) => entry.endsWith('.json')).slice(0, 10)) {
+    const state = readJson(join(path, file));
+    if (state && typeof state === 'object') return state as Record<string, unknown>;
+  }
+  return undefined;
+}
+
+function scanLegacyRuns(repoRoot: string, minAgeMinutes: number, limit: number): RuntimeCleanupCandidate[] {
+  const root = join(repoRoot, '.ai/harness/jobs');
+  if (!existsSync(root)) return [];
+  const processes = processCommands();
+  const at = Date.now();
+  const candidates: RuntimeCleanupCandidate[] = [];
+  for (const name of readdirSync(root).filter((entry) => entry.startsWith('RUN-')).slice(0, limit * 3)) {
+    const path = join(root, name);
+    try {
+      const stat = lstatSync(path);
+      if (!stat.isDirectory()) continue;
+      const state = findRunState(path);
+      const occupied = processes.find((process) => process.command.includes(name) || process.command.includes(path));
+      const status = String(state?.status ?? 'unknown');
+      const ageMinutes = Math.max(0, Math.round((at - stat.mtimeMs) / 60_000));
+      const safe = !occupied && ageMinutes >= minAgeMinutes && status === 'waiting_for_user' && textIncludesNoOpIntegrate(state);
+      candidates.push({
+        kind: 'legacy_run',
+        path,
+        id: typeof state?.runId === 'string' ? state.runId : name,
+        reason: safe
+          ? 'Legacy task run is waiting_for_user only because its worktree has no changes to integrate; it is safe to archive.'
+          : `Legacy task run is not a proven no-op waiting_for_user run. status=${status}`,
+        ageMinutes,
+        occupiedByPid: occupied?.pid,
+        safe,
+      });
+    } catch {
+      candidates.push({
+        kind: 'legacy_run',
+        path,
+        id: name,
+        reason: 'Legacy task run directory is unreadable; review manually before archiving.',
+        safe: false,
+      });
+    }
+  }
+  return candidates.sort((a, b) => (b.ageMinutes ?? 0) - (a.ageMinutes ?? 0)).slice(0, limit);
+}
+
 function scanHistoricalAttention(repoRoot: string): RuntimeCleanupCandidate[] {
   const projectionPath = join(repoRoot, '.ai/harness/controller/runtime-projection.json');
   const projection = readJson(projectionPath) as Record<string, unknown> | undefined;
@@ -179,6 +244,7 @@ function summarize(candidates: RuntimeCleanupCandidate[]): RuntimeCleanupPreview
     unsafe: candidates.filter((candidate) => !candidate.safe).length,
     tempDirs: candidates.filter((candidate) => candidate.kind === 'temp_dir').length,
     localJobs: candidates.filter((candidate) => candidate.kind === 'local_job').length,
+    legacyRuns: candidates.filter((candidate) => candidate.kind === 'legacy_run').length,
     attentionMarkers: candidates.filter((candidate) => candidate.kind === 'attention_marker').length,
   };
 }
@@ -188,6 +254,7 @@ export function previewRuntimeCleanup(repoRoot: string, options: RuntimeCleanupO
   const candidates = [
     ...(normalized.includeTempDirs ? scanTempDirs(normalized.minAgeMinutes, normalized.maxCandidates) : []),
     ...(normalized.includeTerminalLocalJobs ? scanTerminalLocalJobs(repoRoot, normalized.minAgeMinutes, normalized.maxCandidates) : []),
+    ...(normalized.includeLegacyRuns ? scanLegacyRuns(repoRoot, normalized.minAgeMinutes, normalized.maxCandidates) : []),
     ...(normalized.includeHistoricalAttention ? scanHistoricalAttention(repoRoot) : []),
   ].slice(0, normalized.maxCandidates);
   return {
@@ -199,6 +266,7 @@ export function previewRuntimeCleanup(repoRoot: string, options: RuntimeCleanupO
     summary: summarize(candidates),
     warnings: [
       'Preview is non-destructive. Apply requires confirmCleanup=true.',
+      'Legacy run cleanup only archives directories proven to be old no-op waiting_for_user runs with no matching process.',
       'Historical attention cleanup is intentionally represented as acknowledgement guidance unless an explicit reconciler is added.',
     ],
   };
@@ -206,6 +274,12 @@ export function previewRuntimeCleanup(repoRoot: string, options: RuntimeCleanupO
 
 function archiveLocalJob(path: string, repoRoot: string): void {
   const archiveRoot = join(repoRoot, '.ai/harness/local-jobs-archive');
+  mkdirSync(archiveRoot, { recursive: true });
+  renameSync(path, join(archiveRoot, basename(path)));
+}
+
+function archiveLegacyRun(path: string, repoRoot: string): void {
+  const archiveRoot = join(repoRoot, '.ai/harness/jobs-archive/legacy-noop');
   mkdirSync(archiveRoot, { recursive: true });
   renameSync(path, join(archiveRoot, basename(path)));
 }
@@ -224,6 +298,13 @@ export function applyRuntimeCleanup(repoRoot: string, options: RuntimeCleanupOpt
         const relativePath = relative(join(repoRoot, '.ai/harness/local-jobs'), candidate.path);
         if (relativePath && !relativePath.startsWith('..')) {
           archiveLocalJob(candidate.path, repoRoot);
+          return { ...candidate, applied: true };
+        }
+      }
+      if (candidate.kind === 'legacy_run' && candidate.path) {
+        const relativePath = relative(join(repoRoot, '.ai/harness/jobs'), candidate.path);
+        if (relativePath && !relativePath.startsWith('..') && basename(candidate.path).startsWith('RUN-')) {
+          archiveLegacyRun(candidate.path, repoRoot);
           return { ...candidate, applied: true };
         }
       }
