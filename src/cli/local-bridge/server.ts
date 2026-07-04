@@ -1,6 +1,6 @@
 import { randomBytes } from "crypto";
 import { spawn } from "child_process";
-import type { Server } from "http";
+import { createServer, type Server } from "http";
 import express, {
   type NextFunction,
   type Request,
@@ -87,10 +87,17 @@ import { loadMcpLocalConfig, loadMcpRuntimeState } from "../mcp/auth";
 import { loadRepositoryRegistry, registerRepository } from "../repositories/registry";
 import { resolveControllerHome } from "../repositories/controller-home";
 import { readControllerDaemonStatus } from "../../runtime/control-plane/daemon-client";
-import { listExecutionJobs } from "../../runtime/execution/jobs/store";
+import { findExecutionJob, listExecutionJobs } from "../../runtime/execution/jobs/store";
 import { readRepositoryProjectionSnapshot } from "../../runtime/projections/materialized-view";
 import { runtimeToolDefinitions } from "../../runtime/gateway/mcp/runtime-tools";
 import { getAssistantPluginManifest, listAssistantPluginManifests, submitAssistantPluginAction } from "../../runtime/plugins/store";
+import {
+  createMobileIntentDevice,
+  listMobileIntentDevices,
+  mobileIntentHasScope,
+  revokeMobileIntentDevice,
+  verifyMobileIntentRequest,
+} from "./mobile-intents";
 import { CORE_CONTROLLER_TOOL_NAMES } from "../mcp/toolset";
 
 export interface LocalBridgeServerOptions {
@@ -99,6 +106,7 @@ export interface LocalBridgeServerOptions {
   port?: number;
   openBrowser?: boolean;
   token?: string;
+  allowLanMobileIntents?: boolean;
 }
 
 export interface LocalBridgeServerHandle {
@@ -118,12 +126,16 @@ function isLoopbackHostname(hostname: string): boolean {
   return ["127.0.0.1", "localhost", "::1"].includes(normalizeHostname(hostname));
 }
 
-function assertLoopback(host: string): void {
-  if (!isLoopbackHostname(host)) {
-    throw new Error(
-      `local controller must bind to a loopback address, received: ${host}`,
-    );
-  }
+function isWildcardBindHost(host: string): boolean {
+  return ["0.0.0.0", "::", "[::]"].includes(normalizeHostname(host));
+}
+
+function assertAllowedBindHost(host: string, allowLanMobileIntents: boolean): void {
+  if (isLoopbackHostname(host)) return;
+  if (allowLanMobileIntents && isWildcardBindHost(host)) return;
+  throw new Error(
+    `local controller must bind to loopback unless --mobile-lan is enabled, received: ${host}`,
+  );
 }
 
 function parsedRequestHost(value: string | undefined): URL | undefined {
@@ -255,6 +267,28 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
   const board = projectBoard(repoRoot);
   const runtime = runtimeControllerSnapshot(repoRoot);
   const executionJobs = "executionJobs" in runtime ? (runtime.executionJobs ?? []) : [];
+  const controllerHome = resolveControllerHome();
+  const assistantRepository = registerRepository({ path: repoRoot, controllerHome });
+  const assistantPlugins = listAssistantPluginManifests(controllerHome, assistantRepository).map((plugin) => ({
+    pluginId: plugin.pluginId,
+    provider: plugin.provider,
+    displayName: plugin.displayName,
+    enabled: plugin.enabled,
+    revision: plugin.revision,
+    lifecycle: plugin.lifecycle,
+    health: plugin.health,
+    permissions: plugin.permissions,
+    actions: plugin.actions.map((action) => ({
+      actionId: action.actionId,
+      title: action.title,
+      readOnly: action.readOnly,
+      risk: action.risk,
+      confirmation: action.confirmation,
+      requiredConfirmationText: action.requiredConfirmationText,
+      scopes: action.scopes,
+    })),
+  }));
+  const mobileIntents = listMobileIntentDevices(repoRoot);
   const boardIssues = board.issues as Array<{
     id: string;
     tasks?: Array<{ id: string; title: string; effectiveStatus: string }>;
@@ -280,6 +314,12 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
         .map((job) => ({ kind: "work", id: job.jobId, title: String(job.payload.operation ?? job.type), status: job.status, updatedAt: job.updatedAt })),
     ].slice(0, 12),
     readyForReview: reviewTasks.slice(0, 12),
+    pendingApprovals: [
+      ...localJobs.filter((job) => job.status === "pending_approval")
+        .map((job) => ({ kind: "local-job", id: job.jobId, title: job.action, status: job.status, updatedAt: job.updatedAt })),
+      ...executionJobs.filter((job) => job.status === "human_attention_required")
+        .map((job) => ({ kind: "work", id: job.jobId, title: String(job.payload.operation ?? job.type), status: job.status, updatedAt: job.updatedAt })),
+    ].slice(0, 12),
     recentlyCompleted: [
       ...runs.filter((run) => ["succeeded", "cancelled"].includes(run.status))
         .map((run) => ({ kind: "run", id: run.runId, title: run.progress?.currentActivity ?? run.runId, status: run.status, updatedAt: run.finishedAt ?? run.lastHeartbeatAt })),
@@ -362,6 +402,8 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
     progress: getProjectProgress(repoRoot),
     timeline: getControllerTimeline(repoRoot, { limit: 40 }),
     githubPlugin: getGitHubPluginStatus(repoRoot),
+    assistantPlugins,
+    mobileIntents,
     runs,
     runCounts: runs.reduce<Record<string, number>>((counts, run) => {
       counts[run.status] = (counts[run.status] ?? 0) + 1;
@@ -378,7 +420,7 @@ export async function startLocalBridgeServer(
 ): Promise<LocalBridgeServerHandle> {
   const host = options.host ?? "127.0.0.1";
   const requestedPort = options.port ?? 8766;
-  assertLoopback(host);
+  assertAllowedBindHost(host, options.allowLanMobileIntents === true);
   reconcileAgentJobs(options.repoRoot);
   reconcileLocalBridgeJobs(options.repoRoot);
   const token = options.token ?? randomBytes(32).toString("base64url");
@@ -410,7 +452,12 @@ export async function startLocalBridgeServer(
   app.disable("x-powered-by");
   app.use((request, response, next) => {
     const requestHost = parsedRequestHost(request.headers.host);
-    if (!requestHost || !isLoopbackHostname(requestHost.hostname)) {
+    const mobileIntentPath = request.path === "/mobile/intent" || request.path.startsWith("/mobile/");
+    if (!requestHost) {
+      response.status(403).json({ error: "invalid local controller host" });
+      return;
+    }
+    if (!isLoopbackHostname(requestHost.hostname) && !(options.allowLanMobileIntents === true && mobileIntentPath)) {
       response.status(403).json({ error: "invalid local controller host" });
       return;
     }
@@ -418,10 +465,7 @@ export async function startLocalBridgeServer(
     if (origin) {
       try {
         const parsedOrigin = new URL(origin);
-        if (
-          !isLoopbackHostname(parsedOrigin.hostname) ||
-          parsedOrigin.host !== requestHost.host
-        ) {
+        if (parsedOrigin.host !== requestHost.host || (!isLoopbackHostname(parsedOrigin.hostname) && !(options.allowLanMobileIntents === true && mobileIntentPath))) {
           response.status(403).json({ error: "invalid local controller origin" });
           return;
         }
@@ -432,7 +476,12 @@ export async function startLocalBridgeServer(
     }
     next();
   });
-  app.use(express.json({ limit: "512kb" }));
+  app.use(express.json({
+    limit: "512kb",
+    verify: (request, _response, buffer) => {
+      (request as Request & { rawBody?: Buffer }).rawBody = Buffer.from(buffer);
+    },
+  }));
 
   const requireToken = (
     request: Request,
@@ -478,6 +527,128 @@ export async function startLocalBridgeServer(
     });
   });
 
+
+  app.post("/mobile/intent", (request, response) => {
+    try {
+      const verified = verifyMobileIntentRequest(options.repoRoot, request);
+      const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
+        ? request.body as Record<string, unknown>
+        : {};
+      const intent = queryString(body.intent) ?? "plugin_action";
+      const controllerHome = resolveControllerHome();
+      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      if (intent === "list_plugins") {
+        if (!mobileIntentHasScope(verified.principal.scopes, "plugins:read")) throw new Error("MOBILE_INTENT_SCOPE_DENIED: plugins:read is required");
+        response.json({
+          schemaVersion: 1,
+          accepted: true,
+          device: verified.principal.device,
+          signatureVerified: verified.signatureVerified,
+          plugins: listAssistantPluginManifests(controllerHome, repository).map((plugin) => ({
+            pluginId: plugin.pluginId,
+            displayName: plugin.displayName,
+            enabled: plugin.enabled,
+            lifecycle: plugin.lifecycle,
+            health: plugin.health,
+            actions: plugin.actions.map((action) => ({
+              actionId: action.actionId,
+              title: action.title,
+              readOnly: action.readOnly,
+              risk: action.risk,
+              confirmation: action.confirmation,
+              requiredConfirmationText: action.requiredConfirmationText,
+            })),
+          })),
+        });
+        return;
+      }
+      if (intent === "get_plugin") {
+        if (!mobileIntentHasScope(verified.principal.scopes, "plugins:read")) throw new Error("MOBILE_INTENT_SCOPE_DENIED: plugins:read is required");
+        const pluginId = queryString(body.pluginId);
+        if (!pluginId) throw new Error("MOBILE_INTENT_PLUGIN_REQUIRED: pluginId is required");
+        response.json({
+          schemaVersion: 1,
+          accepted: true,
+          device: verified.principal.device,
+          signatureVerified: verified.signatureVerified,
+          plugin: getAssistantPluginManifest(controllerHome, repository, pluginId),
+        });
+        return;
+      }
+      if (intent === "poll_job") {
+        if (!mobileIntentHasScope(verified.principal.scopes, "jobs:read")) throw new Error("MOBILE_INTENT_SCOPE_DENIED: jobs:read is required");
+        const jobId = queryString(body.jobId);
+        if (!jobId) throw new Error("MOBILE_INTENT_JOB_REQUIRED: jobId is required");
+        const job = findExecutionJob(controllerHome, jobId);
+        if (!job) {
+          response.status(404).json({ error: `Execution Job not found: ${jobId}` });
+          return;
+        }
+        response.json({ schemaVersion: 1, accepted: true, device: verified.principal.device, signatureVerified: verified.signatureVerified, job });
+        return;
+      }
+      if (intent !== "plugin_action") throw new Error(`MOBILE_INTENT_UNSUPPORTED: ${intent}`);
+      const pluginId = queryString(body.pluginId);
+      const actionId = queryString(body.actionId);
+      if (!pluginId || !actionId) throw new Error("MOBILE_INTENT_ACTION_REQUIRED: pluginId and actionId are required");
+      if (!mobileIntentHasScope(verified.principal.scopes, `plugin:${pluginId}:${actionId}`)) {
+        throw new Error(`MOBILE_INTENT_SCOPE_DENIED: plugin:${pluginId}:${actionId} is required`);
+      }
+      const manifest = getAssistantPluginManifest(controllerHome, repository, pluginId);
+      const action = manifest.actions.find((entry) => entry.actionId === actionId);
+      if (!action) throw new Error(`PLUGIN_ACTION_NOT_FOUND: ${pluginId}/${actionId}`);
+      if (action.confirmation !== "none" && body.confirmAuthorization !== true) {
+        response.status(409).json({
+          schemaVersion: 1,
+          accepted: false,
+          approvalRequired: true,
+          device: verified.principal.device,
+          plugin: { pluginId, displayName: manifest.displayName, enabled: manifest.enabled, lifecycle: manifest.lifecycle, health: manifest.health },
+          action: {
+            actionId: action.actionId,
+            risk: action.risk,
+            confirmation: action.confirmation,
+            requiredConfirmationText: action.requiredConfirmationText,
+          },
+          message: action.confirmation === "strong_confirmation"
+            ? `Repeat the request with confirmAuthorization=true and confirmationText=${action.requiredConfirmationText}`
+            : "Repeat the request with confirmAuthorization=true after human approval.",
+        });
+        return;
+      }
+      const submitted = submitAssistantPluginAction(controllerHome, repository, {
+        pluginId,
+        actionId,
+        requestId: queryString(body.requestId) ?? `${verified.principal.deviceId}:${Date.now()}`,
+        args: body.arguments && typeof body.arguments === "object" && !Array.isArray(body.arguments)
+          ? body.arguments as Record<string, unknown>
+          : {},
+        timeoutMs: typeof body.timeoutMs === "number" ? body.timeoutMs : undefined,
+        confirmAuthorization: body.confirmAuthorization === true,
+        confirmationText: queryString(body.confirmationText),
+        origin: { surface: "mobile-intent", actor: verified.principal.deviceId, correlationId: queryString(body.requestId) },
+      });
+      response.status(202).json({
+        schemaVersion: 1,
+        accepted: true,
+        deduplicated: submitted.deduplicated,
+        device: verified.principal.device,
+        signatureVerified: verified.signatureVerified,
+        pollAfterMs: 2_000,
+        plugin: { pluginId: submitted.manifest.pluginId, displayName: submitted.manifest.displayName, lifecycle: submitted.manifest.lifecycle, health: submitted.manifest.health },
+        action: { actionId: submitted.action.actionId, risk: submitted.action.risk, confirmation: submitted.action.confirmation, requiredConfirmationText: submitted.action.requiredConfirmationText },
+        job: submitted.job,
+      });
+    } catch (error) {
+      const message = errorMessage(error);
+      const status = message.includes("RATE_LIMITED") ? 429
+        : message.includes("SCOPE_DENIED") ? 403
+          : message.includes("TOKEN") || message.includes("SIGNATURE") || message.includes("REPLAY") || message.includes("TIMESTAMP") || message.includes("NONCE") || message.includes("DEVICE") ? 401
+            : 400;
+      response.status(status).json({ error: message });
+    }
+  });
+
   app.use("/api", requireToken);
   app.get("/api/snapshot", (_request, response) => {
     response.json(cachedLocalControllerSnapshot(options.repoRoot));
@@ -503,6 +674,33 @@ export async function startLocalBridgeServer(
       response.json(reconcileProjectGovernance(options.repoRoot));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.get("/api/mobile/devices", (_request, response) => {
+    try {
+      response.json(listMobileIntentDevices(options.repoRoot));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/mobile/devices", (request, response) => {
+    try {
+      response.status(201).json(createMobileIntentDevice(options.repoRoot, {
+        name: queryString(request.body?.name),
+        deviceId: queryString(request.body?.deviceId),
+        scopes: request.body?.scopes,
+        rateLimitPerMinute: request.body?.rateLimitPerMinute,
+      }));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/mobile/devices/:deviceId/revoke", (request, response) => {
+    try {
+      response.json(revokeMobileIntentDevice(options.repoRoot, request.params.deviceId));
+    } catch (error) {
+      response.status(404).json({ error: errorMessage(error) });
     }
   });
   app.get("/api/project-state", (_request, response) => {
@@ -1096,9 +1294,11 @@ export async function startLocalBridgeServer(
     }
   });
 
-  const server = await new Promise<Server>((resolve, reject) => {
-    const instance = app.listen(requestedPort, host, () => resolve(instance));
-    instance.once("error", reject);
+  const server = createServer(app);
+  server.listen(requestedPort, host);
+  await new Promise<void>((resolve, reject) => {
+    server.once("listening", resolve);
+    server.once("error", reject);
   });
   server.keepAliveTimeout = 65_000;
   server.headersTimeout = 70_000;
@@ -1121,8 +1321,12 @@ export async function startLocalBridgeServer(
     token,
     server,
     close: () =>
-      new Promise<void>((resolve, reject) =>
-        server.close((error) => (error ? reject(error) : resolve())),
-      ),
+      new Promise<void>((resolve, reject) => {
+        if (!server.listening) {
+          resolve();
+          return;
+        }
+        server.close((error) => (error ? reject(error) : resolve()));
+      }),
   };
 }

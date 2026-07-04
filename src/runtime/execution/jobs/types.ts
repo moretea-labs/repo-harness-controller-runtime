@@ -39,7 +39,7 @@ export interface ResourceClaimSpec {
 }
 
 export interface ExecutionJobOrigin {
-  surface: 'mcp' | 'local-ui' | 'cli' | 'schedule' | 'reconciliation' | 'system';
+  surface: 'mcp' | 'local-ui' | 'mobile-intent' | 'cli' | 'schedule' | 'reconciliation' | 'system';
   actor?: string;
   correlationId?: string;
   causationId?: string;

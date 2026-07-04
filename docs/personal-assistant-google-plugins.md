@@ -79,3 +79,14 @@ Provider failures remain structured through durable `ExecutionJob` errors:
 
 Plugin audit events record `plugin_action_requested`, `plugin_action_succeeded`,
 and `plugin_action_failed`.
+
+
+## Mobile Shortcuts / Siri Entry Point
+
+The Local Controller also exposes a mobile intent layer for phone-side voice/text automation. Device tokens are created through the authenticated Local UI API, stored only as SHA-256 hashes, and scoped to explicit plugin actions such as `plugin:gmail:send_message` or `plugin:google_tasks:create_task`.
+
+The mobile endpoint is `/mobile/intent`. Requests require a device ID, bearer token, fresh timestamp, unique nonce, and optional HMAC-SHA256 signature over `<timestamp>.<nonce>.<raw-json-body>`. Nonces are retained for replay protection, revoked devices are rejected, and per-device rate limits are enforced before any plugin action is accepted.
+
+When a mobile Shortcut submits a write action without the required authorization or strong confirmation text, the endpoint returns `approvalRequired: true` and the exact confirmation text instead of silently running the action. The Shortcut can then ask the user to confirm and retry, or poll the returned durable Execution Job when accepted.
+
+See `docs/operations/mobile-intents-shortcuts.md` for the iPhone Shortcuts request contract and setup examples.

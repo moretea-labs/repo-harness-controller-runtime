@@ -456,10 +456,11 @@ export function buildControllerCommand(): Command {
   command.command('ui')
     .description('Start the localhost-only visual Issue, Task, Run, approval, and Agent-session control surface')
     .option('--repo <path>', 'Repository root')
-    .option('--host <host>', 'Loopback bind host', '127.0.0.1')
+    .option('--host <host>', 'Loopback bind host, or 0.0.0.0 only with --mobile-lan', '127.0.0.1')
     .option('--port <port>', 'Local UI port')
+    .option('--mobile-lan', 'Allow /mobile/intent on LAN while keeping UI and /api loopback-gated')
     .option('--no-open', 'Do not open the browser automatically')
-    .action(async (opts: { repo?: string; host?: string; port?: string; open?: boolean }) => {
+    .action(async (opts: { repo?: string; host?: string; port?: string; open?: boolean; mobileLan?: boolean }) => {
       const root = repoRoot(opts.repo);
       const config = loadLocalBridgeConfig(root);
       const handle = await startLocalBridgeServer({
@@ -467,9 +468,12 @@ export function buildControllerCommand(): Command {
         host: opts.host ?? config.host ?? '127.0.0.1',
         port: opts.port ? Number(opts.port) : config.port ?? 8766,
         openBrowser: opts.open !== false,
+        allowLanMobileIntents: opts.mobileLan === true,
       });
       console.log(`repo-harness Local Controller: ${handle.url}`);
-      console.log('Press Ctrl+C to stop. The UI is bound to loopback and is not exposed through the MCP tunnel.');
+      console.log(opts.mobileLan === true
+        ? 'Press Ctrl+C to stop. Non-loopback requests are restricted to /mobile/intent and require a device token.'
+        : 'Press Ctrl+C to stop. The UI is bound to loopback and is not exposed through the MCP tunnel.');
       await new Promise<void>((resolvePromise) => {
         const stop = () => { void handle.close().finally(resolvePromise); };
         process.once('SIGINT', stop);

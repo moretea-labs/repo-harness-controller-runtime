@@ -10,6 +10,7 @@ import {
 } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import { createHmac } from "crypto";
 import { spawn, spawnSync } from "child_process";
 import { cancelAgentJob, getAgentJob, listAgentJobs } from "../../src/cli/agent-jobs/job-manager";
 import {
@@ -1052,9 +1053,130 @@ printf '%s\n' '{"type":"turn.completed"}'
     expect(accepted.accepted).toBe(true);
     expect(accepted.action.confirmation).toBe("authorization");
     expect(accepted.job.type).toBe("plugin-action");
+    const snapshot = await fetch(new URL("/api/snapshot", handle.url), { headers }).then((response) => response.json());
+    expect(snapshot.assistantPlugins.map((plugin: { pluginId: string }) => plugin.pluginId)).toContain("github");
+    expect(Array.isArray(snapshot.mobileIntents.devices)).toBe(true);
 
     const plugin = await fetch(new URL("/api/plugins/github", handle.url), { headers }).then((response) => response.json());
     expect(plugin.plugin.actions.some((action: { actionId: string; confirmation: string }) => action.actionId === "close_issue" && action.confirmation === "strong_confirmation")).toBe(true);
+  });
+
+
+  test("serves signed mobile Shortcut intents with device scopes, replay protection, and approval polling", async () => {
+    const root = repo();
+    const handle = await startLocalBridgeServer({ repoRoot: root, port: 0, openBrowser: false });
+    servers.push(handle);
+    const localHeaders = { "x-repo-harness-local-token": handle.token, "content-type": "application/json" };
+
+    const created = await fetch(new URL("/api/mobile/devices", handle.url), {
+      method: "POST",
+      headers: localHeaders,
+      body: JSON.stringify({
+        name: "Greyson iPhone",
+        scopes: ["plugins:read", "jobs:read", "plugin:gmail:configure", "plugin:gmail:send_message"],
+        rateLimitPerMinute: 10,
+      }),
+    }).then((response) => response.json());
+    expect(created.device.deviceId).toBe("greyson-iphone");
+    expect(created.token).toStartWith("rhmi_");
+    expect(readFileSync(join(root, ".repo-harness/mobile-intents.json"), "utf-8")).not.toContain(created.token);
+
+    function signedHeaders(body: string, nonce: string) {
+      const timestamp = new Date().toISOString();
+      const signature = createHmac("sha256", created.token).update(`${timestamp}.${nonce}.${body}`).digest("hex");
+      return {
+        "content-type": "application/json",
+        authorization: `Bearer ${created.token}`,
+        "x-repo-harness-device-id": created.device.deviceId,
+        "x-repo-harness-timestamp": timestamp,
+        "x-repo-harness-nonce": nonce,
+        "x-repo-harness-signature": signature,
+      };
+    }
+
+    const listBody = JSON.stringify({ intent: "list_plugins" });
+    const listed = await fetch(new URL("/mobile/intent", handle.url), {
+      method: "POST",
+      headers: signedHeaders(listBody, "nonce-list-0001"),
+      body: listBody,
+    }).then((response) => response.json());
+    expect(listed.accepted).toBe(true);
+    expect(listed.signatureVerified).toBe(true);
+    expect(listed.plugins.map((plugin: { pluginId: string }) => plugin.pluginId)).toContain("gmail");
+
+    const invalidSignatureHeaders = signedHeaders(listBody, "nonce-bad-signature-0001");
+    invalidSignatureHeaders["x-repo-harness-signature"] = "bad-signature";
+    const invalidSignature = await fetch(new URL("/mobile/intent", handle.url), {
+      method: "POST",
+      headers: invalidSignatureHeaders,
+      body: listBody,
+    }).then(async (response) => ({ status: response.status, body: await response.json() }));
+    expect(invalidSignature.status).toBe(401);
+    expect(invalidSignature.body.error).toContain("MOBILE_INTENT_SIGNATURE_INVALID");
+
+    const replay = await fetch(new URL("/mobile/intent", handle.url), {
+      method: "POST",
+      headers: signedHeaders(listBody, "nonce-list-0001"),
+      body: listBody,
+    }).then(async (response) => ({ status: response.status, body: await response.json() }));
+    expect(replay.status).toBe(401);
+    expect(replay.body.error).toContain("MOBILE_INTENT_REPLAY_DETECTED");
+
+    const configureBody = JSON.stringify({
+      intent: "plugin_action",
+      pluginId: "gmail",
+      actionId: "configure",
+      requestId: "mobile-gmail-config",
+      confirmAuthorization: true,
+      arguments: { enabled: true, provider: "mock", account_email: "assistant@example.com" },
+    });
+    const configured = await fetch(new URL("/mobile/intent", handle.url), {
+      method: "POST",
+      headers: signedHeaders(configureBody, "nonce-config-0001"),
+      body: configureBody,
+    }).then((response) => response.json());
+    expect(configured.accepted).toBe(true);
+    expect(configured.job.type).toBe("plugin-action");
+    expect(configured.job.origin.surface).toBe("mobile-intent");
+
+    const missingApprovalBody = JSON.stringify({
+      intent: "plugin_action",
+      pluginId: "gmail",
+      actionId: "send_message",
+      requestId: "mobile-send-needs-approval",
+      arguments: { to: ["recipient@example.com"], subject: "Hi", body_text: "Hello" },
+    });
+    const needsApproval = await fetch(new URL("/mobile/intent", handle.url), {
+      method: "POST",
+      headers: signedHeaders(missingApprovalBody, "nonce-send-0001"),
+      body: missingApprovalBody,
+    }).then(async (response) => ({ status: response.status, body: await response.json() }));
+    expect(needsApproval.status).toBe(409);
+    expect(needsApproval.body.approvalRequired).toBe(true);
+    expect(needsApproval.body.action.requiredConfirmationText).toBe("send-gmail-message");
+
+    const pollBody = JSON.stringify({ intent: "poll_job", jobId: configured.job.jobId });
+    const polled = await fetch(new URL("/mobile/intent", handle.url), {
+      method: "POST",
+      headers: signedHeaders(pollBody, "nonce-poll-0001"),
+      body: pollBody,
+    }).then((response) => response.json());
+    expect(polled.job.jobId).toBe(configured.job.jobId);
+
+    const revoked = await fetch(new URL(`/api/mobile/devices/${created.device.deviceId}/revoke`, handle.url), {
+      method: "POST",
+      headers: localHeaders,
+      body: "{}",
+    }).then((response) => response.json());
+    expect(revoked.device.revokedAt).toBeTruthy();
+
+    const afterRevoke = await fetch(new URL("/mobile/intent", handle.url), {
+      method: "POST",
+      headers: signedHeaders(listBody, "nonce-after-revoke-0001"),
+      body: listBody,
+    }).then(async (response) => ({ status: response.status, body: await response.json() }));
+    expect(afterRevoke.status).toBe(401);
+    expect(afterRevoke.body.error).toContain("MOBILE_INTENT_DEVICE_REVOKED");
   });
 
 
@@ -1104,6 +1226,8 @@ printf '%s\n' '{"type":"turn.completed"}'
     expect(dashboard).toContain("Ready for Review");
     expect(dashboard).toContain("Needs Attention");
     expect(dashboard).toContain("Direct Edit");
+    expect(dashboard).toContain("Assistant Plugins");
+    expect(dashboard).toContain("Mobile Intents");
   });
 
   test("serves a hardened localhost visual control surface", async () => {
