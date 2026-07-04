@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import { existsSync } from 'fs';
+import { collectRuntimePerformanceDiagnostics, inferLocalControllerProcess } from '../../diagnostics/performance';
 import type { McpToolDefinition, CallToolResult } from '../../../cli/mcp/tools';
 import type { MultiRepositoryMcpToolContext } from '../../../cli/mcp/multi-repository';
 import { listRepositories, repositorySummary, resolveRepositorySelection } from '../../../cli/repositories/registry';
@@ -89,6 +90,12 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
   definition('cancel_job', 'Cancel one queued or running durable Execution Job.', { job_id: { type: 'string' }, repo_id: repoId, reason: { type: 'string' } }, ['job_id'], false),
   definition('controller_ready', 'Return Gateway, Controller Daemon, Worker isolation, queue, and repository projection readiness.', { repo_id: repoId }),
   definition('repository_runtime_snapshot', 'Read the materialized runtime projection without scanning historical state.', { repo_id: repoId }),
+  definition('runtime_performance_diagnostics', 'Diagnose repo-harness host performance, orphan workers, Local Controller presence, and cleanup candidates.', {
+    repo_id: repoId,
+    include_processes: { type: 'boolean', description: 'Include bounded repo-harness related process samples. Defaults to true.' },
+    include_temp_dirs: { type: 'boolean', description: 'Include bounded repo-harness temporary directory scan. Defaults to true.' },
+    cleanup_preview: { type: 'boolean', description: 'Return a no-side-effect cleanup plan for orphan workers and stale temp entries.' },
+  }),
   definition('list_plugins', 'List personal-assistant plugin manifests, lifecycle state, health, and action discovery for one repository.', {
     repo_id: repoId,
   }),
@@ -454,6 +461,7 @@ function controllerReadiness(ctx: MultiRepositoryMcpToolContext, repository = ct
   const scheduler = readSchedulerHealthSnapshot(ctx.controllerHome);
   const projection = repository ? readRepositoryProjectionSnapshot(ctx.controllerHome, repository.repoId).projection : undefined;
   const localBridge = repository ? loadMcpRuntimeState(repository.canonicalRoot)?.localController : undefined;
+  const inferredLocalBridge = repository ? inferLocalControllerProcess(repository.canonicalRoot) : undefined;
   const schedulerHeartbeatAgeMs = ageMs(scheduler.lastTickAt);
   const dispatchHeartbeatAgeMs = ageMs(scheduler.lastDispatchAt);
   const schedulerFresh = daemon.status === 'ready'
@@ -511,9 +519,11 @@ function controllerReadiness(ctx: MultiRepositoryMcpToolContext, repository = ct
       consuming: (projection?.queueDepth ?? 0) === 0 || (projection?.runningWorkers ?? 0) > 0,
     },
     localBridge: repository ? {
-      running: localBridge?.running ?? false,
-      endpoint: localBridge?.endpoint,
+      running: localBridge?.running ?? inferredLocalBridge?.running ?? false,
+      endpoint: localBridge?.endpoint ?? inferredLocalBridge?.endpoint,
       error: localBridge?.error,
+      inferredPid: inferredLocalBridge?.pid,
+      statusSource: localBridge?.running ? 'runtime-state' : inferredLocalBridge ? 'process-scan' : 'runtime-state',
     } : undefined,
     projection,
   };
@@ -616,12 +626,15 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
       case 'local_bridge_status': {
         const repository = selected(ctx, args);
         const runtime = loadMcpRuntimeState(repository.canonicalRoot);
+        const inferredLocalBridge = inferLocalControllerProcess(repository.canonicalRoot);
         const jobs = listLocalBridgeJobSnapshots(repository.canonicalRoot, 12);
         const active = jobs.filter((job) => ['approved', 'running', 'dispatched'].includes(job.status)).length;
         return result({
-          endpoint: runtime?.localController?.endpoint ?? 'http://127.0.0.1:8766/',
-          running: runtime?.localController?.running ?? false,
+          endpoint: runtime?.localController?.endpoint ?? inferredLocalBridge?.endpoint ?? 'http://127.0.0.1:8766/',
+          running: runtime?.localController?.running ?? inferredLocalBridge?.running ?? false,
           error: runtime?.localController?.error,
+          inferredPid: inferredLocalBridge?.pid,
+          statusSource: runtime?.localController?.running ? 'runtime-state' : inferredLocalBridge ? 'process-scan' : 'runtime-state',
           counts: jobs.reduce<Record<string, number>>((counts, job) => {
             counts[job.status] = (counts[job.status] ?? 0) + 1;
             return counts;
@@ -863,6 +876,30 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
       case 'repository_runtime_snapshot': {
         const repository = selected(ctx, args);
         return result({ snapshot: rebuildRepositoryProjection(ctx.controllerHome, repository.repoId) });
+      }
+      case 'runtime_performance_diagnostics': {
+        const repository = selected(ctx, args);
+        const projection = readRepositoryProjectionSnapshot(ctx.controllerHome, repository.repoId).projection;
+        const runtime = loadMcpRuntimeState(repository.canonicalRoot);
+        const inferredLocalBridge = inferLocalControllerProcess(repository.canonicalRoot);
+        const activeJobIds = listExecutionJobs(ctx.controllerHome, repository.repoId, 100)
+          .filter((job) => ['queued', 'dispatched', 'running', 'waiting_for_dependency', 'waiting_for_workspace', 'waiting_for_heavy_check', 'waiting_for_integration'].includes(job.status))
+          .map((job) => job.jobId);
+        const diagnostics = collectRuntimePerformanceDiagnostics({
+          repoId: repository.repoId,
+          repoRoot: repository.canonicalRoot,
+          queueDepth: projection?.queueDepth ?? 0,
+          runningWorkers: projection?.runningWorkers ?? 0,
+          activeLeases: projection?.activeLeases ?? 0,
+          activeJobIds,
+          includeProcesses: args.include_processes !== false,
+          includeTempDirs: args.include_temp_dirs !== false,
+          cleanupPreview: args.cleanup_preview === true,
+          localControllerRunning: runtime?.localController?.running === true || inferredLocalBridge?.running === true,
+          localControllerPid: runtime?.localController?.pid ?? inferredLocalBridge?.pid,
+          localControllerEndpoint: runtime?.localController?.endpoint ?? inferredLocalBridge?.endpoint,
+        });
+        return result({ ...diagnostics });
       }
       case 'list_plugins': {
         const repository = selected(ctx, args);
