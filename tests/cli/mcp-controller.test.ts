@@ -328,6 +328,7 @@ describe("MCP controller profile", () => {
       const listed = await callRuntimeTool(runtimeCtx, "list_plugins", {});
       const listValue = JSON.parse(listed!.content[0].text);
       expect(listValue.plugins.map((plugin: { pluginId: string }) => plugin.pluginId)).toEqual(expect.arrayContaining([
+        "browser",
         "github",
         "gmail",
         "google_calendar",

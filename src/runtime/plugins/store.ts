@@ -10,6 +10,7 @@ import { gmailPluginAdapter } from './gmail-adapter';
 import { googleCalendarPluginAdapter } from './google-calendar-adapter';
 import { googleTasksPluginAdapter } from './google-tasks-adapter';
 import { githubPluginAdapter } from './github-adapter';
+import { browserPluginAdapter } from './browser-adapter';
 import { AssistantPluginError, toAssistantPluginError } from './errors';
 import type {
   AssistantPluginAdapter,
@@ -23,6 +24,7 @@ import type {
 
 const PLUGIN_ADAPTERS = new Map<string, AssistantPluginAdapter>([
   [githubPluginAdapter.pluginId, githubPluginAdapter],
+  [browserPluginAdapter.pluginId, browserPluginAdapter],
   [gmailPluginAdapter.pluginId, gmailPluginAdapter],
   [googleCalendarPluginAdapter.pluginId, googleCalendarPluginAdapter],
   [googleTasksPluginAdapter.pluginId, googleTasksPluginAdapter],

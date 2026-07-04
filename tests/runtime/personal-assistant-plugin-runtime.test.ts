@@ -63,6 +63,7 @@ describe("personal assistant plugin runtime", () => {
     const manifests = listAssistantPluginManifests(controllerHome, repository);
     expect(manifests.map((manifest) => manifest.pluginId)).toContain("github");
     expect(manifests.map((manifest) => manifest.pluginId)).toEqual(expect.arrayContaining([
+      "browser",
       "gmail",
       "google_calendar",
       "google_tasks",
