@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 5,
+  "id": "ISS-20260703-AC7997",
+  "title": "Implement Gmail Calendar and Tasks assistant plugins",
+  "slug": "implement-gmail-calendar-and-tasks-assistant-plugins",
+  "kind": "investigation",
+  "status": "in_progress",
+  "summary": "Build production-shaped Gmail, Google Calendar and Google Tasks/reminder plugins on the generic runtime. Reuse connector/auth abstractions and never persist credentials. Separate read/write scopes; gate send/delete/reschedule and other consequential writes. Add mock providers, contract tests, structured auth/rate-limit/error handling, configuration docs, run checks, and commit.",
+  "goals": [
+    "Build production-shaped Gmail, Google Calendar and Google Tasks/reminder plugins on the generic runtime. Reuse connector/auth abstractions and never persist credentials. Separate read/write scopes; gate send/delete/reschedule and other consequential writes. Add mock providers, contract tests, structured auth/rate-limit/error handling, configuration docs, run checks, and commit."
+  ],
+  "nonGoals": [
+    "Do not make unrelated changes outside the declared Task scope."
+  ],
+  "acceptanceCriteria": [
+    "All three plugins expose usable capability schemas.",
+    "Read/write permissions are separated.",
+    "Consequential writes require confirmation.",
+    "Auth and provider failures are structured.",
+    "Contract tests pass."
+  ],
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Implement Gmail Calendar and Tasks assistant plugins",
+      "objective": "Build production-shaped Gmail, Google Calendar and Google Tasks/reminder plugins on the generic runtime. Reuse connector/auth abstractions and never persist credentials. Separate read/write scopes; gate send/delete/reschedule and other consequential writes. Add mock providers, contract tests, structured auth/rate-limit/error handling, configuration docs, run checks, and commit.",
+      "status": "review",
+      "dependsOn": [],
+      "allowedPaths": [],
+      "forbiddenPaths": [],
+      "checks": [
+        "package:check:type",
+        "package:test",
+        "package:check:mcp-compatibility",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "All three plugins expose usable capability schemas.",
+        "Read/write permissions are separated.",
+        "Consequential writes require confirmation.",
+        "Auth and provider failures are structured.",
+        "Contract tests pass."
+      ],
+      "risk": "high",
+      "recommendedAgent": "codex",
+      "notes": [
+        "Accepted RUN-iss-20260703-ac7997-t1-1783089532259-75265a94 for asynchronous launch.",
+        "Dispatched RUN-iss-20260703-ac7997-t1-1783089532259-75265a94 to codex.",
+        "Implemented Gmail, Google Calendar, and Google Tasks plugins with separated scopes, strong confirmation on consequential writes, mock providers, and structured provider/auth failures.",
+        "Passed package:check:type, package:test, package:check:mcp-compatibility, and package:check:controller-v8 in the current workspace.",
+        "RUN-iss-20260703-ac7997-t1-1783089532259-75265a94 finished successfully."
+      ],
+      "runIds": [
+        "RUN-iss-20260703-ac7997-t1-1783089532259-75265a94"
+      ],
+      "createdAt": "2026-07-03T14:38:52.253Z",
+      "updatedAt": "2026-07-03T15:00:03.542Z"
+    }
+  ],
+  "relatedArtifacts": [
+    "docs/personal-assistant-google-plugins.md",
+    "docs/architecture/current/personal-assistant-plugin-baseline.md",
+    "tests/runtime/personal-assistant-plugin-runtime.test.ts",
+    "tests/cli/mcp-controller.test.ts"
+  ],
+  "createdAt": "2026-07-03T14:38:52.253Z",
+  "updatedAt": "2026-07-03T15:00:03.542Z"
+}

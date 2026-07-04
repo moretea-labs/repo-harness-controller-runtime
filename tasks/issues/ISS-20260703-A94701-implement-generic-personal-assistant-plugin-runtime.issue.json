@@ -25,7 +25,7 @@
       "id": "T1",
       "title": "Implement generic personal assistant plugin runtime",
       "objective": "Implement the generic plugin runtime described by T1. Use one canonical state model integrated with existing MCP, Local Controller and Execution Job layers. Include versioned manifests, registry/discovery, lifecycle/health, typed action schemas, permission scopes, risk/confirmation policies, idempotency, cancellation/timeouts, structured results and audit events. Add focused unit/integration tests, update docs, run checks, and commit.",
-      "status": "running",
+      "status": "review",
       "dependsOn": [],
       "allowedPaths": [],
       "forbiddenPaths": [],
@@ -46,15 +46,18 @@
       "recommendedAgent": "codex",
       "notes": [
         "Accepted RUN-iss-20260703-a94701-t1-1783086912897-a7bd0b57 for asynchronous launch.",
-        "Dispatched RUN-iss-20260703-a94701-t1-1783086912897-a7bd0b57 to codex."
+        "Dispatched RUN-iss-20260703-a94701-t1-1783086912897-a7bd0b57 to codex.",
+        "RUN-iss-20260703-a94701-t1-1783086912897-a7bd0b57 finished successfully."
       ],
       "runIds": [
         "RUN-iss-20260703-a94701-t1-1783086912897-a7bd0b57"
       ],
       "createdAt": "2026-07-03T13:55:12.892Z",
-      "updatedAt": "2026-07-03T13:55:12.959Z"
+      "updatedAt": "2026-07-03T14:28:47.356Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     }
   ],
   "createdAt": "2026-07-03T13:55:12.892Z",
-  "updatedAt": "2026-07-03T13:55:12.959Z"
+  "updatedAt": "2026-07-03T14:28:47.356Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56"
 }

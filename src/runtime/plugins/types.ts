@@ -118,3 +118,9 @@ export interface AssistantPluginActionExecutionInput {
   origin: ExecutionJobOrigin;
   jobId?: string;
 }
+
+export interface AssistantPluginAdapter {
+  pluginId: string;
+  buildManifest(previousRevision?: number, previousUpdatedAt?: string, repoRoot?: string): AssistantPluginManifest;
+  executeAction(input: AssistantPluginActionExecutionInput): Promise<Record<string, unknown>>;
+}

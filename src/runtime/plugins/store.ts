@@ -6,8 +6,13 @@ import { createExecutionJob } from '../execution/jobs/store';
 import type { ExecutionJob, ResourceClaimSpec } from '../execution/jobs/types';
 import { appendRuntimeEvent } from '../evidence/event-ledger';
 import { readJsonFile, sanitizeFileComponent, writeJsonAtomic } from '../shared/json-files';
+import { gmailPluginAdapter } from './gmail-adapter';
+import { googleCalendarPluginAdapter } from './google-calendar-adapter';
+import { googleTasksPluginAdapter } from './google-tasks-adapter';
 import { githubPluginAdapter } from './github-adapter';
+import { AssistantPluginError, toAssistantPluginError } from './errors';
 import type {
+  AssistantPluginAdapter,
   AssistantPluginActionDescriptor,
   AssistantPluginActionExecutionInput,
   AssistantPluginActionRequest,
@@ -16,8 +21,11 @@ import type {
   AssistantPluginRegistryIndexEntry,
 } from './types';
 
-const PLUGIN_ADAPTERS = new Map([
+const PLUGIN_ADAPTERS = new Map<string, AssistantPluginAdapter>([
   [githubPluginAdapter.pluginId, githubPluginAdapter],
+  [gmailPluginAdapter.pluginId, gmailPluginAdapter],
+  [googleCalendarPluginAdapter.pluginId, googleCalendarPluginAdapter],
+  [googleTasksPluginAdapter.pluginId, googleTasksPluginAdapter],
 ]);
 
 function now(): string {
@@ -294,39 +302,71 @@ export async function executeAssistantPluginAction(
   const action = actionForManifest(manifest, input.actionId);
   denyAutomatedWrite(manifest, action, input.origin);
   const normalizedArgs = validateActionArguments(action, input.args);
-  const result = await adapter.executeAction({ ...input, args: normalizedArgs });
-  const synced = syncAssistantPluginRegistry(input.controllerHome, repository);
-  const nextManifest = synced.manifests.find((entry) => entry.pluginId === input.pluginId) ?? manifest;
-  appendRuntimeEvent(input.controllerHome, {
-    repoId: input.repoId,
-    entityType: 'plugin',
-    entityId: input.pluginId,
-    eventType: 'plugin_action_succeeded',
-    requestId: input.requestId,
-    revision: nextManifest.revision,
-    data: {
-      actionId: input.actionId,
-      jobId: input.jobId,
-      resultKeys: Object.keys(result).slice(0, 20),
-      lifecycleState: nextManifest.lifecycle.state,
-      healthState: nextManifest.health.state,
-    },
-  });
-  return {
-    schemaVersion: 1,
-    plugin: {
-      pluginId: nextManifest.pluginId,
-      provider: nextManifest.provider,
-      revision: nextManifest.revision,
-      lifecycle: nextManifest.lifecycle,
-      health: nextManifest.health,
-    },
-    action: {
-      actionId: action.actionId,
-      confirmation: action.confirmation,
-      risk: action.risk,
+  try {
+    const result = await adapter.executeAction({ ...input, args: normalizedArgs });
+    const synced = syncAssistantPluginRegistry(input.controllerHome, repository);
+    const nextManifest = synced.manifests.find((entry) => entry.pluginId === input.pluginId) ?? manifest;
+    appendRuntimeEvent(input.controllerHome, {
+      repoId: input.repoId,
+      entityType: 'plugin',
+      entityId: input.pluginId,
+      eventType: 'plugin_action_succeeded',
       requestId: input.requestId,
-    },
-    result,
-  };
+      revision: nextManifest.revision,
+      data: {
+        actionId: input.actionId,
+        jobId: input.jobId,
+        resultKeys: Object.keys(result).slice(0, 20),
+        lifecycleState: nextManifest.lifecycle.state,
+        healthState: nextManifest.health.state,
+      },
+    });
+    return {
+      schemaVersion: 1,
+      plugin: {
+        pluginId: nextManifest.pluginId,
+        provider: nextManifest.provider,
+        revision: nextManifest.revision,
+        lifecycle: nextManifest.lifecycle,
+        health: nextManifest.health,
+      },
+      action: {
+        actionId: action.actionId,
+        confirmation: action.confirmation,
+        risk: action.risk,
+        requestId: input.requestId,
+      },
+      result,
+    };
+  } catch (error) {
+    const pluginError = toAssistantPluginError(error, {
+      code: 'PLUGIN_ACTION_FAILED',
+      message: `Plugin action ${input.pluginId}/${input.actionId} failed.`,
+      retryable: true,
+      details: {
+        pluginId: input.pluginId,
+        actionId: input.actionId,
+      },
+    });
+    const refreshed = syncAssistantPluginRegistry(input.controllerHome, repository);
+    const nextManifest = refreshed.manifests.find((entry) => entry.pluginId === input.pluginId) ?? manifest;
+    appendRuntimeEvent(input.controllerHome, {
+      repoId: input.repoId,
+      entityType: 'plugin',
+      entityId: input.pluginId,
+      eventType: 'plugin_action_failed',
+      requestId: input.requestId,
+      revision: nextManifest.revision,
+      data: {
+        actionId: input.actionId,
+        jobId: input.jobId,
+        code: pluginError.code,
+        retryable: pluginError.retryable,
+      },
+    });
+    throw new AssistantPluginError(pluginError.code, pluginError.message.replace(/^[^:]+:\s*/, ''), {
+      retryable: pluginError.retryable,
+      details: pluginError.details,
+    });
+  }
 }

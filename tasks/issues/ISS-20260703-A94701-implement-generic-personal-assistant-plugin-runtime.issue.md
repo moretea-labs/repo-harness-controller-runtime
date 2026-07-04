@@ -2,7 +2,7 @@
 id: "ISS-20260703-A94701"
 kind: "investigation"
 status: "in_progress"
-updated_at: "2026-07-03T13:55:12.959Z"
+updated_at: "2026-07-03T14:28:47.356Z"
 source: "repo-harness-controller-v8"
 ---
 
@@ -34,7 +34,7 @@ Implement the generic plugin runtime described by T1. Use one canonical state mo
 
 ### T1 — Implement generic personal assistant plugin runtime
 
-- Status: `running`
+- Status: `review`
 - Objective: Implement the generic plugin runtime described by T1. Use one canonical state model integrated with existing MCP, Local Controller and Execution Job layers. Include versioned manifests, registry/discovery, lifecycle/health, typed action schemas, permission scopes, risk/confirmation policies, idempotency, cancellation/timeouts, structured results and audit events. Add focused unit/integration tests, update docs, run checks, and commit.
 - Depends on: none
 - Allowed paths: not defined

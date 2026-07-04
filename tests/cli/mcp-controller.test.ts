@@ -327,7 +327,12 @@ describe("MCP controller profile", () => {
       });
       const listed = await callRuntimeTool(runtimeCtx, "list_plugins", {});
       const listValue = JSON.parse(listed!.content[0].text);
-      expect(listValue.plugins.map((plugin: { pluginId: string }) => plugin.pluginId)).toContain("github");
+      expect(listValue.plugins.map((plugin: { pluginId: string }) => plugin.pluginId)).toEqual(expect.arrayContaining([
+        "github",
+        "gmail",
+        "google_calendar",
+        "google_tasks",
+      ]));
 
       const denied = await callRuntimeTool(runtimeCtx, "plugin_action_execute", {
         plugin_id: "github",
@@ -359,6 +364,37 @@ describe("MCP controller profile", () => {
       const pluginValue = JSON.parse(plugin!.content[0].text);
       expect(pluginValue.plugin.enabled).toBe(true);
       expect(pluginValue.plugin.actions.some((action: { actionId: string; confirmation: string }) => action.actionId === "close_issue" && action.confirmation === "strong_confirmation")).toBe(true);
+
+      const gmailConfigured = await callRuntimeTool(runtimeCtx, "plugin_action_execute", {
+        plugin_id: "gmail",
+        action_id: "configure",
+        request_id: "gmail-config-runtime-1",
+        arguments: {
+          enabled: true,
+          provider: "mock",
+          account_email: "assistant@example.com",
+        },
+        confirm_authorization: true,
+      });
+      const gmailConfiguredValue = JSON.parse(gmailConfigured!.content[0].text);
+      const gmailJob = getExecutionJob(controllerHome, repository.repoId, gmailConfiguredValue.job.jobId);
+      const gmailExecution = await executeExecutionJob(controllerHome, gmailJob);
+      expect(gmailExecution.ok).toBe(true);
+
+      const gmailDenied = await callRuntimeTool(runtimeCtx, "plugin_action_execute", {
+        plugin_id: "gmail",
+        action_id: "send_message",
+        request_id: "gmail-send-runtime-denied",
+        arguments: {
+          to: ["recipient@example.com"],
+          subject: "Status update",
+          body_text: "Hello from MCP",
+        },
+        confirm_authorization: true,
+      });
+      const gmailDeniedValue = JSON.parse(gmailDenied!.content[0].text);
+      expect(gmailDeniedValue.error.code).toBe("PLUGIN_CONFIRMATION_TEXT_REQUIRED");
+      expect(gmailDenied!.isError).toBe(true);
 
       const deduped = await callRuntimeTool(runtimeCtx, "plugin_action_execute", {
         plugin_id: "github",

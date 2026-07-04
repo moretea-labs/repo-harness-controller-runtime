@@ -13,6 +13,7 @@ import { recordCandidateFinding, updateCandidateFinding } from '../../workflow/f
 import { writeControllerContextProjection } from '../../projections/controller-context';
 import { triggerWorkspaceAgent } from '../../workflow/campaigns/workspace-agent';
 import { executeAssistantPluginAction } from '../../plugins/store';
+import { isAssistantPluginError } from '../../plugins/errors';
 
 
 async function settleLegacyLocalJob(repoRoot: string, jobId: string, timeoutMs = 15 * 60_000) {
@@ -232,6 +233,18 @@ export async function executeExecutionJob(controllerHome: string, job: Execution
     }
     return { ok: true, result: record, outcome, repoRoot };
   } catch (error) {
+    if (isAssistantPluginError(error)) {
+      return {
+        ok: false,
+        error: {
+          code: error.code,
+          message: error.message,
+          retryable: error.retryable,
+          details: error.details,
+        },
+        repoRoot: controllerHome,
+      };
+    }
     const message = error instanceof Error ? error.message : String(error);
     const retryable = /ECONN|EPIPE|temporar|timeout|worker|network/i.test(message);
     return { ok: false, error: { code: errorCode(message), message, retryable }, repoRoot: controllerHome };
