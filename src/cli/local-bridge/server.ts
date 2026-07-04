@@ -99,6 +99,16 @@ import {
   verifyMobileIntentRequest,
 } from "./mobile-intents";
 import { CORE_CONTROLLER_TOOL_NAMES } from "../mcp/toolset";
+import { submitAssistantIntent, runAssistantRoutineNow } from "../../runtime/assistant/intent";
+import { assistantOpenApiSchema } from "../../runtime/assistant/openapi";
+import {
+  listAssistantInbox,
+  listAssistantMemory,
+  listAssistantRoutines,
+  updateAssistantInboxStatus,
+  updateAssistantRoutineStatus,
+  upsertAssistantMemory,
+} from "../../runtime/assistant/store";
 
 export interface LocalBridgeServerOptions {
   repoRoot: string;
@@ -289,6 +299,9 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
     })),
   }));
   const mobileIntents = listMobileIntentDevices(repoRoot);
+  const assistantInbox = listAssistantInbox(repoRoot, 20);
+  const assistantRoutines = listAssistantRoutines(repoRoot);
+  const assistantMemory = listAssistantMemory(repoRoot);
   const boardIssues = board.issues as Array<{
     id: string;
     tasks?: Array<{ id: string; title: string; effectiveStatus: string }>;
@@ -403,6 +416,11 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
     timeline: getControllerTimeline(repoRoot, { limit: 40 }),
     githubPlugin: getGitHubPluginStatus(repoRoot),
     assistantPlugins,
+    assistant: {
+      inbox: assistantInbox.items,
+      routines: assistantRoutines.routines,
+      memory: assistantMemory.entries,
+    },
     mobileIntents,
     runs,
     runCounts: runs.reduce<Record<string, number>>((counts, run) => {
@@ -672,6 +690,133 @@ export async function startLocalBridgeServer(
   app.post("/api/governance/reconcile", (_request, response) => {
     try {
       response.json(reconcileProjectGovernance(options.repoRoot));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.get("/api/assistant/openapi.json", (request, response) => {
+    response.json(assistantOpenApiSchema(`${request.protocol}://${request.get("host") ?? "127.0.0.1:8766"}`));
+  });
+
+  app.post("/api/assistant/intent", (request, response) => {
+    try {
+      const controllerHome = resolveControllerHome();
+      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      response.json(submitAssistantIntent(controllerHome, repository, {
+        ...(request.body && typeof request.body === "object" && !Array.isArray(request.body) ? request.body as Record<string, unknown> : {}),
+        source: request.body?.source === "mcp" || request.body?.source === "local-ui" || request.body?.source === "mobile" || request.body?.source === "system"
+          ? request.body.source
+          : "chatgpt",
+      }));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.get("/api/assistant/inbox", (request, response) => {
+    try {
+      const limit = Number(request.query.limit);
+      response.json(listAssistantInbox(options.repoRoot, Number.isFinite(limit) ? limit : 50));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.patch("/api/assistant/inbox/:itemId", (request, response) => {
+    try {
+      const status = request.body?.status;
+      if (!["unread", "read", "archived"].includes(status)) throw new Error("ASSISTANT_INBOX_STATUS_INVALID: status must be unread, read, or archived");
+      response.json({ item: updateAssistantInboxStatus(options.repoRoot, request.params.itemId, status) });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.get("/api/assistant/routines", (_request, response) => {
+    try {
+      response.json(listAssistantRoutines(options.repoRoot));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.post("/api/assistant/routines", (request, response) => {
+    try {
+      const controllerHome = resolveControllerHome();
+      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      const result = submitAssistantIntent(controllerHome, repository, {
+        utterance: queryString(request.body?.naturalLanguageGoal) ?? queryString(request.body?.utterance) ?? queryString(request.body?.name) ?? "create routine",
+        source: "chatgpt",
+        mode: "plan_then_execute",
+        confirmRoutine: request.body?.confirmRoutine === true,
+        timezone: queryString(request.body?.timezone),
+        routine: {
+          name: queryString(request.body?.name),
+          naturalLanguageGoal: queryString(request.body?.naturalLanguageGoal),
+          scheduleText: queryString(request.body?.scheduleText),
+          timezone: queryString(request.body?.timezone),
+          dataSources: Array.isArray(request.body?.dataSources) ? request.body.dataSources : undefined,
+          output: request.body?.output,
+          allowedActions: Array.isArray(request.body?.allowedActions) ? request.body.allowedActions : undefined,
+          forbiddenActions: Array.isArray(request.body?.forbiddenActions) ? request.body.forbiddenActions : undefined,
+        },
+      });
+      response.status(result.routine ? 201 : 200).json(result);
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.post("/api/assistant/routines/:routineId/run", (request, response) => {
+    try {
+      const controllerHome = resolveControllerHome();
+      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      response.status(202).json(runAssistantRoutineNow(controllerHome, repository, request.params.routineId));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.post("/api/assistant/routines/:routineId/pause", (request, response) => {
+    try {
+      response.json({ routine: updateAssistantRoutineStatus(options.repoRoot, request.params.routineId, "paused") });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.post("/api/assistant/routines/:routineId/resume", (request, response) => {
+    try {
+      response.json({ routine: updateAssistantRoutineStatus(options.repoRoot, request.params.routineId, "enabled") });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.post("/api/assistant/routines/:routineId/delete", (request, response) => {
+    try {
+      response.json({ routine: updateAssistantRoutineStatus(options.repoRoot, request.params.routineId, "deleted") });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.get("/api/assistant/memory", (_request, response) => {
+    try {
+      response.json(listAssistantMemory(options.repoRoot));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.post("/api/assistant/memory", (request, response) => {
+    try {
+      response.json({ entry: upsertAssistantMemory(options.repoRoot, {
+        key: queryString(request.body?.key) ?? "",
+        value: queryString(request.body?.value) ?? "",
+        source: queryString(request.body?.source) ?? "chatgpt",
+      }) });
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }

@@ -1062,6 +1062,57 @@ printf '%s\n' '{"type":"turn.completed"}'
   });
 
 
+  test("serves ChatGPT-first assistant intent, routine, inbox, and memory APIs", async () => {
+    const root = repo();
+    const handle = await startLocalBridgeServer({ repoRoot: root, port: 0, openBrowser: false });
+    servers.push(handle);
+    const headers = { "x-repo-harness-local-token": handle.token, "content-type": "application/json" };
+
+    const plannedRoutine = await fetch(new URL("/api/assistant/intent", handle.url), {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        utterance: "以后每天早上 9 点帮我整理过去 24 小时的重要邮件，重点是工作、API、BA、Jira、PR",
+        mode: "plan_only",
+      }),
+    }).then((response) => response.json());
+    expect(plannedRoutine.understoodIntent).toBe("create_routine");
+    expect(plannedRoutine.requiresConfirmation).toBe(true);
+    expect(plannedRoutine.routineDraft.allowedActions).toContain("gmail.list_messages");
+    expect(plannedRoutine.routineDraft.forbiddenActions).toContain("gmail.send_message");
+
+    const createdRoutine = await fetch(new URL("/api/assistant/intent", handle.url), {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        utterance: "以后每天早上 9 点帮我整理过去 24 小时的重要邮件，重点是工作、API、BA、Jira、PR",
+        confirmRoutine: true,
+      }),
+    }).then((response) => response.json());
+    expect(createdRoutine.routine.name).toBe("每日邮件整理");
+    expect(createdRoutine.inboxItem.title).toContain("Routine");
+
+    const routines = await fetch(new URL("/api/assistant/routines", handle.url), { headers }).then((response) => response.json());
+    expect(routines.routines.map((routine: { routineId: string }) => routine.routineId)).toContain(createdRoutine.routine.routineId);
+
+    const memory = await fetch(new URL("/api/assistant/memory", handle.url), {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ key: "work.communication_style", value: "中文总结，英文回复保持客观、不 push。" }),
+    }).then((response) => response.json());
+    expect(memory.entry.key).toBe("work.communication_style");
+
+    const openapi = await fetch(new URL("/api/assistant/openapi.json", handle.url), { headers }).then((response) => response.json());
+    expect(openapi.paths["/api/assistant/intent"].post.operationId).toBe("submitAssistantIntent");
+
+    const inbox = await fetch(new URL("/api/assistant/inbox", handle.url), { headers }).then((response) => response.json());
+    expect(inbox.items.length).toBeGreaterThan(0);
+    const snapshot = await fetch(new URL("/api/snapshot", handle.url), { headers }).then((response) => response.json());
+    expect(snapshot.assistant.routines.length).toBeGreaterThan(0);
+    expect(snapshot.assistant.inbox.length).toBeGreaterThan(0);
+  });
+
+
   test("serves signed mobile Shortcut intents with device scopes, replay protection, and approval polling", async () => {
     const root = repo();
     const handle = await startLocalBridgeServer({ repoRoot: root, port: 0, openBrowser: false });

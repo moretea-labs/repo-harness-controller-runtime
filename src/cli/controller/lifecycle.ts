@@ -51,7 +51,16 @@ export interface ControllerServiceState {
 export interface ControllerServiceProcess {
   pid: number;
   command: string;
-  kind: "supervisor" | "mcp-keepalive" | "mcp-serve" | "local-controller" | "controller-daemon" | "unknown";
+  kind:
+    | "supervisor"
+    | "mcp-keepalive"
+    | "mcp-serve"
+    | "local-controller"
+    | "controller-daemon"
+    | "tunnel-supervisor"
+    | "tunnel-worker"
+    | "tunnel-client"
+    | "unknown";
 }
 
 export interface ControllerServiceHealth {
@@ -233,6 +242,9 @@ function detectProcessKind(commandLine: string): ControllerServiceProcess["kind"
   if (commandLine.includes("controller service")) return "supervisor";
   if (commandLine.includes("controller ui")) return "local-controller";
   if (commandLine.includes("daemon-entry.ts")) return "controller-daemon";
+  if (commandLine.includes("controller-ngrok-rotation.sh supervise")) return "tunnel-supervisor";
+  if (commandLine.includes("controller-ngrok-rotation.sh run-once")) return "tunnel-worker";
+  if (commandLine.includes("ngrok http ")) return "tunnel-client";
   return "unknown";
 }
 
@@ -371,6 +383,9 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
       entry.kind !== "controller-daemon"
       && entry.kind !== "mcp-serve"
       && entry.kind !== "local-controller"
+      && entry.kind !== "tunnel-supervisor"
+      && entry.kind !== "tunnel-worker"
+      && entry.kind !== "tunnel-client"
       && entry.pid !== state?.supervisor.pid)
     : processes.filter((entry) => entry.kind !== "controller-daemon");
   const warnings: string[] = [];

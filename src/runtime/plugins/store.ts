@@ -197,7 +197,7 @@ function actionForManifest(manifest: AssistantPluginManifest, actionId: string):
 }
 
 function denyAutomatedWrite(manifest: AssistantPluginManifest, action: AssistantPluginActionDescriptor, origin: AssistantPluginActionExecutionInput['origin']): void {
-  if (!['schedule', 'reconciliation', 'system'].includes(origin.surface)) return;
+  if (!['schedule', 'reconciliation', 'system', 'assistant-routine'].includes(origin.surface)) return;
   if (action.readOnly) return;
   throw new Error(`EXTERNAL_EFFECT_AUTHORIZATION_REQUIRED: ${manifest.pluginId}/${action.actionId} cannot run from ${origin.surface}`);
 }
