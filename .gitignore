@@ -109,3 +109,4 @@ _ops/
 
 # repo-harness plugin runtime state
 .repo-harness/plugins/*.json
+.ai

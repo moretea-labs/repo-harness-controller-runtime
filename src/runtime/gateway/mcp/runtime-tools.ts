@@ -30,6 +30,12 @@ import { assessWorkMode } from '../../../cli/controller/work-mode';
 import { projectBoard } from '../../../cli/controller/issue-store';
 import { listControllerChecks } from '../../../cli/controller/check-runner';
 import { listActiveAgentJobSnapshots } from '../../../cli/agent-jobs/job-manager';
+import {
+  commitSelectedPaths,
+  prepareFallbackHandoffArtifacts,
+  selectedPathDiff,
+  stageSelectedPaths,
+} from '../../../cli/repositories/selected-path-actions';
 import type { TaskRisk } from '../../../cli/controller/types';
 import { controllerContextProjectionAgeMs, readControllerContextProjection } from '../../projections/controller-context';
 import { loadMcpRuntimeState } from '../../../cli/mcp/auth';

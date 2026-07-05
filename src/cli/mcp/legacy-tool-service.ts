@@ -15,10 +15,12 @@ import {
   beginEditSession,
   applyEditOperations,
   createEditSavepoint,
+  EditSessionPatchError,
   finalizeEditSession,
   getEditSession,
   getEditSessionDiff,
   listEditSessions,
+  PREFERRED_EDIT_PATCH_BATCH_OPERATIONS,
   rollbackEditSession,
   verifyEditSession,
   type EditOperation,
@@ -2485,11 +2487,12 @@ export function buildMcpToolDefinitions(
       {
         name: "apply_patch",
         description:
-          "Append one atomic patch batch to an active edit session. The same session accepts multiple batches and aggregates localized diffs by revision.",
+          "Append one bounded patch batch to an active edit session. Prefer batches of 100 operations or fewer and pass expected_revision to avoid stale revisions.",
         inputSchema: {
           type: "object",
           properties: {
             session_id: { type: "string" },
+            expected_revision: { type: "number", description: "Optional current revision precondition for the edit session." },
             operations: {
               type: "array",
               items: {
@@ -4316,12 +4319,28 @@ export async function callMcpTool(
             "TOOL_DISABLED",
             "apply_patch requires the controller profile",
           );
-        const session = applyEditOperations(
-          ctx.repoRoot,
-          ctx.policy,
-          String(args.session_id ?? ""),
-          controllerEditOperations(args.operations),
-        );
+        let session;
+        try {
+          session = applyEditOperations(
+            ctx.repoRoot,
+            ctx.policy,
+            String(args.session_id ?? ""),
+            controllerEditOperations(args.operations),
+            {
+              expectedRevision:
+                typeof args.expected_revision === "number"
+                  ? Math.trunc(args.expected_revision)
+                  : undefined,
+              maxBatchOperations: PREFERRED_EDIT_PATCH_BATCH_OPERATIONS,
+            },
+          );
+        } catch (error) {
+          if (error instanceof EditSessionPatchError) {
+            audit(ctx, name, "failed", args, `.ai/harness/edit-sessions/${error.details.sessionId}`, error.message);
+            return errorResult(error.code, error.message, error.details);
+          }
+          throw error;
+        }
         audit(
           ctx,
           name,

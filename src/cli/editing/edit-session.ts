@@ -102,6 +102,59 @@ export interface EditSessionSummary {
   finalizedAt?: string;
 }
 
+export interface EditSessionFingerprintEntry {
+  path: string;
+  exists: boolean;
+  sha256?: string;
+}
+
+export interface EditSessionPatchFailure {
+  operationIndex?: number;
+  type?: EditOperation['type'];
+  path?: string;
+  code:
+    | 'BATCH_TOO_LARGE'
+    | 'REVISION_MISMATCH'
+    | 'SESSION_FINGERPRINT_STALE'
+    | 'PATH_DENIED'
+    | 'PATH_OUTSIDE_SCOPE'
+    | 'CREATE_TARGET_EXISTS'
+    | 'TARGET_MISSING'
+    | 'STALE_FILE_SHA'
+    | 'REPLACEMENT_TEXT_NOT_FOUND'
+    | 'ANCHOR_NOT_FOUND'
+    | 'NO_CHANGE'
+    | 'APPLY_FAILED';
+  message: string;
+  currentSha256?: string;
+}
+
+export interface EditSessionPatchErrorDetails {
+  sessionId: string;
+  currentRevision: number;
+  expectedRevision?: number;
+  diffSha256?: string;
+  suggestedMaxOperationsPerBatch: number;
+  requestedOperationCount: number;
+  fingerprintRefresh: EditSessionFingerprintEntry[];
+  failures: EditSessionPatchFailure[];
+  appliedOperationCount: number;
+  rolledBack: boolean;
+}
+
+export class EditSessionPatchError extends Error {
+  readonly code: string;
+  readonly details: EditSessionPatchErrorDetails;
+
+  constructor(code: string, message: string, details: EditSessionPatchErrorDetails) {
+    super(message);
+    this.name = 'EditSessionPatchError';
+    Object.setPrototypeOf(this, new.target.prototype);
+    this.code = code;
+    this.details = details;
+  }
+}
+
 export type EditOperation =
   | { type: 'create'; path: string; content: string }
   | { type: 'write'; path: string; expectedSha256: string; content: string }
@@ -111,6 +164,8 @@ export type EditOperation =
   | { type: 'delete'; path: string; expectedSha256: string };
 
 const SESSION_ROOT = '.ai/harness/edit-sessions';
+export const MAX_EDIT_PATCH_BATCH_OPERATIONS = 500;
+export const PREFERRED_EDIT_PATCH_BATCH_OPERATIONS = 100;
 
 function hash(content: string): string {
   return createHash('sha256').update(content).digest('hex');
@@ -279,6 +334,48 @@ function latestOperations(session: EditSession): Map<string, EditSessionOperatio
   return latest;
 }
 
+function fingerprintEntries(repoRoot: string, paths: Iterable<string>): EditSessionFingerprintEntry[] {
+  return [...new Set([...paths].filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right))
+    .map((path) => {
+      const absolute = join(repoRoot, path);
+      if (!existsSync(absolute)) return { path, exists: false };
+      const content = readFileSync(absolute, 'utf-8');
+      return { path, exists: true, sha256: hash(content) };
+    });
+}
+
+function patchError(
+  repoRoot: string,
+  code: string,
+  message: string,
+  session: EditSession,
+  operations: EditOperation[],
+  failures: EditSessionPatchFailure[],
+  options: {
+    expectedRevision?: number;
+    fingerprintPaths?: Iterable<string>;
+    appliedOperationCount?: number;
+    rolledBack?: boolean;
+  } = {},
+): EditSessionPatchError {
+  return new EditSessionPatchError(code, message, {
+    sessionId: session.sessionId,
+    currentRevision: session.currentRevision,
+    expectedRevision: options.expectedRevision,
+    diffSha256: session.diffSha256,
+    suggestedMaxOperationsPerBatch: PREFERRED_EDIT_PATCH_BATCH_OPERATIONS,
+    requestedOperationCount: operations.length,
+    fingerprintRefresh: fingerprintEntries(
+      repoRoot,
+      options.fingerprintPaths ?? operations.map((operation) => operation.path),
+    ),
+    failures,
+    appliedOperationCount: options.appliedOperationCount ?? 0,
+    rolledBack: options.rolledBack === true,
+  });
+}
+
 function assertCurrentHashes(repoRoot: string, session: EditSession): void {
   for (const operation of latestOperations(session).values()) {
     const absolute = join(repoRoot, operation.path);
@@ -296,6 +393,17 @@ function assertCurrentHashes(repoRoot: string, session: EditSession): void {
 
 interface PatchItem {
   relativePath: string;
+  before: string;
+  after: string;
+  beforeExists: boolean;
+  afterExists: boolean;
+}
+
+interface PreparedEditOperation {
+  operationIndex: number;
+  operation: EditOperation;
+  relativePath: string;
+  absolutePath: string;
   before: string;
   after: string;
   beforeExists: boolean;
@@ -585,39 +693,176 @@ export function getEditSessionDiff(repoRoot: string, sessionId: string): {
   return { sessionId, path: session.diffPath, sha256: session.diffSha256, revision: session.currentRevision, patch };
 }
 
-export function applyEditOperations(repoRoot: string, policy: McpPolicy, sessionId: string, operations: EditOperation[]): EditSession {
+export function applyEditOperations(repoRoot: string, policy: McpPolicy, sessionId: string, operations: EditOperation[], options: {
+  expectedRevision?: number;
+  maxBatchOperations?: number;
+} = {}): EditSession {
   const session = getEditSession(repoRoot, sessionId);
   if (['finalized', 'rolled_back'].includes(session.status)) throw new Error(`edit session is closed: ${session.status}`);
   if (operations.length === 0) throw new Error('at least one edit operation is required');
-  if (operations.length > 500) throw new Error('one patch batch may contain at most 500 operations');
+  const maxBatchOperations = Math.max(1, Math.trunc(options.maxBatchOperations ?? MAX_EDIT_PATCH_BATCH_OPERATIONS));
+  if (operations.length > maxBatchOperations) {
+    throw patchError(
+      repoRoot,
+      'EDIT_PATCH_BATCH_TOO_LARGE',
+      `one patch batch may contain at most ${maxBatchOperations} operations`,
+      session,
+      operations,
+      [{
+        code: 'BATCH_TOO_LARGE',
+        message: `split this patch into batches of ${PREFERRED_EDIT_PATCH_BATCH_OPERATIONS} operations or fewer`,
+      }],
+      { expectedRevision: options.expectedRevision },
+    );
+  }
+  if (options.expectedRevision !== undefined && Math.trunc(options.expectedRevision) !== session.currentRevision) {
+    throw patchError(
+      repoRoot,
+      'EDIT_SESSION_REVISION_MISMATCH',
+      `edit session revision mismatch: expected ${Math.trunc(options.expectedRevision)}, got ${session.currentRevision}`,
+      session,
+      operations,
+      [{
+        code: 'REVISION_MISMATCH',
+        message: `refresh the edit session state before appending a new patch batch`,
+      }],
+      { expectedRevision: Math.trunc(options.expectedRevision) },
+    );
+  }
   const uniquePaths = new Set(operations.map((operation) => operation.path));
   if (uniquePaths.size !== operations.length) throw new Error('each path may appear only once per patch batch');
-  assertCurrentHashes(repoRoot, session);
+  try {
+    assertCurrentHashes(repoRoot, session);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw patchError(
+      repoRoot,
+      'EDIT_SESSION_FINGERPRINT_STALE',
+      message,
+      session,
+      operations,
+      [{ code: 'SESSION_FINGERPRINT_STALE', message }],
+      {
+        expectedRevision: options.expectedRevision,
+        fingerprintPaths: latestOperations(session).keys(),
+      },
+    );
+  }
 
   const cumulativePaths = new Set([...session.operations.map((operation) => operation.path), ...operations.map((operation) => operation.path)]);
   if (cumulativePaths.size > session.maxFiles) throw new Error(`changed file count ${cumulativePaths.size} exceeds session maxFiles (${session.maxFiles})`);
 
-  const prepared = operations.map((operation) => {
+  const failures: EditSessionPatchFailure[] = [];
+  const prepared: PreparedEditOperation[] = [];
+  operations.forEach((operation, index) => {
+    const operationIndex = index + 1;
     const decision = resolveMcpPath(repoRoot, operation.path, policy, 'write');
-    if (!decision.ok || !decision.absolutePath || !decision.relativePath) throw new Error(decision.reason ?? `path denied: ${operation.path}`);
-    if (!pathAllowed(decision.relativePath, session.allowedPaths)) throw new Error(`path is outside edit session scope: ${decision.relativePath}`);
+    if (!decision.ok || !decision.absolutePath || !decision.relativePath) {
+      failures.push({
+        operationIndex,
+        type: operation.type,
+        path: operation.path,
+        code: 'PATH_DENIED',
+        message: decision.reason ?? `path denied: ${operation.path}`,
+      });
+      return;
+    }
+    if (!pathAllowed(decision.relativePath, session.allowedPaths)) {
+      failures.push({
+        operationIndex,
+        type: operation.type,
+        path: decision.relativePath,
+        code: 'PATH_OUTSIDE_SCOPE',
+        message: `path is outside edit session scope: ${decision.relativePath}`,
+      });
+      return;
+    }
     const exists = existsSync(decision.absolutePath);
     const before = exists ? readFileSync(decision.absolutePath, 'utf-8') : '';
     if (operation.type === 'create') {
-      if (exists) throw new Error(`create target already exists: ${decision.relativePath}`);
-      return { operation, relativePath: decision.relativePath, absolutePath: decision.absolutePath, before, after: operation.content, beforeExists: false, afterExists: true };
+      if (exists) {
+        failures.push({
+          operationIndex,
+          type: operation.type,
+          path: decision.relativePath,
+          code: 'CREATE_TARGET_EXISTS',
+          message: `create target already exists: ${decision.relativePath}`,
+          currentSha256: hash(before),
+        });
+        return;
+      }
+      prepared.push({ operationIndex, operation, relativePath: decision.relativePath, absolutePath: decision.absolutePath, before, after: operation.content, beforeExists: false, afterExists: true });
+      return;
     }
-    if (!exists) throw new Error(`target does not exist: ${decision.relativePath}`);
+    if (!exists) {
+      failures.push({
+        operationIndex,
+        type: operation.type,
+        path: decision.relativePath,
+        code: 'TARGET_MISSING',
+        message: `target does not exist: ${decision.relativePath}`,
+      });
+      return;
+    }
     const beforeHash = hash(before);
-    if (beforeHash !== operation.expectedSha256) throw new Error(`stale file version for ${decision.relativePath}: expected ${operation.expectedSha256}, got ${beforeHash}`);
-    if (operation.type === 'delete') return { operation, relativePath: decision.relativePath, absolutePath: decision.absolutePath, before, after: '', beforeExists: true, afterExists: false };
-    if (operation.type === 'write') return { operation, relativePath: decision.relativePath, absolutePath: decision.absolutePath, before, after: operation.content, beforeExists: true, afterExists: true };
-    const after = applyTextOperation(operation, before, decision.relativePath);
-    return { operation, relativePath: decision.relativePath, absolutePath: decision.absolutePath, before, after, beforeExists: true, afterExists: true };
+    if (beforeHash !== operation.expectedSha256) {
+      failures.push({
+        operationIndex,
+        type: operation.type,
+        path: decision.relativePath,
+        code: 'STALE_FILE_SHA',
+        message: `stale file version for ${decision.relativePath}: expected ${operation.expectedSha256}, got ${beforeHash}`,
+        currentSha256: beforeHash,
+      });
+      return;
+    }
+    if (operation.type === 'delete') {
+      prepared.push({ operationIndex, operation, relativePath: decision.relativePath, absolutePath: decision.absolutePath, before, after: '', beforeExists: true, afterExists: false });
+      return;
+    }
+    if (operation.type === 'write') {
+      prepared.push({ operationIndex, operation, relativePath: decision.relativePath, absolutePath: decision.absolutePath, before, after: operation.content, beforeExists: true, afterExists: true });
+      return;
+    }
+    try {
+      const after = applyTextOperation(operation, before, decision.relativePath);
+      prepared.push({ operationIndex, operation, relativePath: decision.relativePath, absolutePath: decision.absolutePath, before, after, beforeExists: true, afterExists: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      failures.push({
+        operationIndex,
+        type: operation.type,
+        path: decision.relativePath,
+        code: operation.type === 'replace' ? 'REPLACEMENT_TEXT_NOT_FOUND' : 'ANCHOR_NOT_FOUND',
+        message,
+        currentSha256: beforeHash,
+      });
+    }
   });
 
-  const noChange = prepared.filter((item) => item.beforeExists === item.afterExists && item.before === item.after).map((item) => item.relativePath);
-  if (noChange.length) throw new Error(`edit operation produced no change: ${noChange.join(', ')}`);
+  prepared.forEach((item) => {
+    if (item.beforeExists === item.afterExists && item.before === item.after) {
+      failures.push({
+        operationIndex: item.operationIndex,
+        type: item.operation.type,
+        path: item.relativePath,
+        code: 'NO_CHANGE',
+        message: `edit operation produced no change: ${item.relativePath}`,
+        currentSha256: item.beforeExists ? hash(item.before) : undefined,
+      });
+    }
+  });
+  if (failures.length > 0) {
+    throw patchError(
+      repoRoot,
+      'EDIT_PATCH_PRECONDITION_FAILED',
+      failures.length === 1 ? failures[0]!.message : `${failures.length} edit operations failed precondition checks`,
+      session,
+      operations,
+      failures,
+      { expectedRevision: options.expectedRevision },
+    );
+  }
 
   const revision = session.currentRevision + 1;
   const revisionPatch = buildLocalizedPatch(repoRoot, session.sessionId, `revision-${revision}`, prepared.map((item) => ({
@@ -628,7 +873,7 @@ export function applyEditOperations(repoRoot: string, policy: McpPolicy, session
     afterExists: item.afterExists,
   })));
   const changedLinesByPath = changedLinesByPathFromPatch(revisionPatch);
-  const changedLinesFor = (item: typeof prepared[number]) =>
+  const changedLinesFor = (item: PreparedEditOperation) =>
     changedLinesByPath.get(item.relativePath) ?? changedLineEstimate(item.before, item.after);
   const batchChangedLines = prepared.reduce((sum, item) => sum + changedLinesFor(item), 0);
   const cumulativeChangedLines = session.operations.reduce((sum, operation) => sum + operation.changedLines, 0) + batchChangedLines;
@@ -636,6 +881,7 @@ export function applyEditOperations(repoRoot: string, policy: McpPolicy, session
 
   const firstRevision = session.operations.length === 0;
   const records: EditSessionOperationRecord[] = [];
+  let appliedOperationCount = 0;
   try {
     prepared.forEach((item, index) => {
       const backupRelative = `${SESSION_ROOT}/${session.sessionId}/backups/r${String(revision).padStart(4, '0')}-${String(index + 1).padStart(4, '0')}-${item.relativePath.replace(/[^a-zA-Z0-9._-]+/g, '__')}.bak`;
@@ -647,7 +893,7 @@ export function applyEditOperations(repoRoot: string, policy: McpPolicy, session
       else atomicWriteFile(repoRoot, item.relativePath, item.after, { backupRoot: `${SESSION_ROOT}/${session.sessionId}/atomic-backups/r${revision}` });
       records.push({
         revision,
-        operationIndex: index + 1,
+        operationIndex: item.operationIndex,
         type: item.operation.type,
         path: item.relativePath,
         beforeSha256: item.beforeExists ? hash(item.before) : undefined,
@@ -655,6 +901,7 @@ export function applyEditOperations(repoRoot: string, policy: McpPolicy, session
         backupPath: item.beforeExists ? backupRelative : undefined,
         changedLines: changedLinesFor(item),
       });
+      appliedOperationCount += 1;
     });
   } catch (error) {
     for (const record of [...records].reverse()) {
@@ -662,7 +909,26 @@ export function applyEditOperations(repoRoot: string, policy: McpPolicy, session
       if (record.type === 'create') rmSync(absolute, { force: true });
       else if (record.backupPath && existsSync(join(repoRoot, record.backupPath))) atomicWriteFile(repoRoot, record.path, readFileSync(join(repoRoot, record.backupPath), 'utf-8'));
     }
-    throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    throw patchError(
+      repoRoot,
+      'EDIT_PATCH_APPLY_FAILED',
+      message,
+      session,
+      operations,
+      [{
+        operationIndex: appliedOperationCount + 1,
+        type: operations[appliedOperationCount]?.type,
+        path: operations[appliedOperationCount]?.path,
+        code: 'APPLY_FAILED',
+        message,
+      }],
+      {
+        expectedRevision: options.expectedRevision,
+        appliedOperationCount,
+        rolledBack: true,
+      },
+    );
   }
 
   const absoluteRevisionPatch = revisionPatchPath(repoRoot, session.sessionId, revision);

@@ -998,6 +998,123 @@ describe("MCP controller profile", () => {
     });
   });
 
+  test("rejects stale edit-session revisions and returns refreshed fingerprints", async () => {
+    await withController(async (repoRoot, ctx) => {
+      const read = await jsonTool(ctx, "read_workflow_file", {
+        path: "src/example.ts",
+      });
+      const session = await jsonTool(ctx, "begin_edit_session", {
+        purpose: "Change constant with revision guard",
+        allowed_paths: ["src/**"],
+      });
+      const first = await jsonTool(ctx, "apply_patch", {
+        session_id: session.value.sessionId,
+        expected_revision: 0,
+        operations: [
+          {
+            type: "replace",
+            path: "src/example.ts",
+            expected_sha256: read.value.sha256,
+            replacements: [{ old_text: "value = 1", new_text: "value = 2" }],
+          },
+        ],
+      });
+      expect(first.value.currentRevision).toBe(1);
+      const refreshed = await jsonTool(ctx, "read_workflow_file", {
+        path: "src/example.ts",
+      });
+
+      const stale = await jsonTool(ctx, "apply_patch", {
+        session_id: session.value.sessionId,
+        expected_revision: 0,
+        operations: [
+          {
+            type: "append",
+            path: "src/example.ts",
+            expected_sha256: refreshed.value.sha256,
+            content: "export const stale = true;\n",
+          },
+        ],
+      });
+      expect(stale.raw.isError).toBe(true);
+      expect(stale.value.error.code).toBe("EDIT_SESSION_REVISION_MISMATCH");
+      expect(stale.value.error.details.currentRevision).toBe(1);
+      expect(stale.value.error.details.expectedRevision).toBe(0);
+      expect(stale.value.error.details.fingerprintRefresh[0].path).toBe("src/example.ts");
+      expect(typeof stale.value.error.details.fingerprintRefresh[0].sha256).toBe("string");
+      expect(readFileSync(join(repoRoot, "src/example.ts"), "utf-8")).not.toContain("stale = true");
+    });
+  });
+
+  test("fails mixed stale batches safely without creating a partial revision", async () => {
+    await withController(async (repoRoot, ctx) => {
+      const read = await jsonTool(ctx, "read_workflow_file", {
+        path: "src/example.ts",
+      });
+      const session = await jsonTool(ctx, "begin_edit_session", {
+        purpose: "Safe partial failure",
+        allowed_paths: ["src/**"],
+      });
+      writeFileSync(join(repoRoot, "src/example.ts"), "export const value = 9;\n");
+
+      const failed = await jsonTool(ctx, "apply_patch", {
+        session_id: session.value.sessionId,
+        expected_revision: 0,
+        operations: [
+          {
+            type: "replace",
+            path: "src/example.ts",
+            expected_sha256: read.value.sha256,
+            replacements: [{ old_text: "value = 1", new_text: "value = 2" }],
+          },
+          {
+            type: "create",
+            path: "src/extra.ts",
+            content: "export const extra = true;\n",
+          },
+        ],
+      });
+
+      expect(failed.raw.isError).toBe(true);
+      expect(failed.value.error.code).toBe("EDIT_PATCH_PRECONDITION_FAILED");
+      expect(failed.value.error.details.failures[0].code).toBe("STALE_FILE_SHA");
+      expect(failed.value.error.details.appliedOperationCount).toBe(0);
+      expect(failed.value.error.details.rolledBack).toBe(false);
+      expect(existsSync(join(repoRoot, "src/extra.ts"))).toBe(false);
+
+      const current = await jsonTool(ctx, "get_edit_session", {
+        session_id: session.value.sessionId,
+      });
+      expect(current.value.currentRevision).toBe(0);
+      expect(current.value.status).toBe("open");
+    });
+  });
+
+  test("rejects oversized patch batches before touching the workspace", async () => {
+    await withController(async (repoRoot, ctx) => {
+      const session = await jsonTool(ctx, "begin_edit_session", {
+        purpose: "Large batch guard",
+        allowed_paths: ["src/**"],
+      });
+      const operations = Array.from({ length: 101 }, (_, index) => ({
+        type: "create",
+        path: `src/generated-${index + 1}.ts`,
+        content: `export const value${index + 1} = ${index + 1};\n`,
+      }));
+
+      const failed = await jsonTool(ctx, "apply_patch", {
+        session_id: session.value.sessionId,
+        operations,
+      });
+
+      expect(failed.raw.isError).toBe(true);
+      expect(failed.value.error.code).toBe("EDIT_PATCH_BATCH_TOO_LARGE");
+      expect(failed.value.error.details.requestedOperationCount).toBe(101);
+      expect(failed.value.error.details.suggestedMaxOperationsPerBatch).toBe(100);
+      expect(existsSync(join(repoRoot, "src/generated-1.ts"))).toBe(false);
+    });
+  });
+
 
   test("routes known small changes to direct edits and records patch/check/finalization evidence", async () => {
     await withController(async (repoRoot, ctx) => {

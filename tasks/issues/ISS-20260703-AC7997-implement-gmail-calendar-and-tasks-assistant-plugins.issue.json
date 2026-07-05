@@ -54,7 +54,8 @@
         "RUN-iss-20260703-ac7997-t1-1783089532259-75265a94"
       ],
       "createdAt": "2026-07-03T14:38:52.253Z",
-      "updatedAt": "2026-07-03T15:00:03.542Z"
+      "updatedAt": "2026-07-03T15:00:03.542Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     }
   ],
   "relatedArtifacts": [
@@ -64,5 +65,6 @@
     "tests/cli/mcp-controller.test.ts"
   ],
   "createdAt": "2026-07-03T14:38:52.253Z",
-  "updatedAt": "2026-07-03T15:00:03.542Z"
+  "updatedAt": "2026-07-03T15:00:03.542Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56"
 }
