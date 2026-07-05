@@ -86,9 +86,9 @@ import { controllerExpectedToolNames } from "../mcp/tools";
 import { loadMcpLocalConfig, loadMcpRuntimeState } from "../mcp/auth";
 import { loadRepositoryRegistry, registerRepository } from "../repositories/registry";
 import { resolveControllerHome } from "../repositories/controller-home";
-import { readControllerDaemonStatus } from "../../runtime/control-plane/daemon-client";
+import { ensureControllerDaemon, readControllerDaemonStatus } from "../../runtime/control-plane/daemon-client";
 import { findExecutionJob, listExecutionJobs } from "../../runtime/execution/jobs/store";
-import { readRepositoryProjectionSnapshot } from "../../runtime/projections/materialized-view";
+import { rebuildRepositoryProjection, readRepositoryProjectionSnapshot } from "../../runtime/projections/materialized-view";
 import { runtimeToolDefinitions } from "../../runtime/gateway/mcp/runtime-tools";
 import { getAssistantPluginManifest, listAssistantPluginManifests, submitAssistantPluginAction } from "../../runtime/plugins/store";
 import {
@@ -103,6 +103,7 @@ import { submitAssistantIntent, runAssistantRoutineNow } from "../../runtime/ass
 import { assistantOpenApiSchema } from "../../runtime/assistant/openapi";
 import { buildAssistantReadinessReport } from "../../runtime/assistant/readiness";
 import { applyRuntimeCleanup, previewRuntimeCleanup } from "../../runtime/maintenance/cleanup";
+import { assertRecoveryAuthorized, buildCapabilityRecoverySnapshot, buildRecoveryAuditRecord, recoveryActionById, writeRecoveryAuditRecord } from "../../runtime/recovery";
 import {
   listAssistantInbox,
   listAssistantMemory,
@@ -370,6 +371,44 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
     runtimeToolFingerprint === expectedRuntimeFingerprint &&
     runtimeToolset === configuredToolset &&
     runtimeProfile === "controller";
+  const runtimeProjection = "projection" in runtime ? runtime.projection : undefined;
+  const recovery = buildCapabilityRecoverySnapshot({
+    daemonStatus: runtime.daemon.status,
+    daemonError: runtime.daemon.error,
+    schedulerStatus: runtimeProjection ? (runtimeProjection.queueDepth > 0 && runtimeProjection.runningWorkers === 0 ? "degraded" : "ready") : undefined,
+    queueDepth: runtimeProjection?.queueDepth,
+    runningWorkers: runtimeProjection?.runningWorkers,
+    activeLeases: runtimeProjection?.activeLeases,
+    localBridgeRunning: true,
+    connectorHealthy,
+    connectorMismatch: mcpRuntime?.server?.healthMismatch,
+    runtimeProjectionStale: false,
+    runtimeProjectionPersisted: Boolean(runtimeProjection),
+    commandPreviewAvailable: connectorHealthy,
+    commandExecuteAvailable: connectorHealthy,
+    issueToolsAvailable: true,
+    jobToolsAvailable: true,
+    checksAvailable: listControllerChecks(repoRoot).length > 0,
+    pluginStates: assistantPlugins.map((plugin) => ({
+      pluginId: plugin.pluginId,
+      enabled: plugin.enabled,
+      healthState: plugin.health.state,
+      ready: plugin.health.ready,
+      errors: plugin.health.errors,
+      warnings: plugin.health.warnings,
+    })),
+    recentErrors: [
+      ...localJobs.flatMap((job) => job.error ? [job.error] : []),
+      ...executionJobs.flatMap((job) => job.error?.message ? [job.error.message] : []),
+    ],
+    localJobs: localJobs.map((job) => ({ status: job.status, error: job.error, updatedAt: job.updatedAt })),
+    executionJobs: executionJobs.map((job) => ({ status: job.status, error: job.error, updatedAt: job.updatedAt, operation: job.payload.operation })),
+    assistant: {
+      inboxCount: assistantInbox.items.length,
+      routineCount: assistantRoutines.routines.length,
+      memoryCount: assistantMemory.entries.length,
+    },
+  });
   return {
     generatedAt: new Date().toISOString(),
     repoRoot,
@@ -414,6 +453,7 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
     board,
     projectState: loadControllerProjectState(repoRoot),
     governance: inspectProjectGovernance(repoRoot),
+    recovery,
     progress: getProjectProgress(repoRoot),
     timeline: getControllerTimeline(repoRoot, { limit: 40 }),
     githubPlugin: getGitHubPluginStatus(repoRoot),
@@ -721,6 +761,71 @@ export async function startLocalBridgeServer(
       const controllerHome = resolveControllerHome();
       const repository = registerRepository({ path: options.repoRoot, controllerHome });
       response.json(buildAssistantReadinessReport(controllerHome, repository));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.get("/api/recovery/probe", (_request, response) => {
+    try {
+      response.json(cachedLocalControllerSnapshot(options.repoRoot).recovery);
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.get("/api/recovery/plan", (_request, response) => {
+    try {
+      const recovery = cachedLocalControllerSnapshot(options.repoRoot).recovery;
+      response.json({
+        generatedAt: recovery.generatedAt,
+        overallState: recovery.overallState,
+        fallbackRequired: recovery.fallbackRequired,
+        recommendedActions: recovery.recommendedActions,
+        blockingCapabilities: recovery.capabilities.filter((capability) => ["blocked", "unavailable", "degraded"].includes(capability.state)),
+        notes: recovery.notes,
+      });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.post("/api/recovery/apply", (request, response) => {
+    try {
+      const controllerHome = resolveControllerHome();
+      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      const actionId = queryString(request.body?.actionId) ?? queryString(request.body?.action_id) ?? "";
+      const action = recoveryActionById(actionId);
+      if (!action) throw new Error(`RECOVERY_ACTION_UNKNOWN: ${actionId}`);
+      assertRecoveryAuthorized(action, action.confirmation === "none" ? action.id : request.body?.confirmAuthorization === true ? queryString(request.body?.authorization) : undefined);
+      const reason = queryString(request.body?.reason) ?? "local controller recovery action";
+      let result: Record<string, unknown>;
+      let affectedPaths: string[] = [];
+      if (action.id === "recovery.probe_again") {
+        result = cachedLocalControllerSnapshot(options.repoRoot).recovery as unknown as Record<string, unknown>;
+      } else if (action.id === "recovery.rebuild_projection" || action.id === "recovery.refresh_repository") {
+        result = { projection: rebuildRepositoryProjection(controllerHome, repository.repoId) };
+        affectedPaths = [".ai/harness/controller/projections"];
+      } else if (action.id === "recovery.cleanup_preview") {
+        result = previewRuntimeCleanup(options.repoRoot, { includeTempDirs: true, includeTerminalLocalJobs: true, includeLegacyRuns: true, includeHistoricalAttention: true }) as unknown as Record<string, unknown>;
+      } else if (action.id === "recovery.reconcile_jobs") {
+        result = applyRuntimeCleanup(options.repoRoot, { includeTempDirs: true, includeTerminalLocalJobs: true, includeLegacyRuns: true, includeHistoricalAttention: true, confirmCleanup: true }) as unknown as Record<string, unknown>;
+        affectedPaths = [".ai/harness/local-jobs", ".ai/harness/jobs"];
+      } else if (action.id === "recovery.restart_controller") {
+        result = { daemon: ensureControllerDaemon(controllerHome) };
+        affectedPaths = ["_ops/controller-home/daemon"];
+      } else {
+        result = { skipped: true, reason: `${action.id} is planned but not executable from the Local Bridge HTTP process.` };
+      }
+      const audit = writeRecoveryAuditRecord(controllerHome, repository.repoId, buildRecoveryAuditRecord({
+        actor: "local-bridge-gui",
+        action,
+        result: result.skipped === true ? "skipped" : "succeeded",
+        reason,
+        affectedPaths,
+      }));
+      localSnapshotCache.delete(options.repoRoot);
+      response.json({ action, audit, result });
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }

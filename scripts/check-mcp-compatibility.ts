@@ -31,7 +31,7 @@ if (compatibilityFingerprint !== EXPECTED_COMPATIBILITY_FINGERPRINT) {
 }
 if (duplicateCompatibility.length) failures.push(`legacy duplicate names: ${[...new Set(duplicateCompatibility)].join(', ')}`);
 if (collisions.length) failures.push(`runtime-control tools collide with legacy tools: ${collisions.join(', ')}`);
-if (coreNames.length !== 26) failures.push(`core Controller tool count changed: expected 26, got ${coreNames.length}`);
+if (coreNames.length !== 29) failures.push(`core Controller tool count changed: expected 29, got ${coreNames.length}`);
 const missingCore = coreNames.filter((name) => !fullNames.includes(name));
 if (missingCore.length) failures.push(`core tools missing from full surface: ${missingCore.join(', ')}`);
 

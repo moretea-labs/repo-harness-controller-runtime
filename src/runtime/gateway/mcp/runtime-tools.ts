@@ -43,6 +43,7 @@ import { redactMcpText } from '../../../cli/mcp/redaction';
 import { getAssistantPluginManifest, listAssistantPluginManifests, submitAssistantPluginAction } from '../../plugins/store';
 import { buildAssistantReadinessReport } from '../../assistant/readiness';
 import { applyRuntimeCleanup, previewRuntimeCleanup } from '../../maintenance/cleanup';
+import { buildCapabilityRecoverySnapshot, recoveryActionById, buildRecoveryAuditRecord, assertRecoveryAuthorized, writeRecoveryAuditRecord, listRecoveryAuditRecords } from '../../recovery';
 import {
   getLocalBridgeJobEventsSnapshot,
   getLocalBridgeJobSnapshot,
@@ -123,6 +124,27 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
     include_temp_dirs: { type: 'boolean', description: 'Include bounded repo-harness temporary directory scan. Defaults to true.' },
     cleanup_preview: { type: 'boolean', description: 'Return a no-side-effect cleanup plan for orphan workers and stale temp entries.' },
   }),
+  definition('capability_recovery_probe', 'Read-only capability recovery probe for daemon, bridge, scheduler, workers, connector, tools, plugins, and fallback state.', {
+    repo_id: repoId,
+    recent_errors: { type: 'array', items: { type: 'string' } },
+    command_preview_available: { type: 'boolean' },
+    command_execute_available: { type: 'boolean' },
+    issue_tools_available: { type: 'boolean' },
+    job_tools_available: { type: 'boolean' },
+  }),
+  definition('capability_recovery_plan', 'Return a deterministic recovery plan without mutating local state.', {
+    repo_id: repoId,
+    recent_errors: { type: 'array', items: { type: 'string' } },
+  }),
+  definition('capability_recovery_apply', 'Apply one bounded repo-harness recovery action after explicit authorization.', {
+    repo_id: repoId,
+    action_id: { type: 'string' },
+    confirm_authorization: { type: 'boolean' },
+    authorization: { type: 'string', description: 'Must equal action_id for actions that require authorization.' },
+    reason: { type: 'string' },
+    min_age_minutes: { type: 'number' },
+    max_candidates: { type: 'number' },
+  }, ['action_id'], false),
   definition('list_plugins', 'List personal-assistant plugin manifests, lifecycle state, health, and action discovery for one repository.', {
     repo_id: repoId,
   }),
@@ -578,6 +600,56 @@ function controllerReadiness(ctx: MultiRepositoryMcpToolContext, repository = ct
   };
 }
 
+function capabilityRecoveryInput(ctx: MultiRepositoryMcpToolContext, repository: ReturnType<typeof selected>, args: Record<string, unknown>) {
+  const readiness = controllerReadiness(ctx, repository);
+  const runtimeSnapshot = readRepositoryProjectionSnapshot(ctx.controllerHome, repository.repoId);
+  const localBridge = loadMcpRuntimeState(repository.canonicalRoot)?.localController;
+  const inferredLocalBridge = inferLocalControllerProcess(repository.canonicalRoot);
+  const contextProjection = readControllerContextProjection(ctx.controllerHome, repository.repoId);
+  const contextProjectionAgeMs = controllerContextProjectionAgeMs(contextProjection);
+  const recentErrors = Array.isArray(args.recent_errors) ? args.recent_errors.map(String) : [];
+  const plugins = listAssistantPluginManifests(ctx.controllerHome, repository);
+  const localJobs = listLocalBridgeJobSnapshots(repository.canonicalRoot, 30);
+  const executionJobs = listExecutionJobs(ctx.controllerHome, repository.repoId, 30);
+  return {
+    generatedAt: new Date().toISOString(),
+    daemonStatus: readiness.daemon.status,
+    daemonError: readiness.daemon.error,
+    schedulerStatus: readiness.durableScheduler.status,
+    schedulerHeartbeatAgeMs: readiness.durableScheduler.heartbeatAgeMs,
+    schedulerDispatchHeartbeatAgeMs: readiness.durableScheduler.dispatchHeartbeatAgeMs,
+    queueDepth: readiness.workerLoop.queueDepth,
+    runningWorkers: readiness.workerLoop.runningWorkers,
+    activeLeases: readiness.workerLoop.activeLeases,
+    localBridgeRunning: localBridge?.running ?? inferredLocalBridge?.running,
+    localBridgeError: localBridge?.error,
+    connectorHealthy: undefined,
+    runtimeProjectionStale: runtimeSnapshot.stale,
+    runtimeProjectionPersisted: runtimeSnapshot.persisted,
+    contextProjectionStale: Number.isFinite(contextProjectionAgeMs) ? contextProjectionAgeMs > 30_000 : undefined,
+    commandPreviewAvailable: args.command_preview_available === undefined ? true : args.command_preview_available === true,
+    commandExecuteAvailable: args.command_execute_available === undefined ? true : args.command_execute_available === true,
+    issueToolsAvailable: args.issue_tools_available === undefined ? true : args.issue_tools_available === true,
+    jobToolsAvailable: args.job_tools_available === undefined ? true : args.job_tools_available === true,
+    checksAvailable: listControllerChecks(repository.canonicalRoot).length > 0,
+    pluginStates: plugins.map((plugin) => ({
+      pluginId: plugin.pluginId,
+      enabled: plugin.enabled,
+      healthState: plugin.health.state,
+      ready: plugin.health.ready,
+      errors: plugin.health.errors,
+      warnings: plugin.health.warnings,
+    })),
+    recentErrors,
+    localJobs: localJobs.map((job) => ({ status: job.status, error: job.error, updatedAt: job.updatedAt })),
+    executionJobs: executionJobs.map((job) => ({ status: job.status, error: job.error, updatedAt: job.updatedAt, operation: job.payload.operation })),
+  };
+}
+
+function capabilityRecoverySnapshot(ctx: MultiRepositoryMcpToolContext, repository: ReturnType<typeof selected>, args: Record<string, unknown>) {
+  return buildCapabilityRecoverySnapshot(capabilityRecoveryInput(ctx, repository, args));
+}
+
 function workPhase(status: ExecutionJob['status']): 'queued' | 'running' | 'attention' | 'completed' {
   if (['succeeded', 'failed', 'cancelled', 'timed_out'].includes(status)) return 'completed';
   if (['orphaned', 'stale', 'human_attention_required'].includes(status)) return 'attention';
@@ -991,6 +1063,104 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           localControllerEndpoint: runtime?.localController?.endpoint ?? inferredLocalBridge?.endpoint,
         });
         return result({ ...diagnostics });
+      }
+      case 'capability_recovery_probe': {
+        const repository = selected(ctx, args);
+        const snapshot = capabilityRecoverySnapshot(ctx, repository, args);
+        return result({ recovery: snapshot, audit: listRecoveryAuditRecords(ctx.controllerHome, repository.repoId, 10) });
+      }
+      case 'capability_recovery_plan': {
+        const repository = selected(ctx, args);
+        const snapshot = capabilityRecoverySnapshot(ctx, repository, args);
+        return result({
+          repoId: repository.repoId,
+          generatedAt: snapshot.generatedAt,
+          overallState: snapshot.overallState,
+          fallbackRequired: snapshot.fallbackRequired,
+          recommendedActions: snapshot.recommendedActions,
+          blockingCapabilities: snapshot.capabilities.filter((capability) => ['blocked', 'unavailable', 'degraded'].includes(capability.state)),
+          notes: snapshot.notes,
+        });
+      }
+      case 'capability_recovery_apply': {
+        const repository = selected(ctx, args);
+        const actionId = String(args.action_id ?? '').trim();
+        const action = recoveryActionById(actionId);
+        if (!action) return result({ error: { code: 'RECOVERY_ACTION_UNKNOWN', message: actionId } }, true);
+        assertRecoveryAuthorized(action, action.confirmation === 'none' ? action.id : args.confirm_authorization === true ? String(args.authorization ?? '') : undefined);
+        const reason = typeof args.reason === 'string' && args.reason.trim() ? args.reason.trim() : 'manual recovery action';
+        let payload: Record<string, unknown>;
+        let affectedPaths: string[] = [];
+        switch (action.id) {
+          case 'recovery.probe_again':
+            payload = { recovery: capabilityRecoverySnapshot(ctx, repository, args) };
+            break;
+          case 'recovery.rebuild_projection': {
+            const projection = rebuildRepositoryProjection(ctx.controllerHome, repository.repoId);
+            payload = { projection };
+            affectedPaths = ['.ai/harness/controller/projections'];
+            break;
+          }
+          case 'recovery.refresh_repository': {
+            const runtimeStorage = ensureRepositoryRuntimeStorage(repository, ctx.controllerHome);
+            const projection = rebuildRepositoryProjection(ctx.controllerHome, repository.repoId);
+            payload = { runtimeStorage, projection };
+            affectedPaths = ['.ai/harness/controller', '.ai/harness/local-bridge'];
+            break;
+          }
+          case 'recovery.cleanup_preview': {
+            payload = previewRuntimeCleanup(repository.canonicalRoot, {
+              minAgeMinutes: typeof args.min_age_minutes === 'number' ? args.min_age_minutes : undefined,
+              includeTempDirs: true,
+              includeTerminalLocalJobs: true,
+              includeLegacyRuns: true,
+              includeHistoricalAttention: true,
+              maxCandidates: typeof args.max_candidates === 'number' ? args.max_candidates : undefined,
+            }) as unknown as Record<string, unknown>;
+            break;
+          }
+          case 'recovery.reconcile_jobs': {
+            const cleanup = applyRuntimeCleanup(repository.canonicalRoot, {
+              minAgeMinutes: typeof args.min_age_minutes === 'number' ? args.min_age_minutes : 60,
+              includeTempDirs: true,
+              includeTerminalLocalJobs: true,
+              includeLegacyRuns: true,
+              includeHistoricalAttention: true,
+              maxCandidates: typeof args.max_candidates === 'number' ? args.max_candidates : undefined,
+              confirmCleanup: true,
+            });
+            const projection = rebuildRepositoryProjection(ctx.controllerHome, repository.repoId);
+            payload = { cleanup, projection };
+            affectedPaths = ['.ai/harness/local-jobs', '.ai/harness/jobs', '.ai/harness/controller'];
+            break;
+          }
+          case 'recovery.restart_controller': {
+            const daemon = ensureControllerDaemon(ctx.controllerHome);
+            payload = { daemon, note: 'ensureControllerDaemon starts or verifies the bounded repo-harness daemon; it does not kill unrelated processes.' };
+            affectedPaths = ['_ops/controller-home/daemon'];
+            break;
+          }
+          case 'recovery.restart_local_bridge':
+            payload = { skipped: true, reason: 'Local bridge restart must be performed by the owning supervisor process or CLI to avoid killing the current HTTP request mid-response.' };
+            break;
+          case 'recovery.create_patch_handoff':
+            payload = prepareFallbackHandoffArtifacts(repository, { reason }) as unknown as Record<string, unknown>;
+            affectedPaths = ['.ai/handoff'];
+            break;
+          case 'recovery.create_self_fix_task':
+            payload = { skipped: true, next: 'Create an isolated Issue/Task or Campaign for source repair; automatic source-fix dispatch remains gated by existing execution policies.' };
+            break;
+          default:
+            payload = { skipped: true, reason: `No executor is registered for ${action.id}.` };
+        }
+        const audit = writeRecoveryAuditRecord(ctx.controllerHome, repository.repoId, buildRecoveryAuditRecord({
+          actor: 'capability_recovery_apply',
+          action,
+          result: payload.skipped === true ? 'skipped' : 'succeeded',
+          reason,
+          affectedPaths,
+        }));
+        return result({ repoId: repository.repoId, action, audit, result: payload });
       }
       case 'list_plugins': {
         const repository = selected(ctx, args);
