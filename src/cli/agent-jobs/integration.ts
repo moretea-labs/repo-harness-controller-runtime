@@ -1,7 +1,8 @@
 import { createHash } from "crypto";
-import { existsSync, readFileSync, rmSync, statSync } from "fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { spawnSync } from "child_process";
-import { relative } from "path";
+import { tmpdir } from "os";
+import { join, relative } from "path";
 import {
   applyEditOperations,
   beginEditSession,
@@ -80,6 +81,36 @@ function baseContent(
   return { exists: true, content: result.stdout.toString("utf-8") };
 }
 
+function threeWayMergeText(input: {
+  base: string;
+  current: string;
+  incoming: string;
+  path: string;
+}): string {
+  const dir = mkdtempSync(join(tmpdir(), "repo-harness-merge-"));
+  try {
+    const currentPath = join(dir, "current");
+    const basePath = join(dir, "base");
+    const incomingPath = join(dir, "incoming");
+    writeFileSync(currentPath, input.current, "utf-8");
+    writeFileSync(basePath, input.base, "utf-8");
+    writeFileSync(incomingPath, input.incoming, "utf-8");
+    const result = spawnSync("git", ["merge-file", "-p", currentPath, basePath, incomingPath], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    if (result.status === 0 && !result.error) return String(result.stdout ?? "");
+    const stderr = typeof result.stderr === "string" ? result.stderr.trim() : "";
+    throw new Error(
+      `main working tree changed since Task dispatch and automatic 3-way merge failed: ${input.path}${stderr ? `: ${stderr}` : ""}`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+
 export function integrateAgentJob(
   repoRoot: string,
   policy: McpPolicy,
@@ -90,9 +121,13 @@ export function integrateAgentJob(
     run.autoIntegrate === true &&
     run.executionMode === "worktree" &&
     run.progress?.phase === "finalizing";
-  if (run.status !== "succeeded" && !autoFinalizing)
+  const userResolvableIntegration = run.status === "waiting_for_user" &&
+    run.autoIntegrate === true &&
+    run.executionMode === "worktree" &&
+    Boolean(run.autoIntegrationError);
+  if (run.status !== "succeeded" && !autoFinalizing && !userResolvableIntegration)
     throw new Error(
-      `only succeeded or auto-finalizing Runs can be integrated (current: ${run.status})`,
+      `only succeeded, auto-finalizing, or preserved waiting_for_user Runs can be integrated (current: ${run.status})`,
     );
   if (run.provider !== "local")
     throw new Error(
@@ -116,8 +151,8 @@ export function integrateAgentJob(
   const task = issue.tasks.find((entry) => entry.id === run.taskId);
   if (!task) throw new Error(`task not found: ${run.issueId}/${run.taskId}`);
   const state = resolveEffectiveTaskState({ issue, task, runs: readTaskRunEvidence(repoRoot, task) });
-  const taskReady = autoFinalizing
-    ? !state.terminal && !state.inactive && ["review", "verified"].includes(task.status)
+  const taskReady = autoFinalizing || userResolvableIntegration
+    ? !state.terminal && !state.inactive && ["review", "integrated", "verified"].includes(task.status)
     : !state.terminal && !state.inactive && ["review", "verified"].includes(state.effectiveStatus);
   if (!taskReady)
     throw new Error(
@@ -152,16 +187,9 @@ export function integrateAgentJob(
         `binary file integration is not supported: ${decision.relativePath}`,
       );
     const rootText = rootContent.toString("utf-8");
-    if (base.exists) {
-      if (!rootExists || sha256(rootText) !== sha256(base.content))
-        throw new Error(
-          `main working tree changed since Task dispatch: ${decision.relativePath}`,
-        );
-    } else if (rootExists) {
-      throw new Error(
-        `integration would overwrite a new main-tree file: ${decision.relativePath}`,
-      );
-    }
+    const rootChangedFromDispatch = base.exists
+      ? !rootExists || sha256(rootText) !== sha256(base.content)
+      : rootExists;
 
     const workerExists =
       existsSync(worktreePath) && statSync(worktreePath).isFile();
@@ -169,6 +197,10 @@ export function integrateAgentJob(
       if (!base.exists)
         throw new Error(
           `cannot integrate missing untracked file: ${decision.relativePath}`,
+        );
+      if (rootChangedFromDispatch)
+        throw new Error(
+          `main working tree changed since Task dispatch and deletion cannot be merged automatically: ${decision.relativePath}`,
         );
       operations.push({
         type: "delete",
@@ -183,19 +215,43 @@ export function integrateAgentJob(
         `binary file integration is not supported: ${decision.relativePath}`,
       );
     const workerText = workerBytes.toString("utf-8");
-    if (base.exists)
+    if (base.exists) {
+      if (!rootExists)
+        throw new Error(
+          `main working tree changed since Task dispatch and no longer contains ${decision.relativePath}`,
+        );
+      if (workerText === rootText) continue;
+      const content = rootChangedFromDispatch
+        ? threeWayMergeText({
+          base: base.content,
+          current: rootText,
+          incoming: workerText,
+          path: decision.relativePath,
+        })
+        : workerText;
       operations.push({
         type: "write",
         path: decision.relativePath,
         expectedSha256: sha256(rootText),
-        content: workerText,
+        content,
       });
-    else
+    } else {
+      if (rootExists) {
+        if (rootText === workerText) continue;
+        throw new Error(
+          `integration would overwrite a new main-tree file: ${decision.relativePath}`,
+        );
+      }
       operations.push({
         type: "create",
         path: decision.relativePath,
         content: workerText,
       });
+    }
+  }
+
+  if (operations.length === 0) {
+    throw new Error("task worktree changes are already present in the main working tree");
   }
 
   const allowedPaths =

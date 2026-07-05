@@ -82,8 +82,8 @@ export interface TaskDependencyState {
 }
 
 const EXPLICIT_TERMINAL = new Set<TaskStatus>(["done", "cancelled", "superseded"]);
-const ACTIVE_RUN = new Set<AgentJobStatus>(["queued", "starting", "running", "waiting_for_user"]);
-const RETRYABLE_RUN = new Set<AgentJobStatus>(["failed", "cancelled", "unknown"]);
+const ACTIVE_RUN = new Set<AgentJobStatus>(["queued", "starting", "running"]);
+const RETRYABLE_RUN = new Set<AgentJobStatus>(["failed", "cancelled", "unknown", "waiting_for_user"]);
 
 function runTimestamp(run: AgentJobMeta): number {
   const parsed = Date.parse(run.createdAt);
@@ -240,9 +240,11 @@ export function resolveEffectiveTaskState(input: {
   if (evidence.currentActiveRun?.status === "running") {
     return finalizeState(base, "running", "active_run_running", false, false);
   }
-  if (evidence.currentActiveRun?.status === "waiting_for_user") {
-    return finalizeState(base, "waiting_for_user", "active_run_waiting_for_user", false, false);
-  }
+  // Waiting-for-user Runs are not active execution owners: they are retryable
+  // historical evidence attached to the Task. The declared Task status
+  // (usually review after the worker preserved the worktree) controls the
+  // next action, so explicit integration, cancellation, or retry cannot
+  // deadlock behind its own attention state.
 
   // Completed historical Runs are evidence only. They never resurrect or replace Task intent.
   return finalizeState(base, task.status, "declared_status", EXPLICIT_TERMINAL.has(task.status), false);

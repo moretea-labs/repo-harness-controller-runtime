@@ -632,6 +632,75 @@ describe("MCP controller profile", () => {
     });
   });
 
+  test("runs structured selected-path Git and fallback handoff actions on the full controller surface", async () => {
+    await withController(async (repoRoot, _ctx) => {
+      const controllerHome = join(repoRoot, ".controller-home");
+      const repository = registerRepository({ path: repoRoot, controllerHome });
+      const full = createMultiRepositoryContext({ repo: repoRoot, profile: "controller", toolset: "full", controllerHome });
+      const toolNames = exposedControllerToolDefinitions(full).map((tool) => tool.name);
+      expect(toolNames).toContain("git_diff_paths");
+      expect(toolNames).toContain("git_stage_paths");
+      expect(toolNames).toContain("git_commit_paths");
+      expect(toolNames).toContain("prepare_handoff_artifacts");
+
+      expect(spawnSync("git", ["config", "user.email", "test@example.com"], { cwd: repoRoot }).status).toBe(0);
+      expect(spawnSync("git", ["config", "user.name", "Test"], { cwd: repoRoot }).status).toBe(0);
+      writeFileSync(join(repoRoot, "src", "other.ts"), "export const other = 1;\n");
+      expect(spawnSync("git", ["add", "."], { cwd: repoRoot }).status).toBe(0);
+      expect(spawnSync("git", ["commit", "-m", "initial"], { cwd: repoRoot }).status).toBe(0);
+
+      writeFileSync(join(repoRoot, "src", "example.ts"), "export const value = 2;\n");
+      writeFileSync(join(repoRoot, "src", "other.ts"), "export const other = 2;\n");
+      expect(spawnSync("git", ["add", "src/other.ts"], { cwd: repoRoot }).status).toBe(0);
+
+      const diff = await callRuntimeTool(full, "git_diff_paths", {
+        repo_id: repository.repoId,
+        paths: ["src/example.ts"],
+      });
+      const diffValue = JSON.parse(diff!.content[0].text);
+      expect(diffValue.paths).toEqual(["src/example.ts"]);
+      expect(diffValue.diff).toContain("value = 2");
+      expect(diffValue.diff).not.toContain("other = 2");
+
+      const staged = await callRuntimeTool(full, "git_stage_paths", {
+        repo_id: repository.repoId,
+        paths: ["src/example.ts"],
+      });
+      const stagedValue = JSON.parse(staged!.content[0].text);
+      expect(stagedValue.execution.ok).toBe(true);
+      const cachedAfterStage = spawnSync("git", ["diff", "--cached", "--name-only"], { cwd: repoRoot, encoding: "utf-8" });
+      expect(cachedAfterStage.stdout.split(/\r?\n/).filter(Boolean).sort()).toEqual(["src/example.ts", "src/other.ts"]);
+
+      const commit = await callRuntimeTool(full, "git_commit_paths", {
+        repo_id: repository.repoId,
+        paths: ["src/example.ts"],
+        message: "Commit selected example",
+      });
+      const commitValue = JSON.parse(commit!.content[0].text);
+      expect(commitValue.error).toBeUndefined();
+      expect(commitValue.commit.ok).toBe(true);
+      const headFiles = spawnSync("git", ["show", "--name-only", "--format=%s", "HEAD"], { cwd: repoRoot, encoding: "utf-8" });
+      expect(headFiles.stdout).toContain("Commit selected example");
+      expect(headFiles.stdout).toContain("src/example.ts");
+      expect(headFiles.stdout).not.toContain("src/other.ts");
+      const cachedAfterCommit = spawnSync("git", ["diff", "--cached", "--name-only"], { cwd: repoRoot, encoding: "utf-8" });
+      expect(cachedAfterCommit.stdout.trim()).toBe("src/other.ts");
+
+      const handoff = await callRuntimeTool(full, "prepare_handoff_artifacts", {
+        repo_id: repository.repoId,
+        reason: "controller-test",
+      });
+      const handoffValue = JSON.parse(handoff!.content[0].text);
+      expect(handoffValue.usedScript).toBe(false);
+      expect(handoffValue.fallbackUsed).toBe(true);
+      expect(handoffValue.artifacts[0].path).toBe(".ai/harness/handoff/current.md");
+      expect(handoffValue.artifacts[0].preview).toContain("controller-test");
+      expect(handoffValue.artifacts[1].path).toBe(".ai/harness/handoff/resume.md");
+      expect(existsSync(join(repoRoot, ".ai", "harness", "handoff", "current.md"))).toBe(true);
+      expect(existsSync(join(repoRoot, ".ai", "harness", "handoff", "resume.md"))).toBe(true);
+    });
+  });
+
   test("reports degraded controller readiness when queued durable work has no scheduler progress", async () => {
     await withController(async (repoRoot, _ctx) => {
       const controllerHome = join(repoRoot, ".controller-home");

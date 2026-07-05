@@ -4,6 +4,8 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { getAgentJob } from "../../src/cli/agent-jobs/job-manager";
 import type { AgentJobStatus } from "../../src/cli/agent-jobs/types";
+import { readTaskRunEvidence } from "../../src/cli/controller/run-evidence";
+import { resolveEffectiveTaskState } from "../../src/cli/controller/task-status-resolver";
 import {
   createIssue,
   getIssue,
@@ -91,6 +93,34 @@ describe("Controller v6 effective status write boundaries", () => {
     expect(getIssue(root, issue.id).tasks[0]?.status).toBe("ready");
     expect(getAgentJob(root, runId).status).toBe("failed");
     expect(getIssue(root, issue.id).tasks[0]?.status).toBe("ready");
+  });
+
+
+
+  test("waiting_for_user run is retryable evidence, not an active execution owner", () => {
+    const root = repo();
+    const issue = createIssue(root, {
+      title: "Waiting run state",
+      summary: "Manual integration attention must not deadlock task retry/integration.",
+      goals: ["Keep waiting runs actionable."],
+      acceptanceCriteria: ["Waiting run does not occupy activeRunIds."],
+      tasks: [task("Recoverable")],
+    });
+    const runId = "RUN-waiting-user";
+    writeRun(root, issue.id, "T1", runId, "waiting_for_user");
+    updateTask(root, issue.id, "T1", { status: "review", runId });
+
+    const refreshed = getIssue(root, issue.id);
+    const taskState = refreshed.tasks[0]!;
+    const state = resolveEffectiveTaskState({
+      issue: refreshed,
+      task: taskState,
+      runs: readTaskRunEvidence(root, taskState),
+    });
+
+    expect(state.effectiveStatus).toBe("review");
+    expect(state.activeRunIds).toEqual([]);
+    expect(state.retryable).toBe(true);
   });
 
   test("split and supersede reject an effective active Run even when declared status is ready", () => {

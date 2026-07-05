@@ -138,7 +138,7 @@ import type {
 } from "../chatgpt-browser/types";
 import { hashMcpInput, tryWriteMcpAuditEntry } from "./audit";
 import { loadMcpRuntimeState } from "./auth";
-import { resolveMcpPath } from "./paths";
+import { normalizeMcpRelativePath, resolveMcpPath } from "./paths";
 import { currentGitBranch, isRepoHarnessAdopted } from "./repo";
 import { repositoryToolNames } from "./repository-tools";
 import { redactMcpText } from "./redaction";
@@ -4196,12 +4196,24 @@ export async function callMcpTool(
           const cwdInput = typeof entry.cwd === "string" && entry.cwd.trim() ? entry.cwd.trim() : undefined;
           if (cwdInput) {
             const cwdDecision = resolveMcpPath(ctx.repoRoot, cwdInput, ctx.policy, "read");
-            if (!cwdDecision.ok) return errorResult("COMMAND_EVIDENCE_PATH_DENIED", cwdDecision.reason ?? "reported command cwd is denied");
+            if (!cwdDecision.ok) {
+              const normalizedCwd = normalizeMcpRelativePath(cwdInput);
+              const missingHarnessEvidence = normalizedCwd.ok &&
+                normalizedCwd.relativePath?.startsWith(".ai/harness/") &&
+                cwdDecision.reason?.startsWith("path does not exist:");
+              if (!missingHarnessEvidence) return errorResult("COMMAND_EVIDENCE_PATH_DENIED", cwdDecision.reason ?? "reported command cwd is denied");
+            }
           }
           const artifactInput = typeof entry.artifact_path === "string" && entry.artifact_path.trim() ? entry.artifact_path.trim() : undefined;
           if (artifactInput) {
             const artifactDecision = resolveMcpPath(ctx.repoRoot, artifactInput, ctx.policy, "read");
-            if (!artifactDecision.ok) return errorResult("COMMAND_EVIDENCE_ARTIFACT_DENIED", artifactDecision.reason ?? "reported command artifact is denied");
+            if (!artifactDecision.ok) {
+              const normalizedArtifact = normalizeMcpRelativePath(artifactInput);
+              const missingHarnessEvidence = normalizedArtifact.ok &&
+                normalizedArtifact.relativePath?.startsWith(".ai/harness/") &&
+                artifactDecision.reason?.startsWith("path does not exist:");
+              if (!missingHarnessEvidence) return errorResult("COMMAND_EVIDENCE_ARTIFACT_DENIED", artifactDecision.reason ?? "reported command artifact is denied");
+            }
           }
           commandEvidence.push({
             command,

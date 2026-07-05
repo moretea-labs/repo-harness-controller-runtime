@@ -83,6 +83,25 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
     request_id: { type: 'string' },
     reason: { type: 'string' },
   }, [], false),
+  definition('git_diff_paths', 'Return a bounded Git diff and status for explicit repository-relative paths only.', {
+    repo_id: repoId,
+    paths: { type: 'array', items: { type: 'string' } },
+    staged: { type: 'boolean' },
+    max_bytes: { type: 'number' },
+  }, ['paths']),
+  definition('git_stage_paths', 'Stage explicit repository-relative paths only using git add --all -- <paths>.', {
+    repo_id: repoId,
+    paths: { type: 'array', items: { type: 'string' } },
+  }, ['paths'], false),
+  definition('git_commit_paths', 'Stage and commit explicit repository-relative paths only, leaving unrelated staged changes untouched.', {
+    repo_id: repoId,
+    paths: { type: 'array', items: { type: 'string' } },
+    message: { type: 'string' },
+  }, ['paths', 'message'], false),
+  definition('prepare_handoff_artifacts', 'Refresh repo-local handoff artifacts and fall back to minimal current/resume files when helper scripts are unavailable.', {
+    repo_id: repoId,
+    reason: { type: 'string' },
+  }, [], false),
   definition('get_job', 'Read one durable Execution Job. Summary is the default; opt in to full state only when needed.', {
     job_id: { type: 'string' },
     repo_id: repoId,
@@ -652,6 +671,45 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           typeof args.reason === 'string' ? args.reason : undefined,
         );
         return result({ work: summarizeWork(cancelled, repository.canonicalRoot) });
+      }
+      case 'git_diff_paths': {
+        const repository = selected(ctx, args);
+        return result({
+          ...selectedPathDiff(repository, {
+            paths: args.paths,
+            staged: args.staged === true,
+            maxBytes: typeof args.max_bytes === 'number' ? args.max_bytes : undefined,
+          }),
+        });
+      }
+      case 'git_stage_paths': {
+        const repository = selected(ctx, args);
+        const staged = stageSelectedPaths(ctx.controllerHome, repository, { paths: args.paths });
+        return result({
+          repoId: repository.repoId,
+          checkoutId: repository.activeCheckoutId,
+          ...staged,
+        }, staged.execution.ok !== true);
+      }
+      case 'git_commit_paths': {
+        const repository = selected(ctx, args);
+        const committed = commitSelectedPaths(ctx.controllerHome, repository, {
+          paths: args.paths,
+          message: args.message,
+        });
+        return result({
+          repoId: repository.repoId,
+          checkoutId: repository.activeCheckoutId,
+          ...committed,
+        }, Boolean(committed.error));
+      }
+      case 'prepare_handoff_artifacts': {
+        const repository = selected(ctx, args);
+        return result({
+          repoId: repository.repoId,
+          checkoutId: repository.activeCheckoutId,
+          ...prepareFallbackHandoffArtifacts(repository, { reason: args.reason }),
+        });
       }
       case 'local_bridge_status': {
         const repository = selected(ctx, args);

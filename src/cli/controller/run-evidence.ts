@@ -30,7 +30,7 @@ export function readIssueRunEvidence(
   );
 }
 
-const ACTIVE_RUN_STATUSES = new Set(['queued', 'starting', 'running', 'waiting_for_user']);
+const ACTIVE_RUN_STATUSES = new Set(['queued', 'starting', 'running']);
 
 export function readActiveRunEvidence(repoRoot: string): AgentJobMeta[] {
   const root = join(repoRoot, JOB_ROOT);

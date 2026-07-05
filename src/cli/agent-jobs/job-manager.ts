@@ -306,7 +306,7 @@ function updateRunIndexes(repoRoot: string, meta: AgentJobMeta): void {
     };
     const active = readRunIndex(repoRoot, 'active');
     active.runs = active.runs.filter((candidate) => candidate.runId !== meta.runId);
-    if (['queued', 'starting', 'running', 'waiting_for_user'].includes(meta.status)) active.runs.push(entry);
+    if (['queued', 'starting', 'running'].includes(meta.status)) active.runs.push(entry);
     active.updatedAt = new Date().toISOString();
     active.runs = active.runs.sort((a, b) => a.createdAt.localeCompare(b.createdAt)).slice(-5000);
     writeJson(runIndexPath(repoRoot, 'active'), active);
@@ -330,7 +330,7 @@ function updateRunIndexes(repoRoot: string, meta: AgentJobMeta): void {
       ? readJson<{ schemaVersion: 1; issueId: string; taskId: string; runIds: string[]; activeRunId?: string; updatedAt: string }>(taskPath)
       : { schemaVersion: 1 as const, issueId: meta.issueId, taskId: meta.taskId, runIds: [], updatedAt: new Date().toISOString() };
     taskIndex.runIds = [meta.runId, ...taskIndex.runIds.filter((runId) => runId !== meta.runId)].slice(0, 500);
-    taskIndex.activeRunId = ['queued', 'starting', 'running', 'waiting_for_user'].includes(meta.status) ? meta.runId : (taskIndex.activeRunId === meta.runId ? undefined : taskIndex.activeRunId);
+    taskIndex.activeRunId = ['queued', 'starting', 'running'].includes(meta.status) ? meta.runId : (taskIndex.activeRunId === meta.runId ? undefined : taskIndex.activeRunId);
     taskIndex.updatedAt = new Date().toISOString();
     writeJson(taskPath, taskIndex);
   });
@@ -607,7 +607,7 @@ function activeRuns(repoRoot: string): AgentJobMeta[] {
   return activeRunIndexEntries(repoRoot).flatMap((entry) => {
     try { return [readJson<AgentJobMeta>(metaPath(repoRoot, entry.runId))]; }
     catch (_error) { return []; }
-  }).filter((entry) => ["queued", "starting", "running", "waiting_for_user"].includes(entry.status));
+  }).filter((entry) => ["queued", "starting", "running"].includes(entry.status));
 }
 
 function assertNoTaskScopeConflict(
@@ -1021,7 +1021,7 @@ function findActiveTaskRun(repoRoot: string, issueId: string, taskId: string): A
       const index = readJson<{ activeRunId?: string }>(indexPath);
       if (index.activeRunId) {
         const active = getAgentJob(repoRoot, index.activeRunId);
-        if (["queued", "starting", "running", "waiting_for_user"].includes(active.status)) return active;
+        if (["queued", "starting", "running"].includes(active.status)) return active;
       }
     } catch (_error) {
       // Fall through to compatibility backfill.
@@ -1029,7 +1029,7 @@ function findActiveTaskRun(repoRoot: string, issueId: string, taskId: string): A
   }
   const active = scanLegacyJobMeta(repoRoot, 5000)
     .filter((entry) => entry.issueId === issueId && entry.taskId === taskId)
-    .find((entry) => ["queued", "starting", "running", "waiting_for_user"].includes(entry.status));
+    .find((entry) => ["queued", "starting", "running"].includes(entry.status));
   if (active) updateRunIndexes(repoRoot, active);
   return active;
 }
@@ -1904,7 +1904,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
         while (true) {
           const current = getAgentJob(repoRoot, runId);
           if (
-            !["queued", "starting", "running", "waiting_for_user"].includes(current.status) ||
+            !["queued", "starting", "running"].includes(current.status) ||
             !isAlive(current.workerPid)
           ) {
             break;
