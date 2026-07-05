@@ -199,6 +199,19 @@ const DEVOPS_TERMS = [
 const CALENDAR_TERMS = ["lesson", "meeting", "calendar", "event", "appointment", "class", "课程", "会议"];
 const JOB_TERMS = ["job", "hiring", "engineer", "recruiter", "interview", "career", "招聘", "面试"];
 const MARKETING_TERMS = ["premium", "survey", "webinar", "newsletter", "promo", "promotion", "discount", "优惠"];
+const REPOSITORY_TERMS = [
+  "dependabot",
+  "vulnerability",
+  "vulnerabilities",
+  "critical severity",
+  "high severity",
+  "security advisory",
+  "security updates",
+  "cve-",
+  "npm audit",
+  "dependency",
+  "dependencies",
+];
 
 export function normalizeAssistantItem(input: AssistantItem): AssistantItem {
   if (!input.source_id || !input.source_id.trim()) {
@@ -431,6 +444,19 @@ function classifyByHeuristics(item: AssistantItem, options: TriageRuntimeOptions
       reason: "The item contains deployment, domain, workflow, or configuration signals.",
       evidence: devopsEvidence,
       actionTypes: ["inspect_devops_configuration", "open_url"],
+      requiresUserInput: false,
+    };
+  }
+
+  const repositoryEvidence = evidenceForTerms(item, REPOSITORY_TERMS);
+  if (repositoryEvidence.length > 0) {
+    return {
+      category: "repository",
+      priority: "P1",
+      confidence: 0.84,
+      reason: "The item contains repository security, Dependabot, dependency, or vulnerability signals.",
+      evidence: repositoryEvidence,
+      actionTypes: ["create_task", "open_url"],
       requiresUserInput: false,
     };
   }

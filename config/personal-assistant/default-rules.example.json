@@ -1,0 +1,59 @@
+{
+  "id": "greyson-default-mail-triage",
+  "name": "Greyson default assistant triage",
+  "version": 1,
+  "low_value_marketing": "delete_candidate",
+  "learning_mail": "archive",
+  "tool_updates": "archive",
+  "security_mail": "keep",
+  "quota_mail": "keep",
+  "devops_mail": "keep",
+  "github_security_mail": "keep",
+  "require_confirmation_for_remote_write": true,
+  "protected_categories": ["security", "quota", "billing", "devops", "repository"],
+  "delete_sender_allowlist": [
+    "no-reply@spotify.com",
+    "julie@surveylama.com",
+    "emails@efinancialcareers.com",
+    "jobs-listings@linkedin.com",
+    "hello@builder.io"
+  ],
+  "archive_sender_allowlist": [
+    "noreply@trans.preply.com",
+    "noreply@tips.preply.com",
+    "welcome@openrouter.ai",
+    "team@moonshot.ai",
+    "notifications@account.z.ai",
+    "ship@info.vercel.com"
+  ],
+  "report_sinks": [
+    {
+      "id": "chatgpt-daily-brief",
+      "kind": "chatgpt",
+      "enabled": true,
+      "risk": "readonly",
+      "requires_confirmation": false
+    },
+    {
+      "id": "gmail-draft-daily-brief",
+      "kind": "gmail_draft",
+      "enabled": false,
+      "risk": "remote_write",
+      "requires_confirmation": true
+    },
+    {
+      "id": "notion-daily-brief",
+      "kind": "notion_page",
+      "enabled": false,
+      "risk": "remote_write",
+      "requires_confirmation": true
+    },
+    {
+      "id": "repo-worklog-daily-brief",
+      "kind": "repo_harness_worklog",
+      "enabled": false,
+      "risk": "workspace_write",
+      "requires_confirmation": true
+    }
+  ]
+}
