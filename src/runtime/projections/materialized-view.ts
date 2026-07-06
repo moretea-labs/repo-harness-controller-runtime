@@ -45,9 +45,17 @@ function buildRepositoryProjection(
   previous?: RepositoryRuntimeProjection,
 ): RepositoryRuntimeProjection {
   const activeJobs = listActiveExecutionJobs(controllerHome, repoId);
+  const activeJobIds = new Set(activeJobs.map((job) => job.jobId));
   const leases = listActiveLeases(controllerHome, repoId);
   const attentionJobs = listExecutionJobs(controllerHome, repoId, 100)
-    .filter((job) => ['orphaned', 'human_attention_required', 'stale'].includes(job.status));
+    .filter((job) => {
+      if (!['orphaned', 'human_attention_required', 'stale'].includes(job.status)) return false;
+      // A mutating worker can disappear after starting and be marked human_attention_required
+      // to prevent unsafe automatic replay. Once the job is terminal and no longer active, it
+      // should remain visible in job history but not keep repository readiness permanently blocked.
+      if (job.status !== 'human_attention_required') return true;
+      return !job.finishedAt || activeJobIds.has(job.jobId);
+    });
   const campaigns = listCampaigns(controllerHome, repoId, 1_000);
   const repository = listRepositories(controllerHome).find((entry) => entry.repoId === repoId);
   const plugins = repository ? listAssistantPluginManifests(controllerHome, repository) : [];
