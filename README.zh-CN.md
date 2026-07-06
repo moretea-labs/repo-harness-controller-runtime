@@ -39,9 +39,28 @@
 | Issue → Task → Run | 可恢复、带依赖、带 review 和 verification gate 的长期任务模型。 |
 | 本地 Controller UI | 本机查看 Overview、Work、Activity、Settings，以及 Run、编辑、检查和证据。 |
 | Runtime 控制面 | Thin Gateway、Global Scheduler、每仓库 Repo Actor、ExecutionJob、Claim、Lease、Fencing 和独立 Worker。 |
+| 自修复闭环 | `runtime_maintenance_status/apply` 可在 Local Job / runtime storage 卡死时绕过普通执行链路做本地 metadata 修复；高级源码修复再委派给 ChatGPT、Codex CLI 或 DeepSeek。 |
 | 自动化治理 | 有界 Schedule/Decision/Occurrence、Candidate Finding、Portfolio DAG/Saga 和 Release Gate。 |
 | Runtime 隔离 | Controller 状态保存在源码仓库外部，只在运行时按需关联。 |
 | 开源发布工具 | Allowlist 导出、路径与凭据扫描、release surface 检查和 package 校验。 |
+
+
+## 自修复闭环
+
+repo-harness 区分两类问题：
+
+- **本地运行态问题**：例如 `RUNTIME_STORAGE_NOT_READY`、`local-jobs legacy-active`、stale active Local Job、unreadable `job.json`。这些由内置 maintenance executor 处理，不依赖 `repository_command_execute`，也不会创建新的 Local Job。
+- **源码缺陷问题**：例如 recovery action 自身 TypeError、重复出现的断言失败。只有本地维护和重启兜底无效后，才把修复方案交给 ChatGPT / local Codex CLI / DeepSeek backup controller 生成补丁。
+
+常用入口：
+
+```text
+runtime_maintenance_status
+runtime_maintenance_apply
+self_healing_loop_plan
+```
+
+详细设计见 [`docs/repo-harness-runtime-self-healing-loop.md`](docs/repo-harness-runtime-self-healing-loop.md)。
 
 ## 快速开始
 

@@ -52,7 +52,18 @@ import {
 import { buildModelClientSummary, buildModelControlPlaneSummary, deepSeekControllerManifest, deepSeekFunctionToolManifest, prepareDeepSeekControllerHandoff, prepareDeepSeekControllerRequest, prepareDeepSeekToolCall } from '../../model-clients';
 import { buildAssistantReadinessReport } from '../../assistant/readiness';
 import { applyRuntimeCleanup, previewRuntimeCleanup } from '../../maintenance/cleanup';
-import { buildCapabilityRecoverySnapshot, recoveryActionById, buildRecoveryAuditRecord, assertRecoveryAuthorized, writeRecoveryAuditRecord, listRecoveryAuditRecords } from '../../recovery';
+import {
+  applyRuntimeMaintenance,
+  buildCapabilityRecoverySnapshot,
+  buildRuntimeMaintenanceStatus,
+  buildSelfHealingLoopPlan,
+  recoveryActionById,
+  buildRecoveryAuditRecord,
+  assertRecoveryAuthorized,
+  writeRecoveryAuditRecord,
+  listRecoveryAuditRecords,
+  type RuntimeMaintenanceActionId,
+} from '../../recovery';
 import {
   getLocalBridgeJobEventsSnapshot,
   getLocalBridgeJobSnapshot,
@@ -154,6 +165,32 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
     min_age_minutes: { type: 'number' },
     max_candidates: { type: 'number' },
   }, ['action_id'], false),
+  definition('runtime_maintenance_status', 'Read the self-contained runtime maintenance plan without using repository_command_execute or Local Job tickets.', {
+    repo_id: repoId,
+    min_age_minutes: { type: 'number' },
+    max_candidates: { type: 'number' },
+    cancel_pending_approvals: { type: 'boolean' },
+    recent_errors: { type: 'array', items: { type: 'string' } },
+  }),
+  definition('runtime_maintenance_apply', 'Apply one bounded runtime maintenance action without repository_command_execute or Local Job tickets.', {
+    repo_id: repoId,
+    action_id: { type: 'string', enum: ['local_jobs_reconcile', 'quarantine_unreadable_local_jobs', 'runtime_storage_finalize_relocation', 'rebuild_projection', 'full_maintenance_pass'] },
+    confirm_maintenance: { type: 'boolean' },
+    authorization: { type: 'string', description: 'Must equal action_id.' },
+    min_age_minutes: { type: 'number' },
+    max_candidates: { type: 'number' },
+    cancel_pending_approvals: { type: 'boolean' },
+  }, ['action_id', 'confirm_maintenance', 'authorization'], false),
+  definition('self_healing_loop_plan', 'Return the full self-healing loop plan, including local maintenance, restart fallback, and model-assisted source repair delegation.', {
+    repo_id: repoId,
+    objective: { type: 'string' },
+    recent_errors: { type: 'array', items: { type: 'string' } },
+    platform_blocked: { type: 'boolean' },
+    source_defect_suspected: { type: 'boolean' },
+    chatgpt_available: { type: 'boolean' },
+    codex_cli_available: { type: 'boolean' },
+    deepseek_available: { type: 'boolean' },
+  }),
   definition('list_plugins', 'List personal-assistant plugin manifests, lifecycle state, health, and action discovery for one repository.', {
     repo_id: repoId,
   }),
@@ -692,6 +729,16 @@ function capabilityRecoveryInput(ctx: MultiRepositoryMcpToolContext, repository:
   const contextProjection = readControllerContextProjection(ctx.controllerHome, repository.repoId);
   const contextProjectionAgeMs = controllerContextProjectionAgeMs(contextProjection);
   const recentErrors = Array.isArray(args.recent_errors) ? args.recent_errors.map(String) : [];
+  let runtimeStorageReady: boolean | undefined;
+  let runtimeStorageWarnings: string[] = [];
+  try {
+    const runtimeStorage = ensureRepositoryRuntimeStorage(repository, ctx.controllerHome);
+    runtimeStorageReady = runtimeStorage.readyForExecution;
+    runtimeStorageWarnings = runtimeStorage.warnings;
+  } catch (error) {
+    runtimeStorageReady = false;
+    runtimeStorageWarnings = [error instanceof Error ? error.message : String(error)];
+  }
   const plugins = listAssistantPluginManifests(ctx.controllerHome, repository);
   const localJobs = listLocalBridgeJobSnapshots(repository.canonicalRoot, 30);
   const executionJobs = listExecutionJobs(ctx.controllerHome, repository.repoId, 30);
@@ -716,6 +763,8 @@ function capabilityRecoveryInput(ctx: MultiRepositoryMcpToolContext, repository:
     issueToolsAvailable: args.issue_tools_available === undefined ? true : args.issue_tools_available === true,
     jobToolsAvailable: args.job_tools_available === undefined ? true : args.job_tools_available === true,
     checksAvailable: listControllerChecks(repository.canonicalRoot).length > 0,
+    runtimeStorageReady,
+    runtimeStorageWarnings,
     pluginStates: plugins.map((plugin) => ({
       pluginId: plugin.pluginId,
       enabled: plugin.enabled,
@@ -1166,6 +1215,41 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           notes: snapshot.notes,
         });
       }
+      case 'runtime_maintenance_status': {
+        const repository = selected(ctx, args);
+        return result(buildRuntimeMaintenanceStatus(repository, ctx.controllerHome, {
+          minAgeMinutes: typeof args.min_age_minutes === 'number' ? args.min_age_minutes : undefined,
+          maxCandidates: typeof args.max_candidates === 'number' ? args.max_candidates : undefined,
+          cancelPendingApprovals: args.cancel_pending_approvals === true,
+          recentErrors: Array.isArray(args.recent_errors) ? args.recent_errors.map(String) : undefined,
+        }) as unknown as Record<string, unknown>);
+      }
+      case 'runtime_maintenance_apply': {
+        const repository = selected(ctx, args);
+        const actionId = String(args.action_id ?? '').trim() as RuntimeMaintenanceActionId;
+        if (!actionId) return result({ error: { code: 'RUNTIME_MAINTENANCE_ACTION_REQUIRED', message: 'action_id is required.' } }, true);
+        if (args.confirm_maintenance !== true || String(args.authorization ?? '') !== actionId) {
+          throw new Error('RUNTIME_MAINTENANCE_AUTHORIZATION_REQUIRED: confirm_maintenance=true and authorization=action_id are required.');
+        }
+        return result(applyRuntimeMaintenance(repository, ctx.controllerHome, {
+          actionId,
+          confirmMaintenance: true,
+          minAgeMinutes: typeof args.min_age_minutes === 'number' ? args.min_age_minutes : undefined,
+          maxCandidates: typeof args.max_candidates === 'number' ? args.max_candidates : undefined,
+          cancelPendingApprovals: args.cancel_pending_approvals === true,
+        }) as unknown as Record<string, unknown>);
+      }
+      case 'self_healing_loop_plan': {
+        return result(buildSelfHealingLoopPlan({
+          objective: typeof args.objective === 'string' ? args.objective : undefined,
+          recentErrors: Array.isArray(args.recent_errors) ? args.recent_errors.map(String) : undefined,
+          platformBlocked: args.platform_blocked === true,
+          sourceDefectSuspected: args.source_defect_suspected === true,
+          chatgptAvailable: args.chatgpt_available === undefined ? undefined : args.chatgpt_available === true,
+          codexCliAvailable: args.codex_cli_available === true,
+          deepseekAvailable: args.deepseek_available === true,
+        }) as unknown as Record<string, unknown>);
+      }
       case 'capability_recovery_apply': {
         const repository = selected(ctx, args);
         const actionId = String(args.action_id ?? '').trim();
@@ -1203,19 +1287,38 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             }) as unknown as Record<string, unknown>;
             break;
           }
-          case 'recovery.reconcile_jobs': {
-            const cleanup = applyRuntimeCleanup(repository.canonicalRoot, {
-              minAgeMinutes: typeof args.min_age_minutes === 'number' ? args.min_age_minutes : 60,
-              includeTempDirs: true,
-              includeTerminalLocalJobs: true,
-              includeLegacyRuns: true,
-              includeHistoricalAttention: true,
+          case 'recovery.reconcile_jobs':
+          case 'recovery.local_jobs_reconcile': {
+            const maintenance = applyRuntimeMaintenance(repository, ctx.controllerHome, {
+              actionId: 'local_jobs_reconcile',
+              confirmMaintenance: true,
+              minAgeMinutes: typeof args.min_age_minutes === 'number' ? args.min_age_minutes : 10,
               maxCandidates: typeof args.max_candidates === 'number' ? args.max_candidates : undefined,
-              confirmCleanup: true,
             });
-            const projection = rebuildRepositoryProjection(ctx.controllerHome, repository.repoId);
-            payload = { cleanup, projection };
-            affectedPaths = ['.ai/harness/local-jobs', '.ai/harness/jobs', '.ai/harness/controller'];
+            payload = { maintenance };
+            affectedPaths = ['.ai/harness/local-jobs', '.ai/harness/local-jobs-quarantine', '.ai/harness/controller'];
+            break;
+          }
+          case 'recovery.local_jobs_quarantine_unreadable': {
+            const maintenance = applyRuntimeMaintenance(repository, ctx.controllerHome, {
+              actionId: 'quarantine_unreadable_local_jobs',
+              confirmMaintenance: true,
+              minAgeMinutes: typeof args.min_age_minutes === 'number' ? args.min_age_minutes : 0,
+              maxCandidates: typeof args.max_candidates === 'number' ? args.max_candidates : undefined,
+            });
+            payload = { maintenance };
+            affectedPaths = ['.ai/harness/local-jobs', '.ai/harness/local-jobs-quarantine'];
+            break;
+          }
+          case 'recovery.runtime_storage_finalize_relocation': {
+            const maintenance = applyRuntimeMaintenance(repository, ctx.controllerHome, {
+              actionId: 'runtime_storage_finalize_relocation',
+              confirmMaintenance: true,
+              minAgeMinutes: typeof args.min_age_minutes === 'number' ? args.min_age_minutes : 0,
+              maxCandidates: typeof args.max_candidates === 'number' ? args.max_candidates : undefined,
+            });
+            payload = { maintenance };
+            affectedPaths = ['.ai/harness/local-jobs', '.ai/harness/controller'];
             break;
           }
           case 'recovery.restart_controller': {

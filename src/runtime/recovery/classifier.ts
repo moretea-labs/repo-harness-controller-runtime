@@ -18,6 +18,29 @@ const AUTH_PATTERNS = [
   /re-authorization required/i,
 ];
 
+const RUNTIME_STORAGE_PATTERNS = [
+  /runtime_storage_not_ready/i,
+  /runtime storage.*not ready/i,
+  /readyforexecution.*false/i,
+  /storage relocation/i,
+  /runtime storage can be relocated/i,
+];
+
+const LOCAL_JOBS_UNREADABLE_PATTERNS = [
+  /unreadable local jobs?/i,
+  /malformed local jobs?/i,
+  /missing.*local jobs?.*job\.json/i,
+  /local jobs?.*metadata.*unreadable/i,
+];
+
+const LOCAL_JOBS_LEGACY_ACTIVE_PATTERNS = [
+  /legacy-active/i,
+  /active or unreadable local jobs?/i,
+  /local-jobs: active/i,
+  /local jobs must finish/i,
+  /local jobs?.*finish before runtime storage/i,
+];
+
 const POLICY_PATTERNS = [
   /policy denied/i,
   /policy_denied/i,
@@ -47,6 +70,9 @@ export function classifyFailure(message: string | undefined): RecoveryClass {
   const text = message ?? '';
   if (!text.trim()) return 'unknown';
   if (PLATFORM_BLOCK_PATTERNS.some((pattern) => pattern.test(text))) return 'platform_blocked';
+  if (LOCAL_JOBS_LEGACY_ACTIVE_PATTERNS.some((pattern) => pattern.test(text))) return 'local_jobs_legacy_active';
+  if (LOCAL_JOBS_UNREADABLE_PATTERNS.some((pattern) => pattern.test(text))) return 'local_jobs_unreadable';
+  if (RUNTIME_STORAGE_PATTERNS.some((pattern) => pattern.test(text))) return 'runtime_storage_not_ready';
   if (AUTH_PATTERNS.some((pattern) => pattern.test(text))) return 'auth_required';
   if (POLICY_PATTERNS.some((pattern) => pattern.test(text))) return 'policy_denied';
   if (AGENT_RUNTIME_PATTERNS.some((pattern) => pattern.test(text))) return 'agent_runtime_failure';
@@ -59,6 +85,11 @@ export function dominantRecoveryClass(classes: readonly RecoveryClass[]): Recove
     'platform_blocked',
     'auth_required',
     'dirty_worktree_conflict',
+    'local_jobs_legacy_active',
+    'local_jobs_unreadable',
+    'runtime_storage_not_ready',
+    'local_jobs_reconciliation_required',
+    'maintenance_executor_required',
     'policy_denied',
     'source_defect_suspected',
     'stale_runtime_state',

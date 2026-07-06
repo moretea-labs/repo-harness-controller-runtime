@@ -1,10 +1,16 @@
 import { describe, expect, it } from 'bun:test';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import {
   RECOVERY_ACTIONS,
   assertRecoveryAuthorized,
   buildCapabilityRecoverySnapshot,
   buildPatchHandoffArtifact,
   buildRecoveryAuditRecord,
+  buildRuntimeMaintenanceStatus,
+  buildSelfHealingLoopPlan,
+  applyRuntimeMaintenance,
   classifyFailure,
   detectDirtyPathConflicts,
 } from '../../src/runtime/recovery';
@@ -17,6 +23,10 @@ describe('capability recovery classifier', () => {
   it('classifies auth and agent runtime failures', () => {
     expect(classifyFailure('Transport channel closed, when Auth(AuthorizationRequired)')).toBe('auth_required');
     expect(classifyFailure('timeout waiting for child process to exit')).toBe('agent_runtime_failure');
+  });
+
+  it('classifies runtime storage local-job blockers distinctly', () => {
+    expect(classifyFailure('RUNTIME_STORAGE_NOT_READY: local-jobs: active or unreadable Local Jobs must finish before runtime storage can be relocated')).toBe('local_jobs_legacy_active');
   });
 });
 
@@ -65,6 +75,27 @@ describe('capability recovery probe', () => {
     expect(actionIds).not.toContain('recovery.restart_controller');
   });
 
+  it('routes runtime storage blockers to the maintenance executor', () => {
+    const snapshot = buildCapabilityRecoverySnapshot({
+      generatedAt: '2026-07-05T00:00:00.000Z',
+      daemonStatus: 'ready',
+      schedulerStatus: 'ready',
+      localBridgeRunning: true,
+      connectorHealthy: true,
+      runtimeStorageReady: false,
+      runtimeStorageWarnings: ['local-jobs: active or unreadable Local Jobs must finish before runtime storage can be relocated'],
+      commandPreviewAvailable: true,
+      commandExecuteAvailable: false,
+      recentErrors: ['RUNTIME_STORAGE_NOT_READY: local-jobs: active or unreadable Local Jobs must finish before runtime storage can be relocated'],
+    });
+
+    const actionIds = snapshot.recommendedActions.map((action) => action.id);
+    expect(snapshot.capabilities.find((capability) => capability.id === 'runtime.storage')?.class).toBe('local_jobs_legacy_active');
+    expect(actionIds).toContain('recovery.local_jobs_reconcile');
+    expect(actionIds).toContain('recovery.runtime_storage_finalize_relocation');
+    expect(snapshot.notes.join(' ')).toContain('runtime_maintenance_apply');
+  });
+
   it('detects stale worker state as recoverable runtime state', () => {
     const snapshot = buildCapabilityRecoverySnapshot({
       generatedAt: '2026-07-05T00:00:00.000Z',
@@ -101,6 +132,71 @@ describe('authorized recovery actions', () => {
     expect(record.id).toMatch(/^REC-/);
     expect(record.confirmation).toBe('authorization');
     expect(record.affectedPaths).toEqual(['.ai/harness/jobs']);
+  });
+});
+
+
+describe('runtime maintenance executor', () => {
+  function tempRepo() {
+    const root = mkdtempSync(join(tmpdir(), 'repo-harness-maintenance-test-'));
+    const controllerHome = join(root, '_controller_home');
+    const localJobs = join(root, '.ai/harness/local-jobs');
+    mkdirSync(localJobs, { recursive: true });
+    return { root, controllerHome, localJobs, repository: { repoId: 'repo-test', canonicalRoot: root } };
+  }
+
+  it('terminalizes stale active Local Jobs without using Local Job tickets', () => {
+    const { controllerHome, localJobs, repository } = tempRepo();
+    const jobDir = join(localJobs, 'JOB-stale');
+    mkdirSync(jobDir, { recursive: true });
+    writeFileSync(join(jobDir, 'job.json'), `${JSON.stringify({
+      schemaVersion: 1,
+      jobId: 'JOB-stale',
+      action: 'repository-command',
+      status: 'running',
+      createdAt: '2026-07-05T00:00:00.000Z',
+      updatedAt: '2026-07-05T00:00:00.000Z',
+      workerPid: 99999999,
+    }, null, 2)}
+`);
+
+    const before = buildRuntimeMaintenanceStatus(repository, controllerHome, { minAgeMinutes: 0 });
+    expect(before.recommendedActions).toContain('local_jobs_reconcile');
+
+    const applied = applyRuntimeMaintenance(repository, controllerHome, {
+      actionId: 'local_jobs_reconcile',
+      confirmMaintenance: true,
+      minAgeMinutes: 0,
+    });
+    expect(applied.applied.some((candidate) => candidate.applied && candidate.id === 'JOB-stale')).toBe(true);
+    const stored = JSON.parse(readFileSync(join(jobDir, 'job.json'), 'utf8')) as { status: string; error: string };
+    expect(stored.status).toBe('orphaned');
+    expect(stored.error).toContain('runtime maintenance');
+  });
+
+  it('quarantines unreadable Local Job entries', () => {
+    const { controllerHome, localJobs, repository } = tempRepo();
+    mkdirSync(join(localJobs, 'JOB-broken'), { recursive: true });
+    const applied = applyRuntimeMaintenance(repository, controllerHome, {
+      actionId: 'quarantine_unreadable_local_jobs',
+      confirmMaintenance: true,
+      minAgeMinutes: 0,
+    });
+    expect(applied.applied.some((candidate) => candidate.applied && candidate.id === 'JOB-broken')).toBe(true);
+  });
+
+  it('plans model repair only after bounded local recovery and restart fallback', () => {
+    const plan = buildSelfHealingLoopPlan({
+      objective: 'fix repeated TypeError in recovery apply',
+      recentErrors: ['TypeError: cannot read properties of undefined'],
+      chatgptAvailable: false,
+      codexCliAvailable: true,
+      deepseekAvailable: true,
+    });
+
+    expect(plan.failureClass).toBe('source_defect_suspected');
+    expect(plan.modelRepairProducer.preferredProducer).toBe('local_codex_cli');
+    expect(plan.phases.map((phase) => phase.id)).toEqual(['observe', 'local-maintenance', 'restart-fallback', 'model-repair-generation', 'continuation']);
   });
 });
 

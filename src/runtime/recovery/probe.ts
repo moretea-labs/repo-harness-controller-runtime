@@ -58,6 +58,25 @@ function failingJobClass(input: CapabilityRecoveryInput): RecoveryClass {
   return dominantRecoveryClass(messages.map(classifyFailure));
 }
 
+function runtimeStorageClass(input: CapabilityRecoveryInput): RecoveryClass {
+  return dominantRecoveryClass((input.runtimeStorageWarnings ?? []).map(classifyFailure));
+}
+
+function runtimeStorageActions(recoveryClass: RecoveryClass): RecoveryActionDescriptor[] {
+  if (recoveryClass === 'local_jobs_unreadable') return [RECOVERY_ACTIONS.quarantineUnreadableLocalJobs, RECOVERY_ACTIONS.localJobsReconcile, RECOVERY_ACTIONS.finalizeRuntimeStorageRelocation];
+  if (recoveryClass === 'local_jobs_legacy_active') return [RECOVERY_ACTIONS.localJobsReconcile, RECOVERY_ACTIONS.finalizeRuntimeStorageRelocation];
+  if (recoveryClass === 'runtime_storage_not_ready') return [RECOVERY_ACTIONS.localJobsReconcile, RECOVERY_ACTIONS.finalizeRuntimeStorageRelocation];
+  return [RECOVERY_ACTIONS.localJobsReconcile, RECOVERY_ACTIONS.finalizeRuntimeStorageRelocation];
+}
+
+function commandExecuteActions(recoveryClass: RecoveryClass): RecoveryActionDescriptor[] {
+  if (recoveryClass === 'platform_blocked') return [RECOVERY_ACTIONS.createPatchHandoff];
+  if (['runtime_storage_not_ready', 'local_jobs_legacy_active', 'local_jobs_unreadable', 'local_jobs_reconciliation_required'].includes(recoveryClass)) {
+    return runtimeStorageActions(recoveryClass);
+  }
+  return [RECOVERY_ACTIONS.probeAgain];
+}
+
 export function buildCapabilityRecoverySnapshot(input: CapabilityRecoveryInput): CapabilityRecoverySnapshot {
   const at = input.generatedAt ?? new Date().toISOString();
   const capabilities: CapabilityStatus[] = [];
@@ -96,6 +115,21 @@ export function buildCapabilityRecoverySnapshot(input: CapabilityRecoveryInput):
     ? capability(at, 'context.projection', 'Context projection', 'degraded', 'stale_runtime_state', 'Controller context projection is stale.', [RECOVERY_ACTIONS.rebuildProjection], { stale: true, staleThresholdMs: CONTEXT_PROJECTION_STALE_MS })
     : capability(at, 'context.projection', 'Context projection', 'ready', 'unknown', 'Controller context projection is fresh enough.', [], { stale: input.contextProjectionStale }));
 
+  const storageClass = runtimeStorageClass(input);
+  if (input.runtimeStorageReady === false || (input.runtimeStorageWarnings ?? []).length > 0) {
+    const classifiedStorage = storageClass === 'unknown' ? 'runtime_storage_not_ready' : storageClass;
+    capabilities.push(capability(
+      at,
+      'runtime.storage',
+      'Runtime storage',
+      'blocked',
+      classifiedStorage,
+      'Runtime storage is not ready; ordinary execution may be unable to create or dispatch Local Jobs.',
+      runtimeStorageActions(classifiedStorage),
+      { ready: input.runtimeStorageReady, warnings: input.runtimeStorageWarnings ?? [] },
+    ));
+  }
+
   capabilities.push(input.commandPreviewAvailable === false
     ? capability(at, 'tool.command_preview', 'Command preview', 'blocked', 'policy_denied', 'Command preview is blocked or unavailable.', [RECOVERY_ACTIONS.probeAgain])
     : capability(at, 'tool.command_preview', 'Command preview', 'ready', 'unknown', 'Command preview is available.'));
@@ -110,8 +144,10 @@ export function buildCapabilityRecoverySnapshot(input: CapabilityRecoveryInput):
       recentClass === 'platform_blocked' ? 'platform_blocked' : recentClass === 'unknown' ? 'policy_denied' : recentClass,
       recentClass === 'platform_blocked'
         ? 'Command execute appears blocked before reaching repo-harness. Do not restart-loop local services.'
-        : 'Command execute is blocked, denied, or unavailable.',
-      recentClass === 'platform_blocked' ? [RECOVERY_ACTIONS.createPatchHandoff] : [RECOVERY_ACTIONS.probeAgain],
+        : ['runtime_storage_not_ready', 'local_jobs_legacy_active', 'local_jobs_unreadable', 'local_jobs_reconciliation_required'].includes(recentClass)
+          ? 'Command execute is blocked by repo-harness runtime storage; use the maintenance executor instead of repository_command_execute.'
+          : 'Command execute is blocked, denied, or unavailable.',
+      commandExecuteActions(recentClass),
     )
     : capability(at, 'tool.command_execute', 'Command execute', 'ready', 'unknown', 'Command execute is available.'));
 
@@ -125,7 +161,7 @@ export function buildCapabilityRecoverySnapshot(input: CapabilityRecoveryInput):
 
   const jobClass = failingJobClass(input);
   if (jobClass !== 'unknown') {
-    capabilities.push(capability(at, 'recent.failures', 'Recent failures', 'degraded', jobClass, `Recent job failures classify as ${jobClass}.`, jobClass === 'agent_runtime_failure' ? [RECOVERY_ACTIONS.reconcileJobs] : jobClass === 'source_defect_suspected' ? [RECOVERY_ACTIONS.createSelfFixTask] : [], { localJobs: input.localJobs?.length ?? 0, executionJobs: input.executionJobs?.length ?? 0 }));
+    capabilities.push(capability(at, 'recent.failures', 'Recent failures', 'degraded', jobClass, `Recent job failures classify as ${jobClass}.`, jobClass === 'agent_runtime_failure' ? [RECOVERY_ACTIONS.reconcileJobs] : ['runtime_storage_not_ready', 'local_jobs_legacy_active', 'local_jobs_unreadable'].includes(jobClass) ? runtimeStorageActions(jobClass) : jobClass === 'source_defect_suspected' ? [RECOVERY_ACTIONS.createSelfFixTask] : [], { localJobs: input.localJobs?.length ?? 0, executionJobs: input.executionJobs?.length ?? 0 }));
   }
 
   for (const plugin of input.pluginStates ?? []) {
@@ -179,6 +215,6 @@ export function buildCapabilityRecoverySnapshot(input: CapabilityRecoveryInput):
     },
     notes: platformBlocked
       ? ['One or more calls appear blocked before reaching repo-harness. Avoid local restart loops; use patch handoff or narrower typed tools.']
-      : [],
+      : (input.runtimeStorageReady === false ? ['Runtime storage is not ready. Use runtime_maintenance_status/runtime_maintenance_apply; do not try to repair repository_command_execute with repository_command_execute.'] : []),
   };
 }

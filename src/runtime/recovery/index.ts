@@ -5,3 +5,4 @@ export * from './patch-handoff';
 export * from './probe';
 export * from './types';
 export * from './store';
+export * from './maintenance-executor';

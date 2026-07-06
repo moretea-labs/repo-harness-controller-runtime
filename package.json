@@ -40,6 +40,7 @@
     "docs/repo-harness-execution-first-v7.md",
     "docs/repo-harness-chatgpt-bridge-v8.md",
     "docs/repo-harness-v8-verification.md",
+    "docs/repo-harness-runtime-self-healing-loop.md",
     "README.zh-CN.md",
     "install.sh",
     "install.ps1",

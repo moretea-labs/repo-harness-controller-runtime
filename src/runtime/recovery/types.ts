@@ -7,6 +7,11 @@ export type RecoveryClass =
   | 'platform_blocked'
   | 'dirty_worktree_conflict'
   | 'stale_runtime_state'
+  | 'runtime_storage_not_ready'
+  | 'local_jobs_legacy_active'
+  | 'local_jobs_unreadable'
+  | 'local_jobs_reconciliation_required'
+  | 'maintenance_executor_required'
   | 'agent_runtime_failure'
   | 'plugin_configuration_error'
   | 'source_defect_suspected'
@@ -66,6 +71,8 @@ export interface CapabilityRecoveryInput {
   issueToolsAvailable?: boolean;
   jobToolsAvailable?: boolean;
   checksAvailable?: boolean;
+  runtimeStorageReady?: boolean;
+  runtimeStorageWarnings?: string[];
   pluginStates?: Array<{ pluginId: string; enabled: boolean; healthState?: string; ready?: boolean; errors?: string[]; warnings?: string[] }>;
   recentErrors?: string[];
   dirtyPaths?: string[];
