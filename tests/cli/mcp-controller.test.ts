@@ -594,6 +594,45 @@ describe("MCP controller profile", () => {
     });
   });
 
+  test("create_campaign normalizes legacy operation aliases and dependency refs on the controller surface", async () => {
+    await withController(async (repoRoot, _ctx) => {
+      const controllerHome = join(repoRoot, ".controller-home");
+      const repository = registerRepository({ path: repoRoot, controllerHome });
+      const core = createMultiRepositoryContext({ repo: repoRoot, profile: "controller", toolset: "core", controllerHome });
+      expect(spawnSync("git", ["config", "user.email", "test@example.com"], { cwd: repoRoot }).status).toBe(0);
+      expect(spawnSync("git", ["config", "user.name", "Test"], { cwd: repoRoot }).status).toBe(0);
+      expect(spawnSync("git", ["add", "."], { cwd: repoRoot }).status).toBe(0);
+      expect(spawnSync("git", ["commit", "-m", "initial"], { cwd: repoRoot }).status).toBe(0);
+      const created = await callRuntimeTool(core, "create_campaign", {
+        repo_id: repository.repoId,
+        request_id: "campaign-normalization-via-core",
+        title: "Controller-surface campaign",
+        goal: "Normalize campaign inputs before dispatch.",
+        workspace: { mode: "current" },
+        tasks: [
+          {
+            task_id: "T1",
+            title: "First",
+            operation: "launch-task",
+            arguments: { issue_id: "ISS-1", task_id: "T1", agent: "codex" },
+          },
+          {
+            task_id: "T2",
+            title: "Second",
+            operation: "recordCandidateFinding",
+            depends_on: [" task:T1 "],
+            arguments: { semantic_key: "two", title: "Two" },
+          },
+        ],
+      });
+
+      const value = JSON.parse(created!.content[0].text);
+      expect(value.campaign.tasks[0].operation).toBe("dispatch_task");
+      expect(value.campaign.tasks[1].operation).toBe("record_candidate_finding");
+      expect(value.campaign.tasks[1].dependsOn).toEqual(["T1"]);
+    });
+  });
+
   test("rejects cross-repository Work reuse for the same request id", async () => {
     await withController(async (repoRoot, _ctx) => {
       const controllerHome = join(repoRoot, ".controller-home");

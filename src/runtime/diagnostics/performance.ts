@@ -46,6 +46,13 @@ export interface RuntimePerformanceDiagnostics {
   processes: RuntimeProcessSample[];
   temp: { scannedRoots: string[]; totalEntries: number; cleanupCandidates: number; entries: RuntimeTempEntry[] };
   cleanupPreview?: { safeToTerminate: RuntimeProcessSample[]; safeToRemoveTempEntries: RuntimeTempEntry[]; requiresConfirmation: true };
+  truncated: {
+    summary: boolean;
+    processes: boolean;
+    tempEntries: boolean;
+    cleanupPreview: boolean;
+    recommendations: boolean;
+  };
   findings: Array<{ severity: 'info' | 'warning' | 'critical'; code: string; message: string }>;
   recommendations: string[];
 }
@@ -65,9 +72,31 @@ interface DiagnosticsInput {
   localControllerEndpoint?: string;
 }
 
+const MAX_DIAGNOSTIC_SUMMARY_CHARS = 320;
+const MAX_DIAGNOSTIC_RECOMMENDATIONS = 5;
+const MAX_DIAGNOSTIC_PROCESSES = 80;
+const MAX_DIAGNOSTIC_TEMP_ENTRIES = 80;
+const MAX_DIAGNOSTIC_CLEANUP_PREVIEW = 50;
+
 function parseNumber(value: string | undefined): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function boundedText(value: string, maxChars: number): { text: string; truncated: boolean } {
+  if (value.length <= maxChars) return { text: value, truncated: false };
+  return { text: `${value.slice(0, Math.max(0, maxChars - 3))}...`, truncated: true };
+}
+
+export function buildRuntimeDiagnosticSummary(
+  status: RuntimePerformanceDiagnostics['status'],
+  findings: RuntimePerformanceDiagnostics['findings'],
+): { summary: string; truncated: boolean } {
+  const message = status === 'normal'
+    ? 'No orphan workers or abnormal repo-harness CPU pattern detected.'
+    : findings.map((finding) => finding.message.trim()).filter(Boolean).join(' ');
+  const bounded = boundedText(message, MAX_DIAGNOSTIC_SUMMARY_CHARS);
+  return { summary: bounded.text, truncated: bounded.truncated };
 }
 
 function extractFlag(command: string, flag: string): string | undefined {
@@ -217,27 +246,48 @@ export function collectRuntimePerformanceDiagnostics(input: DiagnosticsInput): R
   if ((input.queueDepth ?? 0) === 0 && (input.runningWorkers ?? 0) === 0 && orphanWorkers.length > 0) findings.push({ severity: 'critical', code: 'CONTROL_PLANE_IDLE_HOST_BUSY', message: 'Controller queue is idle but host still has orphan worker process(es).' });
   if (temp.entries.length >= 100) findings.push({ severity: 'warning', code: 'TEMP_DIR_ACCUMULATION', message: 'Detected ' + temp.entries.length + ' repo-harness temp entries.' });
   if (!localController && input.localControllerRunning !== true) findings.push({ severity: 'info', code: 'LOCAL_CONTROLLER_NOT_IN_PROCESS_LIST', message: 'No Local Controller process was found for this repository.' });
-  const cleanupProcesses = [...orphanWorkers, ...highCpuPeerMcp, ...staleControllerDaemons]
-    .filter((sample, index, samples) => samples.findIndex((candidate) => candidate.pid === sample.pid) === index)
-    .slice(0, 50);
+  const cleanupProcessCandidates = [...orphanWorkers, ...highCpuPeerMcp, ...staleControllerDaemons]
+    .filter((sample, index, samples) => samples.findIndex((candidate) => candidate.pid === sample.pid) === index);
+  const rawCleanupProcesses = cleanupProcessCandidates.slice(0, MAX_DIAGNOSTIC_CLEANUP_PREVIEW);
   const status: RuntimePerformanceDiagnostics['status'] = findings.some((finding) => finding.severity === 'critical') ? 'critical' : findings.some((finding) => finding.severity === 'warning') ? 'warning' : 'normal';
+  const summary = buildRuntimeDiagnosticSummary(status, findings);
+  const recommendations = status === 'normal' ? ['No restart is recommended from this diagnostic snapshot.'] : [
+    ...(orphanWorkers.length ? ['Terminate orphan workers only after reviewing cleanupPreview.safeToTerminate.'] : []),
+    ...(temp.entries.some((entry) => entry.cleanupCandidate) ? ['Remove stale temp entries only after reviewing cleanupPreview.safeToRemoveTempEntries.'] : []),
+    ...(highCpu.length ? ['Inspect highCpuProcesses before restarting the controller stack.'] : []),
+  ];
   return {
     schemaVersion: 1,
     repoId: input.repoId,
     repoRoot: input.repoRoot,
     generatedAt: new Date().toISOString(),
     status,
-    summary: status === 'normal' ? 'No orphan workers or abnormal repo-harness CPU pattern detected.' : findings.map((finding) => finding.message).join(' '),
+    summary: summary.summary,
     controller: { queueDepth: input.queueDepth ?? 0, runningWorkers: input.runningWorkers ?? 0, activeLeases: input.activeLeases ?? 0, activeJobs: activeJobIds },
     processSummary: { totalRepoHarnessProcesses: repoProcesses.length, workerProcesses: workers.length, orphanWorkers: orphanWorkers.length, highCpuProcesses: highCpu.length, totalRepoHarnessCpu: totalCpu, localControllerRunning, localControllerPid: localController?.pid ?? input.localControllerPid },
-    processes: repoProcesses.slice(0, 80),
-    temp: { scannedRoots: temp.roots, totalEntries: temp.entries.length, cleanupCandidates: temp.entries.filter((entry) => entry.cleanupCandidate).length, entries: temp.entries.slice(0, 80) },
-    cleanupPreview: input.cleanupPreview === true ? { safeToTerminate: cleanupProcesses, safeToRemoveTempEntries: temp.entries.filter((entry) => entry.cleanupCandidate).slice(0, 80), requiresConfirmation: true } : undefined,
+    processes: repoProcesses.slice(0, MAX_DIAGNOSTIC_PROCESSES),
+    temp: {
+      scannedRoots: temp.roots,
+      totalEntries: temp.entries.length,
+      cleanupCandidates: temp.entries.filter((entry) => entry.cleanupCandidate).length,
+      entries: temp.entries.slice(0, MAX_DIAGNOSTIC_TEMP_ENTRIES),
+    },
+    cleanupPreview: input.cleanupPreview === true
+      ? {
+        safeToTerminate: rawCleanupProcesses,
+        safeToRemoveTempEntries: temp.entries.filter((entry) => entry.cleanupCandidate).slice(0, MAX_DIAGNOSTIC_CLEANUP_PREVIEW),
+        requiresConfirmation: true,
+      }
+      : undefined,
+    truncated: {
+      summary: summary.truncated,
+      processes: repoProcesses.length > MAX_DIAGNOSTIC_PROCESSES,
+      tempEntries: temp.entries.length > MAX_DIAGNOSTIC_TEMP_ENTRIES,
+      cleanupPreview: cleanupProcessCandidates.length > MAX_DIAGNOSTIC_CLEANUP_PREVIEW
+        || temp.entries.filter((entry) => entry.cleanupCandidate).length > MAX_DIAGNOSTIC_CLEANUP_PREVIEW,
+      recommendations: recommendations.length > MAX_DIAGNOSTIC_RECOMMENDATIONS,
+    },
     findings,
-    recommendations: status === 'normal' ? ['No restart is recommended from this diagnostic snapshot.'] : [
-      ...(orphanWorkers.length ? ['Terminate orphan workers only after reviewing cleanupPreview.safeToTerminate.'] : []),
-      ...(temp.entries.some((entry) => entry.cleanupCandidate) ? ['Remove stale temp entries only after reviewing cleanupPreview.safeToRemoveTempEntries.'] : []),
-      ...(highCpu.length ? ['Inspect highCpuProcesses before restarting the controller stack.'] : []),
-    ],
+    recommendations: recommendations.slice(0, MAX_DIAGNOSTIC_RECOMMENDATIONS),
   };
 }

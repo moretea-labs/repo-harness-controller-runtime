@@ -19,6 +19,7 @@ export interface RuntimeCleanupPreview {
   repoRoot: string;
   mode: 'preview';
   candidates: RuntimeCleanupCandidate[];
+  truncated: { candidates: boolean };
   summary: {
     total: number;
     safe: number;
@@ -59,7 +60,7 @@ function normalizeOptions(options: RuntimeCleanupOptions): Required<Omit<Runtime
     includeTerminalLocalJobs: options.includeTerminalLocalJobs === true,
     includeLegacyRuns: options.includeLegacyRuns === true,
     includeHistoricalAttention: options.includeHistoricalAttention === true,
-    maxCandidates: Math.max(1, Math.min(safeNumber(options.maxCandidates, 200), 500)),
+    maxCandidates: Math.max(1, Math.min(safeNumber(options.maxCandidates, 200), 200)),
     confirmCleanup: options.confirmCleanup === true,
   };
 }
@@ -251,18 +252,21 @@ function summarize(candidates: RuntimeCleanupCandidate[]): RuntimeCleanupPreview
 
 export function previewRuntimeCleanup(repoRoot: string, options: RuntimeCleanupOptions = {}): RuntimeCleanupPreview {
   const normalized = normalizeOptions(options);
-  const candidates = [
-    ...(normalized.includeTempDirs ? scanTempDirs(normalized.minAgeMinutes, normalized.maxCandidates) : []),
-    ...(normalized.includeTerminalLocalJobs ? scanTerminalLocalJobs(repoRoot, normalized.minAgeMinutes, normalized.maxCandidates) : []),
-    ...(normalized.includeLegacyRuns ? scanLegacyRuns(repoRoot, normalized.minAgeMinutes, normalized.maxCandidates) : []),
+  const scanLimit = Math.min(normalized.maxCandidates * 3, 600);
+  const allCandidates = [
+    ...(normalized.includeTempDirs ? scanTempDirs(normalized.minAgeMinutes, scanLimit) : []),
+    ...(normalized.includeTerminalLocalJobs ? scanTerminalLocalJobs(repoRoot, normalized.minAgeMinutes, scanLimit) : []),
+    ...(normalized.includeLegacyRuns ? scanLegacyRuns(repoRoot, normalized.minAgeMinutes, scanLimit) : []),
     ...(normalized.includeHistoricalAttention ? scanHistoricalAttention(repoRoot) : []),
-  ].slice(0, normalized.maxCandidates);
+  ];
+  const candidates = allCandidates.slice(0, normalized.maxCandidates);
   return {
     schemaVersion: 1,
     generatedAt: now(),
     repoRoot,
     mode: 'preview',
     candidates,
+    truncated: { candidates: allCandidates.length > candidates.length },
     summary: summarize(candidates),
     warnings: [
       'Preview is non-destructive. Apply requires confirmCleanup=true.',

@@ -150,7 +150,7 @@ async function triggerDue(
 
 async function stopReason(controllerHome: string, schedule: RepositorySchedule): Promise<string | undefined> {
   const projection = rebuildRepositoryProjection(controllerHome, schedule.repoId);
-  if (schedule.stopConditions.includes('human_review_required') && projection.attention.length > 0) return 'Repository has jobs requiring human attention.';
+  if (schedule.stopConditions.includes('human_review_required') && projection.currentAttention.length > 0) return 'Repository has jobs requiring human attention.';
   if (schedule.stopConditions.includes('release_ready') && projection.releaseFrozen) return 'Repository is in release freeze.';
   if (schedule.stopConditions.includes('external_blocker')) {
     try {

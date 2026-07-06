@@ -1,5 +1,10 @@
 import { describe, expect, test } from 'bun:test';
-import { isHighCpuPeerMcpProcess, isStaleControllerDaemonProcess, type RuntimeProcessSample } from '../../src/runtime/diagnostics/performance';
+import {
+  buildRuntimeDiagnosticSummary,
+  isHighCpuPeerMcpProcess,
+  isStaleControllerDaemonProcess,
+  type RuntimeProcessSample,
+} from '../../src/runtime/diagnostics/performance';
 
 function sample(overrides: Partial<RuntimeProcessSample>): RuntimeProcessSample {
   return {
@@ -86,5 +91,14 @@ describe('runtime performance diagnostics', () => {
       ppid: 1,
       command: '/usr/bin/bun /repos/current/src/runtime/control-plane/daemon-entry.ts --controller-home /repos/current/_ops/controller-home',
     }), '/repos/current')).toBe(false);
+  });
+
+  test('bounds long diagnostic summaries', () => {
+    const summary = buildRuntimeDiagnosticSummary('warning', [
+      { severity: 'warning', code: 'ONE', message: 'alpha '.repeat(40) },
+      { severity: 'warning', code: 'TWO', message: 'beta '.repeat(40) },
+    ]);
+    expect(summary.summary.length).toBeLessThanOrEqual(320);
+    expect(summary.truncated).toBe(true);
   });
 });

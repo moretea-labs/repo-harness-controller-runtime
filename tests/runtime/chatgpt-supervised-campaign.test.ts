@@ -133,6 +133,23 @@ describe('ChatGPT-supervised campaigns', () => {
     expect(job.resourceClaims).toEqual([{ resourceKey: 'worktree:ISS-1-T1', mode: 'write' }]);
   });
 
+  test('normalizes campaign dependency references and legacy operation aliases', () => {
+    const controllerHome = home();
+    const created = createCampaign(controllerHome, campaignInput({
+      tasks: [
+        { taskId: 'T1', title: 'First', operation: 'launch-task', arguments: { issue_id: 'ISS-1', task_id: 'T1', agent: 'codex' } },
+        { taskId: 'T2', title: 'Second', operation: 'recordCandidateFinding', dependsOn: [' task:T1 '], arguments: { semantic_key: 'two', title: 'Two' } },
+      ],
+    })).campaign;
+    expect(created.tasks[0].operation).toBe('dispatch_task');
+    expect(created.tasks[1].operation).toBe('record_candidate_finding');
+    expect(created.tasks[1].dependsOn).toEqual(['T1']);
+    reconcileCampaign(controllerHome, 'repo-a', created.campaignId);
+    const refreshed = getCampaign(controllerHome, 'repo-a', created.campaignId);
+    const job = getExecutionJob(controllerHome, 'repo-a', refreshed.tasks[0].jobId!);
+    expect(job.payload.operation).toBe('dispatch_task');
+  });
+
   test('review waiting holds no campaign lease and rejects stale decisions', () => {
     const controllerHome = home();
     const created = createCampaign(controllerHome, campaignInput()).campaign;

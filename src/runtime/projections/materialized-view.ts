@@ -19,6 +19,7 @@ export interface RepositoryRuntimeProjection {
   queueDepth: number;
   runningWorkers: number;
   activeLeases: number;
+  currentAttention: Array<{ jobId: string; status: string; message?: string }>;
   attention: Array<{ jobId: string; status: string; message?: string }>;
   plugins?: {
     total: number;
@@ -50,12 +51,11 @@ function buildRepositoryProjection(
   const attentionJobs = listExecutionJobs(controllerHome, repoId, 100)
     .filter((job) => {
       if (!['orphaned', 'human_attention_required', 'stale'].includes(job.status)) return false;
-      // A mutating worker can disappear after starting and be marked human_attention_required
-      // to prevent unsafe automatic replay. Once the job is terminal and no longer active, it
-      // should remain visible in job history but not keep repository readiness permanently blocked.
-      if (job.status !== 'human_attention_required') return true;
-      return !job.finishedAt || activeJobIds.has(job.jobId);
+      return true;
     });
+  // Terminal attention records remain in history for diagnosis and audit, but only
+  // active/unresolved records should influence "current readiness" decisions.
+  const currentAttentionJobs = attentionJobs.filter((job) => !job.finishedAt || activeJobIds.has(job.jobId));
   const campaigns = listCampaigns(controllerHome, repoId, 1_000);
   const repository = listRepositories(controllerHome).find((entry) => entry.repoId === repoId);
   const plugins = repository ? listAssistantPluginManifests(controllerHome, repository) : [];
@@ -76,6 +76,8 @@ function buildRepositoryProjection(
     queueDepth: activeJobs.filter((job) => job.status !== 'running' && job.status !== 'dispatched').length,
     runningWorkers: activeJobs.filter((job) => job.status === 'running').length,
     activeLeases: leases.length,
+    currentAttention: currentAttentionJobs
+      .map((job) => ({ jobId: job.jobId, status: job.status, message: job.error?.message })),
     attention: attentionJobs
       .map((job) => ({ jobId: job.jobId, status: job.status, message: job.error?.message })),
     plugins: {

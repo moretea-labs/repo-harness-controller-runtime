@@ -16,6 +16,12 @@ import type {
   CreateCampaignInput,
   CreateCampaignTaskInput,
 } from './types';
+import {
+  assertCampaignOperationSupported,
+  normalizeCampaignDependencyReferences,
+  normalizeCampaignOperationName,
+  normalizeCampaignTaskReferences,
+} from './normalize';
 
 interface CampaignIndexEntry {
   campaignId: string;
@@ -155,9 +161,10 @@ export function normalizeSupervisorConfig(input: Partial<CampaignSupervisorConfi
     throw new Error('CAMPAIGN_WORKSPACE_AGENT_ID_INVALID');
   }
   const conversationKey = input.conversationKey?.trim();
+  const operation = mode === 'operation' ? assertCampaignOperationSupported(input.operation!.trim()) : undefined;
   return {
     mode,
-    operation: mode === 'operation' ? input.operation!.trim() : undefined,
+    operation,
     workspaceAgentId: mode === 'workspace_agent' ? workspaceAgentId : undefined,
     conversationKey: mode === 'workspace_agent' && conversationKey ? conversationKey : undefined,
     arguments: mode === 'operation' && input.arguments && typeof input.arguments === 'object' ? input.arguments : undefined,
@@ -172,7 +179,7 @@ export function normalizeSupervisorConfig(input: Partial<CampaignSupervisorConfi
 function normalizeTask(input: CreateCampaignTaskInput, budget: CampaignBudget): CampaignTask {
   const taskId = input.taskId.trim();
   const title = input.title.trim();
-  const operation = input.operation.trim();
+  const operation = assertCampaignOperationSupported(input.operation.trim());
   if (!taskId) throw new Error('CAMPAIGN_TASK_ID_REQUIRED');
   if (!title) throw new Error(`CAMPAIGN_TASK_TITLE_REQUIRED: ${taskId}`);
   if (!operation) throw new Error(`CAMPAIGN_TASK_OPERATION_REQUIRED: ${taskId}`);
@@ -182,7 +189,7 @@ function normalizeTask(input: CreateCampaignTaskInput, budget: CampaignBudget): 
     objective: input.objective?.trim() || title,
     operation,
     arguments: input.arguments ? structuredClone(input.arguments) : undefined,
-    dependsOn: [...new Set((input.dependsOn ?? []).map((value) => value.trim()).filter(Boolean))],
+    dependsOn: normalizeCampaignDependencyReferences(input.dependsOn ?? []),
     priority: input.priority ?? 'P1',
     resourceClaims: structuredClone(input.resourceClaims ?? []),
     reviewRequired: input.reviewRequired ?? true,
@@ -226,12 +233,23 @@ export function validateCreateCampaignTasks(
   budgetInput: Partial<CampaignBudget> = {},
 ): void {
   const budget = normalizeCampaignBudget(budgetInput);
-  validateCampaignTasks(inputs.map((input) => normalizeTask(input, budget)));
+  validateCampaignTasks(normalizeCampaignTaskReferences(inputs.map((input) => normalizeTask(input, budget))));
 }
 
 export function getCampaign(controllerHome: string, repoId: string, campaignId: string): Campaign {
   const campaign = readJsonFile<Campaign>(recordPath(controllerHome, repoId, campaignId));
   if (campaign.repoId !== repoId || campaign.campaignId !== campaignId) throw new Error('CAMPAIGN_IDENTITY_MISMATCH');
+  campaign.tasks = normalizeCampaignTaskReferences(campaign.tasks.map((task) => ({
+    ...task,
+    operation: normalizeCampaignOperationName(task.operation),
+    dependsOn: normalizeCampaignDependencyReferences(task.dependsOn),
+  })));
+  if (campaign.supervisor.mode === 'operation' && campaign.supervisor.operation) {
+    campaign.supervisor = {
+      ...campaign.supervisor,
+      operation: normalizeCampaignOperationName(campaign.supervisor.operation),
+    };
+  }
   if (!campaign.workspace) {
     campaign.workspace = {
       mode: 'current',
@@ -265,7 +283,7 @@ export function createCampaign(controllerHome: string, input: CreateCampaignInpu
   if (!title) throw new Error('CAMPAIGN_TITLE_REQUIRED');
   if (!goal) throw new Error('CAMPAIGN_GOAL_REQUIRED');
   const budget = normalizeCampaignBudget(input.budget);
-  const tasks = input.tasks.map((task) => normalizeTask(task, budget));
+  const tasks = normalizeCampaignTaskReferences(input.tasks.map((task) => normalizeTask(task, budget)));
   validateCampaignTasks(tasks);
   const requestLock = createHash('sha256').update(`${repoId}:${requestId}`).digest('hex').slice(0, 24);
   return withControllerLock(controllerHome, { scope: 'global', resource: `campaign-request-${requestLock}` }, `create-campaign:${requestId}`, () => {
@@ -397,6 +415,7 @@ export function updateCampaign(
     ) {
       throw new Error('CAMPAIGN_IDENTITY_IMMUTABLE');
     }
+    normalizeCampaignTaskReferences(next.tasks);
     validateCampaignTasks(next.tasks);
     next.revision = current.revision + 1;
     next.updatedAt = now();
@@ -444,7 +463,8 @@ export function listActiveCampaigns(controllerHome: string, repoId: string, limi
   try {
     return readdirSync(join(root(controllerHome, repoId), 'records'))
       .filter((name) => name.endsWith('.json'))
-      .map((name) => readJsonFile<Campaign>(join(root(controllerHome, repoId), 'records', name)))
+      .map((name) => name.replace(/\.json$/, ''))
+      .map((campaignId) => getCampaign(controllerHome, repoId, campaignId))
       .filter((campaign) => ACTIVE_CAMPAIGN_STATUSES.has(campaign.status))
       .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt))
       .slice(0, bounded);
@@ -458,7 +478,8 @@ export function listCampaigns(controllerHome: string, repoId: string, limit = 10
   try {
     return readdirSync(join(root(controllerHome, repoId), 'records'))
       .filter((name) => name.endsWith('.json'))
-      .map((name) => readJsonFile<Campaign>(join(root(controllerHome, repoId), 'records', name)))
+      .map((name) => name.replace(/\.json$/, ''))
+      .map((campaignId) => getCampaign(controllerHome, repoId, campaignId))
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
       .slice(0, bounded);
   } catch { return []; }
@@ -477,6 +498,7 @@ export function addCampaignTask(
     const task = normalizeTask(input, campaign.budget);
     if (campaign.tasks.some((entry) => entry.taskId === task.taskId)) throw new Error(`CAMPAIGN_TASK_DUPLICATE: ${task.taskId}`);
     campaign.tasks.push(task);
+    normalizeCampaignTaskReferences(campaign.tasks);
     if (campaign.status === 'ready_for_human_acceptance' || campaign.status === 'failed') campaign.status = 'active';
     campaign.nextReconcileAt = undefined;
     return campaign;

@@ -15,6 +15,7 @@ import type {
 import { campaignProgress, openCampaignCheckpoint } from './review';
 import { campaignSupervisorAdapter } from './supervisor';
 import { getCampaign, listActiveCampaigns, updateCampaign } from './store';
+import { assertCampaignOperationSupported, normalizeCampaignOperationName } from './normalize';
 
 const AGENT_OPERATIONS = new Set(['dispatch_task', 'launch_issue', 'dispatch_ready_tasks', 'retry_task_run', 'quick_agent_session']);
 const CAMPAIGN_CONTROL_OPERATIONS = new Set(['create_campaign', 'add_campaign_task', 'pause_campaign', 'resume_campaign', 'cancel_campaign', 'submit_campaign_review', 'accept_campaign', 'reconcile_campaign']);
@@ -25,6 +26,7 @@ const SUCCESS_TASK_STATUSES = new Set<CampaignTask['status']>(['succeeded', 'suc
 function now(): string { return new Date().toISOString(); }
 
 function operationJobType(operation: string): ExecutionJobType {
+  operation = normalizeCampaignOperationName(operation);
   if (AGENT_OPERATIONS.has(operation)) return 'dispatch-task';
   if (operation === 'run_check' || operation === 'verify_edit_session') return 'check';
   if (operation === 'integrate_task_run') return 'integration';
@@ -172,7 +174,8 @@ function synchronizeTask(controllerHome: string, campaign: Campaign, task: Campa
   }
   if (job.status !== 'succeeded') return { changed: false, checkpointsOpened: 0 };
 
-  if (AGENT_OPERATIONS.has(task.operation) || task.runId || readNestedString(job.result, 'runId')) {
+  const operation = normalizeCampaignOperationName(task.operation);
+  if (AGENT_OPERATIONS.has(operation) || task.runId || readNestedString(job.result, 'runId')) {
     const run = agentRunForTask(controllerHome, campaign, task, job);
     if (!run) {
       const checkpointsOpened = markExecutionFailure(campaign, task, 'CAMPAIGN_AGENT_RUN_MISSING', 'Agent operation completed without a readable Task Run.', true);
@@ -225,10 +228,11 @@ function dependencyState(campaign: Campaign, task: CampaignTask): 'ready' | 'wai
 }
 
 function taskOperation(task: CampaignTask): { operation: string; arguments: Record<string, unknown> } {
+  const operation = assertCampaignOperationSupported(task.operation);
   const base = { ...(task.arguments ?? {}) };
-  if (AGENT_OPERATIONS.has(task.operation)) base.isolate = true;
+  if (AGENT_OPERATIONS.has(operation)) base.isolate = true;
   if (task.supervisorInstructions) base.supervisor_instructions = task.supervisorInstructions;
-  if (task.runId && task.operation === 'dispatch_task') {
+  if (task.runId && operation === 'dispatch_task') {
     return {
       operation: 'retry_task_run',
       arguments: {
@@ -239,7 +243,7 @@ function taskOperation(task: CampaignTask): { operation: string; arguments: Reco
       },
     };
   }
-  return { operation: task.operation, arguments: base };
+  return { operation, arguments: base };
 }
 
 function taskClaims(campaign: Campaign, task: CampaignTask, operation: string, args: Record<string, unknown>): ResourceClaimSpec[] {
@@ -254,7 +258,22 @@ function dispatchTask(controllerHome: string, campaign: Campaign, task: Campaign
     return false;
   }
   const nextAttempt = task.attempt + 1;
-  const execution = taskOperation(task);
+  let execution: ReturnType<typeof taskOperation>;
+  try {
+    execution = taskOperation(task);
+  } catch (error) {
+    task.status = 'blocked';
+    task.executionFinishedAt = now();
+    task.nextAttemptAt = undefined;
+    task.error = {
+      code: error instanceof Error && error.message.startsWith('CAMPAIGN_OPERATION_OBSOLETE')
+        ? 'CAMPAIGN_OPERATION_OBSOLETE'
+        : 'CAMPAIGN_OPERATION_INVALID',
+      message: error instanceof Error ? error.message : String(error),
+      retryable: false,
+    };
+    return false;
+  }
   if (CAMPAIGN_CONTROL_OPERATIONS.has(execution.operation)) throw new Error(`CAMPAIGN_RECURSIVE_OPERATION_DENIED: ${execution.operation}`);
   assertAutomatedOperationAllowed(execution.operation, execution.arguments);
   const requestId = `${campaign.requestId}:task:${task.taskId}:attempt:${nextAttempt}`;
@@ -369,7 +388,15 @@ function triggerSupervisor(controllerHome: string, campaign: Campaign, checkpoin
     checkpoint.nextTriggerAt = undefined;
     return true;
   }
-  const trigger = campaignSupervisorAdapter(campaign).triggerSpec(campaign, checkpoint);
+  let trigger: ReturnType<ReturnType<typeof campaignSupervisorAdapter>['triggerSpec']>;
+  try {
+    trigger = campaignSupervisorAdapter(campaign).triggerSpec(campaign, checkpoint);
+  } catch (error) {
+    campaign.status = 'paused';
+    campaign.pauseReason = `Supervisor trigger requires attention: ${error instanceof Error ? error.message : String(error)}`;
+    checkpoint.nextTriggerAt = undefined;
+    return true;
+  }
   if (!trigger) return false;
   if ((trigger.target ?? 'mcp-tool') === 'mcp-tool') {
     assertAutomatedOperationAllowed(trigger.operation, trigger.arguments);

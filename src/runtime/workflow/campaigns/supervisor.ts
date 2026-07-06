@@ -1,5 +1,6 @@
 import type { ExecutionJobPayload, ExecutionJobPriority, ResourceClaimSpec } from '../../execution/jobs/types';
 import type { Campaign, CampaignCheckpoint, CampaignReviewPacket, CampaignSupervisorDecision } from './types';
+import { assertCampaignOperationSupported } from './normalize';
 
 export interface CampaignSupervisorTriggerSpec {
   operation: string;
@@ -35,7 +36,9 @@ export class OperationCampaignSupervisorAdapter implements CampaignSupervisorAda
   readonly mode = 'operation' as const;
   reviewPacket(_campaign: Campaign, checkpoint: CampaignCheckpoint): CampaignReviewPacket { return checkpoint.packet; }
   triggerSpec(campaign: Campaign, checkpoint: CampaignCheckpoint): CampaignSupervisorTriggerSpec | undefined {
-    const operation = campaign.supervisor.operation?.trim();
+    const operation = campaign.supervisor.operation?.trim()
+      ? assertCampaignOperationSupported(campaign.supervisor.operation)
+      : undefined;
     if (!operation) return undefined;
     return {
       operation,

@@ -10,6 +10,7 @@ import {
   type RuntimeCleanupReport,
 } from '../../src/runtime/control-plane/runtime-cleanup';
 import { isProcessAlive } from '../../src/runtime/shared/process-tree';
+import { previewRuntimeCleanup } from '../../src/runtime/maintenance/cleanup';
 
 const homes: string[] = [];
 const daemonPids = new Set<number>();
@@ -217,6 +218,30 @@ describe('runtime cleanup', () => {
     expect(report.inspectedPaths).toBeLessThanOrEqual(3);
     expect(report.budgetExhausted).toBe(true);
     expect(cleanupEntries(home).at(-1)?.budgetExhausted).toBe(true);
+  });
+
+  test('bounds cleanup preview candidates and reports truncation', () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), 'repo-harness-cleanup-preview-'));
+    homes.push(repoRoot);
+    const jobsRoot = join(repoRoot, '.ai/harness/local-jobs');
+    mkdirSync(jobsRoot, { recursive: true });
+    for (let index = 0; index < 6; index += 1) {
+      const jobRoot = join(jobsRoot, `JOB-${index + 1}`);
+      mkdirSync(jobRoot, { recursive: true });
+      writeFileSync(join(jobRoot, 'job.json'), JSON.stringify({ jobId: `JOB-${index + 1}`, status: 'succeeded' }));
+      age(jobRoot);
+    }
+
+    const preview = previewRuntimeCleanup(repoRoot, {
+      includeTempDirs: false,
+      includeLegacyRuns: false,
+      includeHistoricalAttention: false,
+      includeTerminalLocalJobs: true,
+      maxCandidates: 3,
+    });
+
+    expect(preview.candidates).toHaveLength(3);
+    expect(preview.truncated.candidates).toBe(true);
   });
 
   test('a cleanup failure does not interrupt the scheduler tick', async () => {

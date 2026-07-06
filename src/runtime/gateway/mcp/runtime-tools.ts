@@ -25,6 +25,10 @@ import { submitCampaignReview } from '../../workflow/campaigns/review';
 import type { CampaignReviewPolicy, CampaignSupervisorAction, CreateCampaignTaskInput } from '../../workflow/campaigns/types';
 import { currentCampaignWorkspace, ensureCampaignWorkspace } from '../../workflow/campaigns/workspace';
 import { cancelCampaign } from '../../workflow/campaigns/cleanup';
+import {
+  assertCampaignOperationSupported,
+  normalizeCampaignDependencyReferences,
+} from '../../workflow/campaigns/normalize';
 import { ensureRepositoryRuntimeStorage } from '../../../cli/repositories/runtime-storage';
 import { assessWorkMode } from '../../../cli/controller/work-mode';
 import { projectBoard } from '../../../cli/controller/issue-store';
@@ -729,7 +733,8 @@ function campaignTaskInput(
   const value = raw as Record<string, unknown>;
   const taskId = String(value.task_id ?? value.taskId ?? '').trim();
   const title = String(value.title ?? '').trim();
-  const operation = String(value.operation ?? '').trim();
+  const rawOperation = String(value.operation ?? '').trim();
+  const operation = rawOperation ? assertCampaignOperationSupported(rawOperation) : '';
   if (!taskId || !title || !operation) throw new Error('CAMPAIGN_TASK_INVALID: task_id, title, and operation are required');
   if (CAMPAIGN_CONTROL_OPERATIONS.has(operation)) throw new Error(`CAMPAIGN_RECURSIVE_OPERATION_DENIED: ${operation}`);
   const argumentsValue = value.arguments && typeof value.arguments === 'object' && !Array.isArray(value.arguments)
@@ -756,7 +761,7 @@ function campaignTaskInput(
     objective: typeof value.objective === 'string' ? value.objective : undefined,
     operation,
     arguments: argumentsValue,
-    dependsOn: Array.isArray(value.depends_on ?? value.dependsOn) ? ((value.depends_on ?? value.dependsOn) as unknown[]).map(String) : [],
+    dependsOn: normalizeCampaignDependencyReferences(Array.isArray(value.depends_on ?? value.dependsOn) ? (value.depends_on ?? value.dependsOn) as unknown[] : []),
     priority: ['P0', 'P1', 'P2', 'P3', 'P4'].includes(String(value.priority)) ? String(value.priority) as 'P0' | 'P1' | 'P2' | 'P3' | 'P4' : 'P1',
     resourceClaims: requestedClaims.length > 0 ? requestedClaims : claimsForMcpOperation(operation, argumentsValue, repoIdValue, checkoutId),
     reviewRequired: value.review_required === undefined ? true : value.review_required === true,
@@ -1967,7 +1972,9 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         const supervisorMode = supervisor.mode === 'operation'
           ? 'operation'
           : supervisor.mode === 'workspace_agent' ? 'workspace_agent' : 'pull';
-        const supervisorOperation = typeof supervisor.operation === 'string' ? supervisor.operation.trim() : undefined;
+        const supervisorOperation = typeof supervisor.operation === 'string' && supervisor.operation.trim()
+          ? assertCampaignOperationSupported(supervisor.operation)
+          : undefined;
         const workspaceAgentId = typeof supervisor.workspace_agent_id === 'string'
           ? supervisor.workspace_agent_id.trim()
           : typeof supervisor.workspaceAgentId === 'string' ? supervisor.workspaceAgentId.trim() : undefined;

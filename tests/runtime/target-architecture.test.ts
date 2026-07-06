@@ -125,6 +125,28 @@ describe('target architecture runtime', () => {
     expect(readFileSync(dirtyPath, 'utf-8')).toBe(beforeDirty);
   });
 
+  test('keeps terminal attention in history without treating it as current attention', () => {
+    const controllerHome = home();
+    const created = createExecutionJob(controllerHome, {
+      repoId: 'repo-a',
+      type: 'mcp-tool',
+      requestId: 'terminal-attention-history',
+      semanticKey: 'projection:terminal-attention-history',
+      origin: { surface: 'mcp' },
+      payload: { operation: 'dispatch_task', target: 'mcp-tool' },
+    }).job;
+    updateExecutionJob(controllerHome, 'repo-a', created.jobId, (job) => ({
+      ...job,
+      status: 'human_attention_required',
+      error: { code: 'ATTENTION', message: 'needs review', retryable: false },
+      finishedAt: new Date().toISOString(),
+    }));
+
+    const snapshot = readRepositoryProjectionSnapshot(controllerHome, 'repo-a');
+    expect(snapshot.projection.attention).toHaveLength(1);
+    expect(snapshot.projection.currentAttention).toHaveLength(0);
+  });
+
   test('uses leases and fencing tokens for long-running ownership', () => {
     const controllerHome = home();
     const claims = normalizeClaims([], { readOnly: false });
