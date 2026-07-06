@@ -107,7 +107,7 @@ export function prepareWorkspaceAuthLogin(input: WorkspaceAuthLoginInput = {}): 
       reason: 'The MCP tool must not receive or persist Google credential material. Exchange the code in a local CLI/browser flow and expose the access token through environment variables or a future OS-keychain backend.',
       localNextSteps: [
         'Open the authorizationUrl locally when readyToOpenBrowser=true.',
-        'Exchange the returned code in a local trusted process using your Google OAuth client secret.',
+        'Exchange the returned code in a local trusted process using your Google OAuth client credentials.',
         `Export one of: ${TOKEN_ENV[service].join(', ')}.`,
         'Restart repo-harness controller so plugin health can re-probe the environment.',
       ],
