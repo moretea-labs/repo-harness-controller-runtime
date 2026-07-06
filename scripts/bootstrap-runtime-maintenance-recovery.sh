@@ -5,6 +5,7 @@ repo_root="${1:-$PWD}"
 local_jobs_root="$repo_root/.ai/harness/local-jobs"
 quarantine_root="$repo_root/.ai/harness/local-jobs-quarantine"
 min_age_minutes="${REPO_HARNESS_RECOVERY_MIN_AGE_MINUTES:-10}"
+cancel_pending="${REPO_HARNESS_RECOVERY_CANCEL_PENDING_APPROVALS:-false}"
 now_ms="$(node -e 'console.log(Date.now())')"
 
 if [[ ! -d "$local_jobs_root" ]]; then
@@ -14,13 +15,14 @@ fi
 
 mkdir -p "$quarantine_root"
 
-node - "$repo_root" "$local_jobs_root" "$quarantine_root" "$min_age_minutes" "$now_ms" <<'NODE'
+node - "$repo_root" "$local_jobs_root" "$quarantine_root" "$min_age_minutes" "$now_ms" "$cancel_pending" <<'NODE'
 const fs = require('fs');
 const path = require('path');
 
-const [, , repoRoot, localJobsRoot, quarantineRoot, rawMinAge, rawNow] = process.argv;
+const [, , repoRoot, localJobsRoot, quarantineRoot, rawMinAge, rawNow, rawCancelPending] = process.argv;
 const minAgeMinutes = Number(rawMinAge || '10');
 const nowMs = Number(rawNow || Date.now());
+const cancelPending = String(rawCancelPending || 'false').toLowerCase() === 'true';
 const activeStatuses = new Set(['approved', 'dispatched', 'running']);
 const pendingStatuses = new Set(['pending_approval']);
 const applied = [];
@@ -72,7 +74,11 @@ for (const entry of fs.readdirSync(localJobsRoot, { withFileTypes: true })) {
     continue;
   }
   const status = String(job.status || 'unknown');
-  if (pendingStatuses.has(status)) continue;
+  if (pendingStatuses.has(status)) {
+    const age = ageMinutes(job, dir);
+    if (cancelPending && age >= minAgeMinutes) terminalize(dir, job, 'cancelled', `pending approval cancelled by explicit bootstrap flag ageMinutes=${age}`);
+    continue;
+  }
   if (!activeStatuses.has(status)) continue;
   const age = ageMinutes(job, dir);
   const deadlineExpired = job.deadlineAt && Date.parse(job.deadlineAt) < nowMs;
@@ -99,6 +105,6 @@ writeJson(path.join(localJobsRoot, 'active-index.json'), {
 
 const auditDir = path.join(repoRoot, '.ai/harness/controller');
 fs.mkdirSync(auditDir, { recursive: true });
-fs.appendFileSync(path.join(auditDir, 'bootstrap-runtime-maintenance.jsonl'), JSON.stringify({ at: iso(), minAgeMinutes, applied }) + '\n');
+fs.appendFileSync(path.join(auditDir, 'bootstrap-runtime-maintenance.jsonl'), JSON.stringify({ at: iso(), minAgeMinutes, cancelPending, applied }) + '\n');
 console.log(JSON.stringify({ status: 'ok', applied }, null, 2));
 NODE

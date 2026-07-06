@@ -48,6 +48,12 @@ import {
   resolveWebTargetUrl,
   summarizeJobResultForLowInterception,
   summarizePluginForLowInterception,
+  applyExternalFilesystemGrant,
+  buildWorkspaceAuthStatus,
+  listExternalFilesystemTargets,
+  prepareWorkspaceAuthLogin,
+  previewExternalFilesystemGrant,
+  readExternalFilesystemSnapshot,
 } from '../../safe-tooling';
 import { buildModelClientSummary, buildModelControlPlaneSummary, deepSeekControllerManifest, deepSeekFunctionToolManifest, prepareDeepSeekControllerHandoff, prepareDeepSeekControllerRequest, prepareDeepSeekToolCall } from '../../model-clients';
 import { buildAssistantReadinessReport } from '../../assistant/readiness';
@@ -57,6 +63,7 @@ import {
   buildCapabilityRecoverySnapshot,
   buildRuntimeMaintenanceStatus,
   buildSelfHealingLoopPlan,
+  buildSelfHealingMonitorReport,
   recoveryActionById,
   buildRecoveryAuditRecord,
   assertRecoveryAuthorized,
@@ -191,6 +198,46 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
     codex_cli_available: { type: 'boolean' },
     deepseek_available: { type: 'boolean' },
   }),
+  definition('self_healing_monitor_tick', 'Run one read-only self-healing monitor pass across runtime storage, plugins, browser targets, external filesystem grants, and model repair fallback.', {
+    repo_id: repoId,
+    recent_errors: { type: 'array', items: { type: 'string' } },
+    objective: { type: 'string' },
+    active_mode: { type: 'boolean', description: 'Defaults to false. Active mode may recommend authorized local maintenance but still does not mutate state in this tool.' },
+  }),
+  definition('workspace_auth_status', 'Summarize Workspace/Gmail auth readiness without returning or persisting secrets.', {
+    repo_id: repoId,
+  }),
+  definition('workspace_auth_login_prepare', 'Prepare a local Google Workspace/Gmail OAuth login handoff without receiving or storing secrets.', {
+    repo_id: repoId,
+    service: { type: 'string', enum: ['gmail', 'calendar', 'tasks', 'google-workspace'] },
+    scopes: { type: 'array', items: { type: 'string' } },
+    redirect_uri: { type: 'string' },
+  }),
+  definition('external_filesystem_targets_list', 'List pre-authorized external filesystem targets. Does not expose arbitrary absolute-path access.', {
+    repo_id: repoId,
+  }),
+  definition('external_filesystem_grant_preview', 'Preview a read-only external filesystem grant for a narrow absolute directory without writing config.', {
+    repo_id: repoId,
+    grant_key: { type: 'string' },
+    root_path: { type: 'string' },
+    mode: { type: 'string', enum: ['read'] },
+    reason: { type: 'string' },
+  }, ['grant_key', 'root_path', 'reason']),
+  definition('external_filesystem_grant_apply', 'Apply a previously previewed read-only external filesystem grant with explicit authorization.', {
+    repo_id: repoId,
+    grant_key: { type: 'string' },
+    root_path: { type: 'string' },
+    mode: { type: 'string', enum: ['read'] },
+    reason: { type: 'string' },
+    preview_ticket_id: { type: 'string' },
+    confirm_authorization: { type: 'boolean' },
+  }, ['grant_key', 'root_path', 'reason', 'preview_ticket_id', 'confirm_authorization'], false),
+  definition('external_filesystem_text_snapshot', 'Read a bounded text/directory snapshot from a pre-authorized external filesystem target key.', {
+    repo_id: repoId,
+    target_key: { type: 'string' },
+    path: { type: 'string' },
+    max_chars: { type: 'number' },
+  }, ['target_key']),
   definition('list_plugins', 'List personal-assistant plugin manifests, lifecycle state, health, and action discovery for one repository.', {
     repo_id: repoId,
   }),
@@ -1250,6 +1297,100 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           deepseekAvailable: args.deepseek_available === true,
         }) as unknown as Record<string, unknown>);
       }
+      case 'self_healing_monitor_tick': {
+        const repository = selected(ctx, args);
+        const recentErrors = Array.isArray(args.recent_errors) ? args.recent_errors.map(String) : undefined;
+        const plugins = listAssistantPluginManifests(ctx.controllerHome, repository);
+        const recovery = capabilityRecoverySnapshot(ctx, repository, { ...args, recent_errors: recentErrors });
+        const maintenance = buildRuntimeMaintenanceStatus(repository, ctx.controllerHome, { recentErrors });
+        const auth = buildWorkspaceAuthStatus(plugins);
+        const browserManifest = getAssistantPluginManifest(ctx.controllerHome, repository, 'browser');
+        const browserTargets = listWebTargets(repository.canonicalRoot, browserManifest);
+        const externalFilesystem = listExternalFilesystemTargets(repository.canonicalRoot);
+        const loop = buildSelfHealingLoopPlan({
+          objective: typeof args.objective === 'string' ? args.objective : undefined,
+          recentErrors,
+          platformBlocked: recovery.platformBlocked,
+          sourceDefectSuspected: recovery.summary.topRisks.includes('source_defect_suspected'),
+          chatgptAvailable: !recovery.platformBlocked,
+          codexCliAvailable: false,
+          deepseekAvailable: false,
+        });
+        const browser = {
+          ready: browserTargets.length > 0,
+          targets: browserTargets,
+        };
+        const report = buildSelfHealingMonitorReport({
+          repoId: repository.repoId,
+          mode: args.active_mode === true ? 'active' : 'shadow',
+          recovery,
+          maintenance,
+          auth,
+          browser,
+          externalFilesystem,
+          recentErrors,
+        });
+        return result({
+          schemaVersion: 1,
+          generatedAt: new Date().toISOString(),
+          repoId: repository.repoId,
+          overallState: recovery.overallState,
+          recovery,
+          maintenance,
+          auth,
+          browser: {
+            ready: browser.ready,
+            targetCount: browser.targets.length,
+            targets: browser.targets,
+            next: 'Use web_domain_access_preview/apply for new domains; browser submit/payment/upload/download actions remain intentionally unavailable.',
+          },
+          externalFilesystem,
+          loop,
+          report,
+          candidateFindings: report.candidateFindings,
+          nextActions: [
+            ...report.nextSteps.map((step) => step.id),
+            ...maintenance.recommendedActions.map((action) => `runtime_maintenance_apply:${action}`),
+            ...(Array.isArray((auth as { actionRequired?: unknown[] }).actionRequired) && (auth as { actionRequired?: unknown[] }).actionRequired!.length > 0 ? ['workspace_auth_login_prepare'] : []),
+            'retry original task only after runtime.storage is ready',
+          ],
+          safety: {
+            mutatesState: false,
+            startsJobs: false,
+            readsSecrets: false,
+            shadowMode: report.mode === 'shadow',
+            canAutoModifySource: report.automationPolicy.canAutoModifySource,
+          },
+        });
+      }
+      case 'workspace_auth_status': {
+        const repository = selected(ctx, args);
+        return result(buildWorkspaceAuthStatus(listAssistantPluginManifests(ctx.controllerHome, repository)));
+      }
+      case 'workspace_auth_login_prepare': {
+        selected(ctx, args);
+        return result(prepareWorkspaceAuthLogin({
+          service: typeof args.service === 'string' ? args.service : undefined,
+          scopes: Array.isArray(args.scopes) ? args.scopes.map(String) : undefined,
+          redirectUri: typeof args.redirect_uri === 'string' ? args.redirect_uri : undefined,
+        }));
+      }
+      case 'external_filesystem_targets_list': {
+        const repository = selected(ctx, args);
+        return result(listExternalFilesystemTargets(repository.canonicalRoot));
+      }
+      case 'external_filesystem_grant_preview': {
+        const repository = selected(ctx, args);
+        return result(previewExternalFilesystemGrant(repository.canonicalRoot, args) as unknown as Record<string, unknown>);
+      }
+      case 'external_filesystem_grant_apply': {
+        const repository = selected(ctx, args);
+        return result(applyExternalFilesystemGrant(repository.canonicalRoot, args) as unknown as Record<string, unknown>);
+      }
+      case 'external_filesystem_text_snapshot': {
+        const repository = selected(ctx, args);
+        return result(readExternalFilesystemSnapshot(repository.canonicalRoot, args) as unknown as Record<string, unknown>);
+      }
       case 'capability_recovery_apply': {
         const repository = selected(ctx, args);
         const actionId = String(args.action_id ?? '').trim();
@@ -1333,6 +1474,15 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           case 'recovery.create_patch_handoff':
             payload = prepareFallbackHandoffArtifacts(repository, { reason }) as unknown as Record<string, unknown>;
             affectedPaths = ['.ai/handoff'];
+            break;
+          case 'recovery.workspace_auth_login_prepare':
+            payload = { skipped: true, nextTool: 'workspace_auth_login_prepare', reason: 'Auth login is a non-secret handoff and should be prepared through the dedicated typed tool.' };
+            break;
+          case 'recovery.browser_domain_access_preview':
+            payload = { skipped: true, nextTool: 'web_domain_access_preview', reason: 'Browser access must be granted by domain key before snapshot or interaction.' };
+            break;
+          case 'recovery.external_filesystem_grant_preview':
+            payload = { skipped: true, nextTool: 'external_filesystem_grant_preview', reason: 'External filesystem access must be converted into a named read-only target first.' };
             break;
           case 'recovery.create_self_fix_task':
             payload = { skipped: true, next: 'Create an isolated Issue/Task or Campaign for source repair; automatic source-fix dispatch remains gated by existing execution policies.' };

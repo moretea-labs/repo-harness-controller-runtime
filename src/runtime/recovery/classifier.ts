@@ -12,8 +12,10 @@ const AUTH_PATTERNS = [
   /authorizationrequired/i,
   /oauth authorization required/i,
   /auth_required/i,
+  /login required/i,
+  /token missing/i,
   /token refresh/i,
-  /access token/i,
+  /access[_\s-]?token/i,
   /client id and client secret/i,
   /re-authorization required/i,
 ];
@@ -39,6 +41,26 @@ const LOCAL_JOBS_LEGACY_ACTIVE_PATTERNS = [
   /local-jobs: active/i,
   /local jobs must finish/i,
   /local jobs?.*finish before runtime storage/i,
+];
+
+const BROWSER_GRANT_PATTERNS = [
+  /web_target_not_allowed/i,
+  /browser.*domain.*not allowed/i,
+  /allowed_domains/i,
+  /domain access.*required/i,
+  /browser domain grant/i,
+];
+
+const EXTERNAL_FILESYSTEM_GRANT_PATTERNS = [
+  /external filesystem/i,
+  /external_fs/i,
+  /external_filesystem_grant_required/i,
+  /target grant/i,
+  /selected_path_scope_denied/i,
+  /absolute paths are not allowed/i,
+  /path.*escapes.*repository/i,
+  /outside.*allowed_paths/i,
+  /outside.*repository/i,
 ];
 
 const POLICY_PATTERNS = [
@@ -74,6 +96,8 @@ export function classifyFailure(message: string | undefined): RecoveryClass {
   if (LOCAL_JOBS_UNREADABLE_PATTERNS.some((pattern) => pattern.test(text))) return 'local_jobs_unreadable';
   if (RUNTIME_STORAGE_PATTERNS.some((pattern) => pattern.test(text))) return 'runtime_storage_not_ready';
   if (AUTH_PATTERNS.some((pattern) => pattern.test(text))) return 'auth_required';
+  if (BROWSER_GRANT_PATTERNS.some((pattern) => pattern.test(text))) return 'browser_domain_grant_required';
+  if (EXTERNAL_FILESYSTEM_GRANT_PATTERNS.some((pattern) => pattern.test(text))) return 'external_filesystem_grant_required';
   if (POLICY_PATTERNS.some((pattern) => pattern.test(text))) return 'policy_denied';
   if (AGENT_RUNTIME_PATTERNS.some((pattern) => pattern.test(text))) return 'agent_runtime_failure';
   if (SOURCE_DEFECT_PATTERNS.some((pattern) => pattern.test(text))) return 'source_defect_suspected';
@@ -88,6 +112,8 @@ export function dominantRecoveryClass(classes: readonly RecoveryClass[]): Recove
     'local_jobs_legacy_active',
     'local_jobs_unreadable',
     'runtime_storage_not_ready',
+    'browser_domain_grant_required',
+    'external_filesystem_grant_required',
     'local_jobs_reconciliation_required',
     'maintenance_executor_required',
     'policy_denied',

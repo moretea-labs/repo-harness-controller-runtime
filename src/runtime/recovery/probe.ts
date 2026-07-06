@@ -58,6 +58,17 @@ function failingJobClass(input: CapabilityRecoveryInput): RecoveryClass {
   return dominantRecoveryClass(messages.map(classifyFailure));
 }
 
+function suggestedActionsForClass(recoveryClass: RecoveryClass): RecoveryActionDescriptor[] {
+  if (recoveryClass === 'platform_blocked') return [RECOVERY_ACTIONS.createPatchHandoff];
+  if (recoveryClass === 'auth_required') return [RECOVERY_ACTIONS.workspaceAuthLoginPrepare];
+  if (recoveryClass === 'browser_domain_grant_required') return [RECOVERY_ACTIONS.browserDomainAccessPreview];
+  if (recoveryClass === 'external_filesystem_grant_required') return [RECOVERY_ACTIONS.externalFilesystemGrantPreview];
+  if (['runtime_storage_not_ready', 'local_jobs_legacy_active', 'local_jobs_unreadable', 'local_jobs_reconciliation_required', 'maintenance_executor_required'].includes(recoveryClass)) {
+    return [RECOVERY_ACTIONS.localJobsReconcile, RECOVERY_ACTIONS.finalizeRuntimeStorageRelocation];
+  }
+  return [RECOVERY_ACTIONS.probeAgain];
+}
+
 function runtimeStorageClass(input: CapabilityRecoveryInput): RecoveryClass {
   return dominantRecoveryClass((input.runtimeStorageWarnings ?? []).map(classifyFailure));
 }
@@ -70,11 +81,10 @@ function runtimeStorageActions(recoveryClass: RecoveryClass): RecoveryActionDesc
 }
 
 function commandExecuteActions(recoveryClass: RecoveryClass): RecoveryActionDescriptor[] {
-  if (recoveryClass === 'platform_blocked') return [RECOVERY_ACTIONS.createPatchHandoff];
   if (['runtime_storage_not_ready', 'local_jobs_legacy_active', 'local_jobs_unreadable', 'local_jobs_reconciliation_required'].includes(recoveryClass)) {
     return runtimeStorageActions(recoveryClass);
   }
-  return [RECOVERY_ACTIONS.probeAgain];
+  return suggestedActionsForClass(recoveryClass);
 }
 
 export function buildCapabilityRecoverySnapshot(input: CapabilityRecoveryInput): CapabilityRecoverySnapshot {
@@ -152,11 +162,11 @@ export function buildCapabilityRecoverySnapshot(input: CapabilityRecoveryInput):
     : capability(at, 'tool.command_execute', 'Command execute', 'ready', 'unknown', 'Command execute is available.'));
 
   capabilities.push(input.issueToolsAvailable === false
-    ? capability(at, 'tool.issue', 'Issue tools', 'blocked', recentClass, 'Issue tooling is blocked or unavailable.', recentClass === 'platform_blocked' ? [RECOVERY_ACTIONS.createPatchHandoff] : [RECOVERY_ACTIONS.probeAgain])
+    ? capability(at, 'tool.issue', 'Issue tools', 'blocked', recentClass, 'Issue tooling is blocked or unavailable.', suggestedActionsForClass(recentClass))
     : capability(at, 'tool.issue', 'Issue tools', 'ready', 'unknown', 'Issue tooling is available.'));
 
   capabilities.push(input.jobToolsAvailable === false
-    ? capability(at, 'tool.jobs', 'Job tools', 'blocked', recentClass, 'Job tooling is blocked or unavailable.', recentClass === 'platform_blocked' ? [RECOVERY_ACTIONS.createPatchHandoff] : [RECOVERY_ACTIONS.probeAgain])
+    ? capability(at, 'tool.jobs', 'Job tools', 'blocked', recentClass, 'Job tooling is blocked or unavailable.', suggestedActionsForClass(recentClass))
     : capability(at, 'tool.jobs', 'Job tools', 'ready', 'unknown', 'Job tooling is available.'));
 
   const jobClass = failingJobClass(input);
@@ -171,7 +181,7 @@ export function buildCapabilityRecoverySnapshot(input: CapabilityRecoveryInput):
     } else if (plugin.ready === true || state === 'ready') {
       capabilities.push(capability(at, `plugin.${plugin.pluginId}`, `${plugin.pluginId} plugin`, 'ready', 'unknown', 'Plugin is ready.', [], { state }));
     } else if ((plugin.errors ?? []).some((error) => classifyFailure(error) === 'auth_required')) {
-      capabilities.push(capability(at, `plugin.${plugin.pluginId}`, `${plugin.pluginId} plugin`, 'degraded', 'auth_required', 'Plugin requires authorization or token refresh.', [], { state, errors: plugin.errors }));
+      capabilities.push(capability(at, `plugin.${plugin.pluginId}`, `${plugin.pluginId} plugin`, 'degraded', 'auth_required', 'Plugin requires authorization or token refresh.', [RECOVERY_ACTIONS.workspaceAuthLoginPrepare], { state, errors: plugin.errors }));
     } else {
       capabilities.push(capability(at, `plugin.${plugin.pluginId}`, `${plugin.pluginId} plugin`, 'degraded', 'plugin_configuration_error', 'Plugin is enabled but not healthy.', [], { state, errors: plugin.errors, warnings: plugin.warnings }));
     }

@@ -10,10 +10,18 @@ import {
   buildRecoveryAuditRecord,
   buildRuntimeMaintenanceStatus,
   buildSelfHealingLoopPlan,
+  buildSelfHealingMonitorReport,
   applyRuntimeMaintenance,
   classifyFailure,
   detectDirtyPathConflicts,
 } from '../../src/runtime/recovery';
+import {
+  applyExternalFilesystemGrant,
+  buildWorkspaceAuthStatus,
+  prepareWorkspaceAuthLogin,
+  previewExternalFilesystemGrant,
+  readExternalFilesystemSnapshot,
+} from '../../src/runtime/safe-tooling';
 
 describe('capability recovery classifier', () => {
   it('classifies platform blocks without treating them as local failures', () => {
@@ -27,6 +35,11 @@ describe('capability recovery classifier', () => {
 
   it('classifies runtime storage local-job blockers distinctly', () => {
     expect(classifyFailure('RUNTIME_STORAGE_NOT_READY: local-jobs: active or unreadable Local Jobs must finish before runtime storage can be relocated')).toBe('local_jobs_legacy_active');
+  });
+
+  it('classifies browser and external filesystem grants separately from generic policy denial', () => {
+    expect(classifyFailure('WEB_TARGET_NOT_ALLOWED: docs.example.com')).toBe('browser_domain_grant_required');
+    expect(classifyFailure('SELECTED_PATH_SCOPE_DENIED: /Users/me/Downloads/file.txt escapes the selected repository')).toBe('external_filesystem_grant_required');
   });
 });
 
@@ -94,6 +107,19 @@ describe('capability recovery probe', () => {
     expect(actionIds).toContain('recovery.local_jobs_reconcile');
     expect(actionIds).toContain('recovery.runtime_storage_finalize_relocation');
     expect(snapshot.notes.join(' ')).toContain('runtime_maintenance_apply');
+  });
+
+  it('routes plugin auth failures to the Workspace auth handoff', () => {
+    const snapshot = buildCapabilityRecoverySnapshot({
+      generatedAt: '2026-07-05T00:00:00.000Z',
+      daemonStatus: 'ready',
+      schedulerStatus: 'ready',
+      localBridgeRunning: true,
+      connectorHealthy: true,
+      pluginStates: [{ pluginId: 'gmail', enabled: true, healthState: 'error', ready: false, errors: ['Set one of REPO_HARNESS_GMAIL_ACCESS_TOKEN before invoking gmail Google Workspace actions.'] }],
+    });
+
+    expect(snapshot.recommendedActions.map((action) => action.id)).toContain('recovery.workspace_auth_login_prepare');
   });
 
   it('detects stale worker state as recoverable runtime state', () => {
@@ -196,7 +222,92 @@ describe('runtime maintenance executor', () => {
 
     expect(plan.failureClass).toBe('source_defect_suspected');
     expect(plan.modelRepairProducer.preferredProducer).toBe('local_codex_cli');
-    expect(plan.phases.map((phase) => phase.id)).toEqual(['observe', 'local-maintenance', 'restart-fallback', 'model-repair-generation', 'continuation']);
+    expect(plan.phases.map((phase) => phase.id)).toEqual(['observe', 'local-maintenance', 'capability-grant-resolution', 'restart-fallback', 'model-repair-generation', 'continuation']);
+  });
+});
+
+describe('auth and external filesystem handoffs', () => {
+  it('summarizes Gmail auth without exposing secrets and prepares login guidance', () => {
+    const status = buildWorkspaceAuthStatus([{
+      schemaVersion: 1,
+      manifestVersion: 1,
+      revision: 1,
+      pluginId: 'gmail',
+      provider: 'google',
+      displayName: 'Gmail',
+      pluginVersion: '1.0.0',
+      authority: { strategy: 'derived', duplicateStateAllowed: false, sourceOfTruth: [] },
+      enabled: true,
+      lifecycle: { state: 'error', reason: 'token missing' },
+      health: { state: 'error', checkedAt: '2026-07-05T00:00:00.000Z', ready: false, probed: true, errors: ['access token missing'], warnings: [] },
+      permissions: [],
+      capabilities: [],
+      actions: [],
+      updatedAt: '2026-07-05T00:00:00.000Z',
+    }]);
+    expect((status.actionRequired as unknown[]).length).toBe(1);
+    expect(JSON.stringify(status)).not.toContain('secret');
+    const login = prepareWorkspaceAuthLogin({ service: 'gmail' }) as { tokenEnvironmentVariables: string[]; safety: { credentialMaterialPersisted: boolean } };
+    expect(login.tokenEnvironmentVariables).toContain('REPO_HARNESS_GMAIL_ACCESS_TOKEN');
+    expect(login.safety.credentialMaterialPersisted).toBe(false);
+  });
+
+  it('previews, applies, and reads bounded external filesystem targets', () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), 'repo-harness-external-fs-repo-'));
+    const externalRoot = mkdtempSync(join(tmpdir(), 'repo-harness-external-fs-target-'));
+    writeFileSync(join(externalRoot, 'note.txt'), 'hello external');
+    const preview = previewExternalFilesystemGrant(repoRoot, {
+      grant_key: 'notes',
+      root_path: externalRoot,
+      reason: 'test fixture',
+    });
+    expect(preview.accepted).toBe(true);
+    const applied = applyExternalFilesystemGrant(repoRoot, {
+      grant_key: 'notes',
+      root_path: externalRoot,
+      reason: 'test fixture',
+      preview_ticket_id: preview.previewTicketId,
+      confirm_authorization: true,
+    });
+    expect(applied.grant.key).toBe('notes');
+    const snapshot = readExternalFilesystemSnapshot(repoRoot, { target_key: 'notes', path: 'note.txt' });
+    expect(snapshot.kind).toBe('file');
+    expect(snapshot.text).toBe('hello external');
+  });
+});
+
+
+describe('self-healing monitor report', () => {
+  it('turns runtime blockers into shadow candidate findings without source mutation', () => {
+    const report = buildSelfHealingMonitorReport({
+      repoId: 'repo-test',
+      mode: 'shadow',
+      recentErrors: ['RUNTIME_STORAGE_NOT_READY: local-jobs: active or unreadable Local Jobs must finish before runtime storage can be relocated'],
+    });
+
+    expect(report.overallState).toBe('blocked');
+    expect(report.automationPolicy.canAutoCreateCandidateFindings).toBe(true);
+    expect(report.automationPolicy.canAutoModifySource).toBe(false);
+    expect(report.automationPolicy.canAutoMergeOrPush).toBe(false);
+    expect(report.candidateFindings[0]?.semanticKey).toContain('self-healing:repo-test:runtime:local_jobs_legacy_active');
+    expect(report.nextSteps.map((step) => step.id)).toContain('inspect-runtime-maintenance');
+  });
+
+  it('keeps auth and grant failures behind explicit human handoff', () => {
+    const report = buildSelfHealingMonitorReport({
+      repoId: 'repo-test',
+      recentErrors: [
+        'gmail.list_messages failed: auth_required token refresh needed',
+        'WEB_TARGET_NOT_ALLOWED: domain is outside allowed_domains',
+        'EXTERNAL_FILESYSTEM_GRANT_REQUIRED: root path requires a target grant',
+      ],
+    });
+
+    expect(report.candidateFindings.map((finding) => finding.semanticKey).join('\n')).toContain(':auth:auth_required');
+    expect(report.candidateFindings.map((finding) => finding.semanticKey).join('\n')).toContain(':browser:browser_domain_grant_required');
+    expect(report.candidateFindings.map((finding) => finding.semanticKey).join('\n')).toContain(':filesystem:external_filesystem_grant_required');
+    expect(report.nextSteps.find((step) => step.id === 'prepare-auth-handoff')?.requiresHumanApproval).toBe(true);
+    expect(report.nextSteps.find((step) => step.id === 'typed-grant-review')?.requiresHumanApproval).toBe(true);
   });
 });
 

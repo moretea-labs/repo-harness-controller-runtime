@@ -39,7 +39,7 @@
 | Issue → Task → Run | 可恢复、带依赖、带 review 和 verification gate 的长期任务模型。 |
 | 本地 Controller UI | 本机查看 Overview、Work、Activity、Settings，以及 Run、编辑、检查和证据。 |
 | Runtime 控制面 | Thin Gateway、Global Scheduler、每仓库 Repo Actor、ExecutionJob、Claim、Lease、Fencing 和独立 Worker。 |
-| 自修复闭环 | `runtime_maintenance_status/apply` 可在 Local Job / runtime storage 卡死时绕过普通执行链路做本地 metadata 修复；高级源码修复再委派给 ChatGPT、Codex CLI 或 DeepSeek。 |
+| 自修复闭环 | `self_healing_monitor_tick` 汇总 runtime storage、Local Job、Gmail auth、Browser domain、外部文件 target 和模型修复兜底；`runtime_maintenance_status/apply` 可绕过普通执行链路做本地 metadata 修复。 |
 | 自动化治理 | 有界 Schedule/Decision/Occurrence、Candidate Finding、Portfolio DAG/Saga 和 Release Gate。 |
 | Runtime 隔离 | Controller 状态保存在源码仓库外部，只在运行时按需关联。 |
 | 开源发布工具 | Allowlist 导出、路径与凭据扫描、release surface 检查和 package 校验。 |
@@ -55,8 +55,14 @@ repo-harness 区分两类问题：
 常用入口：
 
 ```text
+self_healing_monitor_tick
 runtime_maintenance_status
 runtime_maintenance_apply
+workspace_auth_status
+workspace_auth_login_prepare
+web_domain_access_preview/apply
+external_filesystem_grant_preview/apply
+external_filesystem_text_snapshot
 self_healing_loop_plan
 ```
 

@@ -37,6 +37,14 @@ const READ_ONLY_TOOLS = new Set([
   'get_campaign_review_packet',
   'capability_recovery_probe',
   'capability_recovery_plan',
+  'runtime_maintenance_status',
+  'self_healing_loop_plan',
+  'self_healing_monitor_tick',
+  'workspace_auth_status',
+  'workspace_auth_login_prepare',
+  'external_filesystem_targets_list',
+  'external_filesystem_grant_preview',
+  'external_filesystem_text_snapshot',
 ]);
 const REPO_STATE_TOOLS = new Set([
   'create_issue', 'update_issue', 'plan_issue', 'append_task', 'split_task', 'supersede_task',
@@ -47,7 +55,7 @@ const REPO_STATE_TOOLS = new Set([
   'begin_edit_session', 'set_current_issue', 'archive_issue', 'restore_issue', 'reconcile_project_governance',
   'create_campaign', 'add_campaign_task', 'pause_campaign', 'resume_campaign', 'cancel_campaign',
   'submit_campaign_review', 'accept_campaign', 'reconcile_campaign',
-  'capability_recovery_apply',
+  'capability_recovery_apply', 'runtime_maintenance_apply', 'external_filesystem_grant_apply',
 ]);
 const CHECK_TOOLS = new Set(['run_check', 'verify_edit_session']);
 const INTEGRATION_TOOLS = new Set(['integrate_task_run']);

@@ -573,10 +573,17 @@ export function buildSelfHealingLoopPlan(input: SelfHealingLoopPlanInput = {}): 
         fallback: 'Restart controller/local bridge once if runtime metadata repair cannot refresh readiness.',
       },
       {
+        id: 'capability-grant-resolution',
+        owner: 'typed capability tools',
+        action: 'Resolve non-source blockers through explicit Gmail/Workspace auth handoffs, browser domain grants, or read-only external filesystem target grants.',
+        exitCriteria: 'Required plugin auth, browser targets, or external filesystem targets are ready through typed grants rather than arbitrary shell or absolute-path retries.',
+        fallback: 'Escalate to restart only if the grant state is written but the controller still reports stale readiness.',
+      },
+      {
         id: 'restart-fallback',
         owner: 'local supervisor or user',
-        action: 'Restart only repo-harness controller services after local maintenance is exhausted.',
-        exitCriteria: 'Daemon, bridge, scheduler, and projection become ready.',
+        action: 'Restart only repo-harness controller services after local maintenance or capability grant resolution is exhausted.',
+        exitCriteria: 'Daemon, bridge, scheduler, plugin health, and projection become ready.',
         fallback: 'Escalate to model-assisted source repair if the same failure repeats after restart.',
       },
       {
@@ -597,6 +604,7 @@ export function buildSelfHealingLoopPlan(input: SelfHealingLoopPlanInput = {}): 
     invariants: [
       'State-only recovery must not modify source files.',
       'Model-generated source repair must not directly mutate runtime metadata.',
+      'Auth, browser, and external filesystem blockers must be resolved through typed grant/login handoff tools before model repair.',
       'All destructive or external effects remain behind repo-harness approval and audit.',
       'Every recovery pass must be idempotent and bounded to one registered repository.',
     ],

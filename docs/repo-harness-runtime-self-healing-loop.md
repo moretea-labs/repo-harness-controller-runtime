@@ -165,3 +165,114 @@ npm run controller:restart
 - State-only recovery 不修改源码。
 - Model repair 只生成补丁或计划，不绕过 repo-harness policy。
 - 所有操作必须绑定 repoId，并写 audit / evidence。
+
+## 插件授权、浏览器、外部文件的同一恢复循环
+
+这版把常见“不是源码 bug，但阻塞工作流”的问题纳入同一套 Observe → Maintain → Retry → Escalate 循环。
+
+### Gmail / Google Workspace auth
+
+新增：
+
+- `workspace_auth_status`
+- `workspace_auth_login_prepare`
+
+`workspace_auth_status` 只返回 readiness、缺失权限和下一步，不返回 token，不读取 secret。
+
+`workspace_auth_login_prepare` 生成本地 OAuth handoff：
+
+- 当 `REPO_HARNESS_GOOGLE_CLIENT_ID` 存在时返回 Google authorization URL；
+- 返回需要设置的 token env var 名称，例如 `REPO_HARNESS_GMAIL_ACCESS_TOKEN`；
+- 不接收 authorization code；
+- 不持久化 client secret、access token、refresh token。
+
+这让 Gmail 阻塞从“插件报错”变成明确 action：
+
+```text
+workspace_auth_status
+  -> workspace_auth_login_prepare(service="gmail")
+  -> local trusted login / env injection
+  -> controller restart
+  -> retry gmail.list_messages
+```
+
+后续如果要做完整 login，可以把 code exchange 放到 Local GUI / CLI，并优先使用 OS keychain；MCP 工具面仍不应接收或保存 secret。
+
+### Browser domain grants
+
+Browser 继续保持低拦截原则：不接受任意 URL，只接受 `target_key + path`。
+
+当出现 `WEB_TARGET_NOT_ALLOWED`、`allowed_domains`、browser domain grant 类错误时，recovery classifier 会返回：
+
+```text
+browser_domain_grant_required
+```
+
+probe 会推荐：
+
+```text
+recovery.browser_domain_access_preview
+```
+
+实际使用专用工具：
+
+```text
+web_domain_access_preview
+web_domain_access_apply
+web_targets_list
+web_target_snapshot
+```
+
+不暴露 submit/delete/payment/upload/download 这类高风险浏览器动作。
+
+### External filesystem grants
+
+新增：
+
+- `external_filesystem_targets_list`
+- `external_filesystem_grant_preview`
+- `external_filesystem_grant_apply`
+- `external_filesystem_text_snapshot`
+
+原则：
+
+- 不接受一次性任意绝对路径读取；
+- 先把外部目录转换成命名 target key；
+- 只支持 read mode；
+- 拒绝 `/`、用户 home 根目录、系统目录、`.ssh`、keychains、云凭据、kube config 等敏感范围；
+- 只返回 `<external:key>/relative/path` 预览，不在摘要中暴露完整绝对路径；
+- 不提供 external write 工具。
+
+典型流程：
+
+```text
+external_filesystem_grant_preview(root_path="/narrow/project/data", grant_key="data", reason="...")
+external_filesystem_grant_apply(..., preview_ticket_id="EFG-...", confirm_authorization=true)
+external_filesystem_text_snapshot(target_key="data", path="file.txt")
+```
+
+当错误包含 absolute path denied / selected path scope denied / outside repository 时，classifier 会返回：
+
+```text
+external_filesystem_grant_required
+```
+
+## Monitor tick
+
+新增：
+
+```text
+self_healing_monitor_tick
+```
+
+它是只读聚合工具，不创建 Local Job，不执行 shell。一次 tick 会聚合：
+
+- capability recovery snapshot；
+- runtime maintenance status；
+- Workspace/Gmail auth status；
+- Browser targets；
+- External filesystem grants；
+- self-healing loop plan；
+- next actions。
+
+GUI / scheduler 可以周期性调用它；若未来要自动 apply，仍应只允许低风险、白名单、可审计 maintenance action，并需要独立预算和冷却时间。

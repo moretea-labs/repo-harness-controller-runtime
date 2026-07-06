@@ -121,6 +121,36 @@ export const RECOVERY_ACTIONS = {
     localOnly: true,
     boundedTo: ['repo_harness_artifact_storage'],
   },
+  workspaceAuthLoginPrepare: {
+    id: 'recovery.workspace_auth_login_prepare',
+    title: 'Prepare Workspace auth login',
+    description: 'Prepare a non-secret Gmail/Google Workspace login handoff when plugin auth is missing.',
+    class: 'auth_required',
+    risk: 'readonly',
+    confirmation: 'none',
+    localOnly: true,
+    boundedTo: ['google_workspace_auth_handoff'],
+  },
+  browserDomainAccessPreview: {
+    id: 'recovery.browser_domain_access_preview',
+    title: 'Preview browser domain grant',
+    description: 'Preview a domain-key browser grant instead of retrying arbitrary URLs.',
+    class: 'browser_domain_grant_required',
+    risk: 'readonly',
+    confirmation: 'none',
+    localOnly: true,
+    boundedTo: ['browser_allowed_domains'],
+  },
+  externalFilesystemGrantPreview: {
+    id: 'recovery.external_filesystem_grant_preview',
+    title: 'Preview external filesystem grant',
+    description: 'Preview a narrow external filesystem target grant instead of retrying absolute paths.',
+    class: 'external_filesystem_grant_required',
+    risk: 'readonly',
+    confirmation: 'none',
+    localOnly: true,
+    boundedTo: ['external_filesystem_grants'],
+  },
 } satisfies Record<string, RecoveryActionDescriptor>;
 
 export function recoveryActionById(actionId: string): RecoveryActionDescriptor | undefined {

@@ -8,6 +8,8 @@ export type RecoveryClass =
   | 'dirty_worktree_conflict'
   | 'stale_runtime_state'
   | 'runtime_storage_not_ready'
+  | 'browser_domain_grant_required'
+  | 'external_filesystem_grant_required'
   | 'local_jobs_legacy_active'
   | 'local_jobs_unreadable'
   | 'local_jobs_reconciliation_required'
