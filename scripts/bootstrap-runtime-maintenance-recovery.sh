@@ -1,186 +1,178 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="${1:-$PWD}"
-repo_id="${REPO_HARNESS_REPO_ID:-}"
-controller_home="${REPO_HARNESS_CONTROLLER_HOME:-$repo_root/_ops/controller-home}"
-quarantine_root="$repo_root/.ai/harness/local-jobs-quarantine"
-min_age_minutes="${REPO_HARNESS_RECOVERY_MIN_AGE_MINUTES:-10}"
-cancel_pending="${REPO_HARNESS_RECOVERY_CANCEL_PENDING_APPROVALS:-false}"
-now_ms="$(node -e 'console.log(Date.now())')"
+REPO_ROOT="${1:-$PWD}"
+REPO_ID="${REPO_HARNESS_REPO_ID:-repo_123b7cf58b6b17b5cbe46a56}"
+MIN_AGE_MINUTES="${REPO_HARNESS_RECOVERY_MIN_AGE_MINUTES:-0}"
+CANCEL_PENDING="${REPO_HARNESS_RECOVERY_CANCEL_PENDING_APPROVALS:-false}"
+CONTROLLER_HOME="${REPO_HARNESS_CONTROLLER_HOME:-$REPO_ROOT/_ops/controller-home}"
 
-mkdir -p "$quarantine_root"
+cd "$REPO_ROOT"
 
-node - "$repo_root" "$repo_id" "$controller_home" "$quarantine_root" "$min_age_minutes" "$now_ms" "$cancel_pending" <<'NODE'
-const fs = require('fs');
-const path = require('path');
+python3 - <<'PY' "$REPO_ROOT" "$REPO_ID" "$MIN_AGE_MINUTES" "$CANCEL_PENDING" "$CONTROLLER_HOME"
+from __future__ import annotations
+import json, os, shutil, sys, time
+from datetime import datetime, timezone
+from pathlib import Path
 
-const [, , repoRoot, repoId, controllerHome, quarantineRoot, rawMinAge, rawNow, rawCancelPending] = process.argv;
-const minAgeMinutes = Number(rawMinAge || '10');
-const nowMs = Number(rawNow || Date.now());
-const cancelPending = String(rawCancelPending || 'false').toLowerCase() === 'true';
-const activeStatuses = new Set(['approved', 'dispatched', 'running']);
-const pendingStatuses = new Set(['pending_approval']);
-const applied = [];
-const inspectedRoots = [];
+repo_root = Path(sys.argv[1]).resolve()
+repo_id = sys.argv[2]
+min_age_minutes = max(0, int(float(sys.argv[3])))
+cancel_pending = sys.argv[4].lower() == 'true'
+controller_home = Path(sys.argv[5]).resolve()
+now = datetime.now(timezone.utc)
 
-function iso() { return new Date().toISOString(); }
-function safeName(value) { return String(value || 'unknown').replace(/[^A-Za-z0-9_.-]/g, '_').slice(0, 120); }
-function readJson(file) { return JSON.parse(fs.readFileSync(file, 'utf8')); }
-function atomicWriteJson(file, value) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.tmp`);
-  fs.writeFileSync(tmp, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 });
-  fs.renameSync(tmp, file);
-}
-function isPidAlive(pid) {
-  if (!pid || !Number.isFinite(Number(pid))) return false;
-  try { process.kill(Number(pid), 0); return true; } catch { return false; }
-}
-function ageMinutes(job, dir) {
-  const raw = job.heartbeatAt || job.updatedAt || job.startedAt || job.createdAt;
-  const parsed = raw ? Date.parse(raw) : NaN;
-  const fallback = fs.existsSync(dir) ? fs.statSync(dir).mtimeMs : nowMs;
-  return Math.max(0, Math.round((nowMs - (Number.isFinite(parsed) ? parsed : fallback)) / 60000));
-}
-function moveToQuarantine(targetPath, id, reason, rootLabel) {
-  const target = path.join(quarantineRoot, `${iso().replace(/[:.]/g, '-')}-${safeName(rootLabel)}-${safeName(id)}`);
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  try {
-    fs.renameSync(targetPath, target);
-  } catch (error) {
-    if (error && error.code === 'EXDEV') {
-      fs.cpSync(targetPath, target, { recursive: true, force: false, errorOnExist: true });
-      fs.rmSync(targetPath, { recursive: true, force: true });
-    } else {
-      throw error;
-    }
-  }
-  applied.push({ root: rootLabel, id, action: 'quarantine', target, reason });
-}
-function terminalize(dir, job, status, reason, rootLabel) {
-  const file = path.join(dir, 'job.json');
-  atomicWriteJson(file, {
-    ...job,
-    status,
-    updatedAt: iso(),
-    finishedAt: iso(),
-    error: job.error || `Terminalized by bootstrap runtime maintenance: ${reason}`,
-    outcome: job.outcome || { infrastructureError: { code: 'BOOTSTRAP_MAINTENANCE_TERMINALIZED', message: reason } },
-  });
-  applied.push({ root: rootLabel, id: job.jobId || path.basename(dir), action: 'terminalize', status, reason });
-}
-function rootCandidates() {
-  const roots = [{ label: 'repository', root: path.join(repoRoot, '.ai/harness/local-jobs') }];
-  if (repoId) {
-    roots.push({
-      label: `controller-${repoId}`,
-      root: path.join(controllerHome, 'repositories', repoId, 'local-jobs'),
-    });
-  }
-  return roots;
-}
-function normalizeExistingRoot(root) {
-  if (!fs.existsSync(root)) return null;
-  try {
-    return fs.realpathSync.native(root);
-  } catch {
-    return path.resolve(root);
-  }
-}
-function inspectActiveIndex(localJobsRoot, rootLabel) {
-  const activeIndex = path.join(localJobsRoot, 'active-index.json');
-  if (!fs.existsSync(activeIndex)) return;
-  try {
-    const parsed = readJson(activeIndex);
-    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.jobIds)) {
-      moveToQuarantine(activeIndex, 'active-index.json', 'invalid active-index.json shape', rootLabel);
-    }
-  } catch (error) {
-    moveToQuarantine(activeIndex, 'active-index.json', `unreadable active-index.json: ${error.message}`, rootLabel);
-  }
-}
-function processLocalJobsRoot(localJobsRoot, rootLabel) {
-  inspectedRoots.push({ label: rootLabel, root: localJobsRoot, exists: fs.existsSync(localJobsRoot) });
-  if (!fs.existsSync(localJobsRoot)) return;
-  if (!fs.statSync(localJobsRoot).isDirectory()) {
-    moveToQuarantine(localJobsRoot, path.basename(localJobsRoot), 'local-jobs path is not a directory', rootLabel);
-    fs.mkdirSync(localJobsRoot, { recursive: true });
-    return;
-  }
+active_statuses = {'pending_approval', 'approved', 'dispatched', 'running'}
+terminal_statuses = {'succeeded', 'failed', 'timed_out', 'orphaned', 'stale', 'cancelled'}
 
-  inspectActiveIndex(localJobsRoot, rootLabel);
+roots = [
+    ('repository', repo_root / '.ai' / 'harness' / 'local-jobs'),
+    ('controller', controller_home / 'repositories' / repo_id / 'local-jobs'),
+]
+records_root = controller_home / 'repositories' / repo_id / 'execution-jobs' / 'records'
+audit_path = repo_root / '.ai' / 'harness' / 'controller' / 'bootstrap-runtime-maintenance-recovery.jsonl'
+quarantine_root = repo_root / '.ai' / 'harness' / 'quarantine' / 'local-jobs'
 
-  for (const entry of fs.readdirSync(localJobsRoot, { withFileTypes: true })) {
-    if (entry.name === 'active-index.json') continue;
-    const entryPath = path.join(localJobsRoot, entry.name);
-    if (!entry.isDirectory()) {
-      moveToQuarantine(entryPath, entry.name, 'unexpected non-directory entry in local-jobs root', rootLabel);
-      continue;
-    }
-    const file = path.join(entryPath, 'job.json');
-    if (!fs.existsSync(file)) {
-      moveToQuarantine(entryPath, entry.name, 'missing job.json', rootLabel);
-      continue;
-    }
-    let job;
-    try { job = readJson(file); } catch (error) {
-      moveToQuarantine(entryPath, entry.name, `unreadable job.json: ${error.message}`, rootLabel);
-      continue;
-    }
-    const status = String(job.status || 'unknown');
-    if (pendingStatuses.has(status)) {
-      const age = ageMinutes(job, entryPath);
-      if (cancelPending && age >= minAgeMinutes) {
-        terminalize(entryPath, job, 'cancelled', `pending approval cancelled by explicit bootstrap flag ageMinutes=${age}`, rootLabel);
-      }
-      continue;
-    }
-    if (!activeStatuses.has(status)) continue;
-    const age = ageMinutes(job, entryPath);
-    const deadlineExpired = job.deadlineAt && Date.parse(job.deadlineAt) < nowMs;
-    const workerAlive = isPidAlive(job.workerPid || job.ownerPid);
-    if ((deadlineExpired || !workerAlive) && age >= minAgeMinutes) {
-      terminalize(entryPath, job, 'orphaned', `workerAlive=${workerAlive} deadlineExpired=${Boolean(deadlineExpired)} ageMinutes=${age}`, rootLabel);
-    }
-  }
+def iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
 
-  const activeIds = [];
-  for (const entry of fs.readdirSync(localJobsRoot, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    try {
-      const job = readJson(path.join(localJobsRoot, entry.name, 'job.json'));
-      const status = String(job.status || '');
-      const keepActive = ['approved', 'dispatched', 'running'].includes(status) || (status === 'pending_approval' && !cancelPending);
-      if (keepActive && job.jobId) activeIds.push(job.jobId);
-    } catch {}
-  }
+def age_minutes(value: str | None) -> int | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except Exception:
+        return None
+    return max(0, int((now - parsed).total_seconds() // 60))
 
-  atomicWriteJson(path.join(localJobsRoot, 'active-index.json'), {
-    schemaVersion: 1,
-    ownerPid: process.pid,
-    updatedAt: iso(),
-    jobIds: [...new Set(activeIds)].sort().reverse(),
-  });
-}
+def atomic_write_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + f'.{os.getpid()}.tmp')
+    tmp.write_text(json.dumps(value, indent=2, ensure_ascii=False) + '\n')
+    tmp.replace(path)
 
-const seen = new Set();
-for (const candidate of rootCandidates()) {
-  const normalized = normalizeExistingRoot(candidate.root) || path.resolve(candidate.root);
-  if (seen.has(normalized)) continue;
-  seen.add(normalized);
-  processLocalJobsRoot(candidate.root, candidate.label);
-}
+def append_event(job_dir: Path, message: str, data: dict | None = None) -> None:
+    event_path = job_dir / 'events.jsonl'
+    event_path.parent.mkdir(parents=True, exist_ok=True)
+    with event_path.open('a', encoding='utf-8') as handle:
+        handle.write(json.dumps({'at': iso(), 'type': 'job_failed', 'message': message, 'data': data or {}}) + '\n')
 
-const auditDir = path.join(repoRoot, '.ai/harness/controller');
-fs.mkdirSync(auditDir, { recursive: true });
-fs.appendFileSync(
-  path.join(auditDir, 'bootstrap-runtime-maintenance.jsonl'),
-  JSON.stringify({ at: iso(), repoId: repoId || null, inspectedRoots, minAgeMinutes, cancelPending, applied }) + '\n',
-);
+def inside(root: Path, path: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except Exception:
+        return False
 
-if (!repoId) {
-  console.error('[repo-harness-recovery] REPO_HARNESS_REPO_ID is not set; skipped controller-home local-jobs root to avoid cross-repository cleanup.');
-}
-console.log(JSON.stringify({ status: 'ok', repoId: repoId || null, inspectedRoots, applied }, null, 2));
-NODE
+def execution_record_exists(execution_job_id: str) -> bool:
+    if not execution_job_id:
+        return False
+    return (records_root / f'{execution_job_id}.json').exists()
+
+def terminalize(job_path: Path, job: dict, reason: str, code: str, data: dict | None = None) -> dict:
+    job['status'] = 'cancelled' if job.get('status') == 'pending_approval' and cancel_pending else 'failed'
+    job['finishedAt'] = iso()
+    job.pop('workerPid', None)
+    job['error'] = reason
+    outcome = job.get('outcome') if isinstance(job.get('outcome'), dict) else {}
+    outcome['infrastructureError'] = {'code': code, 'message': reason}
+    job['outcome'] = outcome
+    atomic_write_json(job_path, job)
+    append_event(job_path.parent, reason, {'repairedBy': 'bootstrap-runtime-maintenance-recovery', **(data or {})})
+    return job
+
+def quarantine(root_kind: str, root: Path, entry: Path, reason: str) -> Path:
+    if not inside(root, entry):
+        raise RuntimeError(f'unsafe quarantine path escapes local-jobs root: {entry}')
+    stamp = iso().replace(':', '-').replace('.', '-')
+    target = quarantine_root / f'{stamp}-{root_kind}-{entry.name}'
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(entry), str(target))
+    return target
+
+def rebuild_active_index(root: Path) -> list[str]:
+    job_ids: list[str] = []
+    if root.exists():
+        for entry in sorted(root.iterdir()):
+            if not entry.is_dir() or entry.name in {'.repo-harness-owner.json', 'active-index.json'}:
+                continue
+            job_path = entry / 'job.json'
+            if not job_path.exists():
+                continue
+            try:
+                job = json.loads(job_path.read_text())
+            except Exception:
+                continue
+            if job.get('status') in active_statuses:
+                job_ids.append(str(job.get('jobId') or entry.name))
+    atomic_write_json(root / 'active-index.json', {
+        'schemaVersion': 1,
+        'ownerPid': os.getpid(),
+        'updatedAt': iso(),
+        'jobIds': sorted(set(job_ids), reverse=True),
+    })
+    return job_ids
+
+applied: list[dict] = []
+for root_kind, root in roots:
+    if not root.exists():
+        continue
+    for entry in sorted(root.iterdir()):
+        if entry.name in {'.repo-harness-owner.json', 'active-index.json'}:
+            continue
+        if not entry.is_dir():
+            target = quarantine(root_kind, root, entry, 'unexpected local-jobs entry')
+            applied.append({'action': 'quarantine', 'rootKind': root_kind, 'path': str(entry), 'target': str(target), 'reason': 'unexpected local-jobs entry'})
+            continue
+        job_path = entry / 'job.json'
+        if not job_path.exists():
+            target = quarantine(root_kind, root, entry, 'missing job.json')
+            applied.append({'action': 'quarantine', 'rootKind': root_kind, 'path': str(entry), 'target': str(target), 'reason': 'missing job.json'})
+            continue
+        try:
+            job = json.loads(job_path.read_text())
+        except Exception:
+            target = quarantine(root_kind, root, entry, 'unreadable job.json')
+            applied.append({'action': 'quarantine', 'rootKind': root_kind, 'path': str(entry), 'target': str(target), 'reason': 'unreadable job.json'})
+            continue
+        status = job.get('status')
+        if status not in active_statuses:
+            continue
+        age = age_minutes(job.get('updatedAt') or job.get('createdAt'))
+        old_enough = age is None or age >= min_age_minutes
+        if not old_enough:
+            continue
+        result = job.get('result') if isinstance(job.get('result'), dict) else {}
+        execution_job_id = result.get('executionJobId') if isinstance(result.get('executionJobId'), str) else ''
+        if execution_job_id and not execution_record_exists(execution_job_id):
+            reason = f'Bootstrap terminalized Local Job {job.get("jobId") or entry.name}: projected Execution Job {execution_job_id} is missing.'
+            terminalize(job_path, job, reason, 'MISSING_PROJECTED_EXECUTION_JOB', {'executionJobId': execution_job_id, 'rootKind': root_kind})
+            applied.append({'action': 'terminalize', 'rootKind': root_kind, 'jobId': job.get('jobId') or entry.name, 'reason': reason})
+            continue
+        if status == 'pending_approval' and not cancel_pending:
+            continue
+        if status in {'approved', 'dispatched', 'pending_approval'} or (status == 'running' and not job.get('workerPid')):
+            reason = f'Bootstrap terminalized stale active Local Job {job.get("jobId") or entry.name}: status={status}, ageMinutes={age}.'
+            terminalize(job_path, job, reason, 'BOOTSTRAP_MAINTENANCE_TERMINALIZED', {'rootKind': root_kind, 'ageMinutes': age})
+            applied.append({'action': 'terminalize', 'rootKind': root_kind, 'jobId': job.get('jobId') or entry.name, 'reason': reason})
+
+active_indexes = []
+for root_kind, root in roots:
+    if root.exists():
+        active_indexes.append({'rootKind': root_kind, 'root': str(root), 'activeJobIds': rebuild_active_index(root)})
+
+audit_path.parent.mkdir(parents=True, exist_ok=True)
+with audit_path.open('a', encoding='utf-8') as handle:
+    handle.write(json.dumps({
+        'schemaVersion': 1,
+        'at': iso(),
+        'repoId': repo_id,
+        'minAgeMinutes': min_age_minutes,
+        'cancelPendingApprovals': cancel_pending,
+        'inspectedRoots': [{'kind': kind, 'path': str(root), 'exists': root.exists()} for kind, root in roots],
+        'applied': applied,
+        'activeIndexes': active_indexes,
+    }, ensure_ascii=False) + '\n')
+
+print(json.dumps({'ok': True, 'repoId': repo_id, 'appliedCount': len(applied), 'applied': applied, 'activeIndexes': active_indexes}, indent=2, ensure_ascii=False))
+PY

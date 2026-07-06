@@ -535,7 +535,9 @@ export function submitLocalBridgeJob(
   );
   const requireRuntimeBinding = request.action === "run-check"
     || request.action === "verify-edit-session"
-    || request.action === "repository-command";
+    || request.action === "repository-command"
+    || request.action === "launch-task"
+    || request.action === "quick-agent-session";
   try {
     const repository = registerRepository({ path: repoRoot, controllerHome });
     const runtimeStorage = ensureRepositoryRuntimeStorage(repository, controllerHome);
@@ -695,6 +697,10 @@ function projectedExecutionJobId(job: LocalBridgeJob): string | undefined {
 function projectedExecutionControllerHome(
   job: LocalBridgeJob,
 ): string {
+  const result = job.result;
+  if (result && typeof result.controllerHome === "string" && result.controllerHome.trim()) {
+    return resolveControllerHome(result.controllerHome);
+  }
   if (
     job.action === "repository-command" &&
     job.payload &&
@@ -707,11 +713,37 @@ function projectedExecutionControllerHome(
   return resolveControllerHome();
 }
 
+function projectedExecutionMissingGraceExpired(job: LocalBridgeJob): boolean {
+  const updatedAt = Date.parse(job.updatedAt);
+  if (!Number.isFinite(updatedAt)) return true;
+  return Date.now() - updatedAt >= 15_000;
+}
+
+function failMissingProjectedExecutionJob(
+  repoRoot: string,
+  job: LocalBridgeJob,
+  executionJobId: string,
+): LocalBridgeJob {
+  const controllerHome = projectedExecutionControllerHome(job);
+  return markJobTerminal(
+    repoRoot,
+    job,
+    "failed",
+    `Durable Execution Job ${executionJobId} was not found after local projection; terminalizing the Local Job to prevent runtime storage deadlock.`,
+    { executionJobId, controllerHome, projectedExecutionMissing: true },
+  );
+}
+
 function syncProjectedExecutionJob(repoRoot: string, job: LocalBridgeJob): LocalBridgeJob {
   const executionJobId = projectedExecutionJobId(job);
   if (!executionJobId || !["dispatched", "running"].includes(job.status)) return job;
   const execution = findExecutionJob(projectedExecutionControllerHome(job), executionJobId);
-  if (!execution) return job;
+  if (!execution) {
+    if (projectedExecutionMissingGraceExpired(job)) {
+      return failMissingProjectedExecutionJob(repoRoot, job, executionJobId);
+    }
+    return job;
+  }
   const previous = job.status;
   job.deadlineAt = execution.deadlineAt ?? job.deadlineAt;
   job.workerPid = execution.workerPid;
@@ -1582,20 +1614,43 @@ export function executeLocalBridgeJobInline(
 export function dispatchLocalBridgeJob(repoRoot: string, jobId: string): LocalBridgeJob {
   const job = getLocalBridgeJob(repoRoot, jobId);
   if (job.status !== "approved") return job;
-  const dispatched = dispatchLegacyLocalJob(repoRoot, job);
+  let dispatched: ReturnType<typeof dispatchLegacyLocalJob>;
+  try {
+    dispatched = dispatchLegacyLocalJob(repoRoot, job);
+  } catch (error) {
+    return markJobTerminal(
+      repoRoot,
+      job,
+      "failed",
+      error instanceof Error ? error.message : String(error),
+      { dispatchProjectionFailed: true },
+    );
+  }
+  const readableExecution = findExecutionJob(dispatched.controllerHome, dispatched.executionJob.jobId);
+  if (!readableExecution) {
+    job.result = {
+      ...(job.result ?? {}),
+      executionJobId: dispatched.executionJob.jobId,
+      repoId: dispatched.repository.repoId,
+      controllerHome: dispatched.controllerHome,
+      daemonStatus: dispatched.daemon.status,
+    };
+    return failMissingProjectedExecutionJob(repoRoot, job, dispatched.executionJob.jobId);
+  }
   if (job.action === "run-check") job.revision = currentControllerCheckRevision(repoRoot);
   job.status = "dispatched";
   job.result = {
     ...(job.result ?? {}),
     executionJobId: dispatched.executionJob.jobId,
     repoId: dispatched.repository.repoId,
+    controllerHome: dispatched.controllerHome,
     daemonStatus: dispatched.daemon.status,
   };
   job.updatedAt = now();
   appendEvent(repoRoot, job.jobId, {
     type: "job_dispatched",
     message: `Legacy Local Job projected to durable Execution Job ${dispatched.executionJob.jobId}.`,
-    data: { executionJobId: dispatched.executionJob.jobId, repoId: dispatched.repository.repoId },
+    data: { executionJobId: dispatched.executionJob.jobId, repoId: dispatched.repository.repoId, controllerHome: dispatched.controllerHome },
   });
   return saveJob(repoRoot, job);
 }

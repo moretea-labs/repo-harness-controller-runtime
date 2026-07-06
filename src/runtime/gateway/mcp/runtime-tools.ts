@@ -54,6 +54,17 @@ import {
   prepareWorkspaceAuthLogin,
   previewExternalFilesystemGrant,
   readExternalFilesystemSnapshot,
+  iosXcodeStatus,
+  iosSimulatorsList,
+  iosProjectDiscover,
+  iosSchemesList,
+  iosSimulatorBoot,
+  iosAppBuild,
+  iosAppInstall,
+  iosAppLaunch,
+  iosSimulatorScreenshot,
+  iosSimulatorLogTail,
+  iosUiSmokeTest,
 } from '../../safe-tooling';
 import { buildModelClientSummary, buildModelControlPlaneSummary, deepSeekControllerManifest, deepSeekFunctionToolManifest, prepareDeepSeekControllerHandoff, prepareDeepSeekControllerRequest, prepareDeepSeekToolCall } from '../../model-clients';
 import { buildAssistantReadinessReport } from '../../assistant/readiness';
@@ -70,6 +81,8 @@ import {
   writeRecoveryAuditRecord,
   listRecoveryAuditRecords,
   type RuntimeMaintenanceActionId,
+  previewRuntimeStorageRepair,
+  applyRuntimeStorageRepair,
 } from '../../recovery';
 import {
   getLocalBridgeJobEventsSnapshot,
@@ -238,6 +251,18 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
     path: { type: 'string' },
     max_chars: { type: 'number' },
   }, ['target_key']),
+  definition('runtime_storage_repair_preview', 'Preview repo-scoped local-jobs runtime storage repair candidates without mutation.', {
+    repo_id: repoId,
+    min_age_minutes: { type: 'number' },
+    max_candidates: { type: 'number' },
+  }),
+  definition('runtime_storage_repair_apply', 'Apply safe repo-scoped local-jobs runtime storage repairs after explicit confirmation.', {
+    repo_id: repoId,
+    candidate_ids: { type: 'array', items: { type: 'string' } },
+    min_age_minutes: { type: 'number' },
+    max_candidates: { type: 'number' },
+    confirm_repair: { type: 'boolean' },
+  }, ['confirm_repair'], false),
   definition('list_plugins', 'List personal-assistant plugin manifests, lifecycle state, health, and action discovery for one repository.', {
     repo_id: repoId,
   }),
@@ -333,6 +358,71 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
   definition('assistant_readiness', 'Summarize personal-assistant readiness, Google plugin state, routines, inbox, and recommended next actions.', {
     repo_id: repoId,
   }),
+  definition('ios_xcode_status', 'Check local Xcode, xcodebuild, and simctl availability without mutation.', { repo_id: repoId }),
+  definition('ios_simulators_list', 'List available iOS Simulator devices using structured simctl JSON output.', {
+    repo_id: repoId,
+    runtime: { type: 'string' },
+    name: { type: 'string' },
+  }),
+  definition('ios_project_discover', 'Discover iOS workspaces, projects, Package.swift, and Info.plist files inside the repository.', { repo_id: repoId }),
+  definition('ios_schemes_list', 'List Xcode schemes for a repository-bounded workspace or project.', {
+    repo_id: repoId,
+    workspace: { type: 'string' },
+    project: { type: 'string' },
+  }),
+  definition('ios_simulator_boot', 'Boot an explicitly selected iOS Simulator UDID. Requires authorization.', {
+    repo_id: repoId,
+    udid: { type: 'string' },
+    open_simulator: { type: 'boolean' },
+    confirm_authorization: { type: 'boolean' },
+    timeout_ms: { type: 'number' },
+  }, ['udid', 'confirm_authorization'], false),
+  definition('ios_app_build', 'Build an iOS app into .repo-harness/ios/DerivedData using xcodebuild structured arguments.', {
+    repo_id: repoId,
+    scheme: { type: 'string' },
+    udid: { type: 'string' },
+    workspace: { type: 'string' },
+    project: { type: 'string' },
+    configuration: { type: 'string' },
+    timeout_ms: { type: 'number' },
+  }, ['scheme'], false),
+  definition('ios_app_install', 'Install a bounded .app product from .repo-harness/ios/DerivedData into a booted simulator. Requires authorization.', {
+    repo_id: repoId,
+    udid: { type: 'string' },
+    app_path: { type: 'string' },
+    confirm_authorization: { type: 'boolean' },
+  }, ['udid', 'app_path', 'confirm_authorization'], false),
+  definition('ios_app_launch', 'Launch a simulator app by bundle id with structured launch arguments. Requires authorization.', {
+    repo_id: repoId,
+    udid: { type: 'string' },
+    bundle_id: { type: 'string' },
+    arguments: { type: 'array', items: { type: 'string' } },
+    confirm_authorization: { type: 'boolean' },
+  }, ['udid', 'bundle_id', 'confirm_authorization'], false),
+  definition('ios_simulator_screenshot', 'Capture a simulator screenshot to .repo-harness/ios/screenshots as a bounded artifact.', {
+    repo_id: repoId,
+    udid: { type: 'string' },
+    label: { type: 'string' },
+  }, ['udid'], false),
+  definition('ios_simulator_log_tail', 'Collect a bounded recent simulator log tail into .repo-harness/ios/logs.', {
+    repo_id: repoId,
+    udid: { type: 'string' },
+    process: { type: 'string' },
+    last: { type: 'string' },
+    max_bytes: { type: 'number' },
+  }),
+  definition('ios_ui_smoke_test', 'Compose build, boot, launch, screenshot, and bounded logs for simulator UI review. Requires authorization.', {
+    repo_id: repoId,
+    udid: { type: 'string' },
+    scheme: { type: 'string' },
+    bundle_id: { type: 'string' },
+    workspace: { type: 'string' },
+    project: { type: 'string' },
+    configuration: { type: 'string' },
+    app_path: { type: 'string' },
+    screenshot_label: { type: 'string' },
+    confirm_authorization: { type: 'boolean' },
+  }, ['udid', 'scheme', 'bundle_id', 'confirm_authorization'], false),
   definition('runtime_cleanup_preview', 'Preview stale repo-harness temp directories, terminal local jobs, and historical attention cleanup candidates.', {
     repo_id: repoId,
     min_age_minutes: { type: 'number' },
@@ -1499,6 +1589,27 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         }));
         return result({ repoId: repository.repoId, action, audit, result: payload });
       }
+      case 'runtime_storage_repair_preview': {
+        const repository = selected(ctx, args);
+        const preview = previewRuntimeStorageRepair(repository, ctx.controllerHome, {
+          minAgeMinutes: typeof args.min_age_minutes === 'number' ? args.min_age_minutes : undefined,
+          maxCandidates: typeof args.max_candidates === 'number' ? args.max_candidates : undefined,
+        });
+        return result({ ...preview });
+      }
+      case 'runtime_storage_repair_apply': {
+        const repository = selected(ctx, args);
+        const candidateIds = Array.isArray(args.candidate_ids) ? args.candidate_ids.map(String) : undefined;
+        const applied = applyRuntimeStorageRepair(repository, ctx.controllerHome, {
+          candidateIds,
+          minAgeMinutes: typeof args.min_age_minutes === 'number' ? args.min_age_minutes : undefined,
+          maxCandidates: typeof args.max_candidates === 'number' ? args.max_candidates : undefined,
+          confirmRepair: args.confirm_repair === true,
+        });
+        const runtimeStorage = ensureRepositoryRuntimeStorage(repository, ctx.controllerHome);
+        const projection = rebuildRepositoryProjection(ctx.controllerHome, repository.repoId);
+        return result({ ...applied, runtimeStorage, projection });
+      }
       case 'list_plugins': {
         const repository = selected(ctx, args);
         return result({ plugins: listAssistantPluginManifests(ctx.controllerHome, repository).map(summarizePlugin) });
@@ -1511,6 +1622,91 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         const repository = selected(ctx, args);
         const readiness = buildAssistantReadinessReport(ctx.controllerHome, repository);
         return result({ ...readiness });
+      }
+      case 'ios_xcode_status': {
+        return result({ ...iosXcodeStatus() });
+      }
+      case 'ios_simulators_list': {
+        return result({ ...iosSimulatorsList({
+          runtime: typeof args.runtime === 'string' ? args.runtime : undefined,
+          name: typeof args.name === 'string' ? args.name : undefined,
+        }) });
+      }
+      case 'ios_project_discover': {
+        const repository = selected(ctx, args);
+        return result({ repoId: repository.repoId, ...iosProjectDiscover(repository) });
+      }
+      case 'ios_schemes_list': {
+        const repository = selected(ctx, args);
+        return result({ repoId: repository.repoId, ...iosSchemesList(repository, {
+          workspace: typeof args.workspace === 'string' ? args.workspace : undefined,
+          project: typeof args.project === 'string' ? args.project : undefined,
+        }) });
+      }
+      case 'ios_simulator_boot': {
+        if (args.confirm_authorization !== true) throw new Error('IOS_AUTHORIZATION_REQUIRED: confirm_authorization must be true');
+        return result({ ...iosSimulatorBoot({
+          udid: String(args.udid ?? '').trim(),
+          openSimulator: args.open_simulator !== false,
+          timeoutMs: typeof args.timeout_ms === 'number' ? args.timeout_ms : undefined,
+        }) });
+      }
+      case 'ios_app_build': {
+        const repository = selected(ctx, args);
+        return result({ repoId: repository.repoId, ...iosAppBuild(repository, {
+          scheme: String(args.scheme ?? '').trim(),
+          udid: typeof args.udid === 'string' ? args.udid : undefined,
+          workspace: typeof args.workspace === 'string' ? args.workspace : undefined,
+          project: typeof args.project === 'string' ? args.project : undefined,
+          configuration: typeof args.configuration === 'string' ? args.configuration : undefined,
+          timeoutMs: typeof args.timeout_ms === 'number' ? args.timeout_ms : undefined,
+        }) });
+      }
+      case 'ios_app_install': {
+        if (args.confirm_authorization !== true) throw new Error('IOS_AUTHORIZATION_REQUIRED: confirm_authorization must be true');
+        const repository = selected(ctx, args);
+        return result({ repoId: repository.repoId, ...iosAppInstall(repository, {
+          udid: String(args.udid ?? '').trim(),
+          appPath: String(args.app_path ?? '').trim(),
+        }) });
+      }
+      case 'ios_app_launch': {
+        if (args.confirm_authorization !== true) throw new Error('IOS_AUTHORIZATION_REQUIRED: confirm_authorization must be true');
+        return result({ ...iosAppLaunch({
+          udid: String(args.udid ?? '').trim(),
+          bundleId: String(args.bundle_id ?? '').trim(),
+          arguments: Array.isArray(args.arguments) ? args.arguments.map(String) : undefined,
+        }) });
+      }
+      case 'ios_simulator_screenshot': {
+        const repository = selected(ctx, args);
+        return result({ repoId: repository.repoId, ...iosSimulatorScreenshot(repository, {
+          udid: String(args.udid ?? '').trim(),
+          label: typeof args.label === 'string' ? args.label : undefined,
+        }) });
+      }
+      case 'ios_simulator_log_tail': {
+        const repository = selected(ctx, args);
+        return result({ repoId: repository.repoId, ...iosSimulatorLogTail(repository, {
+          udid: String(args.udid ?? '').trim(),
+          process: typeof args.process === 'string' ? args.process : undefined,
+          last: typeof args.last === 'string' ? args.last : undefined,
+          maxBytes: typeof args.max_bytes === 'number' ? args.max_bytes : undefined,
+        }) });
+      }
+      case 'ios_ui_smoke_test': {
+        if (args.confirm_authorization !== true) throw new Error('IOS_AUTHORIZATION_REQUIRED: confirm_authorization must be true');
+        const repository = selected(ctx, args);
+        return result({ repoId: repository.repoId, ...iosUiSmokeTest(repository, {
+          udid: String(args.udid ?? '').trim(),
+          scheme: String(args.scheme ?? '').trim(),
+          bundleId: String(args.bundle_id ?? '').trim(),
+          workspace: typeof args.workspace === 'string' ? args.workspace : undefined,
+          project: typeof args.project === 'string' ? args.project : undefined,
+          configuration: typeof args.configuration === 'string' ? args.configuration : undefined,
+          appPath: typeof args.app_path === 'string' ? args.app_path : undefined,
+          screenshotLabel: typeof args.screenshot_label === 'string' ? args.screenshot_label : undefined,
+        }) });
       }
       case 'runtime_cleanup_preview': {
         const repository = selected(ctx, args);

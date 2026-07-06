@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 5,
+  "id": "ISS-20260706-97AA9D",
+  "title": "Phase 1 typed runtime storage repair tools",
+  "slug": "phase-1-typed-runtime-storage-repair-tools",
+  "kind": "feature",
+  "status": "planned",
+  "summary": "Implement typed runtime storage/local-jobs repair preview and apply actions for repo-harness self-healing. This phase is scoped only to repo-harness-controller-runtime and must not touch yaozhunshi or other repositories.",
+  "goals": [
+    "Expose runtime storage repair preview/apply actions with repoId scoping.",
+    "Repair preview should inspect repository local-jobs and controller-home local-jobs without mutation.",
+    "Repair apply should only handle explicit safe candidates by default.",
+    "Retain bootstrap script as fallback while moving normal self-healing into typed tools.",
+    "Add regression tests and MCP compatibility updates."
+  ],
+  "nonGoals": [
+    "Operations on yaozhunshi or any other repository.",
+    "Cross-repository cleanup or worker termination.",
+    "Deleting legacy runs.",
+    "Unreviewed merge, push, or release.",
+    "iOS simulator tooling in this phase."
+  ],
+  "acceptanceCriteria": [
+    "Preview reports stale, missing, unreadable, pending, and active local-job candidates without mutation.",
+    "Apply terminalizes or quarantines only safe repo-scoped local-job candidates by default.",
+    "Pending approvals require explicit authorization to cancel.",
+    "No process kill is performed by default.",
+    "Audit evidence records inspected roots and applied actions.",
+    "Tests validate stale, missing, unreadable, pending, and cross-repo exclusion cases.",
+    "npm run check:type and npm run check:mcp-compatibility pass."
+  ],
+  "relatedArtifacts": [],
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Implement typed runtime storage repair",
+      "objective": "Add runtime storage/local-jobs repair preview and apply actions, wire them into MCP runtime tools, update compatibility checks, and add focused tests and docs. Preserve repository scoping and yaozhunshi exclusion.",
+      "status": "ready",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src/runtime/recovery/**",
+        "src/runtime/gateway/mcp/**",
+        "tests/runtime/**",
+        "scripts/check-mcp-compatibility.ts",
+        "docs/**"
+      ],
+      "forbiddenPaths": [
+        ".ai/harness/**",
+        "_ops/**",
+        ".git/**"
+      ],
+      "checks": [
+        "package:check:type",
+        "package:check:mcp-compatibility"
+      ],
+      "acceptanceCriteria": [
+        "Preview is read-only and deterministic.",
+        "Apply requires explicit confirmation and only mutates current repo local-job metadata.",
+        "No cross-repo cleanup path exists.",
+        "Tests cover stale/missing/unreadable/pending local-jobs and controller-home roots."
+      ],
+      "risk": "medium",
+      "recommendedAgent": "codex",
+      "notes": [],
+      "runIds": [],
+      "createdAt": "2026-07-06T09:04:19.605Z",
+      "updatedAt": "2026-07-06T09:04:19.605Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    }
+  ],
+  "createdAt": "2026-07-06T09:04:19.605Z",
+  "updatedAt": "2026-07-06T09:04:19.605Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+}

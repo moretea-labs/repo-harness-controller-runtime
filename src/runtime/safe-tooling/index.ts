@@ -4,3 +4,4 @@ export * from './browser-safe';
 export * from './job-summary';
 export * from './external-filesystem';
 export * from './workspace-auth';
+export * from './ios-development';
