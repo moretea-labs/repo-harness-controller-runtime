@@ -102,6 +102,8 @@ import { CORE_CONTROLLER_TOOL_NAMES } from "../mcp/toolset";
 import { submitAssistantIntent, runAssistantRoutineNow } from "../../runtime/assistant/intent";
 import { assistantOpenApiSchema } from "../../runtime/assistant/openapi";
 import { buildAssistantReadinessReport } from "../../runtime/assistant/readiness";
+import { listWebTargets, previewBrowserDomainAccess, summarizePluginForLowInterception } from "../../runtime/safe-tooling";
+import { buildModelClientSummary, deepSeekFunctionToolManifest, prepareDeepSeekToolCall } from "../../runtime/model-clients";
 import { applyRuntimeCleanup, previewRuntimeCleanup } from "../../runtime/maintenance/cleanup";
 import { assertRecoveryAuthorized, buildCapabilityRecoverySnapshot, buildRecoveryAuditRecord, recoveryActionById, writeRecoveryAuditRecord } from "../../runtime/recovery";
 import {
@@ -1402,6 +1404,52 @@ export async function startLocalBridgeServer(
   });
   app.get("/api/github/plugin", (_request, response) => {
     response.json(getGitHubPluginStatus(options.repoRoot));
+  });
+  app.get("/api/toolchain/plugins/:pluginId/summary", (request, response) => {
+    try {
+      const controllerHome = resolveControllerHome();
+      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      const manifest = getAssistantPluginManifest(controllerHome, repository, request.params.pluginId);
+      response.json({ plugin: summarizePluginForLowInterception(manifest) });
+    } catch (error) {
+      response.status(404).json({ error: errorMessage(error) });
+    }
+  });
+  app.get("/api/toolchain/web-targets", (_request, response) => {
+    try {
+      const controllerHome = resolveControllerHome();
+      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      const manifest = getAssistantPluginManifest(controllerHome, repository, "browser");
+      response.json({ targets: listWebTargets(options.repoRoot, manifest), arbitraryUrlAccepted: false });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/toolchain/web-domain-preview", (request, response) => {
+    try {
+      const controllerHome = resolveControllerHome();
+      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      const manifest = getAssistantPluginManifest(controllerHome, repository, "browser");
+      response.json({ preview: previewBrowserDomainAccess(options.repoRoot, request.body?.domain, request.body?.reason, manifest) });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.get("/api/toolchain/model-clients", (_request, response) => {
+    response.json({ clients: buildModelClientSummary(), policyOwner: "repo-harness" });
+  });
+  app.get("/api/toolchain/deepseek/tools", (_request, response) => {
+    response.json({ provider: "deepseek", tools: deepSeekFunctionToolManifest(), policyOwner: "repo-harness" });
+  });
+  app.post("/api/toolchain/deepseek/prepare", (request, response) => {
+    try {
+      const args = request.body?.functionArguments && typeof request.body.functionArguments === "object" && !Array.isArray(request.body.functionArguments)
+        ? request.body.functionArguments as Record<string, unknown>
+        : {};
+      response.json({ prepared: prepareDeepSeekToolCall(String(request.body?.functionName ?? "").trim(), args) });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
   });
   app.get("/api/plugins", (_request, response) => {
     try {

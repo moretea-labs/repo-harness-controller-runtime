@@ -41,6 +41,15 @@ import { controllerContextProjectionAgeMs, readControllerContextProjection } fro
 import { loadMcpRuntimeState } from '../../../cli/mcp/auth';
 import { redactMcpText } from '../../../cli/mcp/redaction';
 import { getAssistantPluginManifest, listAssistantPluginManifests, submitAssistantPluginAction } from '../../plugins/store';
+import {
+  listWebTargets,
+  mergeAllowedDomains,
+  previewBrowserDomainAccess,
+  resolveWebTargetUrl,
+  summarizeJobResultForLowInterception,
+  summarizePluginForLowInterception,
+} from '../../safe-tooling';
+import { buildModelClientSummary, deepSeekFunctionToolManifest, prepareDeepSeekToolCall } from '../../model-clients';
 import { buildAssistantReadinessReport } from '../../assistant/readiness';
 import { applyRuntimeCleanup, previewRuntimeCleanup } from '../../maintenance/cleanup';
 import { buildCapabilityRecoverySnapshot, recoveryActionById, buildRecoveryAuditRecord, assertRecoveryAuthorized, writeRecoveryAuditRecord, listRecoveryAuditRecords } from '../../recovery';
@@ -162,6 +171,53 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
     confirm_authorization: { type: 'boolean' },
     confirmation_text: { type: 'string' },
   }, ['plugin_id', 'action_id', 'request_id'], false),
+  definition('toolchain_plugin_summary', 'Return a redacted, low-interception plugin summary without raw config files or full action schemas.', {
+    repo_id: repoId,
+    plugin_id: { type: 'string' },
+  }, ['plugin_id']),
+  definition('web_targets_list', 'List pre-allowed web targets as domain keys. This avoids arbitrary URL parameters.', {
+    repo_id: repoId,
+  }),
+  definition('web_target_snapshot', 'Create a read-only browser snapshot for a pre-allowed web target by target_key and path. Does not accept arbitrary URLs.', {
+    repo_id: repoId,
+    target_key: { type: 'string' },
+    path: { type: 'string' },
+    query: { type: 'object' },
+    capture: { type: 'string', enum: ['title', 'text', 'screenshot'] },
+    wait_until: { type: 'string', enum: ['load', 'domcontentloaded', 'networkidle'] },
+    max_chars: { type: 'number' },
+    full_page: { type: 'boolean' },
+    request_id: { type: 'string' },
+    timeout_ms: { type: 'number' },
+  }, ['target_key', 'request_id'], false),
+  definition('web_domain_access_preview', 'Preview a browser domain access request without writing plugin config or accepting arbitrary URLs.', {
+    repo_id: repoId,
+    domain: { type: 'string' },
+    reason: { type: 'string' },
+  }, ['domain']),
+  definition('web_domain_access_apply', 'Apply a previously previewed browser domain access request through browser configuration with explicit authorization.', {
+    repo_id: repoId,
+    domain: { type: 'string' },
+    reason: { type: 'string' },
+    preview_ticket_id: { type: 'string' },
+    request_id: { type: 'string' },
+    confirm_authorization: { type: 'boolean' },
+  }, ['domain', 'request_id', 'confirm_authorization'], false),
+  definition('work_result_summary', 'Return a redacted job result summary with failure class and suggested next actions. Does not return raw stdout or stderr.', {
+    repo_id: repoId,
+    job_id: { type: 'string' },
+  }, ['job_id']),
+  definition('model_clients_summary', 'List enabled model clients and DeepSeek adapter configuration state. Policy remains enforced by repo-harness.', {
+    repo_id: repoId,
+  }),
+  definition('deepseek_tool_manifest', 'Return DeepSeek function-calling tool manifests for the low-interception repo-harness surface.', {
+    repo_id: repoId,
+  }),
+  definition('deepseek_tool_call_prepare', 'Translate one DeepSeek function call into a repo-harness operation without executing it.', {
+    repo_id: repoId,
+    function_name: { type: 'string' },
+    function_arguments: { type: 'object' },
+  }, ['function_name', 'function_arguments']),
   definition('assistant_readiness', 'Summarize personal-assistant readiness, Google plugin state, routines, inbox, and recommended next actions.', {
     repo_id: repoId,
   }),
@@ -1229,6 +1285,126 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           daemon: { status: daemon.status, pid: daemon.pid },
           next: `Call get_job with job_id ${submitted.job.jobId}.`,
         });
+      }
+      case 'toolchain_plugin_summary': {
+        const repository = selected(ctx, args);
+        const manifest = getAssistantPluginManifest(ctx.controllerHome, repository, String(args.plugin_id ?? '').trim());
+        return result({
+          plugin: summarizePluginForLowInterception(manifest),
+          nonOpaque: true,
+          next: manifest.pluginId === 'browser'
+            ? 'Use web_targets_list, web_domain_access_preview, or web_target_snapshot instead of raw browser action names.'
+            : undefined,
+        });
+      }
+      case 'web_targets_list': {
+        const repository = selected(ctx, args);
+        const manifest = getAssistantPluginManifest(ctx.controllerHome, repository, 'browser');
+        return result({
+          pluginId: 'browser',
+          enabled: manifest.enabled,
+          healthState: manifest.health.state,
+          ready: manifest.health.ready,
+          targets: listWebTargets(repository.canonicalRoot, manifest),
+          safety: {
+            arbitraryUrlAccepted: false,
+            returnsRawConfig: false,
+            nextTool: 'web_target_snapshot',
+          },
+        });
+      }
+      case 'web_target_snapshot': {
+        const repository = selected(ctx, args);
+        const manifest = getAssistantPluginManifest(ctx.controllerHome, repository, 'browser');
+        const url = resolveWebTargetUrl(repository.canonicalRoot, String(args.target_key ?? '').trim(), args.path, args.query, manifest);
+        const capture = args.capture === 'screenshot' ? 'screenshot' : args.capture === 'text' ? 'text' : 'title';
+        const actionId = capture === 'screenshot' ? 'screenshot' : 'open_page';
+        const actionArguments: Record<string, unknown> = {
+          url,
+          wait_until: typeof args.wait_until === 'string' ? args.wait_until : 'domcontentloaded',
+          timeout_ms: typeof args.timeout_ms === 'number' ? args.timeout_ms : undefined,
+          ...(capture === 'text' ? { extract_text: true, max_chars: typeof args.max_chars === 'number' ? args.max_chars : 4000 } : {}),
+          ...(capture === 'screenshot' ? { full_page: args.full_page === true } : {}),
+        };
+        const requestId = String(args.request_id ?? '').trim();
+        if (!requestId) throw new Error('REQUEST_ID_REQUIRED: web_target_snapshot requires request_id');
+        const submitted = submitAssistantPluginAction(ctx.controllerHome, repository, {
+          pluginId: 'browser',
+          actionId,
+          requestId,
+          args: actionArguments,
+          timeoutMs: typeof args.timeout_ms === 'number' ? args.timeout_ms : undefined,
+          origin: { surface: 'mcp', actor: 'web_target_snapshot', correlationId: requestId },
+        });
+        const daemon = ensureControllerDaemon(ctx.controllerHome);
+        return result({
+          accepted: true,
+          deduplicated: submitted.deduplicated,
+          webTarget: {
+            targetKey: String(args.target_key ?? '').trim(),
+            capture,
+            path: typeof args.path === 'string' ? args.path : '/',
+            arbitraryUrlAccepted: false,
+          },
+          job: summarizeWork(submitted.job, repository.canonicalRoot),
+          daemon: { status: daemon.status, pid: daemon.pid },
+          next: `Call work_result_summary with job_id ${submitted.job.jobId}.`,
+        });
+      }
+      case 'web_domain_access_preview': {
+        const repository = selected(ctx, args);
+        const manifest = getAssistantPluginManifest(ctx.controllerHome, repository, 'browser');
+        return result({
+          preview: previewBrowserDomainAccess(repository.canonicalRoot, args.domain, args.reason, manifest),
+          next: 'After human review, call web_domain_access_apply with confirm_authorization=true.',
+        });
+      }
+      case 'web_domain_access_apply': {
+        const repository = selected(ctx, args);
+        if (args.confirm_authorization !== true) throw new Error('CONFIRM_AUTHORIZATION_REQUIRED: web_domain_access_apply requires confirm_authorization=true');
+        const manifest = getAssistantPluginManifest(ctx.controllerHome, repository, 'browser');
+        const preview = previewBrowserDomainAccess(repository.canonicalRoot, args.domain, args.reason, manifest);
+        const providedTicket = typeof args.preview_ticket_id === 'string' ? args.preview_ticket_id.trim() : '';
+        if (providedTicket && providedTicket !== preview.ticketId) throw new Error('DOMAIN_ACCESS_TICKET_MISMATCH');
+        const requestId = String(args.request_id ?? '').trim();
+        if (!requestId) throw new Error('REQUEST_ID_REQUIRED: web_domain_access_apply requires request_id');
+        const allowedDomains = mergeAllowedDomains(repository.canonicalRoot, args.domain, manifest);
+        const submitted = submitAssistantPluginAction(ctx.controllerHome, repository, {
+          pluginId: 'browser',
+          actionId: 'configure',
+          requestId,
+          args: { enabled: true, allowed_domains: allowedDomains },
+          confirmAuthorization: true,
+          origin: { surface: 'mcp', actor: 'web_domain_access_apply', correlationId: requestId },
+        });
+        const daemon = ensureControllerDaemon(ctx.controllerHome);
+        return result({
+          accepted: true,
+          deduplicated: submitted.deduplicated,
+          preview,
+          allowedDomainCount: allowedDomains.length,
+          job: summarizeWork(submitted.job, repository.canonicalRoot),
+          daemon: { status: daemon.status, pid: daemon.pid },
+          next: `Call work_result_summary with job_id ${submitted.job.jobId}.`,
+        });
+      }
+      case 'work_result_summary': {
+        const repository = selected(ctx, args);
+        const jobId = String(args.job_id ?? '').trim();
+        const job = getExecutionJob(ctx.controllerHome, repository.repoId, jobId);
+        return result({ summary: summarizeJobResultForLowInterception(job) });
+      }
+      case 'model_clients_summary': {
+        return result({ clients: buildModelClientSummary(), policyOwner: 'repo-harness', transportEncryption: 'not-configured-by-this-tool' });
+      }
+      case 'deepseek_tool_manifest': {
+        return result({ provider: 'deepseek', tools: deepSeekFunctionToolManifest(), policyOwner: 'repo-harness' });
+      }
+      case 'deepseek_tool_call_prepare': {
+        const functionArguments = args.function_arguments && typeof args.function_arguments === 'object' && !Array.isArray(args.function_arguments)
+          ? args.function_arguments as Record<string, unknown>
+          : {};
+        return result({ prepared: prepareDeepSeekToolCall(String(args.function_name ?? '').trim(), functionArguments) });
       }
       case 'create_campaign': {
         const repository = selected(ctx, args);
