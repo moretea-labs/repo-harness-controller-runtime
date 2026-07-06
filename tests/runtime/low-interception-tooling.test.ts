@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { listWebTargets, previewBrowserDomainAccess, resolveWebTargetUrl, summarizePluginForLowInterception, summarizeJobResultForLowInterception } from '../../src/runtime/safe-tooling';
-import { buildModelClientSummary, deepSeekFunctionToolManifest, prepareDeepSeekToolCall } from '../../src/runtime/model-clients';
+import { buildModelClientSummary, buildModelControlPlaneSummary, deepSeekControllerManifest, deepSeekFunctionToolManifest, prepareDeepSeekControllerHandoff, prepareDeepSeekControllerRequest, prepareDeepSeekToolCall } from '../../src/runtime/model-clients';
 import type { AssistantPluginManifest } from '../../src/runtime/plugins/types';
 import type { ExecutionJob } from '../../src/runtime/execution/jobs/types';
 
@@ -83,5 +83,20 @@ describe('low-interception safe tool surface', () => {
     expect(prepared.accepted).toBe(true);
     expect(prepared.mappedOperation).toBe('web_target_snapshot');
     expect(prepared.safety.executesLocally).toBe(false);
+  });
+
+  test('models DeepSeek as a backup primary controller handoff target', () => {
+    const summary = buildModelControlPlaneSummary({ DEEPSEEK_API_KEY: 'x' } as NodeJS.ProcessEnv);
+    expect(summary.backupControllers).toContain('deepseek-backup-controller');
+    expect(summary.concurrencyPolicy.workspaceWriteRequiresLease).toBe(true);
+    const manifest = deepSeekControllerManifest();
+    expect(manifest).toMatchObject({ controllerClientId: 'deepseek-backup-controller', policyOwner: 'repo-harness' });
+    const handoff = prepareDeepSeekControllerHandoff({ reason: 'chatgpt_platform_blocked', objective: 'Continue safe browser diagnosis.' }, { DEEPSEEK_API_KEY: 'x' } as NodeJS.ProcessEnv);
+    expect(handoff.role).toBe('backup_primary_controller');
+    expect(handoff.safety.executesToolsDirectly).toBe(false);
+    const request = prepareDeepSeekControllerRequest({ userMessage: 'Check the allowed web targets.', objective: 'Diagnose browser capability.' }, { DEEPSEEK_API_KEY: 'x' } as NodeJS.ProcessEnv);
+    expect(request.configured).toBe(true);
+    expect(request.sendsRawRepositoryContent).toBe(false);
+    expect(request.request.tools.length).toBeGreaterThan(0);
   });
 });

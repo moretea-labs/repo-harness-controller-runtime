@@ -103,7 +103,7 @@ import { submitAssistantIntent, runAssistantRoutineNow } from "../../runtime/ass
 import { assistantOpenApiSchema } from "../../runtime/assistant/openapi";
 import { buildAssistantReadinessReport } from "../../runtime/assistant/readiness";
 import { listWebTargets, previewBrowserDomainAccess, summarizePluginForLowInterception } from "../../runtime/safe-tooling";
-import { buildModelClientSummary, deepSeekFunctionToolManifest, prepareDeepSeekToolCall } from "../../runtime/model-clients";
+import { buildModelClientSummary, buildModelControlPlaneSummary, deepSeekControllerManifest, deepSeekFunctionToolManifest, prepareDeepSeekControllerHandoff, prepareDeepSeekControllerRequest, prepareDeepSeekToolCall } from "../../runtime/model-clients";
 import { applyRuntimeCleanup, previewRuntimeCleanup } from "../../runtime/maintenance/cleanup";
 import { assertRecoveryAuthorized, buildCapabilityRecoverySnapshot, buildRecoveryAuditRecord, recoveryActionById, writeRecoveryAuditRecord } from "../../runtime/recovery";
 import {
@@ -1438,8 +1438,14 @@ export async function startLocalBridgeServer(
   app.get("/api/toolchain/model-clients", (_request, response) => {
     response.json({ clients: buildModelClientSummary(), policyOwner: "repo-harness" });
   });
+  app.get("/api/toolchain/model-control-plane", (_request, response) => {
+    response.json({ controlPlane: buildModelControlPlaneSummary(), transportEncryption: "not-configured-by-this-tool" });
+  });
   app.get("/api/toolchain/deepseek/tools", (_request, response) => {
     response.json({ provider: "deepseek", tools: deepSeekFunctionToolManifest(), policyOwner: "repo-harness" });
+  });
+  app.get("/api/toolchain/deepseek/controller-manifest", (_request, response) => {
+    response.json({ manifest: deepSeekControllerManifest() });
   });
   app.post("/api/toolchain/deepseek/prepare", (request, response) => {
     try {
@@ -1447,6 +1453,40 @@ export async function startLocalBridgeServer(
         ? request.body.functionArguments as Record<string, unknown>
         : {};
       response.json({ prepared: prepareDeepSeekToolCall(String(request.body?.functionName ?? "").trim(), args) });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/toolchain/deepseek/handoff", (request, response) => {
+    try {
+      const controllerHome = resolveControllerHome();
+      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      response.json({ handoff: prepareDeepSeekControllerHandoff({
+        reason: request.body?.reason,
+        objective: request.body?.objective,
+        repoId: repository.repoId,
+        currentController: request.body?.currentController,
+        blockedToolName: request.body?.blockedToolName,
+        recentSafeError: request.body?.recentSafeError,
+      }) });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/toolchain/deepseek/controller-request", (request, response) => {
+    try {
+      const controllerHome = resolveControllerHome();
+      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      response.json({ preview: prepareDeepSeekControllerRequest({
+        reason: request.body?.reason,
+        objective: request.body?.objective,
+        userMessage: request.body?.userMessage,
+        repoId: repository.repoId,
+        currentController: request.body?.currentController,
+        blockedToolName: request.body?.blockedToolName,
+        recentSafeError: request.body?.recentSafeError,
+        model: request.body?.model,
+      }) });
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }

@@ -110,3 +110,7 @@ _ops/
 # repo-harness plugin runtime state
 .repo-harness/plugins/*.json
 .ai
+
+# repo-harness local browser/runtime scratch
+.repo-harness/browser/
+.repo-harness/repair-backups/

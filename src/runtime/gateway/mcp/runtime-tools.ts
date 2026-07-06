@@ -49,7 +49,7 @@ import {
   summarizeJobResultForLowInterception,
   summarizePluginForLowInterception,
 } from '../../safe-tooling';
-import { buildModelClientSummary, deepSeekFunctionToolManifest, prepareDeepSeekToolCall } from '../../model-clients';
+import { buildModelClientSummary, buildModelControlPlaneSummary, deepSeekControllerManifest, deepSeekFunctionToolManifest, prepareDeepSeekControllerHandoff, prepareDeepSeekControllerRequest, prepareDeepSeekToolCall } from '../../model-clients';
 import { buildAssistantReadinessReport } from '../../assistant/readiness';
 import { applyRuntimeCleanup, previewRuntimeCleanup } from '../../maintenance/cleanup';
 import { buildCapabilityRecoverySnapshot, recoveryActionById, buildRecoveryAuditRecord, assertRecoveryAuthorized, writeRecoveryAuditRecord, listRecoveryAuditRecords } from '../../recovery';
@@ -207,7 +207,14 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
     repo_id: repoId,
     job_id: { type: 'string' },
   }, ['job_id']),
+  definition('work_status_digest', 'Return a redacted work status digest using a neutral work_ref. Does not return raw stdout or stderr.', {
+    repo_id: repoId,
+    work_ref: { type: 'string' },
+  }, ['work_ref']),
   definition('model_clients_summary', 'List enabled model clients and DeepSeek adapter configuration state. Policy remains enforced by repo-harness.', {
+    repo_id: repoId,
+  }),
+  definition('model_control_plane_summary', 'Summarize primary and backup model controllers, handoff modes, and concurrency policy.', {
     repo_id: repoId,
   }),
   definition('deepseek_tool_manifest', 'Return DeepSeek function-calling tool manifests for the low-interception repo-harness surface.', {
@@ -218,6 +225,27 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
     function_name: { type: 'string' },
     function_arguments: { type: 'object' },
   }, ['function_name', 'function_arguments']),
+  definition('deepseek_controller_manifest', 'Return DeepSeek backup-controller manifest, boundaries, and function tools.', {
+    repo_id: repoId,
+  }),
+  definition('deepseek_controller_handoff_prepare', 'Prepare a safe DeepSeek backup-controller handoff packet without calling the external model.', {
+    repo_id: repoId,
+    reason: { type: 'string', enum: ['manual', 'chatgpt_platform_blocked', 'chatgpt_unavailable', 'parallel_review', 'local_gui_request'] },
+    objective: { type: 'string' },
+    current_controller: { type: 'string' },
+    blocked_tool_name: { type: 'string' },
+    recent_safe_error: { type: 'string' },
+  }),
+  definition('deepseek_controller_request_prepare', 'Prepare a DeepSeek chat-completions request for backup controller mode without sending it.', {
+    repo_id: repoId,
+    reason: { type: 'string', enum: ['manual', 'chatgpt_platform_blocked', 'chatgpt_unavailable', 'parallel_review', 'local_gui_request'] },
+    objective: { type: 'string' },
+    user_message: { type: 'string' },
+    current_controller: { type: 'string' },
+    blocked_tool_name: { type: 'string' },
+    recent_safe_error: { type: 'string' },
+    model: { type: 'string' },
+  }),
   definition('assistant_readiness', 'Summarize personal-assistant readiness, Google plugin state, routines, inbox, and recommended next actions.', {
     repo_id: repoId,
   }),
@@ -1348,7 +1376,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           },
           job: summarizeWork(submitted.job, repository.canonicalRoot),
           daemon: { status: daemon.status, pid: daemon.pid },
-          next: `Call work_result_summary with job_id ${submitted.job.jobId}.`,
+          next: `Call work_status_digest with work_ref ${submitted.job.jobId}.`,
         });
       }
       case 'web_domain_access_preview': {
@@ -1385,7 +1413,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           allowedDomainCount: allowedDomains.length,
           job: summarizeWork(submitted.job, repository.canonicalRoot),
           daemon: { status: daemon.status, pid: daemon.pid },
-          next: `Call work_result_summary with job_id ${submitted.job.jobId}.`,
+          next: `Call work_status_digest with work_ref ${submitted.job.jobId}.`,
         });
       }
       case 'work_result_summary': {
@@ -1394,8 +1422,17 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         const job = getExecutionJob(ctx.controllerHome, repository.repoId, jobId);
         return result({ summary: summarizeJobResultForLowInterception(job) });
       }
+      case 'work_status_digest': {
+        const repository = selected(ctx, args);
+        const workRef = String(args.work_ref ?? '').trim();
+        const job = getExecutionJob(ctx.controllerHome, repository.repoId, workRef);
+        return result({ digest: summarizeJobResultForLowInterception(job), workRef });
+      }
       case 'model_clients_summary': {
         return result({ clients: buildModelClientSummary(), policyOwner: 'repo-harness', transportEncryption: 'not-configured-by-this-tool' });
+      }
+      case 'model_control_plane_summary': {
+        return result({ controlPlane: buildModelControlPlaneSummary(), transportEncryption: 'not-configured-by-this-tool' });
       }
       case 'deepseek_tool_manifest': {
         return result({ provider: 'deepseek', tools: deepSeekFunctionToolManifest(), policyOwner: 'repo-harness' });
@@ -1405,6 +1442,33 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           ? args.function_arguments as Record<string, unknown>
           : {};
         return result({ prepared: prepareDeepSeekToolCall(String(args.function_name ?? '').trim(), functionArguments) });
+      }
+      case 'deepseek_controller_manifest': {
+        return result({ manifest: deepSeekControllerManifest() });
+      }
+      case 'deepseek_controller_handoff_prepare': {
+        const repository = selected(ctx, args);
+        return result({ handoff: prepareDeepSeekControllerHandoff({
+          reason: args.reason as never,
+          objective: typeof args.objective === 'string' ? args.objective : undefined,
+          repoId: repository.repoId,
+          currentController: typeof args.current_controller === 'string' ? args.current_controller : undefined,
+          blockedToolName: typeof args.blocked_tool_name === 'string' ? args.blocked_tool_name : undefined,
+          recentSafeError: typeof args.recent_safe_error === 'string' ? args.recent_safe_error : undefined,
+        }) });
+      }
+      case 'deepseek_controller_request_prepare': {
+        const repository = selected(ctx, args);
+        return result({ preview: prepareDeepSeekControllerRequest({
+          reason: args.reason as never,
+          objective: typeof args.objective === 'string' ? args.objective : undefined,
+          userMessage: typeof args.user_message === 'string' ? args.user_message : undefined,
+          repoId: repository.repoId,
+          currentController: typeof args.current_controller === 'string' ? args.current_controller : undefined,
+          blockedToolName: typeof args.blocked_tool_name === 'string' ? args.blocked_tool_name : undefined,
+          recentSafeError: typeof args.recent_safe_error === 'string' ? args.recent_safe_error : undefined,
+          model: typeof args.model === 'string' ? args.model : undefined,
+        }) });
       }
       case 'create_campaign': {
         const repository = selected(ctx, args);

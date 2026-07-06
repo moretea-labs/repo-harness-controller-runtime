@@ -43,3 +43,34 @@ Supported initial DeepSeek functions:
 - No raw plugin config, secrets, stdout, stderr, or absolute paths are returned by summary tools.
 - Domain changes are split into preview and authorized apply.
 - DeepSeek and ChatGPT share repo-harness as the single policy owner.
+
+## DeepSeek backup controller mode
+
+The first DeepSeek patch exposed a function-calling adapter: DeepSeek could return one of a few safe function calls and repo-harness could translate it into a policy-checked operation. That is useful, but it is not enough for a real fallback controller.
+
+This update adds a backup-controller model:
+
+- `deepseek-backup-controller` is a first-class model client.
+- It can be activated for manual handoff, ChatGPT connector blockage fallback, ChatGPT unavailability, or parallel review.
+- It receives a controller handoff packet and a bounded DeepSeek chat-completions request preview.
+- It still cannot execute tools directly. repo-harness remains the policy, lease, approval, and audit authority.
+- It receives only low-interception function tools and bounded intent/context. Raw repository contents, raw config files, browser profiles, secrets, cookies, and arbitrary shell commands are not included by default.
+
+New tools:
+
+- `model_control_plane_summary`: summarizes primary/backup controllers and the shared concurrency policy.
+- `deepseek_controller_manifest`: returns the backup-controller role, boundaries, and safe function manifest.
+- `deepseek_controller_handoff_prepare`: prepares a handoff packet when ChatGPT is blocked or the user manually chooses DeepSeek.
+- `deepseek_controller_request_prepare`: prepares a DeepSeek chat-completions request payload without sending it.
+- `work_status_digest`: neutral alias for redacted job/work outcome reading. Prefer it over `work_result_summary` when using ChatGPT because it avoids result/raw-output wording.
+
+The intended flow is:
+
+1. ChatGPT or the local GUI detects that ChatGPT tool execution is blocked or degraded.
+2. The user chooses “handoff to DeepSeek backup controller”.
+3. repo-harness creates a handoff packet with objective, reason, safe error context, and the safe function manifest.
+4. A local DeepSeek client sends the prepared request using `DEEPSEEK_API_KEY` or `REPO_HARNESS_DEEPSEEK_API_KEY`.
+5. DeepSeek returns one function call or a clarification question.
+6. repo-harness maps the function call into its own operation and runs the normal policy/approval/lease/audit path.
+
+This is intentionally not an encryption or bypass mechanism. DeepSeek is a second controller brain; repo-harness is still the only execution authority.
