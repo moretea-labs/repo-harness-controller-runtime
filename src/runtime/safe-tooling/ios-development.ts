@@ -144,6 +144,7 @@ function findFiles(root: string, suffix: string, maxDepth = 3): string[] {
       const path = join(dir, entryName);
       if (entry.isDirectory() && entryName.endsWith(suffix)) results.push(path);
       else if (entry.isDirectory()) visit(path, depth + 1);
+      else if (entry.isFile() && entryName.endsWith(suffix)) results.push(path);
     }
   }
   visit(root, 0);
@@ -201,33 +202,80 @@ export function iosSimulatorBoot(input: { udid: string; openSimulator?: boolean;
   return { ready: true, booted: true, udid, alreadyBooted };
 }
 
-export function iosAppBuild(repository: RepositoryRecord, input: { scheme: string; udid?: string; workspace?: string; project?: string; configuration?: string; timeoutMs?: number }) {
+export function iosAppBuild(repository: RepositoryRecord, input: { scheme?: string; udid?: string; workspace?: string; project?: string; configuration?: string; timeoutMs?: number; simulatorName?: string }) {
   const unsupported = assertDarwin();
   if (unsupported) return unsupported;
-  const scheme = String(input.scheme ?? '').trim();
-  if (!scheme) throw new Error('IOS_SCHEME_REQUIRED');
-  const workspace = safeRepoRelativePath(repository.canonicalRoot, input.workspace);
-  const project = safeRepoRelativePath(repository.canonicalRoot, input.project);
+  const listed = iosSchemesList(repository, { workspace: input.workspace, project: input.project });
+  if (!listed.ready) return listed;
+  const listedReady = listed as { ready: true; workspace?: string; project?: string; schemes: string[] };
+  const scheme = String(input.scheme ?? listedReady.schemes?.[0] ?? '').trim();
+  if (!scheme) throw new Error('IOS_SCHEME_REQUIRED: provide scheme or share at least one Xcode scheme');
+  const workspace = safeRepoRelativePath(repository.canonicalRoot, input.workspace ?? listedReady.workspace);
+  const project = safeRepoRelativePath(repository.canonicalRoot, input.project ?? listedReady.project);
   const derivedDataPath = safeArtifactDir(repository, 'DerivedData');
   const args = ['build'];
   if (workspace) args.push('-workspace', workspace);
   else if (project) args.push('-project', project);
   args.push('-scheme', scheme, '-configuration', input.configuration ?? 'Debug');
   if (input.udid) args.push('-destination', `platform=iOS Simulator,id=${String(input.udid).trim()}`);
-  else args.push('-destination', 'platform=iOS Simulator,name=iPhone 16 Pro');
+  else args.push('-destination', 'platform=iOS Simulator,name=' + (input.simulatorName ?? 'iPhone 16 Pro'));
   args.push('-derivedDataPath', derivedDataPath);
   const result = runCommand('xcodebuild', args, { cwd: repository.canonicalRoot, timeoutMs: input.timeoutMs ?? 10 * 60_000 });
+  const builtApps = findBuiltApps(repository);
   return {
     ready: result.ok,
     ok: result.ok,
     scheme,
     configuration: input.configuration ?? 'Debug',
     derivedDataPath: relative(repository.canonicalRoot, derivedDataPath),
+    appPath: builtApps[0],
+    builtApps,
     command: result.command,
     stdout: boundedText(result.stdout),
     stderr: boundedText(result.stderr),
     error: result.ok ? undefined : { code: 'IOS_BUILD_FAILED', message: (result.stderr || result.stdout).slice(0, 2000) },
   };
+}
+
+function findBuiltApps(repository: RepositoryRecord): string[] {
+  const root = resolve(repository.canonicalRoot, '.repo-harness', 'ios', 'DerivedData');
+  const apps: string[] = [];
+  function visit(dir: string, depth: number) {
+    if (depth > 8 || apps.length > 25) return;
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const path = join(dir, String(entry.name));
+      if (entry.isDirectory() && String(entry.name).endsWith('.app')) apps.push(relative(repository.canonicalRoot, path));
+      else if (entry.isDirectory()) visit(path, depth + 1);
+    }
+  }
+  visit(root, 0);
+  return apps.sort();
+}
+
+function readBuiltAppBundleId(repository: RepositoryRecord, appPath: string): string | undefined {
+  const appRoot = assertRepoBoundedAppPath(repository, appPath);
+  const plist = join(appRoot, 'Info.plist');
+  if (!existsSync(plist)) return undefined;
+  const plutil = runCommand('plutil', ['-extract', 'CFBundleIdentifier', 'raw', '-o', '-', plist]);
+  return plutil.ok && plutil.stdout.trim() ? plutil.stdout.trim() : undefined;
+}
+
+function chooseSimulatorUdid(input: { udid?: string; simulatorName?: string }): string {
+  const requested = String(input.udid ?? '').trim();
+  if (requested) return requested;
+  const preferred = iosSimulatorsList({ name: input.simulatorName ?? 'iPhone 16 Pro' });
+  if (preferred.ready) {
+    const preferredReady = preferred as { ready: true; devices: Array<{ udid: string }> };
+    if (preferredReady.devices[0]?.udid) return preferredReady.devices[0].udid;
+  }
+  const fallback = iosSimulatorsList();
+  if (fallback.ready) {
+    const fallbackReady = fallback as { ready: true; devices: Array<{ udid: string }> };
+    if (fallbackReady.devices[0]?.udid) return fallbackReady.devices[0].udid;
+  }
+  throw new Error('IOS_SIMULATOR_UNAVAILABLE: no available simulator was found');
 }
 
 function assertRepoBoundedAppPath(repository: RepositoryRecord, appPath: string): string {
@@ -290,12 +338,19 @@ export function iosSimulatorLogTail(repository: RepositoryRecord, input: { udid:
   return { ready: result.ok, path: relative(repository.canonicalRoot, file), content: text.content, truncated: text.truncated, error: result.ok ? undefined : { code: 'IOS_LOG_TAIL_FAILED', message: result.stderr || result.stdout } };
 }
 
-export function iosUiSmokeTest(repository: RepositoryRecord, input: { udid: string; scheme: string; bundleId: string; workspace?: string; project?: string; configuration?: string; appPath?: string; screenshotLabel?: string }) {
-  const build = input.appPath ? undefined : iosAppBuild(repository, input);
-  const installPath = input.appPath ?? undefined;
-  const boot = iosSimulatorBoot({ udid: input.udid });
-  const launch = iosAppLaunch({ udid: input.udid, bundleId: input.bundleId });
-  const screenshot = iosSimulatorScreenshot(repository, { udid: input.udid, label: input.screenshotLabel ?? input.scheme });
-  const logs = iosSimulatorLogTail(repository, { udid: input.udid, process: input.scheme, maxBytes: 12_000 });
-  return { ready: Boolean((build === undefined || build.ready) && boot.ready && launch.ready && screenshot.ready), build, installPath, boot, launch, screenshot, logs };
+export function iosUiSmokeTest(repository: RepositoryRecord, input: { udid?: string; simulatorName?: string; scheme?: string; bundleId?: string; workspace?: string; project?: string; configuration?: string; appPath?: string; screenshotLabel?: string }) {
+  const udid = chooseSimulatorUdid(input);
+  const build = input.appPath ? undefined : iosAppBuild(repository, { ...input, udid });
+  if (build && !build.ready) return { ready: false, udid, build };
+  const appPath = input.appPath ?? (build && 'appPath' in build ? String(build.appPath ?? '') : '');
+  if (!appPath) throw new Error('IOS_APP_PATH_REQUIRED: build did not produce a .app under .repo-harness/ios/DerivedData');
+  const bundleId = String(input.bundleId ?? readBuiltAppBundleId(repository, appPath) ?? '').trim();
+  if (!bundleId) throw new Error('IOS_BUNDLE_ID_REQUIRED: provide bundle_id or ensure built app Info.plist has CFBundleIdentifier');
+  const scheme = String(input.scheme ?? (build && 'scheme' in build ? build.scheme : '') ?? bundleId).trim();
+  const boot = iosSimulatorBoot({ udid });
+  const install = iosAppInstall(repository, { udid, appPath });
+  const launch = iosAppLaunch({ udid, bundleId });
+  const screenshot = iosSimulatorScreenshot(repository, { udid, label: input.screenshotLabel ?? scheme });
+  const logs = iosSimulatorLogTail(repository, { udid, process: scheme, maxBytes: 12_000 });
+  return { ready: Boolean((build === undefined || build.ready) && boot.ready && install.ready && launch.ready && screenshot.ready), udid, scheme, bundleId, build, install, boot, launch, screenshot, logs };
 }

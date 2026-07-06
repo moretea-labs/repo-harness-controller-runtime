@@ -620,8 +620,11 @@ function summarizeExecutionJob(job: ExecutionJob, repoRoot?: string): Record<str
       summaryOnly: true,
     },
     origin: job.origin,
-    resourceClaims: job.resourceClaims,
-    dependencies: job.dependencies,
+    resourceClaims: job.resourceClaims.map((claim) => ({
+      resourceKey: redactMcpText(scrubPathText(claim.resourceKey, replacements)).text,
+      mode: claim.mode,
+    })),
+    dependencyCount: job.dependencies.length,
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
     queuedAt: job.queuedAt,
@@ -632,8 +635,13 @@ function summarizeExecutionJob(job: ExecutionJob, repoRoot?: string): Record<str
     workerPid: job.workerPid,
     attempt: job.attempt,
     maxAttempts: job.maxAttempts,
-    evidenceIds: job.evidenceIds,
-    outcome: job.outcome,
+    evidenceCount: job.evidenceIds.length,
+    outcome: job.outcome ? {
+      infrastructureError: job.outcome.infrastructureError ? {
+        code: job.outcome.infrastructureError.code,
+        message: redactMcpText(scrubPathText(job.outcome.infrastructureError.message, replacements)).text,
+      } : undefined,
+    } : undefined,
     result: resultPreview
       ? {
         preview: resultPreview.preview,
@@ -656,6 +664,14 @@ function summarizeExecutionJob(job: ExecutionJob, repoRoot?: string): Record<str
           : {}),
       }
       : undefined,
+  };
+}
+
+function summarizeRuntimeProjectionForReadiness<T extends { currentAttention?: unknown; attention?: unknown }>(projection: T): T & { historicalAttention?: unknown } {
+  return {
+    ...projection,
+    attention: projection.currentAttention ?? projection.attention,
+    historicalAttention: projection.attention,
   };
 }
 
@@ -1262,12 +1278,13 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         const full = args.detail_level === 'full';
         const repoRoot = repositoryRootForRepoId(ctx.controllerHome, job.repoId);
         return result({
-          detailLevel: full ? 'full' : 'summary',
-          job: full ? job : summarizeExecutionJob(job, repoRoot),
+          detailLevel: 'summary',
+          requestedDetailLevel: full ? 'full' : 'summary',
+          job: summarizeExecutionJob(job, repoRoot),
           ...(args.include_events === true
-            ? { events: full ? readJobEvents(ctx.controllerHome, job.repoId, job.jobId) : summarizeJobEvents(ctx.controllerHome, job.repoId, job.jobId) }
+            ? { events: summarizeJobEvents(ctx.controllerHome, job.repoId, job.jobId) }
             : {}),
-          ...(full ? {} : { next: 'Call get_job with detail_level=full only when the summary is insufficient.' }),
+          next: 'Raw job state is intentionally not returned through MCP; use get_artifact for bounded evidence content.',
         });
       }
       case 'get_artifact': {
@@ -1277,19 +1294,25 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
       }
       case 'list_jobs': {
         const repository = selected(ctx, args);
-        const jobs = listExecutionJobs(ctx.controllerHome, repository.repoId, typeof args.limit === 'number' ? args.limit : 100);
+        const requestedLimit = typeof args.limit === 'number' ? Math.trunc(args.limit) : 100;
+        const limit = Math.max(1, Math.min(requestedLimit, 100));
+        const jobs = listExecutionJobs(ctx.controllerHome, repository.repoId, limit);
         const full = args.detail_level === 'full';
         return result({
-          detailLevel: full ? 'full' : 'summary',
-          jobs: full ? jobs : jobs.map((job) => summarizeExecutionJob(job, repository.canonicalRoot)),
-          ...(full ? {} : { next: 'Call get_job with one job_id for more detail.' }),
+          detailLevel: 'summary',
+          requestedDetailLevel: full ? 'full' : 'summary',
+          limit,
+          jobs: jobs.map((job) => summarizeExecutionJob(job, repository.canonicalRoot)),
+          next: 'Call get_job with one job_id for bounded details; raw job state is intentionally not returned through MCP.',
         });
       }
       case 'cancel_job': {
         const jobId = String(args.job_id ?? '').trim();
         const job = typeof args.repo_id === 'string' ? getExecutionJob(ctx.controllerHome, args.repo_id, jobId) : findExecutionJob(ctx.controllerHome, jobId);
         if (!job) return result({ error: { code: 'JOB_NOT_FOUND', message: jobId } }, true);
-        return result({ job: await cancelExecutionJob(ctx.controllerHome, job.repoId, job.jobId, typeof args.reason === 'string' ? args.reason : undefined) });
+        const cancelled = await cancelExecutionJob(ctx.controllerHome, job.repoId, job.jobId, typeof args.reason === 'string' ? args.reason : undefined);
+        const repoRoot = repositoryRootForRepoId(ctx.controllerHome, cancelled.repoId);
+        return result({ job: summarizeExecutionJob(cancelled, repoRoot) });
       }
       case 'controller_ready': {
         const explicitRepoId = typeof args.repo_id === 'string' && args.repo_id.trim() ? args.repo_id.trim() : undefined;
@@ -1308,12 +1331,12 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           localBridge: readiness.localBridge,
           reasons: readiness.reasons,
           registeredRepositories: registered.length,
-          ...(repository ? { repository: readiness.projection ?? rebuildRepositoryProjection(ctx.controllerHome, repository.repoId) } : {}),
+          ...(repository ? { repository: summarizeRuntimeProjectionForReadiness(readiness.projection ?? rebuildRepositoryProjection(ctx.controllerHome, repository.repoId)) } : {}),
         });
       }
       case 'repository_runtime_snapshot': {
         const repository = selected(ctx, args);
-        return result({ snapshot: rebuildRepositoryProjection(ctx.controllerHome, repository.repoId) });
+        return result({ snapshot: summarizeRuntimeProjectionForReadiness(rebuildRepositoryProjection(ctx.controllerHome, repository.repoId)) });
       }
       case 'runtime_performance_diagnostics': {
         const repository = selected(ctx, args);
@@ -1661,6 +1684,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         return result({ repoId: repository.repoId, ...iosAppBuild(repository, {
           scheme: String(args.scheme ?? '').trim(),
           udid: typeof args.udid === 'string' ? args.udid : undefined,
+          simulatorName: typeof args.simulator_name === 'string' ? args.simulator_name : undefined,
           workspace: typeof args.workspace === 'string' ? args.workspace : undefined,
           project: typeof args.project === 'string' ? args.project : undefined,
           configuration: typeof args.configuration === 'string' ? args.configuration : undefined,
@@ -1703,9 +1727,10 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         if (args.confirm_authorization !== true) throw new Error('IOS_AUTHORIZATION_REQUIRED: confirm_authorization must be true');
         const repository = selected(ctx, args);
         return result({ repoId: repository.repoId, ...iosUiSmokeTest(repository, {
-          udid: String(args.udid ?? '').trim(),
-          scheme: String(args.scheme ?? '').trim(),
-          bundleId: String(args.bundle_id ?? '').trim(),
+          udid: typeof args.udid === 'string' ? args.udid : undefined,
+          simulatorName: typeof args.simulator_name === 'string' ? args.simulator_name : undefined,
+          scheme: typeof args.scheme === 'string' ? args.scheme : undefined,
+          bundleId: typeof args.bundle_id === 'string' ? args.bundle_id : undefined,
           workspace: typeof args.workspace === 'string' ? args.workspace : undefined,
           project: typeof args.project === 'string' ? args.project : undefined,
           configuration: typeof args.configuration === 'string' ? args.configuration : undefined,
