@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a>
+  <a href="README.en.md">English</a> · <a href="README.md">简体中文</a>
 </p>
 
 `repo-harness Controller Runtime` 是一个本地优先的 ChatGPT 仓库执行桥。它向 ChatGPT 提供有边界的工具，用于读取仓库、管理 Issue 与 Task、执行 Direct Edit、运行命名检查、审查 Diff，并在确有必要时把复杂实现委派给编码 Agent。
