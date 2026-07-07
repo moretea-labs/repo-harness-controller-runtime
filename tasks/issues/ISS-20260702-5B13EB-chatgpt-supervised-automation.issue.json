@@ -1,0 +1,189 @@
+{
+  "schemaVersion": 5,
+  "id": "ISS-20260702-5B13EB",
+  "title": "ChatGPT-Supervised Automation",
+  "slug": "chatgpt-supervised-automation",
+  "kind": "feature",
+  "status": "planned",
+  "summary": "",
+  "goals": [],
+  "nonGoals": [],
+  "acceptanceCriteria": [],
+  "relatedArtifacts": [],
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "实现 Campaign、Checkpoint 与 Supervisor 核心状态机",
+      "objective": "Complete the scoped task.",
+      "status": "blocked",
+      "dependsOn": [],
+      "allowedPaths": [],
+      "forbiddenPaths": [],
+      "checks": [],
+      "acceptanceCriteria": [
+        "Campaign 与 Checkpoint 可持久化并从事件恢复",
+        "目标 revision 只能显式更新",
+        "等待 review 不持有 workspace 或 scheduler lease",
+        "状态转移幂等且非法转移被拒绝",
+        "现有 Controller V8 测试保持通过"
+      ],
+      "risk": "medium",
+      "recommendedAgent": "codex",
+      "notes": [
+        "Accepted RUN-iss-20260702-5b13eb-t1-1782993846325-3634ff24 for asynchronous launch.",
+        "Dispatched RUN-iss-20260702-5b13eb-t1-1782993846325-3634ff24 to codex.",
+        "RUN-iss-20260702-5b13eb-t1-1782993846325-3634ff24 cancelled; explicit retry is required before another Run can be created.",
+        "Explicit retry requested from RUN-iss-20260702-5b13eb-t1-1782993846325-3634ff24.",
+        "Accepted RUN-iss-20260702-5b13eb-t1-1782994254573-360fef77 for asynchronous launch.",
+        "Dispatched RUN-iss-20260702-5b13eb-t1-1782994254573-360fef77 to codex.",
+        "RUN-iss-20260702-5b13eb-t1-1782994254573-360fef77 cancelled; explicit retry is required before another Run can be created."
+      ],
+      "runIds": [
+        "RUN-iss-20260702-5b13eb-t1-1782993846325-3634ff24",
+        "RUN-iss-20260702-5b13eb-t1-1782994254573-360fef77"
+      ],
+      "createdAt": "2026-07-02T12:02:37.135Z",
+      "updatedAt": "2026-07-02T12:11:19.173Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    },
+    {
+      "id": "T2",
+      "title": "实现 Campaign Reconciler 与并发调度",
+      "objective": "Complete the scoped task.",
+      "status": "planned",
+      "dependsOn": [
+        "T1"
+      ],
+      "allowedPaths": [],
+      "forbiddenPaths": [],
+      "checks": [],
+      "acceptanceCriteria": [
+        "无冲突任务可并行",
+        "重复事件不会重复派发",
+        "超时和孤儿 Run 会释放资源",
+        "失败任务不阻塞无关任务",
+        "提供并发与恢复测试"
+      ],
+      "risk": "medium",
+      "recommendedAgent": "codex",
+      "notes": [],
+      "runIds": [],
+      "createdAt": "2026-07-02T12:02:51.551Z",
+      "updatedAt": "2026-07-02T12:02:51.551Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    },
+    {
+      "id": "T3",
+      "title": "实现 ChatGPT Supervisor 与 Review Packet",
+      "objective": "Complete the scoped task.",
+      "status": "planned",
+      "dependsOn": [
+        "T1"
+      ],
+      "allowedPaths": [],
+      "forbiddenPaths": [],
+      "checks": [],
+      "acceptanceCriteria": [
+        "ReviewPacket 只包含有界增量证据",
+        "重复或过期结果被拒绝",
+        "调用不占用工作区租约",
+        "连接不可用时可恢复",
+        "提供模拟端到端测试"
+      ],
+      "risk": "medium",
+      "recommendedAgent": "codex",
+      "notes": [],
+      "runIds": [],
+      "createdAt": "2026-07-02T12:03:02.925Z",
+      "updatedAt": "2026-07-02T12:03:02.925Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    },
+    {
+      "id": "T4",
+      "title": "集成执行 Provider",
+      "objective": "Complete the scoped task.",
+      "status": "planned",
+      "dependsOn": [
+        "T2",
+        "T3"
+      ],
+      "allowedPaths": [],
+      "forbiddenPaths": [],
+      "checks": [],
+      "acceptanceCriteria": [
+        "支持实现与验收运行类型",
+        "允许读取完整仓库",
+        "复用现有风险门禁",
+        "终态释放全部资源",
+        "产生统一证据"
+      ],
+      "risk": "medium",
+      "recommendedAgent": "codex",
+      "notes": [],
+      "runIds": [],
+      "createdAt": "2026-07-02T12:03:20.966Z",
+      "updatedAt": "2026-07-02T12:03:20.966Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    },
+    {
+      "id": "T5",
+      "title": "完成恢复测试、文档与交付打包",
+      "objective": "Complete the scoped task.",
+      "status": "planned",
+      "dependsOn": [
+        "T4"
+      ],
+      "allowedPaths": [],
+      "forbiddenPaths": [],
+      "checks": [],
+      "acceptanceCriteria": [
+        "覆盖重启、断连、孤儿 Job 和重复派发",
+        "失败任务不阻塞无关任务",
+        "队列停滞与租约泄漏可检测和终态化",
+        "完整 CI 与 Controller V8 门禁通过",
+        "生成源码归档、补丁系列和验收报告"
+      ],
+      "risk": "medium",
+      "recommendedAgent": "codex",
+      "notes": [],
+      "runIds": [],
+      "createdAt": "2026-07-02T12:03:27.805Z",
+      "updatedAt": "2026-07-02T12:03:27.805Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    },
+    {
+      "id": "T6",
+      "title": "完善 Supervisor 配置、目标规划与 GUI 回退",
+      "objective": "Complete the scoped task.",
+      "status": "blocked",
+      "dependsOn": [],
+      "allowedPaths": [],
+      "forbiddenPaths": [],
+      "checks": [],
+      "acceptanceCriteria": [
+        "Campaign 工具在 controller/core MCP profile 可见",
+        "goal-only campaign 可经 Supervisor 规划任务后进入执行",
+        "Workspace Agent 配置不泄漏凭据且 doctor 可诊断",
+        "正式触发不可用时可异步回退到 Codex 交互执行",
+        "所有等待不持有仓库或调度租约",
+        "相关类型、兼容、Controller V8 和并发恢复测试通过"
+      ],
+      "risk": "medium",
+      "recommendedAgent": "codex",
+      "notes": [
+        "Accepted RUN-iss-20260702-5b13eb-t6-1782998490237-aa099052 for asynchronous launch.",
+        "Dispatched RUN-iss-20260702-5b13eb-t6-1782998490237-aa099052 to codex.",
+        "RUN-iss-20260702-5b13eb-t6-1782998490237-aa099052 cancelled; explicit retry is required before another Run can be created."
+      ],
+      "runIds": [
+        "RUN-iss-20260702-5b13eb-t6-1782998490237-aa099052"
+      ],
+      "createdAt": "2026-07-02T13:21:07.760Z",
+      "updatedAt": "2026-07-02T13:21:49.371Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    }
+  ],
+  "createdAt": "2026-07-02T12:01:03.430Z",
+  "updatedAt": "2026-07-02T13:21:49.371Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+}
