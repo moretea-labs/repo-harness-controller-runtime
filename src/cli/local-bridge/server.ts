@@ -1067,7 +1067,6 @@ export async function startLocalBridgeServer(
         remoteUrl: queryString(request.body?.remoteUrl),
         defaultBranch: queryString(request.body?.defaultBranch),
       });
-      localSnapshotCache.delete(options.repoRoot);
       localSnapshotCache.delete(repository.canonicalRoot);
       response.status(201).json({ repository, userSnapshot: buildUserControllerExperienceSnapshot(repository.canonicalRoot, controllerHome, repository.repoId) });
     } catch (error) {
@@ -1699,9 +1698,9 @@ export async function startLocalBridgeServer(
       if (!task) throw new Error("task not found");
       const latestRunId = task.runIds.at(-1);
       if (latestRunId) {
-        const run = getAgentJob(options.repoRoot, latestRunId);
+        const run = getAgentJob(repoRoot, latestRunId);
         if (run.status !== "succeeded") throw new Error(`latest Run must succeed before acceptance (current: ${run.status})`);
-        if (run.provider === "local" && run.worktree !== options.repoRoot && !run.integratedSessionId) {
+        if (run.provider === "local" && run.worktree !== repoRoot && !run.integratedSessionId) {
           throw new Error("integrate the isolated local Task Run before accepting it");
         }
       }
@@ -2044,9 +2043,10 @@ export async function startLocalBridgeServer(
   });
   app.get("/api/jobs/:jobId", (request, response) => {
     try {
+      const repoRoot = requestRepositoryRoot(request, options, controllerHome);
       response.json({
-        job: getLocalBridgeJob(options.repoRoot, request.params.jobId),
-        events: getLocalBridgeJobEvents(options.repoRoot, request.params.jobId),
+        job: getLocalBridgeJob(repoRoot, request.params.jobId),
+        events: getLocalBridgeJobEvents(repoRoot, request.params.jobId),
       });
     } catch (error) {
       response.status(404).json({ error: errorMessage(error) });
@@ -2054,11 +2054,12 @@ export async function startLocalBridgeServer(
   });
   app.post("/api/jobs", (request, response) => {
     try {
+      const repoRoot = requestRepositoryRoot(request, options, controllerHome);
       const job = submitLocalBridgeJob(
-        options.repoRoot,
+        repoRoot,
         request.body as LocalBridgeJobRequest,
       );
-      if (job.status === "approved") asyncExecute(options.repoRoot, job.jobId);
+      if (job.status === "approved") asyncExecute(repoRoot, job.jobId);
       response.status(202).json(job);
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
@@ -2067,7 +2068,7 @@ export async function startLocalBridgeServer(
   app.post("/api/jobs/:jobId/cancel", (request, response) => {
     try {
       response.json(
-        cancelLocalBridgeJob(options.repoRoot, request.params.jobId),
+        cancelLocalBridgeJob(requestRepositoryRoot(request, options, controllerHome), request.params.jobId),
       );
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
@@ -2075,16 +2076,17 @@ export async function startLocalBridgeServer(
   });
   app.get("/api/runs/:runId", (request, response) => {
     try {
-      response.json(getAgentJob(options.repoRoot, request.params.runId));
+      response.json(getAgentJob(requestRepositoryRoot(request, options, controllerHome), request.params.runId));
     } catch (error) {
       response.status(404).json({ error: errorMessage(error) });
     }
   });
   app.get("/api/runs/:runId/log", (request, response) => {
     try {
-      const run = getAgentJob(options.repoRoot, request.params.runId);
+      const repoRoot = requestRepositoryRoot(request, options, controllerHome);
+      const run = getAgentJob(repoRoot, request.params.runId);
       const result = getAgentJobLog(
-        options.repoRoot,
+        repoRoot,
         request.params.runId,
         false,
       );
@@ -2096,7 +2098,7 @@ export async function startLocalBridgeServer(
   app.get("/api/runs/:runId/events", (request, response) => {
     try {
       response.json({
-        events: getAgentJobEvents(options.repoRoot, request.params.runId, 500),
+        events: getAgentJobEvents(requestRepositoryRoot(request, options, controllerHome), request.params.runId, 500),
       });
     } catch (error) {
       response.status(404).json({ error: errorMessage(error) });
@@ -2104,7 +2106,8 @@ export async function startLocalBridgeServer(
   });
   app.post("/api/runs/:runId/finish", (request, response) => {
     try {
-      const result = finishTaskRun(options.repoRoot, {
+      const repoRoot = requestRepositoryRoot(request, options, controllerHome);
+      const result = finishTaskRun(repoRoot, {
         runId: request.params.runId,
         decision: String(request.body?.decision ?? "auto").replace(/-/g, "_") as never,
         reviewer: queryString(request.body?.reviewer) ?? "local-bridge-completion",
@@ -2112,7 +2115,7 @@ export async function startLocalBridgeServer(
         cleanup: request.body?.keepWorktree !== true,
         commit: request.body?.commit === true,
       });
-      localSnapshotCache.delete(options.repoRoot);
+      localSnapshotCache.delete(repoRoot);
       response.json(result);
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
@@ -2120,26 +2123,27 @@ export async function startLocalBridgeServer(
   });
   app.get("/api/runs/:runId/diff", (request, response) => {
     try {
-      response.json(taskRunDiff(options.repoRoot, request.params.runId));
+      response.json(taskRunDiff(requestRepositoryRoot(request, options, controllerHome), request.params.runId));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
   });
   app.post("/api/runs/:runId/integrate", (request, response) => {
     try {
+      const repoRoot = requestRepositoryRoot(request, options, controllerHome);
       const integrated = integrateAgentJob(
-        options.repoRoot,
-        getMcpPolicy("controller", { repoRoot: options.repoRoot }),
+        repoRoot,
+        getMcpPolicy("controller", { repoRoot }),
         request.params.runId,
       );
       const cleanup = cleanupIntegratedWorktree(
-        options.repoRoot,
+        repoRoot,
         request.params.runId,
       );
       response.json({
         integrated,
         cleanup,
-        run: getAgentJob(options.repoRoot, request.params.runId),
+        run: getAgentJob(repoRoot, request.params.runId),
       });
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
@@ -2147,7 +2151,7 @@ export async function startLocalBridgeServer(
   });
   app.post("/api/runs/:runId/cancel", (request, response) => {
     try {
-      response.json(cancelAgentJob(options.repoRoot, request.params.runId));
+      response.json(cancelAgentJob(requestRepositoryRoot(request, options, controllerHome), request.params.runId));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
@@ -2159,7 +2163,7 @@ export async function startLocalBridgeServer(
           ? request.body.timeoutMs
           : undefined;
       response.status(202).json(
-        retryAgentJob(options.repoRoot, request.params.runId, {
+        retryAgentJob(requestRepositoryRoot(request, options, controllerHome), request.params.runId, {
           timeoutMs,
           isolate:
             typeof request.body?.isolate === "boolean"
