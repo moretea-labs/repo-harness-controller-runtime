@@ -1861,7 +1861,7 @@ export async function startLocalBridgeServer(
   });
   app.post("/api/edit-sessions/:sessionId/rollback", (request, response) => {
     try {
-      response.json(rollbackEditSession(options.repoRoot, request.params.sessionId, {
+      response.json(rollbackEditSession(requestRepositoryRoot(request, options, controllerHome), request.params.sessionId, {
         toRevision: typeof request.body?.toRevision === "number" ? Math.trunc(request.body.toRevision) : undefined,
         savepoint: queryString(request.body?.savepoint),
       }));
@@ -1869,35 +1869,36 @@ export async function startLocalBridgeServer(
       response.status(400).json({ error: errorMessage(error) });
     }
   });
-  app.get("/api/github/plugin", (_request, response) => {
-    response.json(getGitHubPluginStatus(options.repoRoot));
+  app.get("/api/github/plugin", (request, response) => {
+    try {
+      response.json(getGitHubPluginStatus(requestRepositoryRoot(request, options, controllerHome)));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
   });
   app.get("/api/toolchain/plugins/:pluginId/summary", (request, response) => {
     try {
-      const controllerHome = resolveControllerHome();
-      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      const repository = requestRepositorySelection(request, options, controllerHome);
       const manifest = getAssistantPluginManifest(controllerHome, repository, request.params.pluginId);
       response.json({ plugin: summarizePluginForLowInterception(manifest) });
     } catch (error) {
       response.status(404).json({ error: errorMessage(error) });
     }
   });
-  app.get("/api/toolchain/web-targets", (_request, response) => {
+  app.get("/api/toolchain/web-targets", (request, response) => {
     try {
-      const controllerHome = resolveControllerHome();
-      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      const repository = requestRepositorySelection(request, options, controllerHome);
       const manifest = getAssistantPluginManifest(controllerHome, repository, "browser");
-      response.json({ targets: listWebTargets(options.repoRoot, manifest), arbitraryUrlAccepted: false });
+      response.json({ targets: listWebTargets(repository.canonicalRoot, manifest), arbitraryUrlAccepted: false });
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
   });
   app.post("/api/toolchain/web-domain-preview", (request, response) => {
     try {
-      const controllerHome = resolveControllerHome();
-      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      const repository = requestRepositorySelection(request, options, controllerHome);
       const manifest = getAssistantPluginManifest(controllerHome, repository, "browser");
-      response.json({ preview: previewBrowserDomainAccess(options.repoRoot, request.body?.domain, request.body?.reason, manifest) });
+      response.json({ preview: previewBrowserDomainAccess(repository.canonicalRoot, request.body?.domain, request.body?.reason, manifest) });
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
@@ -1926,8 +1927,7 @@ export async function startLocalBridgeServer(
   });
   app.post("/api/toolchain/deepseek/handoff", (request, response) => {
     try {
-      const controllerHome = resolveControllerHome();
-      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      const repository = requestRepositorySelection(request, options, controllerHome);
       response.json({ handoff: prepareDeepSeekControllerHandoff({
         reason: request.body?.reason,
         objective: request.body?.objective,
@@ -1942,8 +1942,7 @@ export async function startLocalBridgeServer(
   });
   app.post("/api/toolchain/deepseek/controller-request", (request, response) => {
     try {
-      const controllerHome = resolveControllerHome();
-      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      const repository = requestRepositorySelection(request, options, controllerHome);
       response.json({ preview: prepareDeepSeekControllerRequest({
         reason: request.body?.reason,
         objective: request.body?.objective,
@@ -1958,10 +1957,9 @@ export async function startLocalBridgeServer(
       response.status(400).json({ error: errorMessage(error) });
     }
   });
-  app.get("/api/plugins", (_request, response) => {
+  app.get("/api/plugins", (request, response) => {
     try {
-      const controllerHome = resolveControllerHome();
-      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      const repository = requestRepositorySelection(request, options, controllerHome);
       response.json({ plugins: listAssistantPluginManifests(controllerHome, repository) });
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
@@ -1969,8 +1967,7 @@ export async function startLocalBridgeServer(
   });
   app.get("/api/plugins/:pluginId", (request, response) => {
     try {
-      const controllerHome = resolveControllerHome();
-      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      const repository = requestRepositorySelection(request, options, controllerHome);
       response.json({ plugin: getAssistantPluginManifest(controllerHome, repository, request.params.pluginId) });
     } catch (error) {
       response.status(404).json({ error: errorMessage(error) });
@@ -1978,8 +1975,7 @@ export async function startLocalBridgeServer(
   });
   app.post("/api/plugins/:pluginId/actions/:actionId", (request, response) => {
     try {
-      const controllerHome = resolveControllerHome();
-      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      const repository = requestRepositorySelection(request, options, controllerHome);
       const submitted = submitAssistantPluginAction(controllerHome, repository, {
         pluginId: request.params.pluginId,
         actionId: request.params.actionId,
@@ -2012,7 +2008,7 @@ export async function startLocalBridgeServer(
     try {
       const body = request.body ?? {};
       response.json(
-        saveGitHubPluginConfig(options.repoRoot, {
+        saveGitHubPluginConfig(requestRepositoryRoot(request, options, controllerHome), {
           enabled: typeof body.enabled === "boolean" ? body.enabled : undefined,
           repository: typeof body.repository === "string" ? body.repository : undefined,
           syncMode: body.syncMode === "checkpoint" ? "checkpoint" : body.syncMode === "manual" ? "manual" : undefined,
@@ -2027,21 +2023,21 @@ export async function startLocalBridgeServer(
   });
   app.post("/api/issues/:issueId/github/publish", (request, response) => {
     try {
-      response.json(publishIssueWithGitHubPlugin(options.repoRoot, request.params.issueId));
+      response.json(publishIssueWithGitHubPlugin(requestRepositoryRoot(request, options, controllerHome), request.params.issueId));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
   });
   app.post("/api/issues/:issueId/github/refresh", (request, response) => {
     try {
-      response.json(refreshIssueWithGitHubPlugin(options.repoRoot, request.params.issueId));
+      response.json(refreshIssueWithGitHubPlugin(requestRepositoryRoot(request, options, controllerHome), request.params.issueId));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
   });
   app.post("/api/issues/:issueId/github/close", (request, response) => {
     try {
-      response.json(closeIssueWithGitHubPlugin(options.repoRoot, request.params.issueId));
+      response.json(closeIssueWithGitHubPlugin(requestRepositoryRoot(request, options, controllerHome), request.params.issueId));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
