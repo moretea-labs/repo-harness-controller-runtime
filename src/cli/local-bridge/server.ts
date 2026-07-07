@@ -80,6 +80,10 @@ import {
 } from "../controller/runtime-config";
 import { taskExecutionPolicy, taskWriteScopesConflict } from "../controller/execution-policy";
 import { continueTaskAfterSuccessfulRun } from "../controller/execution-completion";
+import { applyCompletionDecision, completionDecisionQueues, finishCompletionBacklog, inspectCompletionBacklog } from "../controller/completion-backlog";
+import { finishTaskRun } from "../controller/completion-orchestrator";
+import { prepareCodexContinuation } from "../controller/codex-continuation";
+import { applyStuckStateMigration, inspectStuckControllerStates } from "../controller/stuck-state-migration";
 import { getMcpPolicy } from "../mcp/policy";
 import { runtimePolicy } from "../mcp/multi-repository";
 import { controllerExpectedToolNames } from "../mcp/tools";
@@ -280,6 +284,9 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
   const editSessions = listEditSessions(repoRoot, 30);
   const localJobs = listLocalBridgeJobs(repoRoot, 30);
   const board = projectBoard(repoRoot);
+  const completionBacklog = inspectCompletionBacklog(repoRoot, { limit: 100 });
+  const completionQueues = completionDecisionQueues(repoRoot, { limit: 100 });
+  const stuckStates = inspectStuckControllerStates(repoRoot, { limit: 100 });
   const runtime = runtimeControllerSnapshot(repoRoot);
   const executionJobs = "executionJobs" in runtime ? (runtime.executionJobs ?? []) : [];
   const controllerHome = resolveControllerHome();
@@ -331,8 +338,12 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
       ...executionJobs.filter((job) => ["queued", "dispatched", "running", "waiting_for_dependency", "waiting_for_workspace", "waiting_for_heavy_check", "waiting_for_integration"].includes(job.status))
         .map((job) => ({ kind: "work", id: job.jobId, title: String(job.payload.operation ?? job.type), status: job.status, updatedAt: job.updatedAt })),
     ].slice(0, 12),
-    readyForReview: reviewTasks.slice(0, 12),
+    readyForReview: [
+      ...completionQueues.autoFinish.map((item) => ({ kind: "completion", id: item.runId ?? `${item.issueId}/${item.taskId}`, runId: item.runId, issueId: item.issueId, taskId: item.taskId, title: item.title, status: item.action, updatedAt: undefined })),
+      ...reviewTasks,
+    ].slice(0, 12),
     pendingApprovals: [
+      ...completionQueues.needsHumanReview.map((item) => ({ kind: "completion-review", id: item.runId ?? `${item.issueId}/${item.taskId}`, runId: item.runId, issueId: item.issueId, taskId: item.taskId, title: item.title, status: item.action, updatedAt: undefined })),
       ...localJobs.filter((job) => job.status === "pending_approval")
         .map((job) => ({ kind: "local-job", id: job.jobId, title: job.action, status: job.status, updatedAt: job.updatedAt })),
       ...executionJobs.filter((job) => job.status === "human_attention_required")
@@ -445,6 +456,11 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
     timeoutPolicy: localBridgeTimeoutPolicy(repoRoot),
     runtime,
     decisionQueues,
+    completion: {
+      backlog: completionBacklog,
+      queues: completionQueues,
+      stuckStates,
+    },
     execution: {
       defaultMode: "direct-edit",
       agentRunner: mcpConfig?.devMode?.agentRunner === true,
@@ -714,6 +730,89 @@ export async function startLocalBridgeServer(
   app.use("/api", requireToken);
   app.get("/api/snapshot", (_request, response) => {
     response.json(cachedLocalControllerSnapshot(options.repoRoot));
+  });
+  app.get("/api/completion/backlog", (request, response) => {
+    try {
+      const limit = Number(request.query.limit);
+      response.json(inspectCompletionBacklog(options.repoRoot, { limit: Number.isFinite(limit) ? limit : 100 }));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.get("/api/completion/queues", (request, response) => {
+    try {
+      const limit = Number(request.query.limit);
+      response.json(completionDecisionQueues(options.repoRoot, { limit: Number.isFinite(limit) ? limit : 100 }));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/completion/finish-ready-runs", (request, response) => {
+    try {
+      const result = finishCompletionBacklog(options.repoRoot, {
+        dryRun: request.body?.apply !== true,
+        limit: typeof request.body?.limit === "number" ? request.body.limit : undefined,
+        commit: request.body?.commit === true,
+        cleanup: request.body?.keepWorktree !== true,
+        reviewer: queryString(request.body?.reviewer) ?? "local-bridge-completion",
+      });
+      localSnapshotCache.delete(options.repoRoot);
+      response.json(result);
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/completion/decision", (request, response) => {
+    try {
+      const result = applyCompletionDecision(options.repoRoot, {
+        action: String(request.body?.action ?? "").replace(/-/g, "_") as never,
+        runId: queryString(request.body?.runId) ?? queryString(request.body?.run_id),
+        issueId: queryString(request.body?.issueId) ?? queryString(request.body?.issue_id),
+        taskId: queryString(request.body?.taskId) ?? queryString(request.body?.task_id),
+        reviewer: queryString(request.body?.reviewer) ?? "local-bridge-completion",
+        note: queryString(request.body?.note),
+        commit: request.body?.commit === true,
+        cleanup: request.body?.keepWorktree !== true,
+      });
+      localSnapshotCache.delete(options.repoRoot);
+      response.json(result);
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.get("/api/completion/stuck", (request, response) => {
+    try {
+      const limit = Number(request.query.limit);
+      response.json(inspectStuckControllerStates(options.repoRoot, { limit: Number.isFinite(limit) ? limit : 100 }));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/completion/stuck/migrate", (request, response) => {
+    try {
+      const result = applyStuckStateMigration(options.repoRoot, {
+        dryRun: request.body?.apply !== true,
+        limit: typeof request.body?.limit === "number" ? request.body.limit : undefined,
+        reviewer: queryString(request.body?.reviewer) ?? "local-bridge-stuck-migration",
+        markRetryRequired: request.body?.markRetryRequired === true,
+        markNoRunEvidence: request.body?.markNoRunEvidence === true,
+      });
+      localSnapshotCache.delete(options.repoRoot);
+      response.json(result);
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/controller/codex-continuation", (request, response) => {
+    try {
+      response.json(prepareCodexContinuation(options.repoRoot, {
+        objective: queryString(request.body?.objective),
+        maxItems: typeof request.body?.maxItems === "number" ? request.body.maxItems : undefined,
+        mode: request.body?.launch === true ? "launch" : "prepare",
+      }));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
   });
   app.get("/api/stream", (request, response) => {
     response.status(200);
@@ -1637,6 +1736,22 @@ export async function startLocalBridgeServer(
       });
     } catch (error) {
       response.status(404).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/runs/:runId/finish", (request, response) => {
+    try {
+      const result = finishTaskRun(options.repoRoot, {
+        runId: request.params.runId,
+        decision: String(request.body?.decision ?? "auto").replace(/-/g, "_") as never,
+        reviewer: queryString(request.body?.reviewer) ?? "local-bridge-completion",
+        note: queryString(request.body?.note),
+        cleanup: request.body?.keepWorktree !== true,
+        commit: request.body?.commit === true,
+      });
+      localSnapshotCache.delete(options.repoRoot);
+      response.json(result);
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
     }
   });
   app.get("/api/runs/:runId/diff", (request, response) => {

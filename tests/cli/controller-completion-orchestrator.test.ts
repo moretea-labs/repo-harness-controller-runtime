@@ -4,6 +4,9 @@ import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 import { createIssue, updateTask } from '../../src/cli/controller/issue-store';
 import { finishTaskRun } from '../../src/cli/controller/completion-orchestrator';
+import { applyCompletionDecision, completionDecisionQueues, finishCompletionBacklog, inspectCompletionBacklog } from '../../src/cli/controller/completion-backlog';
+import { prepareCodexContinuation } from '../../src/cli/controller/codex-continuation';
+import { applyStuckStateMigration, inspectStuckControllerStates } from '../../src/cli/controller/stuck-state-migration';
 import type { AgentJobMeta } from '../../src/cli/agent-jobs/types';
 
 function withRepo<T>(fn: (repoRoot: string) => T): T {
@@ -103,5 +106,120 @@ describe('completion orchestrator', () => {
       reviewer: 'test-reviewer',
     });
     expect(approved.taskStatus).toBe('done');
+  }));
+});
+
+
+describe('completion backlog', () => {
+  test('classifies auto-finishable and human-review completion work', () => withRepo((repoRoot) => {
+    const issue = createIssue(repoRoot, {
+      title: 'Mixed completion backlog',
+      tasks: [
+        { title: 'Safe code change', objective: 'Update normal source code.', allowedPaths: ['src/**'], risk: 'medium' },
+        { title: 'Risky runtime change', objective: 'Change high risk runtime internals.', allowedPaths: ['src/runtime/**'], risk: 'high' },
+      ],
+      allowDuplicate: true,
+    });
+    updateTask(repoRoot, issue.id, 'T1', { status: 'review', runId: 'RUN-auto' });
+    updateTask(repoRoot, issue.id, 'T2', { status: 'review', runId: 'RUN-human' });
+    seedRun(repoRoot, { runId: 'RUN-auto', issueId: issue.id, taskId: 'T1' });
+    seedRun(repoRoot, { runId: 'RUN-human', issueId: issue.id, taskId: 'T2' });
+
+    const report = inspectCompletionBacklog(repoRoot);
+
+    expect(report.counts.auto_finish).toBe(1);
+    expect(report.counts.needs_human_review).toBe(1);
+    expect(report.finishableRunIds).toEqual(['RUN-auto']);
+    expect(report.needsHumanReviewRunIds).toEqual(['RUN-human']);
+  }));
+
+  test('batch-finishes only auto-finishable completion work', () => withRepo((repoRoot) => {
+    const issue = createIssue(repoRoot, {
+      title: 'Batch finish backlog',
+      tasks: [
+        { title: 'Safe code change', objective: 'Update normal source code.', allowedPaths: ['src/**'], risk: 'medium' },
+        { title: 'Risky runtime change', objective: 'Change high risk runtime internals.', allowedPaths: ['src/runtime/**'], risk: 'high' },
+      ],
+      allowDuplicate: true,
+    });
+    updateTask(repoRoot, issue.id, 'T1', { status: 'review', runId: 'RUN-auto-batch' });
+    updateTask(repoRoot, issue.id, 'T2', { status: 'review', runId: 'RUN-human-batch' });
+    seedRun(repoRoot, { runId: 'RUN-auto-batch', issueId: issue.id, taskId: 'T1' });
+    seedRun(repoRoot, { runId: 'RUN-human-batch', issueId: issue.id, taskId: 'T2' });
+
+    const dryRun = finishCompletionBacklog(repoRoot, { dryRun: true });
+    expect(dryRun.attempted).toBe(1);
+    expect(dryRun.results).toHaveLength(0);
+
+    const applied = finishCompletionBacklog(repoRoot, { dryRun: false });
+    expect(applied.attempted).toBe(1);
+    expect(applied.finished).toBe(1);
+
+    const after = inspectCompletionBacklog(repoRoot);
+    expect(after.counts.auto_finish).toBe(0);
+    expect(after.counts.needs_human_review).toBe(1);
+  }));
+});
+
+
+describe('completion decision queues and stuck-state migration', () => {
+  test('exposes Local Bridge friendly decision queues', () => withRepo((repoRoot) => {
+    const issue = createIssue(repoRoot, {
+      title: 'Queue decisions',
+      tasks: [
+        { title: 'Safe done run', objective: 'Safe code.', allowedPaths: ['src/**'], risk: 'medium' },
+        { title: 'Manual high risk', objective: 'Risky code.', allowedPaths: ['src/runtime/**'], risk: 'high' },
+      ],
+      allowDuplicate: true,
+    });
+    updateTask(repoRoot, issue.id, 'T1', { status: 'review', runId: 'RUN-q-safe' });
+    updateTask(repoRoot, issue.id, 'T2', { status: 'review', runId: 'RUN-q-human' });
+    seedRun(repoRoot, { runId: 'RUN-q-safe', issueId: issue.id, taskId: 'T1' });
+    seedRun(repoRoot, { runId: 'RUN-q-human', issueId: issue.id, taskId: 'T2' });
+
+    const queues = completionDecisionQueues(repoRoot);
+
+    expect(queues.autoFinish.map((item) => item.runId)).toEqual(['RUN-q-safe']);
+    expect(queues.needsHumanReview.map((item) => item.runId)).toEqual(['RUN-q-human']);
+  }));
+
+  test('applies explicit completion decisions without requiring direct task status edits', () => withRepo((repoRoot) => {
+    const issue = createIssue(repoRoot, {
+      title: 'Apply completion decision',
+      tasks: [{ title: 'Safe decision', objective: 'Safe code.', allowedPaths: ['src/**'], risk: 'medium' }],
+      allowDuplicate: true,
+    });
+    updateTask(repoRoot, issue.id, 'T1', { status: 'review', runId: 'RUN-decision' });
+    seedRun(repoRoot, { runId: 'RUN-decision', issueId: issue.id, taskId: 'T1' });
+
+    const decision = applyCompletionDecision(repoRoot, { action: 'finish', runId: 'RUN-decision' });
+
+    expect(decision.action).toBe('finish');
+    expect('action' in decision.result ? decision.result.action : '').toBe('finished');
+  }));
+
+  test('detects and annotates stale review states', () => withRepo((repoRoot) => {
+    const issue = createIssue(repoRoot, {
+      title: 'Stale states',
+      tasks: [{ title: 'Review without run', objective: 'Stuck state.', allowedPaths: ['src/**'], risk: 'medium' }],
+      allowDuplicate: true,
+    });
+    updateTask(repoRoot, issue.id, 'T1', { status: 'review' });
+
+    const report = inspectStuckControllerStates(repoRoot);
+    expect(report.counts.review_without_run).toBe(1);
+
+    const applied = applyStuckStateMigration(repoRoot, { dryRun: false });
+    expect(applied.applied).toBe(1);
+    const after = getIssue(repoRoot, issue.id);
+    expect(after.tasks[0].notes.at(-1)).toContain('review_without_run inspected');
+  }));
+
+  test('writes a Codex continuation packet without launching by default', () => withRepo((repoRoot) => {
+    const result = prepareCodexContinuation(repoRoot, { objective: 'Continue safely.' });
+
+    expect(result.launched).toBe(false);
+    expect(result.packet.objective).toBe('Continue safely.');
+    expect(result.promptPath).toContain('.ai/harness/continuations/');
   }));
 });

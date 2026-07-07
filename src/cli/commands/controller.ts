@@ -5,8 +5,11 @@ import { archiveIssue, getIssue, inspectIssueReadiness, projectBoard, restoreIss
 import { taskWriteScopesConflict } from '../controller/execution-policy';
 import { getControllerTimeline, getProjectProgress } from '../controller/progress';
 import { finishTaskRun, type TaskReviewDecision } from '../controller/completion-orchestrator';
+import { applyCompletionDecision, completionDecisionQueues, finishCompletionBacklog, inspectCompletionBacklog, type CompletionBacklogReport, type CompletionDecisionAction } from '../controller/completion-backlog';
 import { exportControllerWorklog, parseWorklogCategory } from '../controller/worklog';
 import { inspectProjectGovernance, reconcileProjectGovernance } from '../controller/governance';
+import { prepareCodexContinuation } from '../controller/codex-continuation';
+import { applyStuckStateMigration, inspectStuckControllerStates } from '../controller/stuck-state-migration';
 import { assessWorkMode } from '../controller/work-mode';
 import { finalizeEditSession, getEditSession, getEditSessionDiff, listEditSessions, rollbackEditSession, verifyEditSession } from '../editing/edit-session';
 import { loadControllerProjectState, saveControllerProjectState } from '../controller/project-state';
@@ -60,6 +63,26 @@ function formatRuns(runs: ReturnType<typeof listAgentJobs>): string {
     ...(run.github?.pullRequestUrl ? [`  Pull request: ${run.github.pullRequestUrl}`] : []),
     ...(run.error ? [`  Error: ${run.error}`] : []),
   ].join('\n')).join('\n\n');
+}
+
+
+function formatCompletionBacklog(report: CompletionBacklogReport): string {
+  const lines = ['repo-harness Completion backlog', ''];
+  lines.push(`Scanned: ${report.scannedAt}`);
+  lines.push(`Counts: ${Object.entries(report.counts).map(([key, count]) => `${key}=${count}`).join('  ')}`);
+  if (report.recommendations.length) {
+    lines.push('', 'Recommendations:');
+    for (const recommendation of report.recommendations) lines.push(`  - ${recommendation}`);
+  }
+  const actionable = report.items.filter((item) => item.action !== 'already_terminal');
+  if (actionable.length) {
+    lines.push('', 'Items:');
+    for (const item of actionable) {
+      lines.push(`  ${item.issueId}/${item.taskId}  [${item.action}]  task=${item.taskStatus}${item.runStatus ? ` run=${item.runStatus}` : ''}${item.runId ? ` ${item.runId}` : ''}`);
+      lines.push(`    ${item.reason}`);
+    }
+  }
+  return lines.join('\n');
 }
 
 async function watchRun(root: string, runId: string, intervalSeconds: number, includeLog: boolean, json: boolean): Promise<void> {
@@ -255,6 +278,129 @@ export function buildControllerCommand(): Command {
         commit: opts.commit === true,
       });
       output(finished, opts.json === true);
+    });
+
+  command.command('completion-backlog')
+    .description('Show finishable Runs, human-review items, retry-required Tasks, and stale review states')
+    .option('--repo <path>', 'Repository root')
+    .option('--include-terminal', 'Include terminal done/cancelled/superseded Tasks')
+    .option('--limit <count>', 'Maximum items', '500')
+    .option('--json', 'Output JSON')
+    .action((opts: { repo?: string; includeTerminal?: boolean; limit?: string; json?: boolean }) => {
+      const report = inspectCompletionBacklog(repoRoot(opts.repo), {
+        includeTerminal: opts.includeTerminal === true,
+        limit: opts.limit ? Number(opts.limit) : undefined,
+      });
+      output(opts.json ? report : formatCompletionBacklog(report), opts.json === true);
+    });
+
+  command.command('finish-ready-runs')
+    .description('Batch-finish low/medium completed Runs; dry-run by default and never approves high-risk work')
+    .option('--repo <path>', 'Repository root')
+    .option('--apply', 'Apply the auto-finish actions instead of dry-running')
+    .option('--limit <count>', 'Maximum auto-finish Runs', '25')
+    .option('--keep-worktree', 'Do not remove isolated worktrees after integration')
+    .option('--commit', 'Create selected-path Git commits after successful finishes')
+    .option('--reviewer <name>', 'Reviewer identity', 'repo-harness-completion-backlog')
+    .option('--json', 'Output JSON')
+    .action((opts: { repo?: string; apply?: boolean; limit?: string; keepWorktree?: boolean; commit?: boolean; reviewer?: string; json?: boolean }) => {
+      const finished = finishCompletionBacklog(repoRoot(opts.repo), {
+        dryRun: opts.apply !== true,
+        limit: opts.limit ? Number(opts.limit) : undefined,
+        cleanup: opts.keepWorktree !== true,
+        commit: opts.commit === true,
+        reviewer: opts.reviewer,
+      });
+      output(finished, opts.json === true);
+      if (!opts.json && finished.dryRun && finished.attempted > 0) {
+        console.log('Dry run only. Re-run with --apply to finish these low/medium Runs.');
+      }
+    });
+
+  command.command('completion-queues')
+    .description('Show Local-Bridge-friendly completion decision queues')
+    .option('--repo <path>', 'Repository root')
+    .option('--include-terminal', 'Include terminal done/cancelled/superseded Tasks')
+    .option('--limit <count>', 'Maximum items', '500')
+    .option('--json', 'Output JSON')
+    .action((opts: { repo?: string; includeTerminal?: boolean; limit?: string; json?: boolean }) => {
+      const queues = completionDecisionQueues(repoRoot(opts.repo), {
+        includeTerminal: opts.includeTerminal === true,
+        limit: opts.limit ? Number(opts.limit) : undefined,
+      });
+      output(queues, opts.json === true);
+    });
+
+  command.command('completion-decision')
+    .description('Apply one explicit completion decision from the queue')
+    .option('--repo <path>', 'Repository root')
+    .requiredOption('--action <action>', 'finish, approve_and_finish, request_changes, discard, mark_inspected, or retry_later')
+    .option('--run-id <runId>', 'Run ID for run decisions')
+    .option('--issue-id <issueId>', 'Issue ID for task decisions')
+    .option('--task-id <taskId>', 'Task ID for task decisions')
+    .option('--reviewer <name>', 'Reviewer identity', 'repo-harness-completion-decision')
+    .option('--note <text>', 'Decision note')
+    .option('--keep-worktree', 'Do not remove isolated worktrees after integration')
+    .option('--commit', 'Create selected-path Git commit after finish')
+    .option('--json', 'Output JSON')
+    .action((opts: { repo?: string; action: string; runId?: string; issueId?: string; taskId?: string; reviewer?: string; note?: string; keepWorktree?: boolean; commit?: boolean; json?: boolean }) => {
+      const action = String(opts.action ?? '').replace(/-/g, '_') as CompletionDecisionAction;
+      if (!['finish', 'approve_and_finish', 'request_changes', 'discard', 'mark_inspected', 'retry_later'].includes(action)) {
+        throw new Error('action must be finish, approve_and_finish, request_changes, discard, mark_inspected, or retry_later');
+      }
+      output(applyCompletionDecision(repoRoot(opts.repo), {
+        action,
+        runId: opts.runId,
+        issueId: opts.issueId,
+        taskId: opts.taskId,
+        reviewer: opts.reviewer,
+        note: opts.note,
+        cleanup: opts.keepWorktree !== true,
+        commit: opts.commit === true,
+      }), opts.json === true);
+    });
+
+  command.command('stuck-states')
+    .description('Inspect stale review, retry-required, missing-run, and blocked completion states')
+    .option('--repo <path>', 'Repository root')
+    .option('--limit <count>', 'Maximum findings', '500')
+    .option('--json', 'Output JSON')
+    .action((opts: { repo?: string; limit?: string; json?: boolean }) => {
+      output(inspectStuckControllerStates(repoRoot(opts.repo), { limit: opts.limit ? Number(opts.limit) : undefined }), opts.json === true);
+    });
+
+  command.command('migrate-stuck-states')
+    .description('Safely annotate stale completion states; dry-run by default')
+    .option('--repo <path>', 'Repository root')
+    .option('--apply', 'Apply note-only migration actions')
+    .option('--limit <count>', 'Maximum findings', '100')
+    .option('--mark-retry-required', 'Move retry-required findings to changes_requested')
+    .option('--mark-no-run-evidence', 'Move stale review/running without run evidence to changes_requested')
+    .option('--reviewer <name>', 'Reviewer identity', 'repo-harness-stuck-state-migration')
+    .option('--json', 'Output JSON')
+    .action((opts: { repo?: string; apply?: boolean; limit?: string; markRetryRequired?: boolean; markNoRunEvidence?: boolean; reviewer?: string; json?: boolean }) => {
+      output(applyStuckStateMigration(repoRoot(opts.repo), {
+        dryRun: opts.apply !== true,
+        limit: opts.limit ? Number(opts.limit) : undefined,
+        reviewer: opts.reviewer,
+        markRetryRequired: opts.markRetryRequired === true,
+        markNoRunEvidence: opts.markNoRunEvidence === true,
+      }), opts.json === true);
+    });
+
+  command.command('codex-continuation')
+    .description('Prepare or launch a local Codex continuation packet for remaining completion work')
+    .option('--repo <path>', 'Repository root')
+    .option('--objective <text>', 'Continuation objective')
+    .option('--max-items <count>', 'Maximum backlog/stuck items', '100')
+    .option('--launch', 'Launch codex exec after writing the packet')
+    .option('--json', 'Output JSON')
+    .action((opts: { repo?: string; objective?: string; maxItems?: string; launch?: boolean; json?: boolean }) => {
+      output(prepareCodexContinuation(repoRoot(opts.repo), {
+        objective: opts.objective,
+        maxItems: opts.maxItems ? Number(opts.maxItems) : undefined,
+        mode: opts.launch === true ? 'launch' : 'prepare',
+      }), opts.json === true);
     });
 
   command.command('progress')
