@@ -11,6 +11,7 @@ import { googleCalendarPluginAdapter } from './google-calendar-adapter';
 import { googleTasksPluginAdapter } from './google-tasks-adapter';
 import { githubPluginAdapter } from './github-adapter';
 import { browserPluginAdapter } from './browser-adapter';
+import { appStoreConnectPluginAdapter } from './app-store-connect-adapter';
 import { AssistantPluginError, toAssistantPluginError } from './errors';
 import type {
   AssistantPluginAdapter,
@@ -25,6 +26,7 @@ import type {
 const PLUGIN_ADAPTERS = new Map<string, AssistantPluginAdapter>([
   [githubPluginAdapter.pluginId, githubPluginAdapter],
   [browserPluginAdapter.pluginId, browserPluginAdapter],
+  [appStoreConnectPluginAdapter.pluginId, appStoreConnectPluginAdapter],
   [gmailPluginAdapter.pluginId, gmailPluginAdapter],
   [googleCalendarPluginAdapter.pluginId, googleCalendarPluginAdapter],
   [googleTasksPluginAdapter.pluginId, googleTasksPluginAdapter],
