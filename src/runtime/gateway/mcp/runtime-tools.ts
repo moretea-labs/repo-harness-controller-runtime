@@ -69,9 +69,15 @@ import {
   iosSimulatorScreenshot,
   iosSimulatorLogTail,
   iosUiSmokeTest,
+  buildReviewArtifactIndex,
+  ensureReviewArtifactRoots,
+  prepareBrowserReviewPacket,
+  prepareIosReviewPacket,
 } from '../../safe-tooling';
 import { buildModelClientSummary, buildModelControlPlaneSummary, deepSeekControllerManifest, deepSeekFunctionToolManifest, prepareDeepSeekControllerHandoff, prepareDeepSeekControllerRequest, prepareDeepSeekToolCall } from '../../model-clients';
 import { buildAssistantReadinessReport } from '../../assistant/readiness';
+import { buildGmailTriagePlan, readGmailTriageRules, upsertGmailTriageRule } from '../../personal-assistant/gmail-triage-manager';
+import { buildWorkflowWatchdogReport } from '../../watchdog/workflow-watchdog';
 import { applyRuntimeCleanup, previewRuntimeCleanup } from '../../maintenance/cleanup';
 import {
   applyRuntimeMaintenance,
@@ -371,6 +377,35 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
   }),
   definition('assistant_readiness', 'Summarize personal-assistant readiness, Google plugin state, routines, inbox, and recommended next actions.', {
     repo_id: repoId,
+  }),
+  definition('gmail_triage_rules', 'Read repository-local Gmail triage rules used by the personal assistant manager.', { repo_id: repoId }),
+  definition('gmail_triage_rule_upsert', 'Create or update one repository-local Gmail triage rule. This only changes repo-local assistant configuration.', {
+    repo_id: repoId,
+    id: { type: 'string' },
+    enabled: { type: 'boolean' },
+    order: { type: 'number' },
+    match: { type: 'object' },
+    decision: { type: 'object' },
+  }, ['id', 'match', 'decision'], false),
+  definition('gmail_triage_plan', 'Build a safe Gmail triage plan from supplied message summaries and current Gmail plugin readiness. Does not mutate Gmail.', {
+    repo_id: repoId,
+    query: { type: 'string' },
+    items: { type: 'array', items: { type: 'object' } },
+  }),
+  definition('review_artifacts_prepare', 'Create bounded repo-local review artifact roots for browser/iOS screenshot review workflows.', { repo_id: repoId }, [], false),
+  definition('review_artifacts_index', 'Index bounded repo-local browser/iOS screenshots, logs, and build reports for visual review.', { repo_id: repoId, limit: { type: 'number' } }),
+  definition('browser_review_packet', 'Build a browser visual review packet from indexed browser screenshots.', { repo_id: repoId, limit: { type: 'number' } }),
+  definition('ios_review_packet', 'Build or capture an iOS visual review packet from simulator screenshots and logs.', {
+    repo_id: repoId,
+    udid: { type: 'string' },
+    label: { type: 'string' },
+    capture: { type: 'boolean' },
+    limit: { type: 'number' },
+  }, [], false),
+  definition('workflow_watchdog_report', 'Diagnose stuck repository workflows across execution jobs, local bridge jobs, schedules, and runtime processes.', {
+    repo_id: repoId,
+    stale_minutes: { type: 'number' },
+    include_processes: { type: 'boolean' },
   }),
   definition('ios_xcode_status', 'Check local Xcode, xcodebuild, and simctl availability without mutation.', { repo_id: repoId }),
   definition('ios_simulators_list', 'List available iOS Simulator devices using structured simctl JSON output.', {
@@ -1669,6 +1704,42 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         const repository = selected(ctx, args);
         const readiness = buildAssistantReadinessReport(ctx.controllerHome, repository);
         return result({ ...readiness });
+      }
+
+      case 'gmail_triage_rules': {
+        const repository = selected(ctx, args);
+        return result({ repoId: repository.repoId, checkoutId: repository.activeCheckoutId, path: '.repo-harness/assistant/gmail-triage-rules.json', ...readGmailTriageRules(repository) });
+      }
+      case 'gmail_triage_rule_upsert': {
+        const repository = selected(ctx, args);
+        const upserted = upsertGmailTriageRule(repository, args);
+        return result({ repoId: repository.repoId, checkoutId: repository.activeCheckoutId, ...upserted });
+      }
+      case 'gmail_triage_plan': {
+        const repository = selected(ctx, args);
+        let manifest;
+        try { manifest = getAssistantPluginManifest(ctx.controllerHome, repository, 'gmail'); } catch (_error) { manifest = undefined; }
+        return result(buildGmailTriagePlan(repository, { manifest, items: args.items, query: args.query }) as unknown as Record<string, unknown>);
+      }
+      case 'review_artifacts_prepare': {
+        const repository = selected(ctx, args);
+        return result(ensureReviewArtifactRoots(repository));
+      }
+      case 'review_artifacts_index': {
+        const repository = selected(ctx, args);
+        return result(buildReviewArtifactIndex(repository, { limit: args.limit }) as unknown as Record<string, unknown>);
+      }
+      case 'browser_review_packet': {
+        const repository = selected(ctx, args);
+        return result(prepareBrowserReviewPacket(repository, { limit: args.limit }) as unknown as Record<string, unknown>);
+      }
+      case 'ios_review_packet': {
+        const repository = selected(ctx, args);
+        return result(prepareIosReviewPacket(repository, { udid: args.udid, label: args.label, capture: args.capture, limit: args.limit }) as unknown as Record<string, unknown>);
+      }
+      case 'workflow_watchdog_report': {
+        const repository = selected(ctx, args);
+        return result(buildWorkflowWatchdogReport(ctx.controllerHome, repository, { staleMinutes: args.stale_minutes, includeProcesses: args.include_processes }) as unknown as Record<string, unknown>);
       }
       case 'ios_xcode_status': {
         return result({ ...iosXcodeStatus() });

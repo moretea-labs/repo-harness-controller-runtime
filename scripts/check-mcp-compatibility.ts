@@ -4,8 +4,8 @@ import { controllerExpectedToolNames } from '../src/cli/mcp/tools';
 import { runtimeToolDefinitions } from '../src/runtime/gateway/mcp/runtime-tools';
 import { CORE_CONTROLLER_TOOL_NAMES } from '../src/cli/mcp/toolset';
 
-const EXPECTED_COMPATIBILITY_FINGERPRINT = '9586b6a89a5a5e04';
-const EXPECTED_COMPATIBILITY_TOOL_COUNT = 100;
+const EXPECTED_COMPATIBILITY_FINGERPRINT = 'bd5bd8c9ae39ccdf';
+const EXPECTED_COMPATIBILITY_TOOL_COUNT = 115;
 
 const policy = runtimePolicy(process.cwd(), {
   profile: 'controller',

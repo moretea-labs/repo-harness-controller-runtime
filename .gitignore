@@ -114,3 +114,33 @@ _ops/
 # repo-harness local browser/runtime scratch
 .repo-harness/browser/
 .repo-harness/repair-backups/
+
+# repo-harness hardening: runtime scratch, temp, review artifacts, watchdog state
+.ai/harness/tmp/
+.ai/harness/cache/
+.ai/harness/locks/*.stale
+.ai/harness/watchdog/
+.ai/harness/recovery/
+.ai/harness/recovery-plans/
+.ai/harness/runtime-diagnostics/
+.ai/harness/self-healing/
+.ai/harness/secrets-audit/
+.repo-harness/tmp/
+.repo-harness/cache/
+.repo-harness/ios/
+.repo-harness/review-artifacts/
+.repo-harness/watchdog/
+.repo-harness/runtime-diagnostics/
+.repo-harness/secrets-audit/
+.repo-harness/*.local.*
+.repo-harness/*.tokens.*
+.repo-harness/*.secret.*
+.repo-harness/**/*.tmp
+.repo-harness/**/*.log
+.repo-harness/**/*.bak
+.repo-harness/**/*.backup
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision

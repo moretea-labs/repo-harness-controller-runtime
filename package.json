@@ -44,6 +44,7 @@
     "README.zh-CN.md",
     "install.sh",
     "install.ps1",
+    "bin/",
     "scripts/",
     "src/",
     "AGENTS.md",
@@ -54,15 +55,16 @@
     "OPTIMIZATION_REPORT.md"
   ],
   "bin": {
-    "repo-harness": "src/cli/index.ts",
-    "repo-harness-hook": "src/cli/hook-entry.ts"
+    "repo-harness": "bin/repo-harness.mjs",
+    "repo-harness-hook": "bin/repo-harness-hook.mjs"
   },
   "engines": {
+    "node": ">=20.10.0",
     "bun": ">=1.0.0"
   },
   "scripts": {
     "benchmark:skills": "bun scripts/run-skill-evals.ts",
-    "test": "bun test",
+    "test": "bash scripts/run-tests-portable.sh",
     "test:coverage": "bun test --coverage",
     "check:type": "node node_modules/typescript/bin/tsc --noEmit",
     "check:runtime-architecture": "node scripts/check-runtime-architecture.mjs",
@@ -95,7 +97,11 @@
     "repo:registry": "bun src/cli/v81-entry.ts repo",
     "repo:rollout": "bash scripts/rollout-all-registered-repos.sh",
     "smoke:schedule-engine": "node --loader ./src/runtime/shared/node-ts-loader.mjs scripts/smoke-schedule-engine.ts",
-    "smoke:supervised-automation": "node --loader ./src/runtime/shared/node-ts-loader.mjs scripts/smoke-chatgpt-supervised-automation.ts"
+    "smoke:supervised-automation": "node --loader ./src/runtime/shared/node-ts-loader.mjs scripts/smoke-chatgpt-supervised-automation.ts",
+    "check:env": "node scripts/check-runtime-env.mjs",
+    "test:bun": "bun test",
+    "test:node-smoke": "node --test tests/node/*.test.mjs",
+    "check:ci:portable": "REPO_HARNESS_ALLOW_NODE_ONLY=1 bash scripts/check-ci.sh"
   },
   "devDependencies": {
     "@colbymchenry/codegraph": "1.0.1",
@@ -109,5 +115,6 @@
     "commander": "^14.0.3",
     "express": "^5.2.1",
     "playwright": "^1.54.1"
-  }
+  },
+  "packageManager": "npm@10.0.0"
 }
