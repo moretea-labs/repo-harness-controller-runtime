@@ -88,7 +88,7 @@ import { getMcpPolicy } from "../mcp/policy";
 import { runtimePolicy } from "../mcp/multi-repository";
 import { controllerExpectedToolNames } from "../mcp/tools";
 import { loadMcpLocalConfig, loadMcpRuntimeState } from "../mcp/auth";
-import { loadRepositoryRegistry, registerRepository } from "../repositories/registry";
+import { loadRepositoryRegistry, registerRepository, resolveRepositorySelection } from "../repositories/registry";
 import { resolveControllerHome } from "../repositories/controller-home";
 import { ensureControllerDaemon, readControllerDaemonStatus } from "../../runtime/control-plane/daemon-client";
 import { findExecutionJob, listExecutionJobs } from "../../runtime/execution/jobs/store";
@@ -120,7 +120,14 @@ import {
 } from "../../runtime/assistant/store";
 
 export interface LocalBridgeServerOptions {
+  /**
+   * Compatibility root used to bootstrap older repo-local storage. New Local
+   * Bridge endpoints should resolve the active repository through repoId and
+   * use repoRoot only as a fallback/default selection.
+   */
   repoRoot: string;
+  controllerHome?: string;
+  defaultRepoId?: string;
   host?: string;
   port?: number;
   openBrowser?: boolean;
@@ -493,11 +500,291 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
   };
 }
 
+type LocalControllerSnapshot = ReturnType<typeof buildLocalControllerSnapshot>;
+
+interface UserFacingAction {
+  id: string;
+  label: string;
+}
+
+interface UserFacingAttentionItem {
+  id: string;
+  category: string;
+  categoryLabel: string;
+  title: string;
+  reason: string;
+  scope: string;
+  icon: string;
+  primaryAction: UserFacingAction;
+  refs?: Record<string, string | undefined>;
+}
+
+function normalizePathForCompare(value: string | undefined): string {
+  return String(value ?? '').replace(/\\/g, '/');
+}
+
+function displayPath(value: string | undefined): string {
+  const raw = String(value ?? '');
+  const home = process.env.HOME;
+  return home && raw.startsWith(home) ? `~${raw.slice(home.length)}` : raw;
+}
+
+function action(id: string, label: string): UserFacingAction {
+  return { id, label };
+}
+
+function userFacingRepositories(repoRoot: string, controllerHome = resolveControllerHome(), selectedRepoId?: string) {
+  const currentRoot = normalizePathForCompare(repoRoot);
+  return loadRepositoryRegistry(controllerHome).repositories
+    .map((record) => {
+      const checkout = record.checkouts.find((value) => value.checkoutId === record.activeCheckoutId) ?? record.checkouts[0];
+      const current = selectedRepoId
+        ? record.repoId === selectedRepoId
+        : normalizePathForCompare(record.canonicalRoot) === currentRoot || normalizePathForCompare(checkout?.canonicalRoot) === currentRoot;
+      const status = record.removedAt ? 'removed' : record.enabled === false ? 'disabled' : current ? 'ready' : 'available';
+      return {
+        id: record.repoId,
+        name: record.displayName,
+        path: displayPath(checkout?.canonicalRoot ?? record.canonicalRoot),
+        status,
+        statusLabel: status === 'ready' ? '就绪' : status === 'available' ? '可用' : status === 'disabled' ? '已停用' : '已移除',
+        current,
+        defaultBranch: record.defaultBranch,
+        remote: record.remoteUrl,
+        updatedAt: record.updatedAt,
+        lastSeenAt: record.lastSeenAt,
+      };
+    })
+    .sort((left, right) => Number(right.current) - Number(left.current) || String(right.lastSeenAt ?? '').localeCompare(String(left.lastSeenAt ?? '')));
+}
+
+function requestRepositorySelection(request: Request, options: LocalBridgeServerOptions, controllerHome: string) {
+  const body = request.body && typeof request.body === 'object' && !Array.isArray(request.body)
+    ? request.body as Record<string, unknown>
+    : {};
+  const repoId = queryString(request.params.repoId)
+    ?? queryString(request.query.repoId)
+    ?? queryString(body.repoId)
+    ?? options.defaultRepoId;
+  const checkoutId = queryString(request.params.checkoutId)
+    ?? queryString(request.query.checkoutId)
+    ?? queryString(body.checkoutId);
+  return resolveRepositorySelection({
+    repoId,
+    checkoutId,
+    explicitPath: repoId ? undefined : options.repoRoot,
+    controllerHome,
+    allowSoleRepository: true,
+  });
+}
+
+function requestRepositoryRoot(request: Request, options: LocalBridgeServerOptions, controllerHome: string): string {
+  return requestRepositorySelection(request, options, controllerHome).canonicalRoot;
+}
+
+function userFacingPluginStatus(plugin: LocalControllerSnapshot['assistantPlugins'][number]) {
+  const health = plugin.health;
+  const lifecycle = plugin.lifecycle;
+  const ready = plugin.enabled !== false && health.ready !== false && health.state !== 'error' && lifecycle.state !== 'error';
+  const needsAuthorization = [...(health.errors ?? []), ...(health.warnings ?? []), lifecycle.reason ?? '']
+    .some((entry) => /auth|token|credential|permission|scope|授权|登录/i.test(String(entry)));
+  const status = plugin.enabled === false ? 'disabled'
+    : ready ? 'ready'
+      : needsAuthorization ? 'authorization_required'
+        : health.state === 'error' || lifecycle.state === 'error' ? 'failed'
+          : 'needs_setup';
+  const nextStep = status === 'ready' ? '已连接，可用于任务执行'
+    : status === 'authorization_required' ? '需要完成授权后才能使用'
+      : status === 'disabled' ? '插件已禁用，可在高级配置中启用'
+        : '需要配置并测试连接';
+  return {
+    id: plugin.pluginId,
+    name: plugin.displayName || plugin.pluginId,
+    provider: plugin.provider,
+    status,
+    statusLabel: status === 'ready' ? '可用' : status === 'authorization_required' ? '待授权' : status === 'failed' ? '测试失败' : status === 'disabled' ? '已禁用' : '需配置',
+    enabled: plugin.enabled !== false,
+    actionCount: plugin.actions.length,
+    description: `${plugin.actions.length} 个可用动作`,
+    nextStep,
+    health: plugin.health,
+    lifecycle: plugin.lifecycle,
+  };
+}
+
+function userFacingAttentionItems(snapshot: LocalControllerSnapshot): UserFacingAttentionItem[] {
+  const items: UserFacingAttentionItem[] = [];
+  const seen = new Set<string>();
+  const push = (item: UserFacingAttentionItem): void => {
+    if (seen.has(item.id)) return;
+    seen.add(item.id);
+    items.push(item);
+  };
+  const queues = snapshot.completion.queues;
+  for (const entry of queues.needsHumanReview.slice(0, 12)) {
+    push({
+      id: `confirm:${entry.runId ?? `${entry.issueId}:${entry.taskId}`}`,
+      category: 'confirm_result',
+      categoryLabel: '任务待确认',
+      title: entry.title,
+      reason: entry.reason || '任务已经产出结果，需要你确认完成或打回修改。',
+      scope: '当前仓库',
+      icon: '✓',
+      primaryAction: action('view_advanced', '查看结果'),
+      refs: { issueId: entry.issueId, taskId: entry.taskId, runId: entry.runId },
+    });
+  }
+  for (const entry of queues.retryRequired.slice(0, 8)) {
+    push({
+      id: `retry:${entry.runId ?? `${entry.issueId}:${entry.taskId}`}`,
+      category: 'fix_failed_run',
+      categoryLabel: '失败需要处理',
+      title: entry.title,
+      reason: entry.reason || '最近一次执行失败，需要重新运行或打回修改。',
+      scope: '当前仓库',
+      icon: '!',
+      primaryAction: action('start_task', '重新发起'),
+      refs: { issueId: entry.issueId, taskId: entry.taskId, runId: entry.runId },
+    });
+  }
+  for (const entry of [...queues.noRunEvidence, ...queues.systemBlocked].slice(0, 8)) {
+    push({
+      id: `inspect:${entry.issueId}:${entry.taskId}`,
+      category: 'needs_inspection',
+      categoryLabel: '需要检查',
+      title: entry.title,
+      reason: entry.reason || '任务状态需要人工检查后再继续。',
+      scope: '当前仓库',
+      icon: '?',
+      primaryAction: action('view_advanced', '查看诊断'),
+      refs: { issueId: entry.issueId, taskId: entry.taskId, runId: entry.runId },
+    });
+  }
+  for (const plugin of snapshot.assistantPlugins.map(userFacingPluginStatus).filter((entry) => ['authorization_required', 'failed', 'needs_setup'].includes(entry.status)).slice(0, 8)) {
+    push({
+      id: `plugin:${plugin.id}`,
+      category: 'connect_plugin',
+      categoryLabel: '插件待授权',
+      title: `${plugin.name} ${plugin.statusLabel}`,
+      reason: plugin.nextStep,
+      scope: '能力中心',
+      icon: '✣',
+      primaryAction: action('configure_plugins', '去配置'),
+      refs: { pluginId: plugin.id },
+    });
+  }
+  const issues = Array.isArray(snapshot.board.issues) ? snapshot.board.issues : [];
+  for (const issue of issues.slice(0, 40)) {
+    const tasks = Array.isArray(issue.tasks) ? issue.tasks : [];
+    for (const task of tasks) {
+      const effectiveStatus = String((task as Record<string, unknown>).effectiveStatus ?? (task as Record<string, unknown>).status ?? '');
+      if (effectiveStatus !== 'changes_requested') continue;
+      push({
+        id: `changes:${issue.id}:${String((task as Record<string, unknown>).id ?? '')}`,
+        category: 'changes_requested',
+        categoryLabel: '已打回等待修改',
+        title: String((task as Record<string, unknown>).title ?? issue.title ?? '任务等待修改'),
+        reason: '该任务已经被打回，不应该继续显示成待审批。',
+        scope: String(issue.title ?? issue.id),
+        icon: '↩',
+        primaryAction: action('start_task', '继续修改'),
+        refs: { issueId: String(issue.id), taskId: String((task as Record<string, unknown>).id ?? '') },
+      });
+    }
+  }
+  return items.slice(0, 24);
+}
+
+function userFacingRecentTasks(snapshot: LocalControllerSnapshot) {
+  const queues = snapshot.decisionQueues;
+  const fromRunning = queues.runningNow.map((item) => {
+    const value = item as typeof item & Record<string, unknown>;
+    return {
+      id: String(value.id ?? value.runId ?? value.taskId ?? value.title),
+      title: String(value.title ?? '执行中的任务'),
+      summary: '助手正在处理，请等待下一步结果。',
+      status: 'running',
+      actor: 'G',
+      updatedAt: item.updatedAt,
+    };
+  });
+  const fromCompleted = queues.recentlyCompleted.map((item) => {
+    const value = item as typeof item & Record<string, unknown>;
+    return {
+      id: String(value.id ?? value.runId ?? value.taskId ?? value.title),
+      title: String(value.title ?? '已完成任务'),
+      summary: String(item.status) === 'cancelled' ? '任务已取消。' : '任务已经完成，可在历史中查看凭证。',
+      status: String(item.status) === 'cancelled' ? 'attention' : 'completed',
+      actor: 'G',
+      updatedAt: item.updatedAt,
+    };
+  });
+  const fromAttention = userFacingAttentionItems(snapshot).slice(0, 3).map((item) => ({
+    id: item.id,
+    title: item.title,
+    summary: item.reason,
+    status: 'attention',
+    actor: 'G',
+    updatedAt: undefined,
+  }));
+  return [...fromRunning, ...fromCompleted, ...fromAttention].slice(0, 8);
+}
+
+function buildUserControllerExperienceSnapshot(repoRoot: string, controllerHome = resolveControllerHome(), selectedRepoId?: string) {
+  const snapshot = cachedLocalControllerSnapshot(repoRoot);
+  const repositories = userFacingRepositories(repoRoot, controllerHome, selectedRepoId);
+  const currentRepository = repositories.find((entry) => entry.current) ?? repositories[0];
+  const plugins = snapshot.assistantPlugins.map(userFacingPluginStatus);
+  const readyPlugins = plugins.filter((plugin) => plugin.status === 'ready');
+  const attentionItems = userFacingAttentionItems(snapshot);
+  const blocked = snapshot.recovery.overallState === 'blocked' || snapshot.recovery.overallState === 'unavailable';
+  const needsSetup = !currentRepository || currentRepository.status !== 'ready';
+  const readinessState = blocked ? 'blocked' : needsSetup ? 'needs_setup' : 'ready';
+  const recommendation = needsSetup
+    ? { title: '先选择或注册一个仓库', description: '仓库可用后才能执行任务。', action: action('manage_repositories', '管理仓库') }
+    : attentionItems.length > 0
+      ? { title: '先处理高优先级事项', description: `有 ${attentionItems.length} 项需要你处理，处理后助手即可继续推进。`, action: action('handle_attention', '处理待办') }
+      : readyPlugins.length < plugins.length
+        ? { title: '补全插件能力', description: '核心仓库能力可用，但部分助手能力还未连接。', action: action('configure_plugins', '配置插件') }
+        : { title: '创建一个新任务，让助手为你完成工作', description: '当前系统可用，你可以直接输入自然语言任务。', action: action('start_task', '执行一个任务') };
+  return {
+    schemaVersion: 1,
+    generatedAt: new Date().toISOString(),
+    readiness: {
+      state: readinessState,
+      label: readinessState === 'ready' ? '系统就绪' : readinessState === 'needs_setup' ? '需要设置' : '系统阻塞',
+      title: readinessState === 'ready' ? '系统可用' : readinessState === 'needs_setup' ? '需要完成设置' : '系统暂不可用',
+      description: currentRepository
+        ? `仓库 ${currentRepository.name} ${readinessState === 'ready' ? '已就绪，助手随时为你执行任务' : '需要处理后才能执行任务'}`
+        : '请先添加一个本地仓库。',
+      chips: [
+        { label: snapshot.execution.defaultMode === 'direct-edit' ? '自动执行' : '执行模式已设置', tone: 'green' },
+        { label: snapshot.runtime.registered ? '环境就绪' : '仓库未注册', tone: snapshot.runtime.registered ? 'green' : 'amber' },
+        { label: snapshot.connector.healthy ? '权限充足' : '连接需检查', tone: snapshot.connector.healthy ? 'green' : 'amber' },
+        { label: '安全防护已启用', tone: 'green' },
+      ],
+      primaryAction: recommendation.action,
+    },
+    currentRepository,
+    repositories,
+    pluginSummary: {
+      ready: readyPlugins.length,
+      total: plugins.length,
+      lines: plugins.slice(0, 5).map((plugin) => `${plugin.name}  ${plugin.statusLabel}`),
+    },
+    plugins,
+    attentionItems,
+    recommendation,
+    recentTasks: userFacingRecentTasks(snapshot),
+  };
+}
+
 export async function startLocalBridgeServer(
   options: LocalBridgeServerOptions,
 ): Promise<LocalBridgeServerHandle> {
   const host = options.host ?? "127.0.0.1";
   const requestedPort = options.port ?? 8766;
+  const controllerHome = resolveControllerHome(options.controllerHome);
   assertAllowedBindHost(host, options.allowLanMobileIntents === true);
   reconcileAgentJobs(options.repoRoot);
   reconcileLocalBridgeJobs(options.repoRoot);
@@ -613,7 +900,6 @@ export async function startLocalBridgeServer(
         ? request.body as Record<string, unknown>
         : {};
       const intent = queryString(body.intent) ?? "plugin_action";
-      const controllerHome = resolveControllerHome();
       const repository = registerRepository({ path: options.repoRoot, controllerHome });
       if (intent === "list_plugins") {
         if (!mobileIntentHasScope(verified.principal.scopes, "plugins:read")) throw new Error("MOBILE_INTENT_SCOPE_DENIED: plugins:read is required");
@@ -728,8 +1014,65 @@ export async function startLocalBridgeServer(
   });
 
   app.use("/api", requireToken);
-  app.get("/api/snapshot", (_request, response) => {
-    response.json(cachedLocalControllerSnapshot(options.repoRoot));
+  app.get("/api/snapshot", (request, response) => {
+    try {
+      response.json(cachedLocalControllerSnapshot(requestRepositoryRoot(request, options, controllerHome)));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.get("/api/user-snapshot", (request, response) => {
+    try {
+      const repository = requestRepositorySelection(request, options, controllerHome);
+      response.json(buildUserControllerExperienceSnapshot(repository.canonicalRoot, controllerHome, repository.repoId));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.get("/api/repositories", (request, response) => {
+    try {
+      const selectedRepoId = queryString(request.query.repoId) ?? options.defaultRepoId;
+      response.json({ repositories: userFacingRepositories(options.repoRoot, controllerHome, selectedRepoId) });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.get("/api/repositories/:repoId/snapshot", (request, response) => {
+    try {
+      response.json(cachedLocalControllerSnapshot(requestRepositoryRoot(request, options, controllerHome)));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.get("/api/repositories/:repoId/user-snapshot", (request, response) => {
+    try {
+      const repository = requestRepositorySelection(request, options, controllerHome);
+      response.json(buildUserControllerExperienceSnapshot(repository.canonicalRoot, controllerHome, repository.repoId));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.post("/api/repositories/register", (request, response) => {
+    try {
+      const path = queryString(request.body?.path);
+      if (!path) throw new Error("REPOSITORY_PATH_REQUIRED");
+      const repository = registerRepository({
+        path,
+        controllerHome,
+        displayName: queryString(request.body?.displayName),
+        remoteUrl: queryString(request.body?.remoteUrl),
+        defaultBranch: queryString(request.body?.defaultBranch),
+      });
+      localSnapshotCache.delete(options.repoRoot);
+      localSnapshotCache.delete(repository.canonicalRoot);
+      response.status(201).json({ repository, userSnapshot: buildUserControllerExperienceSnapshot(repository.canonicalRoot, controllerHome, repository.repoId) });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
   });
   app.get("/api/completion/backlog", (request, response) => {
     try {
