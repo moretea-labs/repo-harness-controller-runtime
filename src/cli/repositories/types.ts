@@ -1,5 +1,6 @@
 export type RepositoryType = 'git' | 'bare' | 'local-git' | 'unknown';
 export type RepositoryStateStorageStrategy = 'controller-home' | 'repository-local' | 'hybrid';
+export type LocalProjectBootstrapMode = 'init_git_only' | 'init_git_and_register' | 'replace_registration';
 
 export interface GitHubRepositoryMapping {
   owner: string;
@@ -97,4 +98,52 @@ export interface EntityMigrationReport {
   unresolved: number;
   files: string[];
   errors: Array<{ path: string; error: string }>;
+}
+
+export interface LocalProjectCandidate {
+  path: string;
+  canonicalPath?: string;
+  name: string;
+  family: string;
+  exists: boolean;
+  hasGit: boolean;
+  markerKinds: string[];
+  markerPaths: string[];
+  visibleEntryCount: number;
+  fileCount: number;
+  recentActivityAt?: string;
+  stale: boolean;
+  staleReasons: string[];
+  score: number;
+  repoId?: string;
+  displayName?: string;
+  recommended: boolean;
+}
+
+export interface LocalProjectLatestSourceDiagnosis {
+  inputPath: string;
+  family: string;
+  repoId?: string;
+  noMutation: true;
+  candidates: LocalProjectCandidate[];
+  recommendedPath?: string;
+  recommendedRepoId?: string;
+  warnings: string[];
+}
+
+export interface LocalProjectBootstrapResult {
+  path: string;
+  mode: LocalProjectBootstrapMode;
+  createdGit: boolean;
+  createdGitignore: boolean;
+  idempotent: boolean;
+  markers: string[];
+  markerPaths: string[];
+  repository?: RepositoryRecord;
+  replacedRegistration?: {
+    repoId: string;
+    previousCanonicalRoot: string;
+    previousCheckoutId: string;
+  };
+  next: string;
 }

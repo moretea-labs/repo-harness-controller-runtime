@@ -72,7 +72,23 @@ The real endpoint stays in ignored local config; the tracked guide stays placeho
 
 ## Verify the loaded tool surface
 
-Call `controller_capabilities` from ChatGPT. It should report `controller-chatgpt-bridge-v8` and list the Issue Launcher, GitHub session, Run inspection, bounded edit, and Verification Gate tools. If only legacy planning tools are visible, refresh or recreate the Connector so ChatGPT reloads the MCP tool schema.
+Call `controller_capabilities` from ChatGPT. It should report `controller-chatgpt-bridge-v8` and list the Issue Launcher, GitHub session, Run inspection, bounded edit, and Verification Gate tools. `expectedTools` should also include `repository_latest_source_diagnose` and `repository_bootstrap_local_project`. If only legacy planning tools are visible, refresh or recreate the Connector so ChatGPT reloads the MCP tool schema.
+
+## Refresh newly added repository tools
+
+For the current repository only, prefer a bounded local restart:
+
+```bash
+repo-harness mcp restart --repo .
+```
+
+If this repository is already registered with the global Controller and also needs a local harness refresh, use a repo-scoped rollout instead of an unscoped rollout:
+
+```bash
+repo-harness repo rollout --repo-id <current-repo-id>
+```
+
+After either command, rescan or recreate the ChatGPT Connector, then call `controller_capabilities` again and verify `expectedTools` still includes `repository_latest_source_diagnose` and `repository_bootstrap_local_project`. Do not run an unscoped `repo-harness repo rollout` unless you intentionally want to refresh every registered repository.
 
 ## Daily workflow
 
@@ -179,7 +195,7 @@ The executor profile remains read-oriented. Controller-dispatched Codex work is 
 
 - ChatGPT cannot connect: verify the HTTPS tunnel ends in `/mcp` and local `/health` responds.
 - ChatGPT auth loops: retry authorization and inspect `.repo-harness/mcp.oauth.json`; do not paste the passphrase into chat.
-- Tool scan misses tools: open the local visual controller and compare its runtime fingerprint with `controller-chatgpt-bridge-v8`; restart keepalive, then rescan or recreate the versioned Connector.
+- Tool scan misses tools: run `repo-harness mcp restart --repo .`, then rescan or recreate the versioned Connector and verify `controller_capabilities.expectedTools` includes `repository_latest_source_diagnose` and `repository_bootstrap_local_project`.
 - Codex cannot see the MCP server: rerun `repo-harness mcp setup codex --repo . --scope project`.
 - A quick tunnel URL changed: update the Connector URL or switch to a named tunnel.
 - A Task is blocked: inspect `get_task_run`, shrink or re-plan the Task, then retry that Task rather than redispatching the full Issue.

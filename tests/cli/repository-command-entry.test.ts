@@ -23,8 +23,11 @@ describe('repository command entry', () => {
       encoding: 'utf-8',
     });
     expect(result.status).toBe(0);
+    expect(result.stdout).toContain('diagnose-local');
+    expect(result.stdout).toContain('bootstrap-local');
     expect(result.stdout).toContain('rollout');
     expect(result.stdout).toContain('Apply the latest repo-harness workflow to');
-    expect(result.stdout).toContain('registered repositories and restart configured');
+    expect(result.stdout).toContain('registered repositories and restart');
+    expect(result.stdout).toContain('configured MCP controllers');
   });
 });

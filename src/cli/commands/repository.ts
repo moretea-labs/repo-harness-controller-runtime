@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import { executeRepositoryCommand } from '../repositories/command-executor';
 import { bindRepositoryEntities } from '../repositories/entity-migration';
 import { withControllerLock } from '../repositories/locks';
+import { bootstrapLocalProject, diagnoseLatestLocalProjectSource } from '../repositories/local-project-onboarding';
 import {
   disableRepository,
   focusRepository,
@@ -51,6 +52,42 @@ export function buildRepositoryCommand(): Command {
     .action((path: string, opts: { controllerHome?: string; name?: string; remote?: string; defaultBranch?: string; json?: boolean }) => {
       const repository = registerRepository({ path, controllerHome: opts.controllerHome, displayName: opts.name, remoteUrl: opts.remote, defaultBranch: opts.defaultBranch });
       output(initializeRepository(repository, opts.controllerHome), opts.json === true);
+    });
+
+  common(command.command('diagnose-local')
+    .description('Read-only diagnosis for picking the latest local project source tree among sibling directories')
+    .argument('<path>', 'Absolute local project path')
+    .option('--repo-id <repo-id>', 'Registered repository to diagnose instead of the path'))
+    .action((path: string, opts: { controllerHome?: string; repoId?: string; json?: boolean }) => {
+      output(diagnoseLatestLocalProjectSource({ path, repoId: opts.repoId, controllerHome: opts.controllerHome }), opts.json === true);
+    });
+
+  common(command.command('bootstrap-local')
+    .description('Safely initialize and optionally register a trusted non-Git local project directory')
+    .argument('<path>', 'Absolute local project path')
+    .option('--name <display-name>', 'Display name')
+    .option('--default-branch <branch>', 'Default branch when Git is initialized')
+    .option('--mode <mode>', 'Bootstrap mode: init_git_only, init_git_and_register, replace_registration')
+    .option('--replace-registered-repo-id <repo-id>', 'Reuse an existing repoId when replacing a stale registration')
+    .requiredOption('--confirm-authorization', 'Required confirmation for local project bootstrap'))
+    .action((path: string, opts: {
+      controllerHome?: string;
+      name?: string;
+      defaultBranch?: string;
+      mode?: 'init_git_only' | 'init_git_and_register' | 'replace_registration';
+      replaceRegisteredRepoId?: string;
+      confirmAuthorization?: boolean;
+      json?: boolean;
+    }) => {
+      output(bootstrapLocalProject({
+        path,
+        controllerHome: opts.controllerHome,
+        displayName: opts.name,
+        defaultBranch: opts.defaultBranch,
+        mode: opts.mode,
+        replaceRegisteredRepoId: opts.replaceRegisteredRepoId,
+        confirmAuthorization: opts.confirmAuthorization === true,
+      }), opts.json === true);
     });
 
   common(command.command('list').description('List registered repositories')

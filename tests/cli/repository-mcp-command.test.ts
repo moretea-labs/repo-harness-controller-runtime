@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { spawnSync } from "child_process";
 import { registerRepository } from "../../src/cli/repositories/registry";
+import { callMcpTool } from "../../src/cli/mcp/tools";
 import { callRepositoryTool } from "../../src/cli/mcp/repository-tools";
 import { createMcpToolContext } from "../../src/cli/mcp/multi-repository";
 import { getLocalBridgeJob, readLocalBridgeJobOutput, readLocalBridgeJobOutputSnapshot } from "../../src/cli/local-bridge/job-store";
@@ -60,6 +61,67 @@ function writeLocalJobFixture(
 }
 
 describe("repository MCP command tools", () => {
+  test("diagnoses the latest sibling source tree through MCP without mutating the project directories", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "repo-harness-mcp-repo-diagnose-"));
+    const controllerHome = join(workspace, "controller-home");
+    const staleRoot = join(workspace, "TinyMoments");
+    const richRoot = join(workspace, "TinyMoments 1.7");
+    try {
+      mkdirSync(controllerHome, { recursive: true });
+      mkdirSync(staleRoot, { recursive: true });
+      git(staleRoot, ["init", "-q"]);
+      const registered = registerRepository({ path: staleRoot, controllerHome, displayName: "TinyMoments" });
+
+      mkdirSync(richRoot, { recursive: true });
+      mkdirSync(join(richRoot, "TinyMoments.xcodeproj"), { recursive: true });
+      mkdirSync(join(richRoot, "App"), { recursive: true });
+      writeFileSync(join(richRoot, "Package.swift"), "// swift package\n");
+      writeFileSync(join(richRoot, "README.md"), "# TinyMoments\n");
+      const canonicalRichRoot = realpathSync(richRoot);
+
+      const response = await json(callRepositoryTool(controllerHome, "repository_latest_source_diagnose", {
+        repo_id: registered.repoId,
+      }));
+      const ctx = createMcpToolContext({ repo: staleRoot, controllerHome, profile: "controller" });
+      const capabilities = JSON.parse((await callMcpTool(ctx, "controller_capabilities")).content[0]?.text ?? "{}");
+
+      expect(response.diagnosis.recommendedPath).toBe(canonicalRichRoot);
+      expect(response.diagnosis.noMutation).toBe(true);
+      expect(capabilities.expectedTools).toContain("repository_latest_source_diagnose");
+      expect(capabilities.expectedTools).toContain("repository_bootstrap_local_project");
+      expect(existsSync(join(richRoot, ".git"))).toBe(false);
+    } finally {
+      await cleanupWorkspace([workspace, controllerHome, staleRoot, richRoot]);
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  test("bootstraps a non-Git local project through MCP", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "repo-harness-mcp-repo-bootstrap-"));
+    const controllerHome = join(workspace, "controller-home");
+    const projectRoot = join(workspace, "PulseMetronomeApp");
+    try {
+      mkdirSync(controllerHome, { recursive: true });
+      mkdirSync(projectRoot, { recursive: true });
+      mkdirSync(join(projectRoot, "PulseMetronome.xcodeproj"), { recursive: true });
+      mkdirSync(join(projectRoot, "PulseMetronome"), { recursive: true });
+      writeFileSync(join(projectRoot, "README.md"), "# PulseMetronome\n");
+      writeFileSync(join(projectRoot, "build.sh"), "#!/usr/bin/env bash\nxcodebuild\n");
+
+      const response = await json(callRepositoryTool(controllerHome, "repository_bootstrap_local_project", {
+        path: projectRoot,
+        display_name: "PulseMetronomeApp",
+        confirm_authorization: true,
+      }));
+      expect(response.bootstrap.repository.repoId).toBeTruthy();
+      expect(response.bootstrap.createdGit).toBe(true);
+      expect(existsSync(join(projectRoot, ".git"))).toBe(true);
+    } finally {
+      await cleanupWorkspace([workspace, controllerHome, projectRoot]);
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
   test("previews and executes repository-scoped git commands through MCP", async () => {
     const workspace = mkdtempSync(join(tmpdir(), "repo-harness-mcp-repo-command-"));
     const controllerHome = join(workspace, "controller-home");

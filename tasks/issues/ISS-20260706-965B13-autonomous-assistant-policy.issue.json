@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 5,
+  "id": "ISS-20260706-965B13",
+  "title": "Autonomous assistant policy",
+  "slug": "autonomous-assistant-policy",
+  "kind": "investigation",
+  "status": "in_progress",
+  "summary": "Add a durable repo-harness philosophy note: autonomous-first, policy-bound, self-improving personal assistant; reduce user interruption; try safe repairs before escalation.",
+  "goals": [
+    "Add a durable repo-harness philosophy note: autonomous-first, policy-bound, self-improving personal assistant; reduce user interruption; try safe repairs before escalation."
+  ],
+  "nonGoals": [
+    "Do not make unrelated changes outside the declared Task scope."
+  ],
+  "acceptanceCriteria": [
+    "Complete: Add a durable repo-harness philosophy note: autonomous-first, policy-bound, self-improving personal assistant; reduce user interruption; try safe repairs before escalation."
+  ],
+  "relatedArtifacts": [],
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Autonomous assistant policy",
+      "objective": "Add a durable repo-harness philosophy note: autonomous-first, policy-bound, self-improving personal assistant; reduce user interruption; try safe repairs before escalation.",
+      "status": "review",
+      "dependsOn": [],
+      "allowedPaths": [
+        "docs",
+        "plans"
+      ],
+      "forbiddenPaths": [],
+      "checks": [
+        "npm run check:type"
+      ],
+      "acceptanceCriteria": [
+        "Complete: Add a durable repo-harness philosophy note: autonomous-first, policy-bound, self-improving personal assistant; reduce user interruption; try safe repairs before escalation."
+      ],
+      "risk": "low",
+      "recommendedAgent": "codex",
+      "notes": [
+        "Accepted RUN-iss-20260706-965b13-t1-1783348210483-d3808a4a for asynchronous launch.",
+        "Dispatched RUN-iss-20260706-965b13-t1-1783348210483-d3808a4a to codex.",
+        "RUN-iss-20260706-965b13-t1-1783348210483-d3808a4a finished successfully."
+      ],
+      "runIds": [
+        "RUN-iss-20260706-965b13-t1-1783348210483-d3808a4a"
+      ],
+      "createdAt": "2026-07-06T14:30:10.475Z",
+      "updatedAt": "2026-07-06T14:31:44.625Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    }
+  ],
+  "createdAt": "2026-07-06T14:30:10.475Z",
+  "updatedAt": "2026-07-06T14:31:44.625Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+}

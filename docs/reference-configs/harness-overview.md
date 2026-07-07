@@ -9,7 +9,8 @@ or refreshes a repo. The harness gives agents three durable surfaces:
 
 - **Shared standards**: `docs/spec.md`, `docs/reference-configs/`, root
   `AGENTS.md`, and root `CLAUDE.md` explain stable product intent, coding
-  rules, and local workflow boundaries.
+  rules, local workflow boundaries, and assistant philosophy such as
+  `docs/repo-harness-autonomous-assistant-philosophy.md`.
 - **Task contracts**: `plans/`, `tasks/contracts/`, `tasks/reviews/`, and
   `.ai/harness/checks/` turn a request into scoped implementation work with
   evidence-backed completion.

@@ -42,6 +42,7 @@ interface RegisterRepositoryInput {
   repositoryType?: RepositoryType;
   enabled?: boolean;
   stateStorageStrategy?: RepositoryStateStorageStrategy;
+  repoIdOverride?: string;
 }
 
 interface UpdateRepositoryInput {
@@ -338,7 +339,9 @@ export function registerRepository(input: RegisterRepositoryInput): RepositoryRe
   const timestamp = now();
   const registry = loadRepositoryRegistry(home);
   const existingByRoot = uniqueCanonicalRecord(registry.repositories, canonicalRoot);
-  const derivedRepoId = localIdentity.repoId || (canonicalRemote ? stableRemoteRepoId(canonicalRemote) : newLocalRepoId());
+  const derivedRepoId = input.repoIdOverride?.trim()
+    || localIdentity.repoId
+    || (canonicalRemote ? stableRemoteRepoId(canonicalRemote) : newLocalRepoId());
   const repoId = existingByRoot?.repoId ?? derivedRepoId;
   const checkoutId = stableCheckoutId(repoId, canonicalRoot);
   const existing = existingByRoot ?? registry.repositories.find((record) => record.repoId === repoId);

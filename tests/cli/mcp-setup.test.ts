@@ -430,6 +430,10 @@ describe("mcp setup", () => {
     expect(guide).toContain("## Dev Mode Agent Runner");
     expect(guide).toContain("--enable-dev-runner");
     expect(guide).toContain("run_agent_goal");
+    expect(guide).toContain("repo-harness mcp restart --repo .");
+    expect(guide).toContain("repo-harness repo rollout --repo-id <current-repo-id>");
+    expect(guide).toContain("repository_latest_source_diagnose");
+    expect(guide).toContain("repository_bootstrap_local_project");
     expect(guide).toContain("https://example.test/mcp");
     expect(guide).toContain("cloudflared tunnel create repo-harness-mcp");
     expect(guide).toContain("quick tunnel");

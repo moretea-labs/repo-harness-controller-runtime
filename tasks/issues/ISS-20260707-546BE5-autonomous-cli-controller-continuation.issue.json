@@ -1,0 +1,146 @@
+{
+  "schemaVersion": 5,
+  "id": "ISS-20260707-546BE5",
+  "title": "Autonomous CLI controller continuation",
+  "slug": "autonomous-cli-controller-continuation",
+  "kind": "feature",
+  "status": "in_progress",
+  "summary": "Allow repo-harness daemon to continue work with local Codex/ChatGPT-compatible CLI controllers from durable continuation packets, reducing user intervention while keeping repo-harness as policy and audit authority.",
+  "goals": [
+    "Support a durable continuation packet that can be consumed by a local CLI controller process such as Codex CLI or future ChatGPT CLI.",
+    "Add a daemon-owned controller-runner that can start a bounded CLI continuation when schedules or monitors produce safe next actions.",
+    "Keep all execution behind repo-harness policy, leases, budgets, stop conditions, and audit logs.",
+    "Support DeepSeek as a function-calling backup reviewer through local configuration rather than assuming it is an MCP host.",
+    "Avoid notification-only workflows except as escalation when local autonomous continuation cannot proceed."
+  ],
+  "nonGoals": [
+    "Bypass platform safety checks.",
+    "Let external models execute repo-harness tools directly without policy validation.",
+    "Depend on ChatGPT initiating a new conversation.",
+    "Store API keys in tracked repository files."
+  ],
+  "acceptanceCriteria": [
+    "repo-harness can write a continuation packet after blocked or incomplete work.",
+    "local daemon can launch a bounded Codex CLI continuation from the packet when configured and allowed.",
+    "DeepSeek configuration status clearly distinguishes MCP-host support from API/function-calling adapter support.",
+    "Blocked restart/tool-schema refresh paths become structured repair actions or continuation packet entries.",
+    "A schedule can choose local CLI continuation before human notification when risk and policy allow."
+  ],
+  "relatedArtifacts": [],
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Continuation packet schema",
+      "objective": "Define and implement a durable continuation packet schema with objective, state summary, blockers, next safe actions, allowed tools, budget, and stop conditions.",
+      "status": "review",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src",
+        "tests",
+        "docs",
+        "plans"
+      ],
+      "forbiddenPaths": [],
+      "checks": [
+        "npm run check:type",
+        "bun test"
+      ],
+      "acceptanceCriteria": [],
+      "risk": "medium",
+      "recommendedAgent": "codex",
+      "notes": [
+        "Accepted RUN-iss-20260707-546be5-t1-1783384882196-b53fe34a for asynchronous launch.",
+        "Dispatched RUN-iss-20260707-546be5-t1-1783384882196-b53fe34a to codex.",
+        "RUN-iss-20260707-546be5-t1-1783384882196-b53fe34a finished successfully. Automatic integration is starting.",
+        "Automatic integration failed for RUN-iss-20260707-546be5-t1-1783384882196-b53fe34a: 4 edit operations failed precondition checks"
+      ],
+      "runIds": [
+        "RUN-iss-20260707-546be5-t1-1783384882196-b53fe34a"
+      ],
+      "createdAt": "2026-07-07T00:40:46.328Z",
+      "updatedAt": "2026-07-07T00:52:20.417Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    },
+    {
+      "id": "T2",
+      "title": "CLI continuation runner",
+      "objective": "Add daemon/local-job support for launching a bounded Codex CLI or ChatGPT-compatible CLI continuation from a packet, with repo-harness policy as the authority.",
+      "status": "ready",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src",
+        "tests",
+        "docs",
+        "plans"
+      ],
+      "forbiddenPaths": [],
+      "checks": [
+        "npm run check:type",
+        "bun test"
+      ],
+      "acceptanceCriteria": [],
+      "risk": "medium",
+      "recommendedAgent": "codex",
+      "notes": [],
+      "runIds": [],
+      "createdAt": "2026-07-07T00:40:46.328Z",
+      "updatedAt": "2026-07-07T00:40:46.328Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    },
+    {
+      "id": "T3",
+      "title": "DeepSeek adapter docs and config",
+      "objective": "Document and validate DeepSeek as API/function-calling adapter rather than MCP host, with local config diagnostics and prepare-only default.",
+      "status": "ready",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src",
+        "tests",
+        "docs",
+        "plans"
+      ],
+      "forbiddenPaths": [],
+      "checks": [
+        "npm run check:type",
+        "bun test"
+      ],
+      "acceptanceCriteria": [],
+      "risk": "medium",
+      "recommendedAgent": "codex",
+      "notes": [],
+      "runIds": [],
+      "createdAt": "2026-07-07T00:40:46.328Z",
+      "updatedAt": "2026-07-07T00:40:46.328Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    },
+    {
+      "id": "T4",
+      "title": "Autonomous schedule policy",
+      "objective": "Teach schedules/monitors to prefer local CLI continuation for safe work, then backup model review, then human notification only as escalation.",
+      "status": "ready",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src",
+        "tests",
+        "docs",
+        "plans"
+      ],
+      "forbiddenPaths": [],
+      "checks": [
+        "npm run check:type",
+        "bun test"
+      ],
+      "acceptanceCriteria": [],
+      "risk": "medium",
+      "recommendedAgent": "codex",
+      "notes": [],
+      "runIds": [],
+      "createdAt": "2026-07-07T00:40:46.328Z",
+      "updatedAt": "2026-07-07T00:40:46.328Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    }
+  ],
+  "createdAt": "2026-07-07T00:40:46.328Z",
+  "updatedAt": "2026-07-07T00:52:20.417Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+}

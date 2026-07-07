@@ -1,4 +1,5 @@
 import { bindRepositoryEntities } from '../repositories/entity-migration';
+import { bootstrapLocalProject, diagnoseLatestLocalProjectSource } from '../repositories/local-project-onboarding';
 import { executeRepositoryCommand, previewRepositoryCommandExecution } from '../repositories/command-executor';
 import { withControllerLock } from '../repositories/locks';
 import {
@@ -49,6 +50,18 @@ export const repositoryToolDefinitions: McpToolDefinition[] = [
     remote_url: { type: 'string' },
     default_branch: { type: 'string' },
   }, ['path']),
+  definition('repository_latest_source_diagnose', 'Read-only diagnosis that compares sibling project directories and recommends the latest usable source tree.', {
+    path: { type: 'string', description: 'Absolute local project path.' },
+    repo_id: repoId,
+  }, [], true),
+  definition('repository_bootstrap_local_project', 'Safely initialize and optionally register a trusted non-Git local project directory.', {
+    path: { type: 'string', description: 'Absolute local project path.' },
+    display_name: { type: 'string' },
+    default_branch: { type: 'string' },
+    mode: { type: 'string', enum: ['init_git_only', 'init_git_and_register', 'replace_registration'] },
+    replace_registered_repo_id: repoId,
+    confirm_authorization: { type: 'boolean', description: 'Must be true to authorize Git initialization and registration.' },
+  }, ['path', 'confirm_authorization'], false, true),
   definition('repository_list', 'List registered repositories.', {
     include_removed: { type: 'boolean' },
   }, [], true),
@@ -149,6 +162,26 @@ export async function callRepositoryTool(
         });
         return result({ repository, migration: bindRepositoryEntities(repository) });
       }
+      case 'repository_latest_source_diagnose':
+        return result({
+          diagnosis: diagnoseLatestLocalProjectSource({
+            path: typeof args.path === 'string' ? args.path : undefined,
+            repoId: typeof args.repo_id === 'string' ? args.repo_id : undefined,
+            controllerHome,
+          }),
+        });
+      case 'repository_bootstrap_local_project':
+        return result({
+          bootstrap: bootstrapLocalProject({
+            path: String(args.path ?? ''),
+            controllerHome,
+            displayName: typeof args.display_name === 'string' ? args.display_name : undefined,
+            defaultBranch: typeof args.default_branch === 'string' ? args.default_branch : undefined,
+            mode: typeof args.mode === 'string' ? args.mode as 'init_git_only' | 'init_git_and_register' | 'replace_registration' : undefined,
+            replaceRegisteredRepoId: typeof args.replace_registered_repo_id === 'string' ? args.replace_registered_repo_id : undefined,
+            confirmAuthorization: args.confirm_authorization === true,
+          }),
+        });
       case 'repository_list':
         return result({ repositories: listRepositories(controllerHome, { includeRemoved: args.include_removed === true }).map(repositorySummary) });
       case 'repository_get':

@@ -24,6 +24,11 @@ const STARTUP_WAIT_ATTEMPTS = 160;
 const STARTUP_WAIT_INTERVAL_MS = 250;
 const TOOLS_SMOKE_ATTEMPTS = 20;
 const TOOLS_SMOKE_INTERVAL_MS = 500;
+const REQUIRED_RESTART_TOOLS = [
+  'controller_capabilities',
+  'repository_latest_source_diagnose',
+  'repository_bootstrap_local_project',
+] as const;
 
 export interface McpRestartOptions {
   repo?: string;
@@ -77,7 +82,7 @@ interface PublicSurfaceCheck {
 
 interface ToolsSmokeCheck {
   toolCount: number;
-  expectedTool: string;
+  expectedTools: string[];
 }
 
 interface GitHubPluginSummary {
@@ -671,10 +676,11 @@ async function runToolsSmoke(config: ResolvedMcpRestartConfig): Promise<ToolsSmo
         ? ((payload.result as { tools: Array<{ name?: string }> }).tools)
         : [];
       const names = tools.map((tool) => tool.name).filter((name): name is string => typeof name === 'string');
-      if (!names.includes('controller_capabilities')) {
-        throw new Error('missing expected tool: controller_capabilities');
+      const missing = REQUIRED_RESTART_TOOLS.filter((tool) => !names.includes(tool));
+      if (missing.length > 0) {
+        throw new Error(`missing expected tools: ${missing.join(', ')}`);
       }
-      return { toolCount: names.length, expectedTool: 'controller_capabilities' };
+      return { toolCount: names.length, expectedTools: [...REQUIRED_RESTART_TOOLS] };
     } catch (error) {
       if (attempt === TOOLS_SMOKE_ATTEMPTS - 1) throw error;
       await sleep(TOOLS_SMOKE_INTERVAL_MS);
@@ -805,6 +811,7 @@ export async function runMcpRestart(opts: McpRestartOptions): Promise<McpSetupRe
     lines.push(`  local_controller: ${localControllerUrl(config.localUiHost, config.localUiPort)}`);
   }
   lines.push(`  smoke_tool_count: ${toolsSmoke ? String(toolsSmoke.toolCount) : 'skipped'}`);
+  lines.push(`  smoke_expected_tools: ${toolsSmoke ? toolsSmoke.expectedTools.join(', ') : 'skipped'}`);
   lines.push(`  github_plugin_enabled: ${String(github.enabled)}`);
   lines.push(`  github_plugin_sync_mode: ${github.syncMode}`);
   lines.push(`  github_plugin_include_tasks: ${String(github.includeTasks)}`);

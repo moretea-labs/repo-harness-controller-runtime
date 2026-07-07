@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-07-06T13:45:49.310Z",
+  "grants": [
+    {
+      "schemaVersion": 1,
+      "key": "devprojects-read-20260706",
+      "root": "/Users/greyson/DevProjects",
+      "canonicalRoot": "/Users/greyson/DevProjects",
+      "mode": "read",
+      "reason": "List first-level project directories to register missing local Git repositories in repo-harness, skipping explicitly excluded names.",
+      "createdAt": "2026-07-06T13:45:49.310Z",
+      "createdBy": "external_filesystem_grant_apply"
+    }
+  ]
+}
