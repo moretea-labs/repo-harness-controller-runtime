@@ -1469,21 +1469,26 @@ export async function startLocalBridgeServer(
       response.status(404).json({ error: errorMessage(error) });
     }
   });
-  app.get("/api/project-state", (_request, response) => {
-    response.json(loadControllerProjectState(options.repoRoot));
+  app.get("/api/project-state", (request, response) => {
+    try {
+      response.json(loadControllerProjectState(requestRepositoryRoot(request, options, controllerHome)));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
   });
   app.patch("/api/project-state", (request, response) => {
     try {
       const body = request.body ?? {};
+      const repoRoot = requestRepositoryRoot(request, options, controllerHome);
       if (body.currentIssueId === null || body.currentIssueId === "") {
-        response.json(clearCurrentIssue(options.repoRoot, "local-ui"));
+        response.json(clearCurrentIssue(repoRoot, "local-ui"));
         return;
       }
       if (typeof body.currentIssueId === "string") {
-        const issue = getIssue(options.repoRoot, body.currentIssueId);
+        const issue = getIssue(repoRoot, body.currentIssueId);
         if (issue.archivedAt || ["done", "cancelled"].includes(issue.status)) throw new Error("only an active, non-archived Issue can become the execution focus");
       }
-      response.json(saveControllerProjectState(options.repoRoot, {
+      response.json(saveControllerProjectState(repoRoot, {
         currentIssueId: typeof body.currentIssueId === "string" ? body.currentIssueId : undefined,
         issueCreationMode: ["open", "focus_only", "paused"].includes(body.issueCreationMode) ? body.issueCreationMode : undefined,
         showArchivedByDefault: typeof body.showArchivedByDefault === "boolean" ? body.showArchivedByDefault : undefined,
@@ -1494,16 +1499,18 @@ export async function startLocalBridgeServer(
   });
   app.post("/api/issues/:issueId/focus", (request, response) => {
     try {
-      const issue = getIssue(options.repoRoot, request.params.issueId);
+      const repoRoot = requestRepositoryRoot(request, options, controllerHome);
+      const issue = getIssue(repoRoot, request.params.issueId);
       if (issue.archivedAt || ["done", "cancelled"].includes(issue.status)) throw new Error("only an active, non-archived Issue can become the execution focus");
-      response.json(saveControllerProjectState(options.repoRoot, { currentIssueId: issue.id }, "local-ui"));
+      response.json(saveControllerProjectState(repoRoot, { currentIssueId: issue.id }, "local-ui"));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
   });
   app.post("/api/tasks/launch-ready", (request, response) => {
     try {
-      const board = projectBoard(options.repoRoot);
+      const repoRoot = requestRepositoryRoot(request, options, controllerHome);
+      const board = projectBoard(repoRoot);
       const maxParallel = Math.max(1, Math.min(Number(request.body?.maxParallel ?? 2), 4));
       const selected: Array<{ issueId: string; taskId: string }> = [];
       const selectedTasks: Array<ReturnType<typeof getIssue>["tasks"][number]> = [];
@@ -1512,7 +1519,7 @@ export async function startLocalBridgeServer(
         if (selected.length >= maxParallel) break;
         const issueId = String(candidate.issueId ?? "");
         const taskId = String(candidate.taskId ?? "");
-        const issue = getIssue(options.repoRoot, issueId);
+        const issue = getIssue(repoRoot, issueId);
         const task = issue.tasks.find((entry) => entry.id === taskId);
         if (!task) continue;
         if (selectedTasks.some((entry) => taskWriteScopesConflict(entry, task))) {
@@ -1523,7 +1530,7 @@ export async function startLocalBridgeServer(
         selectedTasks.push(task);
       }
       const jobs = selected.map(({ issueId, taskId }) => {
-        const job = submitLocalBridgeJob(options.repoRoot, {
+        const job = submitLocalBridgeJob(repoRoot, {
           action: "launch-task",
           requestedBy: "local-ui",
           payload: {
@@ -1533,13 +1540,13 @@ export async function startLocalBridgeServer(
             isolate: typeof request.body?.isolate === "boolean" ? request.body.isolate : undefined,
           },
         });
-        if (job.status === "approved") asyncExecute(options.repoRoot, job.jobId);
+        if (job.status === "approved") asyncExecute(repoRoot, job.jobId);
         return job;
       });
       response.status(202).json({
         jobs,
         skipped,
-        currentFocus: loadControllerProjectState(options.repoRoot).currentIssueId,
+        currentFocus: loadControllerProjectState(repoRoot).currentIssueId,
         focusIsInformational: true,
       });
     } catch (error) {
@@ -1548,13 +1555,14 @@ export async function startLocalBridgeServer(
   });
   app.post("/api/issues/:issueId/launch", (request, response) => {
     try {
-      const readiness = inspectIssueReadiness(options.repoRoot, request.params.issueId);
+      const repoRoot = requestRepositoryRoot(request, options, controllerHome);
+      const readiness = inspectIssueReadiness(repoRoot, request.params.issueId);
       if (!readiness.queueable) {
         response.status(409).json({ error: "Issue has no queueable Tasks.", readiness });
         return;
       }
-      saveControllerProjectState(options.repoRoot, { currentIssueId: request.params.issueId }, "local-ui");
-      const issue = getIssue(options.repoRoot, request.params.issueId);
+      saveControllerProjectState(repoRoot, { currentIssueId: request.params.issueId }, "local-ui");
+      const issue = getIssue(repoRoot, request.params.issueId);
       const maxParallel = Math.max(1, Math.min(Number(request.body?.maxParallel ?? readiness.suggestedMaxParallel), readiness.queueableTaskIds.length));
       const selected = [] as typeof issue.tasks;
       const skipped: Array<{ taskId: string; reason: string }> = [];
@@ -1569,7 +1577,7 @@ export async function startLocalBridgeServer(
         selected.push(task);
       }
       const jobs = selected.map((task) => {
-        const job = submitLocalBridgeJob(options.repoRoot, {
+        const job = submitLocalBridgeJob(repoRoot, {
           action: "launch-task",
           requestedBy: "local-ui",
           payload: {
@@ -1580,7 +1588,7 @@ export async function startLocalBridgeServer(
             isolate: typeof request.body?.isolate === "boolean" ? request.body.isolate : undefined,
           },
         });
-        if (job.status === "approved") asyncExecute(options.repoRoot, job.jobId);
+        if (job.status === "approved") asyncExecute(repoRoot, job.jobId);
         return job;
       });
       response.status(202).json({ readiness, jobs, skipped });
@@ -1590,27 +1598,28 @@ export async function startLocalBridgeServer(
   });
   app.post("/api/issues/:issueId/archive", (request, response) => {
     try {
-      response.json(archiveIssue(options.repoRoot, request.params.issueId));
+      response.json(archiveIssue(requestRepositoryRoot(request, options, controllerHome), request.params.issueId));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
   });
   app.post("/api/issues/:issueId/restore", (request, response) => {
     try {
-      response.json(restoreIssue(options.repoRoot, request.params.issueId));
+      response.json(restoreIssue(requestRepositoryRoot(request, options, controllerHome), request.params.issueId));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
   });
   app.post("/api/issues/:issueId/tasks/:taskId/launch", (request, response) => {
     try {
-      const readiness = inspectTaskReadiness(options.repoRoot, request.params.issueId, request.params.taskId);
+      const repoRoot = requestRepositoryRoot(request, options, controllerHome);
+      const readiness = inspectTaskReadiness(repoRoot, request.params.issueId, request.params.taskId);
       if (!readiness.queueable) {
         response.status(409).json({ error: "Task has launch blockers.", readiness });
         return;
       }
-      saveControllerProjectState(options.repoRoot, { currentIssueId: request.params.issueId }, "local-ui");
-      const job = submitLocalBridgeJob(options.repoRoot, {
+      saveControllerProjectState(repoRoot, { currentIssueId: request.params.issueId }, "local-ui");
+      const job = submitLocalBridgeJob(repoRoot, {
         action: "launch-task",
         requestedBy: "local-ui",
         payload: {
@@ -1621,7 +1630,7 @@ export async function startLocalBridgeServer(
           isolate: typeof request.body?.isolate === "boolean" ? request.body.isolate : undefined,
         },
       });
-      if (job.status === "approved") asyncExecute(options.repoRoot, job.jobId);
+      if (job.status === "approved") asyncExecute(repoRoot, job.jobId);
       response.status(202).json(job);
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
