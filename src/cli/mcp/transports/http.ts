@@ -310,6 +310,11 @@ function requireMcpHttpAuth(
       return;
     }
 
+    if (isAuthorizedMcpHttpRequest(req, bearerToken)) {
+      next();
+      return;
+    }
+
     const token = bearerFromRequest(req);
     if (!token || !provider) {
       sendOAuthUnauthorized(req, res, token ? 'OAuth is not configured' : 'Missing Authorization header', configuredOrigin);

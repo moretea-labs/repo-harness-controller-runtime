@@ -157,6 +157,11 @@ describe('mcp http transport', () => {
       writeFileSync(join(repoRoot, '.ai/harness/policy.json'), '{}\n');
       runMcpSetupChatgpt({ repo: repoRoot, port: String(port) });
       const passphrase = (await Bun.file(join(repoRoot, '.repo-harness/mcp.oauth.json')).json()).passphrase;
+      const staticBearerToken = 'repo-harness-grok-test-token';
+      writeFileSync(
+        join(repoRoot, '.repo-harness/mcp.tokens.json'),
+        `${JSON.stringify({ version: 1, bearerToken: staticBearerToken }, null, 2)}\n`,
+      );
 
       proc = Bun.spawn(
         [
@@ -249,6 +254,18 @@ describe('mcp http transport', () => {
       });
       expect(noAuth.status).toBe(401);
       expect(noAuth.headers.get('www-authenticate')).toContain('/.well-known/oauth-protected-resource/mcp');
+
+      const initializedWithStaticBearer = await fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${staticBearerToken}`,
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+        },
+        body: initializeBody(),
+      });
+      expect(initializedWithStaticBearer.status).toBe(200);
+      expect(await initializedWithStaticBearer.text()).toContain('repo-harness-mcp');
 
       const initialized = await fetch(`http://127.0.0.1:${port}/mcp`, {
         method: 'POST',
