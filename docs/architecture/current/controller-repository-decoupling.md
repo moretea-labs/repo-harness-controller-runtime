@@ -32,7 +32,7 @@ ChatGPT / Local UI
 - 文档中明确 MCP Gateway / Local Bridge 是全局 controller 服务。
 - GUI 和用户文案避免把 Local Bridge 暴露成用户需要理解的概念。
 
-### Phase 2：Local Bridge 支持 repoId-scoped 读取入口
+### Phase 2：Local Bridge 支持 repoId-scoped 业务入口
 
 先不迁移存储，降低风险。
 
@@ -42,7 +42,12 @@ ChatGPT / Local UI
 - 新增 `/api/repositories/:repoId/snapshot`。
 - 新增 `/api/repositories/:repoId/user-snapshot`。
 - 仓库列表按 selected repoId 标记 current，而不是只能按启动 repoRoot 判断。
-- completion、progress、governance、assistant readiness/intent 和 recovery probe/plan/apply 入口开始通过 request 解析目标仓库。
+- completion、progress、governance、assistant readiness/intent 和 recovery probe/plan/apply 入口通过 request 解析目标仓库。
+- assistant inbox/routines/memory、runtime cleanup、mobile devices 入口通过 request 解析目标仓库。
+- project-state、issue focus、launch/archive/restore、task launch/verify/accept/request-changes/cancel/dependencies 和 timeline 入口通过 request 解析目标仓库。
+- task detail、worklog export、edit session list/detail/diff/savepoint/verify/finalize/rollback 入口通过 request 解析目标仓库。
+- plugin、GitHub sync、browser target、DeepSeek handoff/request 入口通过 request 解析目标仓库。
+- local jobs 与 runs 的 detail/log/events/finish/diff/integrate/cancel/retry 入口通过 request 解析目标仓库。
 
 ### Phase 3：迁移服务级运行态到 controllerHome
 
@@ -93,8 +98,33 @@ controllerHome/repositories/<repoId>/controller-state
 - 已新增 Local Bridge request-level repo selection helper。
 - 已让 `/api/snapshot` 和 `/api/user-snapshot` 支持 repoId / checkoutId。
 - 已新增 repoId-scoped snapshot 和 user-snapshot endpoints。
-- 已将 completion、progress、governance、assistant readiness/intent 和 recovery probe/plan/apply 改为 request-scoped repo selection。
+- 已将主要 Local Bridge 业务 API 改为 request-scoped repo selection，包括 completion、progress、governance、assistant、recovery、project-state、issue/task、timeline、worklog、edit-session、plugin、GitHub、toolchain、local jobs 和 runs。
 - 已将 README 的启动说明改为 registry-first / compatibility `--repo` 语义。
+- 当前剩余的 `options.repoRoot` 用法集中在启动默认仓库 fallback、启动时 reconcile、stream signature、runtime policy/mobile intent 兼容入口、仓库列表默认选择和 server close/cache cleanup。
+
+## 仍未完成的架构收口
+
+### 1. MCP Gateway 身份边界复核
+
+本轮主要完成 Local Bridge request-scoped routing。MCP Gateway 仍需要单独复核：
+
+- 启动入口是否仍把 `--repo` 当作服务身份，而不是默认仓库 fallback。
+- 工具 schema 是否全部以 `repo_id` / `checkout_id` 表达仓库作用域。
+- 多仓库启用时，未传 repo_id 的行为是否只允许 sole-repository fallback 或返回明确错误。
+- connector / ChatGPT 配置是否可以指向全局 controller，而不要求用户从某个仓库目录启动。
+
+### 2. 服务级运行态迁移
+
+Local Bridge 仍保留 `options.repoRoot` 用于启动级 reconcile、stream signature、runtime policy 和缓存清理。短期允许作为 compatibility default；长期应迁移为 controller-home/global runtime state，并让 `repoRoot` 只出现在 repository registration 和 repository-scoped execution 层。
+
+### 3. 最小多仓库验收
+
+不需要膨胀测试，但至少应做以下针对性验证：
+
+- 注册两个仓库后，分别请求 snapshot / issue / run / plugin API，不串仓。
+- `repoId`、`checkoutId`、默认 fallback 三条路径行为明确且可解释。
+- GUI 切换仓库后，所有业务请求携带选中的 repoId。
+- Local Bridge 重启后，默认仓库只影响初始选择，不影响 request-scoped API。
 
 ## 后续验收点
 
