@@ -178,7 +178,7 @@ function legacyBlocks(repo: string): string[] {
   }
 
   const discovered: string[] = [];
-  const ignored = new Set([".git", "node_modules", ".ai", ".claude", ".worktrees", "_ref"]);
+  const ignored = new Set([".git", "node_modules", ".ai", ".claude", ".worktrees", "_ops", "_ref"]);
   function walk(absDir: string) {
     for (const entry of readdirSync(absDir, { withFileTypes: true })) {
       if (ignored.has(entry.name)) continue;
