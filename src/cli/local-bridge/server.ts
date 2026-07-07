@@ -1765,7 +1765,7 @@ export async function startLocalBridgeServer(
     try {
       response.json(
         getTaskProgressDetail(
-          options.repoRoot,
+          requestRepositoryRoot(request, options, controllerHome),
           request.params.issueId,
           request.params.taskId,
         ),
@@ -1777,7 +1777,7 @@ export async function startLocalBridgeServer(
   app.post("/api/worklog/export", (request, response) => {
     try {
       response.json(
-        exportControllerWorklog(options.repoRoot, {
+        exportControllerWorklog(requestRepositoryRoot(request, options, controllerHome), {
           format: request.body?.format === "json" ? "json" : "markdown",
           outputPath: queryString(request.body?.outputPath),
           filter: {
@@ -1795,36 +1795,37 @@ export async function startLocalBridgeServer(
   app.get("/api/edit-sessions", (request, response) => {
     try {
       const limit = request.query.limit ? Number(request.query.limit) : 200;
-      response.json({ sessions: listEditSessions(options.repoRoot, limit) });
+      response.json({ sessions: listEditSessions(requestRepositoryRoot(request, options, controllerHome), limit) });
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
   });
   app.get("/api/edit-sessions/:sessionId", (request, response) => {
     try {
-      response.json(getEditSession(options.repoRoot, request.params.sessionId));
+      response.json(getEditSession(requestRepositoryRoot(request, options, controllerHome), request.params.sessionId));
     } catch (error) {
       response.status(404).json({ error: errorMessage(error) });
     }
   });
   app.get("/api/edit-sessions/:sessionId/diff", (request, response) => {
     try {
-      response.json(getEditSessionDiff(options.repoRoot, request.params.sessionId));
+      response.json(getEditSessionDiff(requestRepositoryRoot(request, options, controllerHome), request.params.sessionId));
     } catch (error) {
       response.status(404).json({ error: errorMessage(error) });
     }
   });
   app.post("/api/edit-sessions/:sessionId/savepoints", (request, response) => {
     try {
-      response.json(createEditSavepoint(options.repoRoot, request.params.sessionId, String(request.body?.name ?? "")));
+      response.json(createEditSavepoint(requestRepositoryRoot(request, options, controllerHome), request.params.sessionId, String(request.body?.name ?? "")));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
   });
   app.post("/api/edit-sessions/:sessionId/verify", (request, response) => {
     try {
-      const session = getEditSession(options.repoRoot, request.params.sessionId);
-      const job = submitLocalBridgeJob(options.repoRoot, {
+      const repoRoot = requestRepositoryRoot(request, options, controllerHome);
+      const session = getEditSession(repoRoot, request.params.sessionId);
+      const job = submitLocalBridgeJob(repoRoot, {
         action: "verify-edit-session",
         requestedBy: "local-controller",
         payload: {
@@ -1836,7 +1837,7 @@ export async function startLocalBridgeServer(
           note: queryString(request.body?.note),
         },
       });
-      if (job.status === "approved") asyncExecute(options.repoRoot, job.jobId);
+      if (job.status === "approved") asyncExecute(repoRoot, job.jobId);
       response.status(202).json({
         accepted: true,
         jobId: job.jobId,
@@ -1850,7 +1851,7 @@ export async function startLocalBridgeServer(
   });
   app.post("/api/edit-sessions/:sessionId/finalize", (request, response) => {
     try {
-      response.json(finalizeEditSession(options.repoRoot, request.params.sessionId, {
+      response.json(finalizeEditSession(requestRepositoryRoot(request, options, controllerHome), request.params.sessionId, {
         reviewer: queryString(request.body?.reviewer) ?? "local-controller-human",
         note: queryString(request.body?.note),
       }));
