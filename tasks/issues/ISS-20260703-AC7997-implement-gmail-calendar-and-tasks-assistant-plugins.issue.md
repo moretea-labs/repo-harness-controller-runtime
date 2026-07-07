@@ -2,7 +2,7 @@
 id: "ISS-20260703-AC7997"
 kind: "investigation"
 status: "in_progress"
-updated_at: "2026-07-03T15:00:03.542Z"
+updated_at: "2026-07-07T08:40:22.556Z"
 source: "repo-harness-controller-v8"
 ---
 
@@ -34,7 +34,7 @@ Build production-shaped Gmail, Google Calendar and Google Tasks/reminder plugins
 
 ### T1 — Implement Gmail Calendar and Tasks assistant plugins
 
-- Status: `review`
+- Status: `changes_requested`
 - Objective: Build production-shaped Gmail, Google Calendar and Google Tasks/reminder plugins on the generic runtime. Reuse connector/auth abstractions and never persist credentials. Separate read/write scopes; gate send/delete/reschedule and other consequential writes. Add mock providers, contract tests, structured auth/rate-limit/error handling, configuration docs, run checks, and commit.
 - Depends on: none
 - Allowed paths: not defined
