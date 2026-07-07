@@ -1290,8 +1290,7 @@ export async function startLocalBridgeServer(
 
   app.post("/api/assistant/self-test/gmail-read", (request, response) => {
     try {
-      const controllerHome = resolveControllerHome();
-      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      const repository = requestRepositorySelection(request, options, controllerHome);
       const query = queryString(request.body?.query) ?? "newer_than:1d";
       const maxResults = typeof request.body?.maxResults === "number" ? Math.max(1, Math.min(Math.trunc(request.body.maxResults), 10)) : 3;
       response.status(202).json(submitAssistantIntent(controllerHome, repository, {
@@ -1308,8 +1307,9 @@ export async function startLocalBridgeServer(
 
   app.get("/api/assistant/inbox", (request, response) => {
     try {
+      const repoRoot = requestRepositoryRoot(request, options, controllerHome);
       const limit = Number(request.query.limit);
-      response.json(listAssistantInbox(options.repoRoot, Number.isFinite(limit) ? limit : 50));
+      response.json(listAssistantInbox(repoRoot, Number.isFinite(limit) ? limit : 50));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
@@ -1319,15 +1319,15 @@ export async function startLocalBridgeServer(
     try {
       const status = request.body?.status;
       if (!["unread", "read", "archived"].includes(status)) throw new Error("ASSISTANT_INBOX_STATUS_INVALID: status must be unread, read, or archived");
-      response.json({ item: updateAssistantInboxStatus(options.repoRoot, request.params.itemId, status) });
+      response.json({ item: updateAssistantInboxStatus(requestRepositoryRoot(request, options, controllerHome), request.params.itemId, status) });
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
   });
 
-  app.get("/api/assistant/routines", (_request, response) => {
+  app.get("/api/assistant/routines", (request, response) => {
     try {
-      response.json(listAssistantRoutines(options.repoRoot));
+      response.json(listAssistantRoutines(requestRepositoryRoot(request, options, controllerHome)));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
@@ -1335,8 +1335,7 @@ export async function startLocalBridgeServer(
 
   app.post("/api/assistant/routines", (request, response) => {
     try {
-      const controllerHome = resolveControllerHome();
-      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      const repository = requestRepositorySelection(request, options, controllerHome);
       const result = submitAssistantIntent(controllerHome, repository, {
         utterance: queryString(request.body?.naturalLanguageGoal) ?? queryString(request.body?.utterance) ?? queryString(request.body?.name) ?? "create routine",
         source: "chatgpt",
@@ -1362,8 +1361,7 @@ export async function startLocalBridgeServer(
 
   app.post("/api/assistant/routines/:routineId/run", (request, response) => {
     try {
-      const controllerHome = resolveControllerHome();
-      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      const repository = requestRepositorySelection(request, options, controllerHome);
       response.status(202).json(runAssistantRoutineNow(controllerHome, repository, request.params.routineId));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
@@ -1372,7 +1370,7 @@ export async function startLocalBridgeServer(
 
   app.post("/api/assistant/routines/:routineId/pause", (request, response) => {
     try {
-      response.json({ routine: updateAssistantRoutineStatus(options.repoRoot, request.params.routineId, "paused") });
+      response.json({ routine: updateAssistantRoutineStatus(requestRepositoryRoot(request, options, controllerHome), request.params.routineId, "paused") });
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
@@ -1380,7 +1378,7 @@ export async function startLocalBridgeServer(
 
   app.post("/api/assistant/routines/:routineId/resume", (request, response) => {
     try {
-      response.json({ routine: updateAssistantRoutineStatus(options.repoRoot, request.params.routineId, "enabled") });
+      response.json({ routine: updateAssistantRoutineStatus(requestRepositoryRoot(request, options, controllerHome), request.params.routineId, "enabled") });
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
@@ -1388,7 +1386,7 @@ export async function startLocalBridgeServer(
 
   app.post("/api/assistant/routines/:routineId/delete", (request, response) => {
     try {
-      response.json({ routine: updateAssistantRoutineStatus(options.repoRoot, request.params.routineId, "deleted") });
+      response.json({ routine: updateAssistantRoutineStatus(requestRepositoryRoot(request, options, controllerHome), request.params.routineId, "deleted") });
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
@@ -1396,7 +1394,7 @@ export async function startLocalBridgeServer(
 
   app.post("/api/assistant/maintenance/cleanup-preview", (request, response) => {
     try {
-      response.json(previewRuntimeCleanup(options.repoRoot, {
+      response.json(previewRuntimeCleanup(requestRepositoryRoot(request, options, controllerHome), {
         minAgeMinutes: typeof request.body?.minAgeMinutes === "number" ? request.body.minAgeMinutes : undefined,
         includeTempDirs: request.body?.includeTempDirs !== false,
         includeTerminalLocalJobs: request.body?.includeTerminalLocalJobs === true,
@@ -1411,7 +1409,7 @@ export async function startLocalBridgeServer(
 
   app.post("/api/assistant/maintenance/cleanup-apply", (request, response) => {
     try {
-      response.json(applyRuntimeCleanup(options.repoRoot, {
+      response.json(applyRuntimeCleanup(requestRepositoryRoot(request, options, controllerHome), {
         minAgeMinutes: typeof request.body?.minAgeMinutes === "number" ? request.body.minAgeMinutes : undefined,
         includeTempDirs: request.body?.includeTempDirs !== false,
         includeTerminalLocalJobs: request.body?.includeTerminalLocalJobs === true,
@@ -1425,9 +1423,9 @@ export async function startLocalBridgeServer(
     }
   });
 
-  app.get("/api/assistant/memory", (_request, response) => {
+  app.get("/api/assistant/memory", (request, response) => {
     try {
-      response.json(listAssistantMemory(options.repoRoot));
+      response.json(listAssistantMemory(requestRepositoryRoot(request, options, controllerHome)));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
@@ -1435,7 +1433,7 @@ export async function startLocalBridgeServer(
 
   app.post("/api/assistant/memory", (request, response) => {
     try {
-      response.json({ entry: upsertAssistantMemory(options.repoRoot, {
+      response.json({ entry: upsertAssistantMemory(requestRepositoryRoot(request, options, controllerHome), {
         key: queryString(request.body?.key) ?? "",
         value: queryString(request.body?.value) ?? "",
         source: queryString(request.body?.source) ?? "chatgpt",
@@ -1445,16 +1443,16 @@ export async function startLocalBridgeServer(
     }
   });
 
-  app.get("/api/mobile/devices", (_request, response) => {
+  app.get("/api/mobile/devices", (request, response) => {
     try {
-      response.json(listMobileIntentDevices(options.repoRoot));
+      response.json(listMobileIntentDevices(requestRepositoryRoot(request, options, controllerHome)));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
   });
   app.post("/api/mobile/devices", (request, response) => {
     try {
-      response.status(201).json(createMobileIntentDevice(options.repoRoot, {
+      response.status(201).json(createMobileIntentDevice(requestRepositoryRoot(request, options, controllerHome), {
         name: queryString(request.body?.name),
         deviceId: queryString(request.body?.deviceId),
         scopes: request.body?.scopes,
@@ -1466,7 +1464,7 @@ export async function startLocalBridgeServer(
   });
   app.post("/api/mobile/devices/:deviceId/revoke", (request, response) => {
     try {
-      response.json(revokeMobileIntentDevice(options.repoRoot, request.params.deviceId));
+      response.json(revokeMobileIntentDevice(requestRepositoryRoot(request, options, controllerHome), request.params.deviceId));
     } catch (error) {
       response.status(404).json({ error: errorMessage(error) });
     }
