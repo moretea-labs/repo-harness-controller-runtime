@@ -2,7 +2,7 @@ import { createHash } from 'crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'fs';
 import { basename, dirname, join, relative, resolve } from 'path';
 
-export type ExternalFilesystemGrantMode = 'read';
+export type ExternalFilesystemGrantMode = 'read' | 'copy_into_repo';
 
 export interface ExternalFilesystemGrant {
   schemaVersion: 1;
@@ -13,6 +13,7 @@ export interface ExternalFilesystemGrant {
   reason: string;
   createdAt: string;
   createdBy: string;
+  expiresAt?: string;
 }
 
 export interface ExternalFilesystemGrantFile {
@@ -30,6 +31,7 @@ export interface ExternalFilesystemGrantPreview {
   canonicalRoot?: string;
   mode: ExternalFilesystemGrantMode;
   reason: string;
+  expiresAt?: string;
   risk: 'readonly' | 'denied';
   denialReason?: string;
   next: string;
@@ -79,7 +81,21 @@ function normalizeKey(value: unknown): string {
 
 function normalizeMode(value: unknown): ExternalFilesystemGrantMode {
   if (value === undefined || value === null || value === 'read') return 'read';
-  throw new Error('EXTERNAL_FS_MODE_UNSUPPORTED: only read mode is supported in this tool surface');
+  if (value === 'copy_into_repo') return 'copy_into_repo';
+  throw new Error('EXTERNAL_FS_MODE_UNSUPPORTED: only read and copy_into_repo modes are supported in this tool surface');
+}
+
+function expiryFromArgs(value: unknown): string {
+  const minutes = typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(1, Math.min(Math.trunc(value), 24 * 60))
+    : 8 * 60;
+  return new Date(Date.now() + minutes * 60_000).toISOString();
+}
+
+export function externalFilesystemGrantExpired(grant: Pick<ExternalFilesystemGrant, 'expiresAt'>, at = new Date()): boolean {
+  if (!grant.expiresAt) return false;
+  const expires = Date.parse(grant.expiresAt);
+  return !Number.isFinite(expires) || expires <= at.getTime();
 }
 
 function userHome(): string | undefined {
@@ -95,7 +111,26 @@ function denyReason(canonical: string, repoRoot: string): string | undefined {
   if (sensitiveExact.has(normalized)) return 'Grant root is too broad or system-owned.';
   if (home && normalized === home) return 'Grant root is the whole user home; choose a narrower project/data directory.';
   const lower = normalized.toLowerCase();
-  const sensitiveFragments = ['/.ssh', '/.gnupg', '/library/keychains', '/library/mail', '/library/messages', '/library/application support/com.apple', '/.aws', '/.config/gcloud', '/.kube'];
+  const sensitiveFragments = [
+    '/.ssh',
+    '/.gnupg',
+    '/library/keychains',
+    '/library/mail',
+    '/library/messages',
+    '/library/application support/com.apple',
+    '/library/application support/google/chrome/default/cookies',
+    '/library/application support/google/chrome/default/network/cookies',
+    '/library/application support/firefox/profiles',
+    '/library/application support/1password',
+    '/library/group containers/2bua8c4s2c.com.1password',
+    '/.aws',
+    '/.config/gcloud',
+    '/.kube',
+    '/id_rsa',
+    '/id_dsa',
+    '/id_ecdsa',
+    '/id_ed25519',
+  ];
   if (sensitiveFragments.some((fragment) => lower.includes(fragment))) return 'Grant root appears to contain credentials or personal application data.';
   const repoRel = relative(repo, normalized);
   if (!repoRel.startsWith('..') && repoRel !== '') return 'Path is inside the repository; use repository file tools instead of an external filesystem grant.';
@@ -144,6 +179,7 @@ export function previewExternalFilesystemGrant(repoRoot: string, args: Record<st
   const key = normalizeKey(args.grant_key ?? args.target_key ?? args.key);
   const mode = normalizeMode(args.mode);
   const reason = String(args.reason ?? '').trim();
+  const expiresAt = expiryFromArgs(args.expires_in_minutes);
   const root = canonicalizeRoot(repoRoot, args.root_path ?? args.root);
   const accepted = !root.denialReason && Boolean(reason);
   const previewTicketId = stableTicket({ key, canonicalRoot: root.canonical, mode, reason });
@@ -156,6 +192,7 @@ export function previewExternalFilesystemGrant(repoRoot: string, args: Record<st
     canonicalRoot: root.canonical,
     mode,
     reason,
+    expiresAt,
     risk: accepted ? 'readonly' : 'denied',
     denialReason: !reason ? 'A reason is required for auditability.' : root.denialReason,
     next: accepted
@@ -185,6 +222,7 @@ export function applyExternalFilesystemGrant(repoRoot: string, args: Record<stri
     reason: preview.reason,
     createdAt: now(),
     createdBy: 'external_filesystem_grant_apply',
+    expiresAt: preview.expiresAt,
   };
   const grants = file.grants.filter((entry) => entry.key !== grant.key).concat(grant);
   return { grant, file: saveExternalFilesystemGrants(repoRoot, { ...file, grants }), preview };
@@ -202,6 +240,8 @@ export function listExternalFilesystemTargets(repoRoot: string): { targets: Arra
       arbitraryPathAccepted: false,
       operationsRequireTargetKey: true,
       writeOperationsExposed: false,
+      modes: ['read', 'copy_into_repo'],
+      grantExpiryEnforced: true,
       configPath: CONFIG_PATH,
     },
   };
@@ -226,6 +266,7 @@ export function readExternalFilesystemSnapshot(repoRoot: string, args: Record<st
   const key = normalizeKey(args.target_key ?? args.grant_key ?? args.key);
   const grant = loadExternalFilesystemGrants(repoRoot).grants.find((entry) => entry.key === key);
   if (!grant) throw new Error(`EXTERNAL_FS_TARGET_UNKNOWN: ${key}`);
+  if (externalFilesystemGrantExpired(grant)) throw new Error('EXTERNAL_FS_GRANT_EXPIRED: renew the external filesystem grant');
   if (grant.mode !== 'read') throw new Error('EXTERNAL_FS_READ_NOT_GRANTED: target does not grant read mode');
   const resolved = resolveGrantedPath(grant, args.path);
   if (!existsSync(resolved.absolute)) throw new Error('EXTERNAL_FS_PATH_NOT_FOUND');

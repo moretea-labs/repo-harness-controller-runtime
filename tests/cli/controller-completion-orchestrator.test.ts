@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
-import { createIssue, updateTask } from '../../src/cli/controller/issue-store';
+import { createIssue, getIssue, updateTask } from '../../src/cli/controller/issue-store';
 import { finishTaskRun } from '../../src/cli/controller/completion-orchestrator';
 import { applyCompletionDecision, completionDecisionQueues, finishCompletionBacklog, inspectCompletionBacklog } from '../../src/cli/controller/completion-backlog';
 import { prepareCodexContinuation } from '../../src/cli/controller/codex-continuation';

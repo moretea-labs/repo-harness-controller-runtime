@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { spawnSync } from "child_process";
@@ -10,6 +10,7 @@ import { createMcpToolContext } from "../../src/cli/mcp/multi-repository";
 import { getLocalBridgeJob, readLocalBridgeJobOutput, readLocalBridgeJobOutputSnapshot } from "../../src/cli/local-bridge/job-store";
 import { routeDurableMcpCall } from "../../src/runtime/gateway/mcp/router";
 import { getExecutionJob } from "../../src/runtime/execution/jobs/store";
+import { applyExternalFilesystemGrant, previewExternalFilesystemGrant } from "../../src/runtime/safe-tooling/external-filesystem";
 import { terminateProcessesByCommand, waitForNoProcessesByCommand } from "../runtime/process-hygiene";
 
 function git(root: string, args: string[]): void {
@@ -203,6 +204,166 @@ describe("repository MCP command tools", () => {
       expect(value.after).toBeUndefined();
     } finally {
       await cleanupWorkspace([workspace, controllerHome, repoRoot]);
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+
+
+  test("repository command preview requires external filesystem grants and supports authorized external read/copy", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "repo-harness-mcp-external-command-"));
+    const controllerHome = join(workspace, "controller-home");
+    const repoRoot = join(workspace, "sample-repo");
+    const externalRoot = join(workspace, "external-data");
+    try {
+      mkdirSync(controllerHome, { recursive: true });
+      mkdirSync(repoRoot, { recursive: true });
+      mkdirSync(externalRoot, { recursive: true });
+      git(repoRoot, ["init", "-b", "main"]);
+      git(repoRoot, ["config", "user.name", "Repo Harness Test"]);
+      git(repoRoot, ["config", "user.email", "repo-harness-test@example.com"]);
+      writeFileSync(join(repoRoot, "README.md"), "hello\n");
+      git(repoRoot, ["add", "README.md"]);
+      git(repoRoot, ["commit", "-m", "init"]);
+      writeFileSync(join(externalRoot, "note.txt"), "external note\n");
+      const repository = registerRepository({ path: repoRoot, controllerHome });
+
+      const deniedRead = await json(callRepositoryTool(controllerHome, "repository_command_preview", {
+        repo_id: repository.repoId,
+        command: `cat ${join(externalRoot, "note.txt")}`,
+      }));
+      expect(deniedRead.error.code).toBe("EXTERNAL_FILESYSTEM_GRANT_REQUIRED");
+
+      const readPreview = previewExternalFilesystemGrant(repoRoot, {
+        grant_key: "external_notes_read",
+        root_path: externalRoot,
+        mode: "read",
+        reason: "Read fixture notes for repository review",
+      });
+      applyExternalFilesystemGrant(repoRoot, {
+        grant_key: "external_notes_read",
+        root_path: externalRoot,
+        mode: "read",
+        reason: "Read fixture notes for repository review",
+        preview_ticket_id: readPreview.previewTicketId,
+        confirm_authorization: true,
+      });
+      const acceptedRead = await json(callRepositoryTool(controllerHome, "repository_command_preview", {
+        repo_id: repository.repoId,
+        command: `cat ${join(externalRoot, "note.txt")}`,
+      }));
+      expect(acceptedRead.status).toBe("preview");
+      expect(acceptedRead.externalPathUsages[0].operation).toBe("external_read");
+
+      const deniedCopy = await json(callRepositoryTool(controllerHome, "repository_command_preview", {
+        repo_id: repository.repoId,
+        command: `cp ${join(externalRoot, "note.txt")} copied.txt`,
+      }));
+      expect(deniedCopy.error.code).toBe("EXTERNAL_FILESYSTEM_GRANT_REQUIRED");
+
+      const copyPreview = previewExternalFilesystemGrant(repoRoot, {
+        grant_key: "external_notes_copy",
+        root_path: externalRoot,
+        mode: "copy_into_repo",
+        reason: "Copy fixture notes into the selected repository",
+      });
+      applyExternalFilesystemGrant(repoRoot, {
+        grant_key: "external_notes_copy",
+        root_path: externalRoot,
+        mode: "copy_into_repo",
+        reason: "Copy fixture notes into the selected repository",
+        preview_ticket_id: copyPreview.previewTicketId,
+        confirm_authorization: true,
+      });
+      const acceptedCopy = await json(callRepositoryTool(controllerHome, "repository_command_preview", {
+        repo_id: repository.repoId,
+        command: `cp ${join(externalRoot, "note.txt")} copied.txt`,
+      }));
+      expect(acceptedCopy.status).toBe("preview");
+      expect(acceptedCopy.externalPathUsages[0].operation).toBe("external_copy_into_workspace");
+    } finally {
+      await cleanupWorkspace([workspace, controllerHome, repoRoot, externalRoot]);
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  test("repository command scope blocks expired grants, symlink escape, sensitive paths, and external writes", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "repo-harness-mcp-external-command-deny-"));
+    const controllerHome = join(workspace, "controller-home");
+    const repoRoot = join(workspace, "sample-repo");
+    const externalRoot = join(workspace, "external-data");
+    const fakeHome = join(workspace, "home");
+    const fakeSsh = join(fakeHome, ".ssh");
+    try {
+      mkdirSync(controllerHome, { recursive: true });
+      mkdirSync(repoRoot, { recursive: true });
+      mkdirSync(externalRoot, { recursive: true });
+      mkdirSync(fakeSsh, { recursive: true });
+      git(repoRoot, ["init", "-b", "main"]);
+      git(repoRoot, ["config", "user.name", "Repo Harness Test"]);
+      git(repoRoot, ["config", "user.email", "repo-harness-test@example.com"]);
+      writeFileSync(join(repoRoot, "README.md"), "hello\n");
+      git(repoRoot, ["add", "README.md"]);
+      git(repoRoot, ["commit", "-m", "init"]);
+      writeFileSync(join(externalRoot, "note.txt"), "external note\n");
+      writeFileSync(join(fakeSsh, "id_ed25519"), "secret\n");
+      symlinkSync(join(externalRoot, "note.txt"), join(repoRoot, "escape-link.txt"));
+      const repository = registerRepository({ path: repoRoot, controllerHome });
+
+      const expiredPreview = previewExternalFilesystemGrant(repoRoot, {
+        grant_key: "expired_notes",
+        root_path: externalRoot,
+        mode: "read",
+        reason: "Expired grant fixture",
+      });
+      applyExternalFilesystemGrant(repoRoot, {
+        grant_key: "expired_notes",
+        root_path: externalRoot,
+        mode: "read",
+        reason: "Expired grant fixture",
+        preview_ticket_id: expiredPreview.previewTicketId,
+        confirm_authorization: true,
+      });
+      writeFileSync(join(repoRoot, ".repo-harness/external-filesystem-grants.json"), `${JSON.stringify({
+        schemaVersion: 1,
+        updatedAt: new Date().toISOString(),
+        grants: [{
+          schemaVersion: 1,
+          key: "expired_notes",
+          root: externalRoot,
+          canonicalRoot: realpathSync(externalRoot),
+          mode: "read",
+          reason: "Expired grant fixture",
+          createdAt: new Date().toISOString(),
+          createdBy: "test",
+          expiresAt: "2000-01-01T00:00:00.000Z",
+        }],
+      }, null, 2)}\n`);
+      const expired = await json(callRepositoryTool(controllerHome, "repository_command_preview", {
+        repo_id: repository.repoId,
+        command: `cat ${join(externalRoot, "note.txt")}`,
+      }));
+      expect(expired.error.code).toBe("EXTERNAL_FILESYSTEM_GRANT_REQUIRED");
+
+      const symlinkEscape = await json(callRepositoryTool(controllerHome, "repository_command_preview", {
+        repo_id: repository.repoId,
+        command: "cat escape-link.txt",
+      }));
+      expect(symlinkEscape.error.code).toBe("COMMAND_SCOPE_DENIED");
+
+      const sensitive = await json(callRepositoryTool(controllerHome, "repository_command_preview", {
+        repo_id: repository.repoId,
+        command: `cat ${join(fakeSsh, "id_ed25519")}`,
+      }));
+      expect(sensitive.error.code).toBe("COMMAND_POLICY_DENIED");
+
+      const externalWrite = await json(callRepositoryTool(controllerHome, "repository_command_preview", {
+        repo_id: repository.repoId,
+        command: `printf 'x' > ${join(externalRoot, "out.txt")}`,
+      }));
+      expect(externalWrite.error.code).toBe("COMMAND_SCOPE_DENIED");
+    } finally {
+      await cleanupWorkspace([workspace, controllerHome, repoRoot, externalRoot]);
       rmSync(workspace, { recursive: true, force: true });
     }
   });

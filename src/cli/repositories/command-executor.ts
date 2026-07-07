@@ -11,9 +11,11 @@ import {
 } from './command-classifier';
 import {
   assertCommandPathOperandsStayInRepository,
+  type RepositoryCommandExternalPathUsage,
   assertRepositoryCommandAllowed,
   resolveRepositoryCommandCwd,
 } from './command-scope';
+import { loadExternalFilesystemGrants } from '../../runtime/safe-tooling/external-filesystem';
 import type { RepositoryRecord } from './types';
 
 export { classifyRepositoryCommand } from './command-classifier';
@@ -65,7 +67,9 @@ export interface RepositoryCommandExecution {
   changedPaths?: string[];
   policyDecision?: 'allowed' | 'approval_required' | 'rejected';
   infrastructureError?: { code: string; message: string };
+  externalPathUsages?: RepositoryCommandExternalPathUsage[];
 }
+
 
 export interface PreparedRepositoryCommandExecution {
   before: RepositoryCommandSnapshot;
@@ -307,15 +311,17 @@ function approvalToken(
   command: string,
   classification: RepositoryCommandClassification,
   snapshot: RepositoryCommandSnapshot,
+  externalPathUsages: RepositoryCommandExternalPathUsage[],
 ): string {
   return createHash('sha256').update(JSON.stringify({
-    version: 1,
+    version: 2,
     repoId: repository.repoId,
     checkoutId: repository.activeCheckoutId,
     cwd: relativeCwd,
     command,
     classification,
     snapshot,
+    externalPathUsages,
   })).digest('hex');
 }
 
@@ -336,13 +342,14 @@ function snapshotChanged(before: RepositoryCommandSnapshot, after: RepositoryCom
 function prepareRepositoryCommandExecution(
   repository: RepositoryRecord,
   input: ExecuteRepositoryCommandInput,
-): { root: string; cwd: string; command: string; timeoutMs: number; maxOutputBytes: number; before: RepositoryCommandSnapshot; execution: RepositoryCommandExecution; executable: boolean } {
+): { root: string; cwd: string; command: string; timeoutMs: number; maxOutputBytes: number; before: RepositoryCommandSnapshot; execution: RepositoryCommandExecution; executable: boolean; externalPathUsages: RepositoryCommandExternalPathUsage[] } {
   const { root, cwd, relativeCwd } = resolveRepositoryCommandCwd(repository, input.cwd);
   const command = assertRepositoryCommandAllowed(input.command);
-  assertCommandPathOperandsStayInRepository(command, cwd, root);
+  const externalGrants = loadExternalFilesystemGrants(root).grants;
+  const externalPathUsages = assertCommandPathOperandsStayInRepository(command, cwd, root, externalGrants);
   const classification = classifyRepositoryCommand(command, repository.defaultBranch);
   const before = repositorySnapshot(root);
-  const token = approvalToken(repository, relativeCwd, command, classification, before);
+  const token = approvalToken(repository, relativeCwd, command, classification, before, externalPathUsages);
   const execution: RepositoryCommandExecution = {
     status: input.dryRun === true ? 'preview' : 'approval_required',
     repoId: repository.repoId,
@@ -356,6 +363,7 @@ function prepareRepositoryCommandExecution(
     policyDecision: input.dryRun === true || classification.risk === 'readonly'
       ? 'allowed'
       : 'approval_required',
+    externalPathUsages: externalPathUsages.length > 0 ? externalPathUsages : undefined,
   };
   const confirmed = input.authorization === 'confirmed_plan' && input.approvalToken === token;
   const executable = input.dryRun === true || classification.risk === 'readonly' || confirmed;
@@ -369,6 +377,7 @@ function prepareRepositoryCommandExecution(
     before,
     execution,
     executable,
+    externalPathUsages,
   };
 }
 
@@ -405,7 +414,7 @@ export function executeRepositoryCommand(
   input: ExecuteRepositoryCommandInput,
 ): RepositoryCommandExecution {
   const prepared = prepareRepositoryCommandExecution(repository, input);
-  const { root, cwd, command, timeoutMs, maxOutputBytes, before, execution: base, executable } = prepared;
+  const { root, cwd, command, timeoutMs, maxOutputBytes, before, execution: base, executable, externalPathUsages } = prepared;
 
   if (input.dryRun === true) {
     auditCommand(controllerHome, repository, base);
@@ -447,6 +456,7 @@ export function executeRepositoryCommand(
     repositoryChanged: snapshotChanged(before, after),
     changedPaths: changedSnapshotPaths(before, after),
     policyDecision: 'allowed',
+    externalPathUsages: externalPathUsages.length > 0 ? externalPathUsages : undefined,
     infrastructureError: result.error ? {
       code: timedOut ? 'COMMAND_TIMED_OUT' : 'COMMAND_SPAWN_FAILED',
       message: error || `repository command failed with exit ${String(result.status ?? 1)}`,
@@ -463,7 +473,7 @@ export async function executeRepositoryCommandAsync(
   hooks: RepositoryCommandAsyncHooks = {},
 ): Promise<RepositoryCommandExecution> {
   const prepared = prepareRepositoryCommandExecution(repository, input);
-  const { root, cwd, command, timeoutMs, maxOutputBytes, before, execution: base, executable } = prepared;
+  const { root, cwd, command, timeoutMs, maxOutputBytes, before, execution: base, executable, externalPathUsages } = prepared;
 
   if (input.dryRun === true) {
     auditCommand(controllerHome, repository, base);
@@ -488,6 +498,7 @@ export async function executeRepositoryCommandAsync(
     repositoryChanged: snapshotChanged(before, after),
     changedPaths: changedSnapshotPaths(before, after),
     policyDecision: 'allowed',
+    externalPathUsages: externalPathUsages.length > 0 ? externalPathUsages : undefined,
     infrastructureError: result.timedOut ? {
       code: 'COMMAND_TIMED_OUT',
       message: result.stderr || `repository command timed out after ${timeoutMs}ms`,
