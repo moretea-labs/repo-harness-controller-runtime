@@ -16,6 +16,18 @@ import {
 } from '../repositories/registry';
 import { buildControllerWorkbench } from '../repositories/workbench';
 import { buildLocalBridgeJobHandoff, executeLocalBridgeJob, getLocalBridgeJobSnapshot, submitLocalBridgeJob } from '../local-bridge/job-store';
+import { applySafePatch, buildSafePatchPlan } from '../repositories/safe-patch';
+import { diagnoseRepositoryStuckState, listRepositoryGoalRuns, readRepositoryGoalRegistry, runRepositoryGoal, upsertRepositoryGoal } from '../repositories/goal-registry';
+import {
+  repositoryGitCommit,
+  repositoryGitCreateBranch,
+  repositoryGitDeleteBranch,
+  repositoryGitDiff,
+  repositoryGitFinishWorkflow,
+  repositoryGitMergeBranch,
+  repositoryGitStatus,
+  repositoryGitSwitchBranch,
+} from '../repositories/structured-git';
 import type { CallToolResult, McpToolDefinition } from './tools';
 
 export type RepositoryToolResult = CallToolResult;
@@ -91,6 +103,109 @@ export const repositoryToolDefinitions: McpToolDefinition[] = [
     repo_id: repoId,
     include_removed: { type: 'boolean' },
   }, [], true),
+
+
+
+  definition('repository_goal_list', 'List durable repository goals stored inside the checkout.', {
+    repo_id: repoId,
+    checkout_id: { type: 'string', description: 'Optional checkout identity for repositories with multiple local clones.' },
+  }, [], true),
+  definition('repository_goal_upsert', 'Create or update one durable repository goal for repeated assistant workflows.', {
+    repo_id: repoId,
+    checkout_id: { type: 'string', description: 'Optional checkout identity for repositories with multiple local clones.' },
+    id: { type: 'string' },
+    title: { type: 'string' },
+    status: { type: 'string', enum: ['active', 'paused', 'done'] },
+    checks: { type: 'array', items: { type: 'string' } },
+    notes: { type: 'string' },
+  }, []),
+  definition('repository_stuck_diagnose', 'Diagnose likely repository workflow blockers from Git state and registered goals.', {
+    repo_id: repoId,
+    checkout_id: { type: 'string', description: 'Optional checkout identity for repositories with multiple local clones.' },
+  }, [], true),
+  definition('repository_goal_run', 'Run one durable repository goal iteration, optionally executing its configured checks and recording a goal-run artifact.', {
+    repo_id: repoId,
+    checkout_id: { type: 'string', description: 'Optional checkout identity for repositories with multiple local clones.' },
+    goal_id: { type: 'string', description: 'Goal id. Defaults to the first active goal.' },
+    run_checks: { type: 'boolean', description: 'When true, execute configured checks. Defaults to diagnosis-only.' },
+  }, []),
+  definition('repository_goal_runs', 'List recent repository goal-run artifacts.', {
+    repo_id: repoId,
+    checkout_id: { type: 'string', description: 'Optional checkout identity for repositories with multiple local clones.' },
+    limit: { type: 'number' },
+  }, [], true),
+
+  definition('repository_git_status', 'Return a structured Git status snapshot for the selected repository checkout.', {
+    repo_id: repoId,
+    checkout_id: { type: 'string', description: 'Optional checkout identity for repositories with multiple local clones.' },
+  }, [], true),
+
+  definition('repository_git_diff', 'Return a bounded structured git diff for the selected repository, optionally staged and path-scoped.', {
+    repo_id: repoId,
+    checkout_id: { type: 'string', description: 'Optional checkout identity for repositories with multiple local clones.' },
+    staged: { type: 'boolean' },
+    paths: { type: 'array', items: { type: 'string' } },
+    max_bytes: { type: 'number' },
+  }, [], true),
+  definition('repository_git_create_branch', 'Create a safe local Git branch, optionally switching to it.', {
+    repo_id: repoId,
+    checkout_id: { type: 'string', description: 'Optional checkout identity for repositories with multiple local clones.' },
+    branch: { type: 'string' },
+    start_point: { type: 'string' },
+    switch_to: { type: 'boolean', description: 'Defaults to true. False creates the branch without switching.' },
+  }, ['branch']),
+  definition('repository_git_switch_branch', 'Switch to a safe local Git branch name.', {
+    repo_id: repoId,
+    checkout_id: { type: 'string', description: 'Optional checkout identity for repositories with multiple local clones.' },
+    branch: { type: 'string' },
+  }, ['branch']),
+  definition('repository_git_merge_branch', 'Merge a branch into the current branch using --ff-only by default.', {
+    repo_id: repoId,
+    checkout_id: { type: 'string', description: 'Optional checkout identity for repositories with multiple local clones.' },
+    branch: { type: 'string' },
+    no_ff: { type: 'boolean', description: 'Use --no-ff instead of the default --ff-only.' },
+  }, ['branch']),
+  definition('repository_git_delete_branch', 'Delete a safe local Git branch after it has been merged or intentionally discarded.', {
+    repo_id: repoId,
+    checkout_id: { type: 'string', description: 'Optional checkout identity for repositories with multiple local clones.' },
+    branch: { type: 'string' },
+    force: { type: 'boolean' },
+  }, ['branch']),
+
+  definition('repository_git_commit', 'Stage optional explicit paths and commit through a structured Git action.', {
+    repo_id: repoId,
+    checkout_id: { type: 'string', description: 'Optional checkout identity for repositories with multiple local clones.' },
+    message: { type: 'string' },
+    paths: { type: 'array', items: { type: 'string' } },
+    allow_empty: { type: 'boolean' },
+  }, ['message']),
+  definition('repository_git_finish_workflow', 'Finish the current feature workflow: require clean tree, switch to target, merge feature branch, and delete it by default.', {
+    repo_id: repoId,
+    checkout_id: { type: 'string', description: 'Optional checkout identity for repositories with multiple local clones.' },
+    feature_branch: { type: 'string', description: 'Defaults to the current branch.' },
+    target_branch: { type: 'string', description: 'Defaults to repository defaultBranch or main.' },
+    delete_branch: { type: 'boolean', description: 'Defaults to true.' },
+    no_ff: { type: 'boolean', description: 'Use --no-ff instead of the default --ff-only.' },
+  }, []),
+  definition('repository_safe_patch_plan', 'Plan a deterministic chunked repository patch with fresh file fingerprints before applying.', {
+    repo_id: repoId,
+    checkout_id: { type: 'string', description: 'Optional checkout identity for repositories with multiple local clones.' },
+    operations: { type: 'array', items: { type: 'object' }, description: 'Edit operations using the same shape as apply_patch.' },
+    chunk_size: { type: 'number', description: 'Maximum operations per deterministic chunk. Capped at 100.' },
+  }, ['operations'], true),
+  definition('repository_safe_patch_apply', 'Apply a deterministic chunked repository patch through edit sessions, refreshing missing file fingerprints before each chunk.', {
+    repo_id: repoId,
+    checkout_id: { type: 'string', description: 'Optional checkout identity for repositories with multiple local clones.' },
+    session_id: { type: 'string', description: 'Existing edit session id. Omit to create one.' },
+    purpose: { type: 'string', description: 'Purpose for a newly created edit session.' },
+    operations: { type: 'array', items: { type: 'object' }, description: 'Edit operations using the same shape as apply_patch.' },
+    chunk_size: { type: 'number', description: 'Maximum operations per deterministic chunk. Capped at 100.' },
+    expected_revision: { type: 'number', description: 'Expected starting edit-session revision.' },
+    allowed_paths: { type: 'array', items: { type: 'string' }, description: 'Optional allowed path globs for a newly created session.' },
+    continue_on_error: { type: 'boolean', description: 'Continue applying later independent chunks after a failed chunk. Defaults to false.' },
+    refresh_fingerprints: { type: 'boolean', description: 'Refresh file fingerprints before every chunk. Defaults to true.' },
+    recover_stale_session: { type: 'boolean', description: 'For new sessions, recover stale edit-session fingerprints into a fresh session. Defaults to true.' },
+  }, ['operations']),
   definition('repository_command_preview', 'Preview one repository-scoped local command with classification, approval token, and Git snapshots.', {
     repo_id: repoId,
     checkout_id: { type: 'string', description: 'Optional checkout identity for repositories with multiple local clones.' },
@@ -120,7 +235,8 @@ function result(value: Record<string, unknown>): RepositoryToolResult {
 function failure(error: unknown): RepositoryToolResult {
   const message = error instanceof Error ? error.message : String(error);
   const code = message.includes(':') ? message.slice(0, message.indexOf(':')) : 'REPOSITORY_TOOL_FAILED';
-  return { ...result({ error: { code, message } }), isError: true };
+  const details = typeof error === 'object' && error !== null && 'details' in error ? (error as { details?: unknown }).details : undefined;
+  return { ...result({ error: { code, message, ...(details ? { details } : {}) } }), isError: true };
 }
 
 function terminalLocalJobStatus(status: string): boolean {
@@ -209,6 +325,111 @@ export async function callRepositoryTool(
           repoId: repoIdValue || undefined,
           includeRemoved: args.include_removed === true,
         }) });
+
+
+
+      case 'repository_goal_list': {
+        const repository = resolveRepositorySelection({ repoId: repoIdValue || undefined, checkoutId: typeof args.checkout_id === 'string' ? args.checkout_id : undefined, controllerHome, allowSoleRepository: true });
+        return result({ repoId: repository.repoId, checkoutId: repository.activeCheckoutId, registry: readRepositoryGoalRegistry(repository) });
+      }
+      case 'repository_goal_upsert': {
+        const repository = resolveRepositorySelection({ repoId: repoIdValue || undefined, checkoutId: typeof args.checkout_id === 'string' ? args.checkout_id : undefined, controllerHome, allowSoleRepository: true });
+        return result({ repoId: repository.repoId, checkoutId: repository.activeCheckoutId, ...upsertRepositoryGoal(repository, { id: args.id, title: args.title, status: args.status, checks: args.checks, notes: args.notes }) as unknown as Record<string, unknown> });
+      }
+      case 'repository_stuck_diagnose': {
+        const repository = resolveRepositorySelection({ repoId: repoIdValue || undefined, checkoutId: typeof args.checkout_id === 'string' ? args.checkout_id : undefined, controllerHome, allowSoleRepository: true });
+        return result({ diagnosis: diagnoseRepositoryStuckState(repository) });
+      }
+
+      case 'repository_goal_run': {
+        const repository = resolveRepositorySelection({ repoId: repoIdValue || undefined, checkoutId: typeof args.checkout_id === 'string' ? args.checkout_id : undefined, controllerHome, allowSoleRepository: true });
+        const ran = withControllerLock(
+          controllerHome,
+          { scope: 'repository', repoId: repository.repoId },
+          'mcp:repository_goal_run',
+          () => runRepositoryGoal(repository, { goalId: args.goal_id, runChecks: args.run_checks }),
+          60_000,
+        );
+        return result({ repoId: repository.repoId, checkoutId: repository.activeCheckoutId, ...ran as unknown as Record<string, unknown> });
+      }
+      case 'repository_goal_runs': {
+        const repository = resolveRepositorySelection({ repoId: repoIdValue || undefined, checkoutId: typeof args.checkout_id === 'string' ? args.checkout_id : undefined, controllerHome, allowSoleRepository: true });
+        const limit = typeof args.limit === 'number' ? args.limit : typeof args.limit === 'string' ? Number(args.limit) : undefined;
+        return result({ repoId: repository.repoId, checkoutId: repository.activeCheckoutId, runs: listRepositoryGoalRuns(repository, limit) });
+      }
+      case 'repository_git_status': {
+        const repository = resolveRepositorySelection({ repoId: repoIdValue || undefined, checkoutId: typeof args.checkout_id === 'string' ? args.checkout_id : undefined, controllerHome, allowSoleRepository: true });
+        return result({ status: repositoryGitStatus(repository) });
+      }
+
+      case 'repository_git_diff': {
+        const repository = resolveRepositorySelection({ repoId: repoIdValue || undefined, checkoutId: typeof args.checkout_id === 'string' ? args.checkout_id : undefined, controllerHome, allowSoleRepository: true });
+        return result({ diff: repositoryGitDiff(repository, { staged: args.staged, paths: args.paths, maxBytes: args.max_bytes }) });
+      }
+      case 'repository_git_create_branch': {
+        const repository = resolveRepositorySelection({ repoId: repoIdValue || undefined, checkoutId: typeof args.checkout_id === 'string' ? args.checkout_id : undefined, controllerHome, allowSoleRepository: true });
+        return result({ repoId: repository.repoId, checkoutId: repository.activeCheckoutId, ...repositoryGitCreateBranch(controllerHome, repository, { branch: args.branch, startPoint: args.start_point, switchTo: args.switch_to }) as unknown as Record<string, unknown> });
+      }
+      case 'repository_git_switch_branch': {
+        const repository = resolveRepositorySelection({ repoId: repoIdValue || undefined, checkoutId: typeof args.checkout_id === 'string' ? args.checkout_id : undefined, controllerHome, allowSoleRepository: true });
+        return result({ repoId: repository.repoId, checkoutId: repository.activeCheckoutId, ...repositoryGitSwitchBranch(controllerHome, repository, { branch: args.branch }) as unknown as Record<string, unknown> });
+      }
+      case 'repository_git_merge_branch': {
+        const repository = resolveRepositorySelection({ repoId: repoIdValue || undefined, checkoutId: typeof args.checkout_id === 'string' ? args.checkout_id : undefined, controllerHome, allowSoleRepository: true });
+        return result({ repoId: repository.repoId, checkoutId: repository.activeCheckoutId, ...repositoryGitMergeBranch(controllerHome, repository, { branch: args.branch, noFf: args.no_ff }) as unknown as Record<string, unknown> });
+      }
+      case 'repository_git_delete_branch': {
+        const repository = resolveRepositorySelection({ repoId: repoIdValue || undefined, checkoutId: typeof args.checkout_id === 'string' ? args.checkout_id : undefined, controllerHome, allowSoleRepository: true });
+        return result({ repoId: repository.repoId, checkoutId: repository.activeCheckoutId, ...repositoryGitDeleteBranch(controllerHome, repository, { branch: args.branch, force: args.force }) as unknown as Record<string, unknown> });
+      }
+
+      case 'repository_git_commit': {
+        const repository = resolveRepositorySelection({ repoId: repoIdValue || undefined, checkoutId: typeof args.checkout_id === 'string' ? args.checkout_id : undefined, controllerHome, allowSoleRepository: true });
+        return result({ commit: repositoryGitCommit(controllerHome, repository, { message: args.message, paths: args.paths, allowEmpty: args.allow_empty }) });
+      }
+      case 'repository_git_finish_workflow': {
+        const repository = resolveRepositorySelection({ repoId: repoIdValue || undefined, checkoutId: typeof args.checkout_id === 'string' ? args.checkout_id : undefined, controllerHome, allowSoleRepository: true });
+        return result({ finish: repositoryGitFinishWorkflow(controllerHome, repository, { featureBranch: args.feature_branch, targetBranch: args.target_branch, deleteBranch: args.delete_branch, noFf: args.no_ff }) });
+      }
+      case 'repository_safe_patch_plan': {
+        const repository = resolveRepositorySelection({
+          repoId: repoIdValue || undefined,
+          checkoutId: typeof args.checkout_id === 'string' ? args.checkout_id : undefined,
+          controllerHome,
+          allowSoleRepository: true,
+        });
+        return result({
+          repoId: repository.repoId,
+          checkoutId: repository.activeCheckoutId,
+          plan: buildSafePatchPlan(repository, { operations: args.operations, chunkSize: args.chunk_size }),
+        });
+      }
+      case 'repository_safe_patch_apply': {
+        const repository = resolveRepositorySelection({
+          repoId: repoIdValue || undefined,
+          checkoutId: typeof args.checkout_id === 'string' ? args.checkout_id : undefined,
+          controllerHome,
+          allowSoleRepository: true,
+        });
+        const applied = withControllerLock(
+          controllerHome,
+          { scope: 'repository', repoId: repository.repoId },
+          'mcp:repository_safe_patch_apply',
+          () => applySafePatch(repository, {
+            sessionId: args.session_id,
+            purpose: args.purpose,
+            operations: args.operations,
+            chunkSize: args.chunk_size,
+            expectedRevision: args.expected_revision,
+            allowedPaths: args.allowed_paths,
+            continueOnError: args.continue_on_error,
+            refreshFingerprints: args.refresh_fingerprints,
+            recoverStaleSession: args.recover_stale_session,
+          }),
+          60_000,
+        );
+        return result({ repoId: repository.repoId, checkoutId: repository.activeCheckoutId, ...applied as unknown as Record<string, unknown> });
+      }
       case 'repository_command_preview': {
         const repository = resolveRepositorySelection({
           repoId: repoIdValue || undefined,

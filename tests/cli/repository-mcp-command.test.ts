@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { spawnSync } from "child_process";
@@ -580,4 +580,149 @@ describe("repository MCP command tools", () => {
       rmSync(workspace, { recursive: true, force: true });
     }
   });
+
+  test("safe patch apply splits repeated paths, refreshes fingerprints, and returns actionable failures", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "repo-harness-safe-patch-complete-"));
+    const controllerHome = join(workspace, "controller-home");
+    const repoRoot = join(workspace, "sample-repo");
+    try {
+      mkdirSync(controllerHome, { recursive: true });
+      mkdirSync(repoRoot, { recursive: true });
+      git(repoRoot, ["init", "-b", "main"]);
+      git(repoRoot, ["config", "user.name", "Repo Harness Test"]);
+      git(repoRoot, ["config", "user.email", "repo-harness-test@example.com"]);
+      writeFileSync(join(repoRoot, "app.txt"), "alpha\nbeta\n");
+      git(repoRoot, ["add", "app.txt"]);
+      git(repoRoot, ["commit", "-m", "init"]);
+      const repository = registerRepository({ path: repoRoot, controllerHome });
+
+      const applied = await json(callRepositoryTool(controllerHome, "repository_safe_patch_apply", {
+        repo_id: repository.repoId,
+        purpose: "safe patch complete test",
+        operations: [
+          { type: "replace", path: "app.txt", replacements: [{ old_text: "alpha", new_text: "alpha-1" }] },
+          { type: "replace", path: "app.txt", replacements: [{ old_text: "beta", new_text: "beta-1" }] },
+        ],
+        chunk_size: 10,
+      }));
+      expect(applied.status).toBe("applied");
+      expect(applied.appliedChunks.length).toBe(2);
+      expect(applied.session.currentRevision).toBe(2);
+      expect(readFileSync(join(repoRoot, "app.txt"), "utf-8")).toBe("alpha-1\nbeta-1\n");
+
+      const failed = await json(callRepositoryTool(controllerHome, "repository_safe_patch_apply", {
+        repo_id: repository.repoId,
+        purpose: "safe patch failure context",
+        operations: [
+          { type: "replace", path: "app.txt", replacements: [{ old_text: "does-not-exist", new_text: "x" }] },
+        ],
+      }));
+      expect(failed.status).toBe("failed");
+      expect(failed.failures[0].code).toBe("REPLACEMENT_TEXT_NOT_FOUND");
+      expect(failed.failures[0].context.focus).toContain("alpha-1");
+    } finally {
+      await cleanupWorkspace([workspace, controllerHome, repoRoot]);
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  test("structured git diff, commit, and finish workflow complete a feature branch", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "repo-harness-structured-git-complete-"));
+    const controllerHome = join(workspace, "controller-home");
+    const repoRoot = join(workspace, "sample-repo");
+    try {
+      mkdirSync(controllerHome, { recursive: true });
+      mkdirSync(repoRoot, { recursive: true });
+      git(repoRoot, ["init", "-b", "main"]);
+      git(repoRoot, ["config", "user.name", "Repo Harness Test"]);
+      git(repoRoot, ["config", "user.email", "repo-harness-test@example.com"]);
+      writeFileSync(join(repoRoot, "README.md"), "hello\n");
+      git(repoRoot, ["add", "README.md"]);
+      git(repoRoot, ["commit", "-m", "init"]);
+      const repository = registerRepository({ path: repoRoot, controllerHome, defaultBranch: "main" });
+
+      const branch = await json(callRepositoryTool(controllerHome, "repository_git_create_branch", {
+        repo_id: repository.repoId,
+        branch: "feature/structured-flow",
+      }));
+      expect(branch.execution.ok).toBe(true);
+      writeFileSync(join(repoRoot, "README.md"), "hello\nstructured\n");
+
+      const diff = await json(callRepositoryTool(controllerHome, "repository_git_diff", {
+        repo_id: repository.repoId,
+        paths: ["README.md"],
+      }));
+      expect(diff.diff.patch).toContain("structured");
+
+      const commit = await json(callRepositoryTool(controllerHome, "repository_git_commit", {
+        repo_id: repository.repoId,
+        paths: ["README.md"],
+        message: "Update README through structured git",
+      }));
+      expect(commit.commit.committed).toBe(true);
+      expect(commit.commit.after.clean).toBe(true);
+
+      const finish = await json(callRepositoryTool(controllerHome, "repository_git_finish_workflow", {
+        repo_id: repository.repoId,
+        feature_branch: "feature/structured-flow",
+        target_branch: "main",
+      }));
+      expect(finish.finish.completed).toBe(true);
+      const branches = spawnSync("git", ["-C", repoRoot, "branch", "--list", "feature/structured-flow"], { encoding: "utf-8" });
+      expect(branches.stdout.trim()).toBe("");
+    } finally {
+      await cleanupWorkspace([workspace, controllerHome, repoRoot]);
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  test("repository goals run checks, persist run artifacts, and feed stuck diagnosis", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "repo-harness-goal-run-complete-"));
+    const controllerHome = join(workspace, "controller-home");
+    const repoRoot = join(workspace, "sample-repo");
+    try {
+      mkdirSync(controllerHome, { recursive: true });
+      mkdirSync(repoRoot, { recursive: true });
+      mkdirSync(join(repoRoot, ".repo-harness"), { recursive: true });
+      git(repoRoot, ["init", "-b", "main"]);
+      git(repoRoot, ["config", "user.name", "Repo Harness Test"]);
+      git(repoRoot, ["config", "user.email", "repo-harness-test@example.com"]);
+      writeFileSync(join(repoRoot, "README.md"), "hello\n");
+      writeFileSync(join(repoRoot, ".repo-harness/checks.json"), JSON.stringify({
+        version: 1,
+        checks: {
+          "git-clean": { description: "Git status is readable", command: ["git", "status", "--short"], cwd: ".", timeoutMs: 5000 },
+        },
+      }, null, 2));
+      git(repoRoot, ["add", "."]);
+      git(repoRoot, ["commit", "-m", "init"]);
+      const repository = registerRepository({ path: repoRoot, controllerHome });
+
+      const goal = await json(callRepositoryTool(controllerHome, "repository_goal_upsert", {
+        repo_id: repository.repoId,
+        id: "reliability",
+        title: "Improve repo harness reliability",
+        checks: ["git-clean"],
+      }));
+      expect(goal.goal.id).toBe("reliability");
+
+      const run = await json(callRepositoryTool(controllerHome, "repository_goal_run", {
+        repo_id: repository.repoId,
+        goal_id: "reliability",
+        run_checks: true,
+      }));
+      expect(run.run.status).toBe("succeeded");
+      expect(run.run.checks[0].status).toBe("passed");
+      expect(existsSync(join(repoRoot, run.path))).toBe(true);
+
+      const runs = await json(callRepositoryTool(controllerHome, "repository_goal_runs", {
+        repo_id: repository.repoId,
+      }));
+      expect(runs.runs[0].runId).toBe(run.run.runId);
+    } finally {
+      await cleanupWorkspace([workspace, controllerHome, repoRoot]);
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
 });

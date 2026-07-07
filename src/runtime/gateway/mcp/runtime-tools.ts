@@ -12,7 +12,7 @@ import { readExecutionArtifact } from '../../evidence/artifact-store';
 import { ensureControllerDaemon, readControllerDaemonStatus } from '../../control-plane/daemon-client';
 import { readSchedulerHealthSnapshot } from '../../control-plane/global-scheduler/scheduler';
 import { rebuildRepositoryProjection, readRepositoryProjectionSnapshot } from '../../projections/materialized-view';
-import { createSchedule, getSchedule, getScheduleDecision, listOccurrences, listSchedules, saveSchedule } from '../../workflow/schedules/store';
+import { applyScheduleDedupe, buildScheduleDedupeReport, createSchedule, getSchedule, getScheduleDecision, listOccurrences, listSchedules, saveSchedule } from '../../workflow/schedules/store';
 import { evaluateSchedule } from '../../workflow/schedules/engine';
 import { createPortfolioWorkflow, getPortfolioWorkflow, listPortfolioWorkflows } from '../../workflow/portfolio/store';
 import { claimsForMcpOperation } from './resource-policy';
@@ -162,6 +162,14 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
   definition('cancel_job', 'Cancel one queued or running durable Execution Job.', { job_id: { type: 'string' }, repo_id: repoId, reason: { type: 'string' } }, ['job_id'], false),
   definition('controller_ready', 'Return Gateway, Controller Daemon, Worker isolation, queue, and repository projection readiness.', { repo_id: repoId }),
   definition('repository_runtime_snapshot', 'Read the materialized runtime projection without scanning historical state.', { repo_id: repoId }),
+  definition('schedule_dedupe_report', 'Read-only report that groups duplicate schedules by semantic trigger/action identity.', {
+    repo_id: repoId,
+  }, ['repo_id']),
+  definition('schedule_dedupe_apply', 'Pause duplicate schedules after explicit authorization, keeping one canonical enabled schedule per semantic identity.', {
+    repo_id: repoId,
+    dry_run: { type: 'boolean', description: 'When true, only returns the proposed changes.' },
+    confirm_authorization: { type: 'boolean', description: 'Must be true unless dry_run is true.' },
+  }, ['repo_id']),
   definition('runtime_performance_diagnostics', 'Diagnose repo-harness host performance, orphan workers, Local Controller presence, and cleanup candidates.', {
     repo_id: repoId,
     include_processes: { type: 'boolean', description: 'Include bounded repo-harness related process samples. Defaults to true.' },
@@ -1075,6 +1083,15 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           checkoutId: repository.activeCheckoutId,
           ...prepareFallbackHandoffArtifacts(repository, { reason: args.reason }),
         });
+      }
+
+      case 'schedule_dedupe_report': {
+        const repository = selected(ctx, args);
+        return result({ report: buildScheduleDedupeReport(ctx.controllerHome, repository.repoId) });
+      }
+      case 'schedule_dedupe_apply': {
+        const repository = selected(ctx, args);
+        return result({ dedupe: applyScheduleDedupe(ctx.controllerHome, repository.repoId, { dryRun: args.dry_run, confirmAuthorization: args.confirm_authorization }) });
       }
       case 'local_bridge_status': {
         const repository = selected(ctx, args);

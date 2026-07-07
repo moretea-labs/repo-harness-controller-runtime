@@ -224,3 +224,124 @@ export function getScheduleDecision(controllerHome: string, repoId: string, deci
   const path = decisionPath(controllerHome, repoId, decisionId);
   return existsSync(path) ? readJsonFile<ScheduleDecision>(path) : undefined;
 }
+
+
+export interface ScheduleDuplicateMember {
+  scheduleId: string;
+  name: string;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+  keep: boolean;
+  reason: string;
+}
+
+export interface ScheduleDuplicateGroup {
+  semanticKey: string;
+  scheduleIds: string[];
+  names: string[];
+  enabledCount: number;
+  keepScheduleId: string;
+  members: ScheduleDuplicateMember[];
+  recommendation: string;
+}
+
+export interface ScheduleDedupeReport {
+  repoId: string;
+  generatedAt: string;
+  totalSchedules: number;
+  duplicateGroups: ScheduleDuplicateGroup[];
+  proposedDisableCount: number;
+}
+
+export interface ScheduleDedupeApplyResult {
+  repoId: string;
+  appliedAt: string;
+  dryRun: boolean;
+  report: ScheduleDedupeReport;
+  disabled: Array<{ scheduleId: string; previousEnabled: boolean; pausedReason?: string }>;
+}
+
+function scheduleDedupeKey(schedule: RepositorySchedule): string {
+  return createHash('sha256').update(JSON.stringify(canonical({
+    repoId: schedule.repoId,
+    name: schedule.name.trim().toLowerCase(),
+    trigger: schedule.trigger,
+    policy: schedule.policy,
+    action: schedule.action,
+    stopConditions: schedule.stopConditions,
+  }))).digest('hex');
+}
+
+function chooseScheduleToKeep(entries: RepositorySchedule[]): RepositorySchedule {
+  const enabled = entries.filter((entry) => entry.enabled);
+  const pool = enabled.length > 0 ? enabled : entries;
+  return [...pool].sort((left, right) => {
+    const triggered = String(right.lastTriggeredAt ?? '').localeCompare(String(left.lastTriggeredAt ?? ''));
+    if (triggered !== 0) return triggered;
+    return right.updatedAt.localeCompare(left.updatedAt) || right.createdAt.localeCompare(left.createdAt);
+  })[0]!;
+}
+
+function duplicateGroup(semanticKey: string, entries: RepositorySchedule[]): ScheduleDuplicateGroup {
+  const keep = chooseScheduleToKeep(entries);
+  const members = [...entries]
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+    .map((entry) => ({
+      scheduleId: entry.scheduleId,
+      name: entry.name,
+      enabled: entry.enabled,
+      createdAt: entry.createdAt,
+      updatedAt: entry.updatedAt,
+      keep: entry.scheduleId === keep.scheduleId,
+      reason: entry.scheduleId === keep.scheduleId
+        ? 'newest enabled duplicate selected as canonical schedule'
+        : entry.enabled ? 'enabled duplicate should be paused to prevent repeated execution' : 'already disabled duplicate',
+    }));
+  return {
+    semanticKey,
+    scheduleIds: entries.map((entry) => entry.scheduleId),
+    names: [...new Set(entries.map((entry) => entry.name))],
+    enabledCount: entries.filter((entry) => entry.enabled).length,
+    keepScheduleId: keep.scheduleId,
+    members,
+    recommendation: 'Keep one canonical schedule enabled and pause older enabled duplicates with a dedupe reason.',
+  };
+}
+
+export function buildScheduleDedupeReport(controllerHome: string, repoId: string): ScheduleDedupeReport {
+  const schedules = listSchedules(controllerHome, repoId);
+  const groups = new Map<string, RepositorySchedule[]>();
+  for (const schedule of schedules) {
+    const key = scheduleDedupeKey(schedule);
+    groups.set(key, [...(groups.get(key) ?? []), schedule]);
+  }
+  const duplicateGroups = [...groups.entries()]
+    .filter(([, entries]) => entries.length > 1)
+    .map(([semanticKey, entries]) => duplicateGroup(semanticKey, entries))
+    .sort((left, right) => right.scheduleIds.length - left.scheduleIds.length);
+  const proposedDisableCount = duplicateGroups.reduce((sum, group) => sum + group.members.filter((member) => member.enabled && !member.keep).length, 0);
+  return { repoId, generatedAt: new Date().toISOString(), totalSchedules: schedules.length, duplicateGroups, proposedDisableCount };
+}
+
+export function applyScheduleDedupe(controllerHome: string, repoId: string, input: { dryRun?: unknown; confirmAuthorization?: unknown } = {}): ScheduleDedupeApplyResult {
+  const dryRun = input.dryRun === true;
+  if (!dryRun && input.confirmAuthorization !== true) throw new Error('SCHEDULE_DEDUPE_AUTHORIZATION_REQUIRED: confirm_authorization must be true to pause duplicate schedules');
+  return withControllerLock(controllerHome, { scope: 'task', repoId, taskId: 'schedule-dedupe' }, `schedule-dedupe:${repoId}`, () => {
+    const report = buildScheduleDedupeReport(controllerHome, repoId);
+    const disabled: ScheduleDedupeApplyResult['disabled'] = [];
+    if (!dryRun) {
+      for (const group of report.duplicateGroups) {
+        for (const member of group.members) {
+          if (member.keep || !member.enabled) continue;
+          const current = getSchedule(controllerHome, repoId, member.scheduleId);
+          const previousEnabled = current.enabled;
+          const pausedReason = `duplicate schedule paused by schedule_dedupe_apply; kept ${group.keepScheduleId}`;
+          saveSchedule(controllerHome, { ...current, enabled: false, pausedReason });
+          disabled.push({ scheduleId: current.scheduleId, previousEnabled, pausedReason });
+        }
+      }
+    }
+    return { repoId, appliedAt: new Date().toISOString(), dryRun, report, disabled };
+  }, 10_000);
+}
