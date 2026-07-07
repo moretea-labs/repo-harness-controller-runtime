@@ -174,6 +174,15 @@ function isRegisteredRedirectUri(redirectUri: string, client: { redirect_uris?: 
   return (client.redirect_uris ?? []).some((registered) => redirectUriMatches(redirectUri, registered));
 }
 
+function isRegisteredExternalHttpsRedirectUri(redirectUri: string, client: { redirect_uris?: string[] }): boolean {
+  try {
+    const url = new URL(redirectUri);
+    return url.protocol === 'https:' && !url.username && !url.password && isRegisteredRedirectUri(redirectUri, client);
+  } catch (_error) {
+    return false;
+  }
+}
+
 function escapeHtmlAttribute(value: string): string {
   return value
     .replace(/&/g, '&amp;')
@@ -202,7 +211,7 @@ button{width:100%;margin-top:14px;border:0;border-radius:8px;padding:12px;backgr
 </style></head>
 <body><main class="card">
 <h1>Authorize repo-harness</h1>
-<p>Enter the local MCP passphrase to let ChatGPT use this workflow-scoped connector.</p>
+<p>Enter the local MCP passphrase to let this MCP client use this workflow-scoped connector.</p>
 <form method="POST" action="/authorize">
 ${hiddenFields}
 <input type="password" name="passphrase" placeholder="Passphrase" autofocus>
@@ -255,10 +264,10 @@ function oauthAuthorizationHandler(provider: ReturnType<typeof createMcpOAuthPro
     if (!redirectUri && client.redirect_uris.length === 1) {
       redirectUri = client.redirect_uris[0];
     }
-    if (!redirectUri || !isAllowedMcpOAuthRedirectUri(redirectUri)) {
+    if (!redirectUri || (!isAllowedMcpOAuthRedirectUri(redirectUri) && !isRegisteredExternalHttpsRedirectUri(redirectUri, client))) {
       res.status(400).json({
         error: 'invalid_request',
-        error_description: 'redirect_uri must be localhost or a ChatGPT connector callback URL',
+        error_description: 'redirect_uri must be localhost, a ChatGPT connector callback URL, or a registered HTTPS client redirect_uri',
       });
       return;
     }
@@ -323,10 +332,6 @@ function requireMcpHttpAuth(
     }
 
     const token = bearerFromRequest(req);
-    if (!token && bearerToken) {
-      sendBearerUnauthorized(res, 'Missing Authorization header', true);
-      return;
-    }
     if (!token || !provider) {
       sendOAuthUnauthorized(req, res, token ? 'OAuth is not configured' : 'Missing Authorization header', configuredOrigin);
       return;
@@ -338,11 +343,7 @@ function requireMcpHttpAuth(
       })
       .catch((error: unknown) => {
         if (error instanceof InvalidTokenError) {
-          if (bearerToken) {
-            sendBearerUnauthorized(res, error.message, true);
-          } else {
-            sendOAuthUnauthorized(req, res, error.message, configuredOrigin);
-          }
+          sendOAuthUnauthorized(req, res, error.message, configuredOrigin);
         } else {
           res.status(500).json({ error: 'server_error', message: 'Internal Server Error' });
         }
@@ -511,7 +512,7 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   const port = opts.port ?? 8765;
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? '.');
   const authMode = parseMcpHttpAuthMode(opts.auth);
-  const authToken = authMode === 'bearer' ? opts.authToken ?? readMcpBearerToken(repoRoot) : null;
+  const authToken = opts.authToken ?? readMcpBearerToken(repoRoot);
   const oauthPassphrase = authMode === 'oauth' ? readMcpOAuthPassphrase(repoRoot) : null;
   const tokenStore = authMode === 'oauth' ? new McpOAuthTokenStore(mcpOAuthTokenStorePath(repoRoot)) : null;
   tokenStore?.load();
@@ -659,7 +660,7 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
     });
   }
 
-  app.use('/mcp', (_req, res, next) => {
+  const setMcpResponseHeaders = (_req: Request, res: Response, next: NextFunction): void => {
     res.setHeader('x-repo-harness-tool-surface', toolSurface);
     res.setHeader('x-repo-harness-tool-surface-version', String(toolSurfaceVersion));
     res.setHeader('x-repo-harness-schema-version', String(toolSurfaceSchemaVersion));
@@ -667,7 +668,8 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
     if (runtimeToolSurfaceFingerprint) res.setHeader('x-repo-harness-runtime-tool-surface-fingerprint', runtimeToolSurfaceFingerprint);
     if (toolSurfaceFingerprint) res.setHeader('x-repo-harness-tool-surface-fingerprint', toolSurfaceFingerprint);
     next();
-  });
+  };
+  app.use('/mcp', setMcpResponseHeaders);
   app.post('/mcp', requireMcpHttpAuth(authMode, authToken, oauthProvider, configuredPublicOrigin), express.raw({ type: '*/*', limit: '1mb' }), (req, res) => {
     handleMcpPost(req, res, toolContext, transports, runtimeStats).catch((error: unknown) => {
       if (!res.headersSent) sendMcpRequestError(res, error);
