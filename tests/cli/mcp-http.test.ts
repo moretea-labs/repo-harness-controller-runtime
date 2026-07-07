@@ -253,7 +253,7 @@ describe('mcp http transport', () => {
         body: initializeBody(),
       });
       expect(noAuth.status).toBe(401);
-      expect(noAuth.headers.get('www-authenticate')).toContain('/.well-known/oauth-protected-resource/mcp');
+      expect(noAuth.headers.get('www-authenticate')).toBe('Bearer realm="repo-harness-mcp"');
 
       const initializedWithStaticBearer = await fetch(`http://127.0.0.1:${port}/mcp`, {
         method: 'POST',

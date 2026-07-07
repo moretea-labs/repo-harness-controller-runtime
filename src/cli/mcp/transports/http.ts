@@ -279,6 +279,14 @@ function oauthAuthorizationHandler(provider: ReturnType<typeof createMcpOAuthPro
   };
 }
 
+function sendBearerUnauthorized(res: Response, description: string, hasConfiguredToken: boolean): void {
+  res.setHeader('www-authenticate', 'Bearer realm="repo-harness-mcp"');
+  res.status(hasConfiguredToken ? 401 : 503).json({
+    error: hasConfiguredToken ? 'unauthorized' : 'auth_not_configured',
+    message: description,
+  });
+}
+
 function sendOAuthUnauthorized(
   req: Request,
   res: Response,
@@ -302,8 +310,7 @@ function requireMcpHttpAuth(
   return (req: Request, res: Response, next: NextFunction) => {
     if (mode === 'bearer') {
       if (!isAuthorizedMcpHttpRequest(req, bearerToken)) {
-        res.setHeader('www-authenticate', 'Bearer realm="repo-harness-mcp"');
-        res.status(bearerToken ? 401 : 503).json({ error: bearerToken ? 'unauthorized' : 'auth_not_configured' });
+        sendBearerUnauthorized(res, bearerToken ? 'Missing or invalid Authorization header' : 'Bearer token is not configured', Boolean(bearerToken));
         return;
       }
       next();
@@ -316,6 +323,10 @@ function requireMcpHttpAuth(
     }
 
     const token = bearerFromRequest(req);
+    if (!token && bearerToken) {
+      sendBearerUnauthorized(res, 'Missing Authorization header', true);
+      return;
+    }
     if (!token || !provider) {
       sendOAuthUnauthorized(req, res, token ? 'OAuth is not configured' : 'Missing Authorization header', configuredOrigin);
       return;
@@ -327,7 +338,11 @@ function requireMcpHttpAuth(
       })
       .catch((error: unknown) => {
         if (error instanceof InvalidTokenError) {
-          sendOAuthUnauthorized(req, res, error.message, configuredOrigin);
+          if (bearerToken) {
+            sendBearerUnauthorized(res, error.message, true);
+          } else {
+            sendOAuthUnauthorized(req, res, error.message, configuredOrigin);
+          }
         } else {
           res.status(500).json({ error: 'server_error', message: 'Internal Server Error' });
         }
