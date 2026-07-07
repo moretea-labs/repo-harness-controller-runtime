@@ -42,6 +42,7 @@ ChatGPT / Local UI
 - 新增 `/api/repositories/:repoId/snapshot`。
 - 新增 `/api/repositories/:repoId/user-snapshot`。
 - 仓库列表按 selected repoId 标记 current，而不是只能按启动 repoRoot 判断。
+- completion、progress、governance、assistant readiness/intent 和 recovery probe/plan/apply 入口开始通过 request 解析目标仓库。
 
 ### Phase 3：迁移服务级运行态到 controllerHome
 
@@ -92,6 +93,7 @@ controllerHome/repositories/<repoId>/controller-state
 - 已新增 Local Bridge request-level repo selection helper。
 - 已让 `/api/snapshot` 和 `/api/user-snapshot` 支持 repoId / checkoutId。
 - 已新增 repoId-scoped snapshot 和 user-snapshot endpoints。
+- 已将 completion、progress、governance、assistant readiness/intent 和 recovery probe/plan/apply 改为 request-scoped repo selection。
 - 已将 README 的启动说明改为 registry-first / compatibility `--repo` 语义。
 
 ## 后续验收点

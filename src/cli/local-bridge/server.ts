@@ -1076,30 +1076,33 @@ export async function startLocalBridgeServer(
   });
   app.get("/api/completion/backlog", (request, response) => {
     try {
+      const repoRoot = requestRepositoryRoot(request, options, controllerHome);
       const limit = Number(request.query.limit);
-      response.json(inspectCompletionBacklog(options.repoRoot, { limit: Number.isFinite(limit) ? limit : 100 }));
+      response.json(inspectCompletionBacklog(repoRoot, { limit: Number.isFinite(limit) ? limit : 100 }));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
   });
   app.get("/api/completion/queues", (request, response) => {
     try {
+      const repoRoot = requestRepositoryRoot(request, options, controllerHome);
       const limit = Number(request.query.limit);
-      response.json(completionDecisionQueues(options.repoRoot, { limit: Number.isFinite(limit) ? limit : 100 }));
+      response.json(completionDecisionQueues(repoRoot, { limit: Number.isFinite(limit) ? limit : 100 }));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
   });
   app.post("/api/completion/finish-ready-runs", (request, response) => {
     try {
-      const result = finishCompletionBacklog(options.repoRoot, {
+      const repoRoot = requestRepositoryRoot(request, options, controllerHome);
+      const result = finishCompletionBacklog(repoRoot, {
         dryRun: request.body?.apply !== true,
         limit: typeof request.body?.limit === "number" ? request.body.limit : undefined,
         commit: request.body?.commit === true,
         cleanup: request.body?.keepWorktree !== true,
         reviewer: queryString(request.body?.reviewer) ?? "local-bridge-completion",
       });
-      localSnapshotCache.delete(options.repoRoot);
+      localSnapshotCache.delete(repoRoot);
       response.json(result);
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
@@ -1107,7 +1110,8 @@ export async function startLocalBridgeServer(
   });
   app.post("/api/completion/decision", (request, response) => {
     try {
-      const result = applyCompletionDecision(options.repoRoot, {
+      const repoRoot = requestRepositoryRoot(request, options, controllerHome);
+      const result = applyCompletionDecision(repoRoot, {
         action: String(request.body?.action ?? "").replace(/-/g, "_") as never,
         runId: queryString(request.body?.runId) ?? queryString(request.body?.run_id),
         issueId: queryString(request.body?.issueId) ?? queryString(request.body?.issue_id),
@@ -1117,7 +1121,7 @@ export async function startLocalBridgeServer(
         commit: request.body?.commit === true,
         cleanup: request.body?.keepWorktree !== true,
       });
-      localSnapshotCache.delete(options.repoRoot);
+      localSnapshotCache.delete(repoRoot);
       response.json(result);
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
@@ -1125,22 +1129,24 @@ export async function startLocalBridgeServer(
   });
   app.get("/api/completion/stuck", (request, response) => {
     try {
+      const repoRoot = requestRepositoryRoot(request, options, controllerHome);
       const limit = Number(request.query.limit);
-      response.json(inspectStuckControllerStates(options.repoRoot, { limit: Number.isFinite(limit) ? limit : 100 }));
+      response.json(inspectStuckControllerStates(repoRoot, { limit: Number.isFinite(limit) ? limit : 100 }));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
   });
   app.post("/api/completion/stuck/migrate", (request, response) => {
     try {
-      const result = applyStuckStateMigration(options.repoRoot, {
+      const repoRoot = requestRepositoryRoot(request, options, controllerHome);
+      const result = applyStuckStateMigration(repoRoot, {
         dryRun: request.body?.apply !== true,
         limit: typeof request.body?.limit === "number" ? request.body.limit : undefined,
         reviewer: queryString(request.body?.reviewer) ?? "local-bridge-stuck-migration",
         markRetryRequired: request.body?.markRetryRequired === true,
         markNoRunEvidence: request.body?.markNoRunEvidence === true,
       });
-      localSnapshotCache.delete(options.repoRoot);
+      localSnapshotCache.delete(repoRoot);
       response.json(result);
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
@@ -1148,7 +1154,8 @@ export async function startLocalBridgeServer(
   });
   app.post("/api/controller/codex-continuation", (request, response) => {
     try {
-      response.json(prepareCodexContinuation(options.repoRoot, {
+      const repoRoot = requestRepositoryRoot(request, options, controllerHome);
+      response.json(prepareCodexContinuation(repoRoot, {
         objective: queryString(request.body?.objective),
         maxItems: typeof request.body?.maxItems === "number" ? request.body.maxItems : undefined,
         mode: request.body?.launch === true ? "launch" : "prepare",
@@ -1167,15 +1174,23 @@ export async function startLocalBridgeServer(
     sendStreamEvent(response, "connected");
     request.on("close", () => streamClients.delete(response));
   });
-  app.get("/api/progress", (_request, response) => {
-    response.json(getProjectProgress(options.repoRoot));
-  });
-  app.get("/api/governance", (_request, response) => {
-    response.json(inspectProjectGovernance(options.repoRoot));
-  });
-  app.post("/api/governance/reconcile", (_request, response) => {
+  app.get("/api/progress", (request, response) => {
     try {
-      response.json(reconcileProjectGovernance(options.repoRoot));
+      response.json(getProjectProgress(requestRepositoryRoot(request, options, controllerHome)));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.get("/api/governance", (request, response) => {
+    try {
+      response.json(inspectProjectGovernance(requestRepositoryRoot(request, options, controllerHome)));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/governance/reconcile", (request, response) => {
+    try {
+      response.json(reconcileProjectGovernance(requestRepositoryRoot(request, options, controllerHome)));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
@@ -1187,8 +1202,7 @@ export async function startLocalBridgeServer(
 
   app.post("/api/assistant/intent", (request, response) => {
     try {
-      const controllerHome = resolveControllerHome();
-      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      const repository = requestRepositorySelection(request, options, controllerHome);
       response.json(submitAssistantIntent(controllerHome, repository, {
         ...(request.body && typeof request.body === "object" && !Array.isArray(request.body) ? request.body as Record<string, unknown> : {}),
         source: request.body?.source === "mcp" || request.body?.source === "local-ui" || request.body?.source === "mobile" || request.body?.source === "system"
@@ -1200,27 +1214,26 @@ export async function startLocalBridgeServer(
     }
   });
 
-  app.get("/api/assistant/readiness", (_request, response) => {
+  app.get("/api/assistant/readiness", (request, response) => {
     try {
-      const controllerHome = resolveControllerHome();
-      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      const repository = requestRepositorySelection(request, options, controllerHome);
       response.json(buildAssistantReadinessReport(controllerHome, repository));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
   });
 
-  app.get("/api/recovery/probe", (_request, response) => {
+  app.get("/api/recovery/probe", (request, response) => {
     try {
-      response.json(cachedLocalControllerSnapshot(options.repoRoot).recovery);
+      response.json(cachedLocalControllerSnapshot(requestRepositoryRoot(request, options, controllerHome)).recovery);
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
   });
 
-  app.get("/api/recovery/plan", (_request, response) => {
+  app.get("/api/recovery/plan", (request, response) => {
     try {
-      const recovery = cachedLocalControllerSnapshot(options.repoRoot).recovery;
+      const recovery = cachedLocalControllerSnapshot(requestRepositoryRoot(request, options, controllerHome)).recovery;
       response.json({
         generatedAt: recovery.generatedAt,
         overallState: recovery.overallState,
@@ -1236,8 +1249,8 @@ export async function startLocalBridgeServer(
 
   app.post("/api/recovery/apply", (request, response) => {
     try {
-      const controllerHome = resolveControllerHome();
-      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      const repository = requestRepositorySelection(request, options, controllerHome);
+      const repoRoot = repository.canonicalRoot;
       const actionId = queryString(request.body?.actionId) ?? queryString(request.body?.action_id) ?? "";
       const action = recoveryActionById(actionId);
       if (!action) throw new Error(`RECOVERY_ACTION_UNKNOWN: ${actionId}`);
@@ -1246,14 +1259,14 @@ export async function startLocalBridgeServer(
       let result: Record<string, unknown>;
       let affectedPaths: string[] = [];
       if (action.id === "recovery.probe_again") {
-        result = cachedLocalControllerSnapshot(options.repoRoot).recovery as unknown as Record<string, unknown>;
+        result = cachedLocalControllerSnapshot(repoRoot).recovery as unknown as Record<string, unknown>;
       } else if (action.id === "recovery.rebuild_projection" || action.id === "recovery.refresh_repository") {
         result = { projection: rebuildRepositoryProjection(controllerHome, repository.repoId) };
         affectedPaths = [".ai/harness/controller/projections"];
       } else if (action.id === "recovery.cleanup_preview") {
-        result = previewRuntimeCleanup(options.repoRoot, { includeTempDirs: true, includeTerminalLocalJobs: true, includeLegacyRuns: true, includeHistoricalAttention: true }) as unknown as Record<string, unknown>;
+        result = previewRuntimeCleanup(repoRoot, { includeTempDirs: true, includeTerminalLocalJobs: true, includeLegacyRuns: true, includeHistoricalAttention: true }) as unknown as Record<string, unknown>;
       } else if (action.id === "recovery.reconcile_jobs") {
-        result = applyRuntimeCleanup(options.repoRoot, { includeTempDirs: true, includeTerminalLocalJobs: true, includeLegacyRuns: true, includeHistoricalAttention: true, confirmCleanup: true }) as unknown as Record<string, unknown>;
+        result = applyRuntimeCleanup(repoRoot, { includeTempDirs: true, includeTerminalLocalJobs: true, includeLegacyRuns: true, includeHistoricalAttention: true, confirmCleanup: true }) as unknown as Record<string, unknown>;
         affectedPaths = [".ai/harness/local-jobs", ".ai/harness/jobs"];
       } else if (action.id === "recovery.restart_controller") {
         result = { daemon: ensureControllerDaemon(controllerHome) };
