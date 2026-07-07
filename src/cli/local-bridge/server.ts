@@ -1638,7 +1638,8 @@ export async function startLocalBridgeServer(
   });
   app.post("/api/issues/:issueId/tasks/:taskId/verify", async (request, response) => {
     try {
-      const issue = getIssue(options.repoRoot, request.params.issueId);
+      const repoRoot = requestRepositoryRoot(request, options, controllerHome);
+      const issue = getIssue(repoRoot, request.params.issueId);
       const task = issue.tasks.find((entry) => entry.id === request.params.taskId);
       if (!task) throw new Error("task not found");
       if (task.status === "done" || task.status === "verified") {
@@ -1648,12 +1649,12 @@ export async function startLocalBridgeServer(
       const policy = taskExecutionPolicy(task);
       const latestRunId = task.runIds.at(-1);
       if (latestRunId) {
-        const run = getAgentJob(options.repoRoot, latestRunId);
+        const run = getAgentJob(repoRoot, latestRunId);
         if (run.status !== "succeeded") throw new Error(`verification requires a succeeded Run (current: ${run.status})`);
-        if (run.provider === "local" && run.worktree !== options.repoRoot && !run.integratedSessionId) throw new Error("integrate the isolated local Run before verification");
+        if (run.provider === "local" && run.worktree !== repoRoot && !run.integratedSessionId) throw new Error("integrate the isolated local Run before verification");
         if (run.provider === "github" && run.github?.createPullRequest !== false && !run.github?.pullRequestUrl) throw new Error("GitHub verification requires the linked pull request");
-        continueTaskAfterSuccessfulRun(options.repoRoot, run);
-        response.json(getIssue(options.repoRoot, issue.id));
+        continueTaskAfterSuccessfulRun(repoRoot, run);
+        response.json(getIssue(repoRoot, issue.id));
         return;
       }
 
@@ -1661,7 +1662,7 @@ export async function startLocalBridgeServer(
       // require a Run or Diff. Missing named checks never block launch or this path.
       const checkResults = await Promise.all(task.checks.map(async (checkId) => {
         try {
-          const result = await runControllerCheckAsync(options.repoRoot, checkId);
+          const result = await runControllerCheckAsync(repoRoot, checkId);
           return {
             checkId,
             ok: result.ok,
@@ -1676,7 +1677,7 @@ export async function startLocalBridgeServer(
         throw new Error(`${policy.executionClass} requires explicit acceptance evidence when no successful Run is linked`);
       }
       const at = new Date().toISOString();
-      response.json(recordTaskVerification(options.repoRoot, issue.id, task.id, {
+      response.json(recordTaskVerification(repoRoot, issue.id, task.id, {
         reviewedDiffHash: typeof request.body?.reviewedDiffHash === "string" ? request.body.reviewedDiffHash : undefined,
         reviewer: queryString(request.body?.reviewer) ?? "local-controller-human",
         checkResults,
@@ -1692,7 +1693,8 @@ export async function startLocalBridgeServer(
   });
   app.post("/api/issues/:issueId/tasks/:taskId/accept", (request, response) => {
     try {
-      const issue = getIssue(options.repoRoot, request.params.issueId);
+      const repoRoot = requestRepositoryRoot(request, options, controllerHome);
+      const issue = getIssue(repoRoot, request.params.issueId);
       const task = issue.tasks.find((entry) => entry.id === request.params.taskId);
       if (!task) throw new Error("task not found");
       const latestRunId = task.runIds.at(-1);
@@ -1703,30 +1705,32 @@ export async function startLocalBridgeServer(
           throw new Error("integrate the isolated local Task Run before accepting it");
         }
       }
-      response.json(acceptVerifiedTask(options.repoRoot, request.params.issueId, request.params.taskId, queryString(request.body?.note) ?? "Accepted from the local Controller."));
+      response.json(acceptVerifiedTask(repoRoot, request.params.issueId, request.params.taskId, queryString(request.body?.note) ?? "Accepted from the local Controller."));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
   });
   app.post("/api/issues/:issueId/tasks/:taskId/request-changes", (request, response) => {
     try {
-      const issue = getIssue(options.repoRoot, request.params.issueId);
+      const repoRoot = requestRepositoryRoot(request, options, controllerHome);
+      const issue = getIssue(repoRoot, request.params.issueId);
       const task = issue.tasks.find((entry) => entry.id === request.params.taskId);
       if (!task) throw new Error("task not found");
       if (!["review", "integrated", "verifying", "verified"].includes(task.status)) throw new Error(`Task is not reviewable from ${task.status}`);
-      response.json(updateTask(options.repoRoot, issue.id, task.id, { status: "changes_requested", note: queryString(request.body?.note) ?? "Changes requested from the local Controller." }));
+      response.json(updateTask(repoRoot, issue.id, task.id, { status: "changes_requested", note: queryString(request.body?.note) ?? "Changes requested from the local Controller." }));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
   });
   app.post("/api/issues/:issueId/tasks/:taskId/cancel", (request, response) => {
     try {
-      const issue = getIssue(options.repoRoot, request.params.issueId);
+      const repoRoot = requestRepositoryRoot(request, options, controllerHome);
+      const issue = getIssue(repoRoot, request.params.issueId);
       const task = issue.tasks.find((entry) => entry.id === request.params.taskId);
       if (!task) throw new Error("task not found");
-      const state = resolveEffectiveTaskState({ issue, task, runs: readTaskRunEvidence(options.repoRoot, task) });
+      const state = resolveEffectiveTaskState({ issue, task, runs: readTaskRunEvidence(repoRoot, task) });
       if (state.activeRunIds.length > 0) throw new Error(`cancel active Run(s) ${state.activeRunIds.join(", ")} before cancelling the Task`);
-      response.json(updateTask(options.repoRoot, request.params.issueId, request.params.taskId, { status: "cancelled", note: queryString(request.body?.note) ?? "Task cancelled from the local Controller." }));
+      response.json(updateTask(repoRoot, request.params.issueId, request.params.taskId, { status: "cancelled", note: queryString(request.body?.note) ?? "Task cancelled from the local Controller." }));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
@@ -1734,7 +1738,7 @@ export async function startLocalBridgeServer(
   app.post("/api/issues/:issueId/tasks/:taskId/dependencies", (request, response) => {
     try {
       if (!Array.isArray(request.body?.dependsOn)) throw new Error("dependsOn must be an array");
-      response.json(setTaskDependencies(options.repoRoot, request.params.issueId, request.params.taskId, request.body.dependsOn.map(String)));
+      response.json(setTaskDependencies(requestRepositoryRoot(request, options, controllerHome), request.params.issueId, request.params.taskId, request.body.dependsOn.map(String)));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
@@ -1742,7 +1746,7 @@ export async function startLocalBridgeServer(
   app.get("/api/timeline", (request, response) => {
     try {
       response.json({
-        events: getControllerTimeline(options.repoRoot, {
+        events: getControllerTimeline(requestRepositoryRoot(request, options, controllerHome), {
           category: parseWorklogCategory(queryString(request.query.category)),
           issueId: queryString(request.query.issueId),
           taskId: queryString(request.query.taskId),
