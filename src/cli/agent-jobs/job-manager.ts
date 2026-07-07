@@ -1861,6 +1861,43 @@ export function retryAgentJob(
   });
 }
 
+
+export function markAgentJobReviewedCompletion(
+  repoRoot: string,
+  runId: string,
+  options: {
+    changeOutcome?: AgentJobMeta["changeOutcome"];
+    changedFiles?: string[];
+    worktreeCleaned?: boolean;
+  } = {},
+): AgentJobMeta {
+  const current = getAgentJob(repoRoot, runId);
+  if (current.provider !== "local") return current;
+  const { stdoutTail: _stdout, stderrTail: _stderr, ...meta } = current;
+  const completedAt = new Date().toISOString();
+  meta.status = "succeeded";
+  meta.finishedAt = meta.finishedAt ?? completedAt;
+  meta.lastHeartbeatAt = completedAt;
+  if (options.changeOutcome) meta.changeOutcome = options.changeOutcome;
+  if (options.changedFiles) meta.changedFiles = options.changedFiles;
+  if (options.worktreeCleaned) meta.worktreeCleanedAt = meta.worktreeCleanedAt ?? completedAt;
+  meta.progress = {
+    phase: "completed",
+    percent: 100,
+    currentActivity: "Run review, integration, and completion orchestration finished",
+    lastActivityAt: completedAt,
+    activityCount: (meta.progress?.activityCount ?? 0) + 1,
+  };
+  delete meta.autoIntegrationError;
+  writeAgentMeta(repoRoot, metaPath(repoRoot, runId), meta);
+  appendAgentJobEvent(repoRoot, runId, {
+    type: "run_succeeded",
+    message: "Run completion was finalized by the completion orchestrator.",
+    data: { changeOutcome: meta.changeOutcome, changedFiles: meta.changedFiles, worktreeCleanedAt: meta.worktreeCleanedAt },
+  });
+  return meta;
+}
+
 export function markAgentJobIntegrated(
   repoRoot: string,
   runId: string,

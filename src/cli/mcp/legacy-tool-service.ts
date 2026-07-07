@@ -74,6 +74,7 @@ import { exportControllerWorklog, parseWorklogCategory } from "../controller/wor
 import { inspectProjectGovernance, reconcileProjectGovernance } from "../controller/governance";
 import { assessWorkMode } from "../controller/work-mode";
 import { taskExecutionPolicy, taskWriteScopesConflict } from "../controller/execution-policy";
+import { finishTaskRun } from "../controller/completion-orchestrator";
 import { loadControllerProjectState, saveControllerProjectState } from "../controller/project-state";
 import {
   CONTROLLER_SCHEMA_VERSION,
@@ -2322,6 +2323,32 @@ export function buildMcpToolDefinitions(
         },
       },
       {
+        name: "finish_task_run",
+        description:
+          "Finish one reviewed Run in a single policy-gated step: integrate if needed, verify, accept when allowed, and clean the isolated worktree. Use decision=auto for low/medium trusted work; use approve_and_finish only for explicit human approval.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            run_id: { type: "string" },
+            decision: {
+              type: "string",
+              enum: ["auto", "approve_and_finish", "request_changes", "discard"],
+            },
+            reviewer: { type: "string" },
+            note: { type: "string" },
+            cleanup: { type: "boolean" },
+            commit: { type: "boolean", description: "Create a selected-path Git commit after successful finish. Refuses to mix with pre-staged changes." },
+          },
+          required: ["run_id"],
+          additionalProperties: false,
+        },
+        annotations: {
+          readOnlyHint: false,
+          openWorldHint: false,
+          destructiveHint: false,
+        },
+      },
+      {
         name: "list_task_runs",
         description: "List recent persistent agent runs.",
         inputSchema: {
@@ -4150,6 +4177,25 @@ export async function callMcpTool(
           run.error,
         );
         return textResult(run);
+      }
+      case "finish_task_run": {
+        if (ctx.policy.profile !== "controller") return errorResult("TOOL_DISABLED", "finish_task_run requires the controller profile");
+        const runId = String(args.run_id ?? "").trim();
+        if (!runId) return errorResult("RUN_ID_REQUIRED", "finish_task_run requires run_id");
+        const decision = typeof args.decision === "string" ? args.decision : "auto";
+        if (!["auto", "approve_and_finish", "request_changes", "discard"].includes(decision)) {
+          return errorResult("INVALID_DECISION", "decision must be auto, approve_and_finish, request_changes, or discard");
+        }
+        const finished = finishTaskRun(ctx.repoRoot, {
+          runId,
+          decision: decision as "auto" | "approve_and_finish" | "request_changes" | "discard",
+          reviewer: typeof args.reviewer === "string" ? args.reviewer : undefined,
+          note: typeof args.note === "string" ? args.note : undefined,
+          cleanup: typeof args.cleanup === "boolean" ? args.cleanup : undefined,
+          commit: typeof args.commit === "boolean" ? args.commit : undefined,
+        });
+        audit(ctx, name, ["blocked", "needs_decision"].includes(finished.action) ? "failed" : "ok", args, `tasks/issues/${finished.issueId}`, finished.reason);
+        return textResult(finished);
       }
       case "verify_task": {
         if (ctx.policy.profile !== "controller") return errorResult("TOOL_DISABLED", "verify_task requires the controller profile");

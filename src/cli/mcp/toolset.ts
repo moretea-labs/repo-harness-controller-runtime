@@ -32,6 +32,7 @@ export const CORE_CONTROLLER_TOOL_NAMES = [
   'web_domain_access_preview',
   'web_domain_access_apply',
   'work_result_summary',
+  'finish_task_run',
   'work_status_digest',
   'model_clients_summary',
   'model_control_plane_summary',

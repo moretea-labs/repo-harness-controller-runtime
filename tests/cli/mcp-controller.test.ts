@@ -551,9 +551,10 @@ describe("MCP controller profile", () => {
       const repository = registerRepository({ path: repoRoot, controllerHome });
       const core = createMultiRepositoryContext({ repo: repoRoot, profile: "controller", toolset: "core", controllerHome });
       const full = createMultiRepositoryContext({ repo: repoRoot, profile: "controller", toolset: "full", controllerHome });
-      expect(exposedControllerToolDefinitions(core)).toHaveLength(26);
+      expect(exposedControllerToolDefinitions(core)).toHaveLength(54);
       expect(exposedControllerToolDefinitions(core).map((tool) => tool.name)).toContain("create_campaign");
       expect(exposedControllerToolDefinitions(core).map((tool) => tool.name)).toContain("submit_campaign_review");
+      expect(exposedControllerToolDefinitions(core).map((tool) => tool.name)).toContain("finish_task_run");
       expect(exposedControllerToolDefinitions(core).map((tool) => tool.name)).toContain("list_plugins");
       expect(exposedControllerToolDefinitions(core).map((tool) => tool.name)).toContain("get_plugin");
       expect(exposedControllerToolDefinitions(core).map((tool) => tool.name)).toContain("plugin_action_execute");
@@ -853,8 +854,10 @@ describe("MCP controller profile", () => {
         detail_level: "full",
       });
       const fullValue = JSON.parse(full!.content[0].text);
-      expect(fullValue.detailLevel).toBe("full");
-      expect(JSON.stringify(fullValue.job)).toContain(repoRoot);
+      expect(fullValue.detailLevel).toBe("summary");
+      expect(fullValue.requestedDetailLevel).toBe("full");
+      expect(JSON.stringify(fullValue.job)).not.toContain(repoRoot);
+      expect(fullValue.next).toContain("Raw job state is intentionally not returned");
     });
   });
 

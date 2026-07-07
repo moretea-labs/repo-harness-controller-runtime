@@ -4,6 +4,7 @@ import { getAgentJob, getAgentJobEvents, getAgentJobLog, listAgentJobs } from '.
 import { archiveIssue, getIssue, inspectIssueReadiness, projectBoard, restoreIssue } from '../controller/issue-store';
 import { taskWriteScopesConflict } from '../controller/execution-policy';
 import { getControllerTimeline, getProjectProgress } from '../controller/progress';
+import { finishTaskRun, type TaskReviewDecision } from '../controller/completion-orchestrator';
 import { exportControllerWorklog, parseWorklogCategory } from '../controller/worklog';
 import { inspectProjectGovernance, reconcileProjectGovernance } from '../controller/governance';
 import { assessWorkMode } from '../controller/work-mode';
@@ -229,6 +230,32 @@ export function buildControllerCommand(): Command {
     .option('--repo <path>', 'Repository root')
     .option('--json', 'Output JSON')
     .action((sessionId: string, opts: { repo?: string; json?: boolean }) => output(rollbackEditSession(repoRoot(opts.repo), sessionId), opts.json === true));
+
+  command.command('finish-run')
+    .description('Finish one reviewed Run: integrate if needed, verify, accept when policy allows, and clean the isolated worktree')
+    .argument('<run-id>', 'Controller Run ID')
+    .option('--repo <path>', 'Repository root')
+    .option('--decision <decision>', 'auto, approve_and_finish, request_changes, or discard', 'auto')
+    .option('--reviewer <name>', 'Reviewer identity')
+    .option('--note <text>', 'Review note')
+    .option('--keep-worktree', 'Do not remove the isolated worktree after integration')
+    .option('--commit', 'Create a selected-path Git commit after successful finish')
+    .option('--json', 'Output JSON')
+    .action((runId: string, opts: { repo?: string; decision?: string; reviewer?: string; note?: string; keepWorktree?: boolean; commit?: boolean; json?: boolean }) => {
+      const decision = String(opts.decision ?? 'auto').replace(/-/g, '_') as TaskReviewDecision;
+      if (!['auto', 'approve_and_finish', 'request_changes', 'discard'].includes(decision)) {
+        throw new Error('decision must be auto, approve_and_finish, request_changes, or discard');
+      }
+      const finished = finishTaskRun(repoRoot(opts.repo), {
+        runId,
+        decision,
+        reviewer: opts.reviewer,
+        note: opts.note,
+        cleanup: opts.keepWorktree !== true,
+        commit: opts.commit === true,
+      });
+      output(finished, opts.json === true);
+    });
 
   command.command('progress')
     .description('Show project, Issue, and Task progress derived from durable controller state')
