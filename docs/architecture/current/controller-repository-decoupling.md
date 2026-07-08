@@ -114,9 +114,11 @@ controllerHome/repositories/<repoId>/controller-state
 - MCP tool 调用会使用目标仓库的 `repository.canonicalRoot` 构造 scoped context，并把 repository/runtimeStorage envelope 写回结果。
 - `src/cli/mcp/repository-tools.ts` 的 repository/git/safe-patch/command tools 已按 `repo_id` / `checkout_id` 解析目标仓库，并把 command job payload 绑定到 `repoId` / `checkoutId`。
 
-仍需后续补充的是 durable router 的源代码级复核；本轮读取 `src/runtime/gateway/mcp/router.ts` 被安全层拦截，尚未完成该文件的直接审查。
+durable router 和 runtime gateway 主路径均已完成补充复核：
 
-Runtime gateway 主路径已完成补充复核：`src/runtime/gateway/mcp/runtime-tools.ts` 的 tool definitions 暴露 `repo_id`，执行 helper `selected(ctx,args)` 使用 `repo_id` / `checkout_id` / explicit repository / sole-repository fallback 统一解析目标仓库；已抽查 work/git/local-bridge/plugin/recovery/iOS/review/runtime-cleanup 等工具段，均通过目标 repository 执行。
+- `src/runtime/gateway/mcp/router.ts` 会对可持久化 MCP 调用执行 `resolveRepositorySelection`，将 `repoId` / `checkoutId` 写入 ExecutionJob，并通过 `repositoryScopedToolArgs` 注入目标仓库上下文。
+- controller-scoped repository tools 仅限 `repository_register` 以及未指定仓库的 `repository_workbench`；其他 repository tools 会解析目标仓库。
+- `src/runtime/gateway/mcp/runtime-tools.ts` 的 tool definitions 暴露 `repo_id`，执行 helper `selected(ctx,args)` 使用 `repo_id` / `checkout_id` / explicit repository / sole-repository fallback 统一解析目标仓库；已抽查 work/git/local-bridge/plugin/recovery/iOS/review/runtime-cleanup 等工具段，均通过目标 repository 执行。
 
 ### 2. 服务级运行态迁移
 
