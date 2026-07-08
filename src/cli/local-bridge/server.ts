@@ -1280,7 +1280,7 @@ export async function startLocalBridgeServer(
         reason,
         affectedPaths,
       }));
-      localSnapshotCache.delete(options.repoRoot);
+      localSnapshotCache.delete(repoRoot);
       response.json({ action, audit, result });
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
