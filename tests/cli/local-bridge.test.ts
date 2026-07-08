@@ -1297,11 +1297,11 @@ printf '%s\n' '{"type":"turn.completed"}'
     }).then((response) => response.json());
     expect(finalized.status).toBe("finalized");
     const dashboard = await fetch(handle.url).then((response) => response.text());
-    expect(dashboard).toContain("Ready for Review");
-    expect(dashboard).toContain("Needs Attention");
-    expect(dashboard).toContain("Direct Edit");
-    expect(dashboard).toContain("Assistant Plugins");
-    expect(dashboard).toContain("Mobile Intents");
+    expect(dashboard).toContain("仓库中心");
+    expect(dashboard).toContain("待处理");
+    expect(dashboard).toContain("执行任务");
+    expect(dashboard).toContain("能力中心");
+    expect(dashboard).toContain("selectRepo");
   });
 
   test("serves a hardened localhost visual control surface", async () => {

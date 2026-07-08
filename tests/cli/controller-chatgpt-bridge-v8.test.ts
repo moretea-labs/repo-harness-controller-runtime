@@ -162,15 +162,15 @@ describe("Controller V8 ChatGPT execution bridge", () => {
     expect(capabilities.capabilities.hierarchicalControllerUI).toBe(true);
 
     const dashboard = localBridgeDashboardHtml();
-    expect(dashboard).toContain("概览");
-    expect(dashboard).toContain("工作项");
-    expect(dashboard).toContain("活动");
-    expect(dashboard).toContain("设置");
-    expect(dashboard).toContain("Direct Edit");
-    expect(dashboard).toContain("Agent 输出");
-    expect(dashboard).toContain("查看原始日志");
-    expect(dashboard).toContain("/events");
-    expect(dashboard).toContain("parseAgentOutput");
+    expect(dashboard).toContain("首页");
+    expect(dashboard).toContain("执行任务");
+    expect(dashboard).toContain("仓库中心");
+    expect(dashboard).toContain("能力中心");
+    expect(dashboard).toContain("高级诊断");
+    expect(dashboard).toContain("repoQuery");
+    expect(dashboard).toContain("selectRepo");
+    expect(dashboard).toContain("withCurrentRepo");
+    expect(dashboard).toContain("window.onunhandledrejection");
     const embeddedScript = dashboard.match(/<script>([\s\S]*?)<\/script>/)?.[1];
     expect(embeddedScript).toBeDefined();
     expect(() => new Function(embeddedScript!)).not.toThrow();
