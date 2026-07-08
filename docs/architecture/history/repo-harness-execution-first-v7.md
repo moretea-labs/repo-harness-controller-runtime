@@ -4,7 +4,7 @@
 >
 > This document records the V7 execution-first design and remains available for migration history and audit. It may describe behavior that is still implemented, superseded, or not yet migrated.
 >
-> Current Controller Runtime architecture: [docs/architecture/current/README.md](architecture/current/README.md).
+> Current Controller Runtime architecture: [docs/architecture/current/README.md](../current/README.md).
 
 Controller V7 treats repo-harness as a local capability bridge rather than a workflow authority. ChatGPT or another capable operator owns execution decisions; repo-harness supplies bounded filesystem access, persistent Runs, checks, evidence, local approvals, and recovery metadata.
 

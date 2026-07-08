@@ -4,7 +4,7 @@
 >
 > This document records the V8 ChatGPT-controlled execution-bridge design and remains available for migration history and audit. It may describe behavior that is still implemented, superseded, or not yet migrated.
 >
-> Current Controller Runtime architecture: [docs/architecture/current/README.md](architecture/current/README.md).
+> Current Controller Runtime architecture: [docs/architecture/current/README.md](../current/README.md).
 
 ## Positioning
 

@@ -4,7 +4,7 @@
 >
 > This document records the V8 verification baseline and remains available for migration history and audit. It is evidence for that version, not the authority for current or target runtime behavior.
 >
-> Current Controller Runtime architecture: [docs/architecture/current/README.md](architecture/current/README.md).
+> Current Controller Runtime architecture: [docs/architecture/current/README.md](../current/README.md).
 
 ## Scope
 

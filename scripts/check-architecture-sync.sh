@@ -41,11 +41,11 @@ required_current_docs=(
 historical_runtime_docs=(
   "docs/repo-harness-chatgpt-controller.md"
   "docs/repo-harness-local-execution-bridge.md"
-  "docs/repo-harness-execution-closure-v5.md"
-  "docs/repo-harness-direct-change-v6.md"
-  "docs/repo-harness-execution-first-v7.md"
-  "docs/repo-harness-chatgpt-bridge-v8.md"
-  "docs/repo-harness-v8-verification.md"
+  "docs/architecture/history/repo-harness-execution-closure-v5.md"
+  "docs/architecture/history/repo-harness-direct-change-v6.md"
+  "docs/architecture/history/repo-harness-execution-first-v7.md"
+  "docs/architecture/history/repo-harness-chatgpt-bridge-v8.md"
+  "docs/architecture/history/repo-harness-v8-verification.md"
 )
 
 runtime_architecture_gate_enabled() {
