@@ -37,6 +37,7 @@ import {
   writeControllerTaskLedgerArtifacts,
 } from '../../../cli/controller/task-ledger';
 import { buildControllerContextPack } from '../../../cli/controller/context-pack';
+import { buildControllerOperationalPlan } from '../../../cli/controller/operational-plan';
 import { listControllerChecks } from '../../../cli/controller/check-runner';
 import { listActiveAgentJobSnapshots } from '../../../cli/agent-jobs/job-manager';
 import {
@@ -1254,6 +1255,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         const liveGit = gitSnapshot(repository.canonicalRoot);
         const board = projectBoard(repository.canonicalRoot);
         const taskLedger = buildControllerTaskLedgerProjection(repository.canonicalRoot);
+        const operationalPlan = buildControllerOperationalPlan(repository.canonicalRoot, taskLedger);
         const currentIssueRecord = board.currentIssueId
           ? board.issues.find((issue) => issue.id === board.currentIssueId)
           : undefined;
@@ -1334,6 +1336,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           currentIssue,
           taskLedger,
           taskLedgerStatus: taskLedger.status,
+          operationalPlan,
           readyTasks: board.readyTasks.slice(0, 20),
           activeRuns,
           localBridge: {

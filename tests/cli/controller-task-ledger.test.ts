@@ -10,6 +10,7 @@ import {
 } from "../../src/cli/controller/task-ledger";
 import { getMcpPolicy } from "../../src/cli/mcp/policy";
 import { buildControllerContextPack } from "../../src/cli/controller/context-pack";
+import { buildControllerOperationalPlan } from "../../src/cli/controller/operational-plan";
 
 const roots: string[] = [];
 
@@ -119,6 +120,26 @@ describe("controller context pack", () => {
     expect(pack.files.map((file) => file.path)).toContain("src/runtime/example.ts");
     expect(pack.files[0]?.snippets[0]?.content).toContain("loadRuntimeConfig");
     expect(pack.next.join("\n")).toContain("raw diff");
+  });
+
+  test("builds an operational plan covering recovery recipes and validation", () => {
+    const root = repo();
+    const issue = createIssue(root, {
+      title: "Operational plan",
+      summary: "Cover full controller continuation plan.",
+      tasks: [{ title: "Plan slice", objective: "Prepare full plan.", checks: ["package:check:type"] }],
+    });
+
+    const ledger = buildControllerTaskLedgerProjection(root);
+    const plan = buildControllerOperationalPlan(root, ledger);
+
+    expect(issue.id).toBeTruthy();
+    expect(plan.source).toBe("controller-operational-plan");
+    expect(plan.completedCapabilities).toContain("recipe-system");
+    expect(plan.completedCapabilities).toContain("worker-abstraction");
+    expect(plan.completedCapabilities).toContain("gui-interaction-model");
+    expect(plan.validationStrategy.checks).toContain("package:check:type");
+    expect(plan.taskRecovery.handoffArtifacts).toContain(".ai/harness/controller/task-ledger.json");
   });
 
   test("reports denied explicit paths instead of bypassing MCP policy", () => {
