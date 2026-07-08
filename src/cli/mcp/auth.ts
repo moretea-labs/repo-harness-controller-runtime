@@ -37,7 +37,7 @@ export interface McpLocalConfig {
 }
 
 export type McpRuntimeStatus = 'starting' | 'running' | 'degraded' | 'stopped';
-export type McpRuntimeTunnelMode = 'none' | 'quick' | 'named';
+export type McpRuntimeTunnelMode = 'none' | 'quick' | 'named' | 'tailscale';
 
 export interface McpRuntimeState {
   version: 1;

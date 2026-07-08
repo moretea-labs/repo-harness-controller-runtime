@@ -68,7 +68,7 @@ interface ResolvedMcpRestartConfig {
   localUiHost: string;
   localUiPort: number;
   localUiAutoOpen: boolean;
-  tunnelMode: 'none' | 'quick' | 'named';
+  tunnelMode: 'none' | 'quick' | 'named' | 'tailscale';
   tunnelName?: string;
   oauthFile: string;
   tokenFile: string;
@@ -146,7 +146,7 @@ export function buildMcpRestartKeepaliveArgs(config: ResolvedMcpRestartConfig): 
   if (config.tunnelMode === 'named') {
     if (config.tunnelName) args.push('--cloudflare-tunnel-name', config.tunnelName);
     if (config.publicEndpoint) args.push('--public-endpoint', config.publicEndpoint);
-  } else if (config.tunnelMode === 'quick' && config.publicEndpoint) {
+  } else if ((config.tunnelMode === 'quick' || config.tunnelMode === 'tailscale') && config.publicEndpoint) {
     args.push('--public-endpoint', config.publicEndpoint);
   }
 

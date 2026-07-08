@@ -32,6 +32,7 @@ export interface McpServeOptions {
 interface McpKeepaliveOptions extends McpServeOptions {
   tunnel?: string;
   cloudflaredBin?: string;
+  tailscaleBin?: string;
   cloudflareTunnelName?: string;
   publicEndpoint?: string;
   checkIntervalMs?: string;
@@ -210,8 +211,9 @@ export function buildMcpCommand(): Command {
     .option('--dev-runner-agents <agents>', 'Comma-separated dev runner agents: codex,claude')
     .option('--dev-runner-timeout-ms <ms>', 'Default local agent timeout in milliseconds (default: 3600000)')
     .option('--dev-runner-max-timeout-ms <ms>', 'Maximum per-run timeout in milliseconds (default: 43200000)')
-    .option('--tunnel <mode>', 'Tunnel mode: auto|none|quick|named', 'auto')
+    .option('--tunnel <mode>', 'Tunnel mode: auto|none|quick|named|tailscale', 'auto')
     .option('--cloudflared-bin <path>', 'cloudflared binary path or command name', 'cloudflared')
+    .option('--tailscale-bin <path>', 'tailscale binary path or command name', 'tailscale')
     .option('--cloudflare-tunnel-name <name>', 'Named Cloudflare tunnel to run in keepalive mode')
     .option('--public-endpoint <url>', 'Stable public HTTPS /mcp endpoint for named tunnel or public health checks')
     .option('--check-interval-ms <ms>', 'Health check interval in milliseconds')
@@ -241,6 +243,7 @@ export function buildMcpCommand(): Command {
           devRunnerMaxTimeoutMs,
           tunnel: rawOpts.tunnel,
           cloudflaredBin: rawOpts.cloudflaredBin,
+          tailscaleBin: rawOpts.tailscaleBin,
           cloudflareTunnelName: rawOpts.cloudflareTunnelName,
           publicEndpoint: rawOpts.publicEndpoint,
           checkIntervalMs,

@@ -44,7 +44,7 @@ export interface ControllerServiceState {
     mcpPort: number;
     localControllerHost: string;
     localControllerPort: number;
-    tunnelMode: "none" | "quick" | "named";
+    tunnelMode: "none" | "quick" | "named" | "tailscale";
   };
 }
 
@@ -320,7 +320,7 @@ function resolveServiceConfig(repoRoot: string, explicitLogFile?: string): {
   mcpPort: number;
   localControllerHost: string;
   localControllerPort: number;
-  tunnelMode: "none" | "quick" | "named";
+  tunnelMode: "none" | "quick" | "named" | "tailscale";
   toolset: "core" | "full";
   logPath: string;
 } {

@@ -38,6 +38,7 @@ export interface McpKeepaliveOptions extends McpServerOptions {
   auth?: string;
   tunnel?: string;
   cloudflaredBin?: string;
+  tailscaleBin?: string;
   cloudflareTunnelName?: string;
   publicEndpoint?: string;
   checkIntervalMs?: number;
@@ -125,8 +126,8 @@ export function inferMcpTunnelMode(
   if (normalized === undefined || normalized.length === 0 || normalized === 'auto') {
     return publicEndpoint && tunnelName ? 'named' : 'quick';
   }
-  if (normalized === 'none' || normalized === 'quick' || normalized === 'named') return normalized;
-  throw new Error(`invalid --tunnel "${requested}" (expected: auto, none, quick, named)`);
+  if (normalized === 'none' || normalized === 'quick' || normalized === 'named' || normalized === 'tailscale') return normalized;
+  throw new Error(`invalid --tunnel "${requested}" (expected: auto, none, quick, named, tailscale)`);
 }
 
 function endpointOrigin(endpoint: string): string {
@@ -206,15 +207,23 @@ export function resolveSelfCliInvocation(): { command: string; args: string[] } 
   return { command: process.execPath, args: [resolvedPath] };
 }
 
-function resolveCloudflaredBinary(input: string | undefined): string {
-  const candidate = input?.trim() || 'cloudflared';
+function resolveExecutableBinary(input: string | undefined, defaultCommand: string, label: string): string {
+  const candidate = input?.trim() || defaultCommand;
   if (candidate.includes('/') || candidate.includes('\\')) {
     accessSync(candidate, constants.X_OK);
     return candidate;
   }
   const resolved = Bun.which(candidate);
-  if (!resolved) throw new Error(`cloudflared binary was not found on PATH (tried "${candidate}")`);
+  if (!resolved) throw new Error(`${label} binary was not found on PATH (tried "${candidate}")`);
   return resolved;
+}
+
+function resolveCloudflaredBinary(input: string | undefined): string {
+  return resolveExecutableBinary(input, 'cloudflared', 'cloudflared');
+}
+
+function resolveTailscaleBinary(input: string | undefined): string {
+  return resolveExecutableBinary(input, 'tailscale', 'tailscale');
 }
 
 async function jsonHealth(url: string): Promise<Record<string, unknown> | null> {
@@ -351,7 +360,11 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
   if (tunnelMode === 'named' && !tunnelName) {
     throw new Error('named tunnel mode requires --cloudflare-tunnel-name');
   }
-  const cloudflaredBin = tunnelMode === 'none' ? undefined : resolveCloudflaredBinary(rawOpts.cloudflaredBin);
+  if (tunnelMode === 'tailscale' && !configuredEndpoint) {
+    throw new Error('tailscale tunnel mode requires --public-endpoint or chatgpt.endpoint in controllerHome/mcp/mcp.local.json');
+  }
+  const cloudflaredBin = tunnelMode === 'quick' || tunnelMode === 'named' ? resolveCloudflaredBinary(rawOpts.cloudflaredBin) : undefined;
+  const tailscaleBin = tunnelMode === 'tailscale' ? resolveTailscaleBinary(rawOpts.tailscaleBin) : undefined;
   const cli = resolveSelfCliInvocation();
   const checkIntervalMs = rawOpts.checkIntervalMs ?? DEFAULT_CHECK_INTERVAL_MS;
   const restartDelayMs = rawOpts.restartDelayMs ?? DEFAULT_RESTART_DELAY_MS;
@@ -382,6 +395,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
   let lastPublicHealthWarningAt: number | undefined;
   let currentQuickEndpoint: string | undefined;
   let tunnelStartedOnce = false;
+  let tailscaleFunnelConfigured = false;
 
   const runtime: McpRuntimeState = {
     version: 1,
@@ -474,7 +488,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
     localFailureCount = 0;
     localUnhealthySinceAt = undefined;
     lastLocalHealthWarningAt = undefined;
-    if (tunnelMode !== 'none' && !isRunning(tunnelChild)) {
+    if (tunnelMode !== 'none' && (tunnelMode === 'tailscale' ? !tailscaleFunnelConfigured : !isRunning(tunnelChild))) {
       spawnTunnel(tunnelStartedOnce);
       tunnelStartedOnce = true;
     }
@@ -538,7 +552,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
     if (rawOpts.devRunnerTimeoutMs) args.push('--dev-runner-timeout-ms', String(rawOpts.devRunnerTimeoutMs));
     if (rawOpts.devRunnerMaxTimeoutMs) args.push('--dev-runner-max-timeout-ms', String(rawOpts.devRunnerMaxTimeoutMs));
     const env: NodeJS.ProcessEnv = { ...process.env, REPO_HARNESS_CONTROLLER_HOME: controllerHome };
-    if (configuredEndpoint && tunnelMode === 'named') {
+    if (configuredEndpoint && (tunnelMode === 'named' || tunnelMode === 'tailscale')) {
       env.REPO_HARNESS_MCP_PUBLIC_ORIGIN = endpointOrigin(configuredEndpoint);
     }
     serverChild = spawn(cli.command, args, {
@@ -566,11 +580,15 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
   };
 
   const spawnTunnel = (isRestart: boolean): void => {
-    if (!cloudflaredBin || tunnelMode === 'none') return;
-    const args = tunnelMode === 'quick'
-      ? ['tunnel', '--protocol', 'http2', '--url', `http://${host}:${port}`]
-      : ['tunnel', 'run', '--url', `http://${host}:${port}`, tunnelName as string];
-    tunnelChild = spawn(cloudflaredBin, args, {
+    if (tunnelMode === 'none') return;
+    const command = tunnelMode === 'tailscale' ? tailscaleBin : cloudflaredBin;
+    if (!command) return;
+    const args = tunnelMode === 'tailscale'
+      ? ['funnel', '--bg', String(port)]
+      : tunnelMode === 'quick'
+        ? ['tunnel', '--protocol', 'http2', '--url', `http://${host}:${port}`]
+        : ['tunnel', 'run', '--url', `http://${host}:${port}`, tunnelName as string];
+    tunnelChild = spawn(command, args, {
       cwd: repoRoot,
       env: { ...process.env },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -588,15 +606,20 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
     });
     tunnelChild.once('exit', (code, signal) => {
       if (runtime.tunnel) {
-        runtime.tunnel.running = false;
-        runtime.tunnel.healthy = false;
+        runtime.tunnel.running = tunnelMode === 'tailscale' && code === 0;
+        runtime.tunnel.healthy = tunnelMode === 'tailscale' && code === 0 ? runtime.tunnel.healthy : false;
         runtime.tunnel.pid = undefined;
         runtime.tunnel.lastExitAt = nowIso();
         runtime.tunnel.lastExit = summarizeExit(code, signal);
       }
+      if (tunnelMode === 'tailscale' && code === 0) {
+        tailscaleFunnelConfigured = true;
+      }
       updateStatus();
       persistRuntime();
-      if (!stopping) recordError('tunnel', `cloudflared exited (${summarizeExit(code, signal)})`);
+      if (!stopping && !(tunnelMode === 'tailscale' && code === 0)) {
+        recordError('tunnel', (tunnelMode === 'tailscale' ? 'tailscale' : 'cloudflared') + ' exited (' + summarizeExit(code, signal) + ')');
+      }
     });
     updateStatus();
     persistRuntime();
@@ -605,10 +628,14 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
   const restartTunnel = async (reason: string): Promise<void> => {
     if (runtime.tunnelMode === 'none') return;
     recordError('tunnel', reason);
-    await stopChild(tunnelChild, 'cloudflared');
+    await stopChild(tunnelChild, tunnelMode === 'tailscale' ? 'tailscale' : 'cloudflared');
     tunnelChild = undefined;
     if (runtime.tunnelMode === 'quick') {
       currentQuickEndpoint = undefined;
+      if (runtime.tunnel) runtime.tunnel.healthy = false;
+    }
+    if (runtime.tunnelMode === 'tailscale') {
+      tailscaleFunnelConfigured = false;
       if (runtime.tunnel) runtime.tunnel.healthy = false;
     }
     await sleep(restartDelayMs);
@@ -689,7 +716,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
     stopping = true;
     updateStatus();
     persistRuntime();
-    await stopChild(tunnelChild, 'cloudflared');
+    await stopChild(tunnelChild, tunnelMode === 'tailscale' ? 'tailscale' : 'cloudflared');
     await stopChild(serverChild, 'mcp serve');
     if (localBridge) {
       await localBridge.close();
@@ -786,7 +813,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
       persistRuntime();
     }
 
-    const activePublicEndpoint = tunnelMode === 'named'
+    const activePublicEndpoint = tunnelMode === 'named' || tunnelMode === 'tailscale'
       ? configuredEndpoint
       : currentQuickEndpoint ?? runtime.tunnel?.publicEndpoint;
 
