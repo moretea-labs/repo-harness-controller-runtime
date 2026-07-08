@@ -27,7 +27,7 @@
 - **Agent 只是可选执行者。** Codex、Claude、GitHub Copilot 可以处理大范围实现，但不应成为所有任务的默认入口。
 - **仓库状态跨会话保留。** Issue、Task、Run、验证证据和 handoff 都有文件化记录。
 - **多仓库路由明确。** 每个仓库都有稳定 `repoId`；启用多个仓库时，执行必须明确指定目标。
-- **本地运行，HTTPS 接入。** MCP 服务保持监听 loopback，可通过 Cloudflare Tunnel 或 ngrok 等外部隧道提供 HTTPS 地址。
+- **本地运行，HTTPS 接入。** MCP 服务保持监听 loopback；推荐用 Tailscale Funnel 或 Cloudflare named tunnel 暴露稳定 HTTPS `/mcp` 地址，避免临时隧道地址变化。
 
 ## 核心能力
 
@@ -75,7 +75,7 @@ self_healing_loop_plan
 - Git
 - Bun 1.0 或更高版本
 - 主要本地工作流面向 macOS / Linux
-- 使用内置 Cloudflare 隧道模式时需要 `cloudflared`
+- 推荐稳定公网入口：Tailscale CLI / macOS App，或自有域名 + `cloudflared`
 
 ### 2. 从源码运行
 
@@ -118,21 +118,60 @@ repo-harness repo list --json
 
 ### 5. 启动 ChatGPT Controller 地址
 
-临时 Cloudflare 地址：
+先把仓库注册为 Controller 管理目标，并生成 ChatGPT MCP 配置：
 
 ```bash
-# 先把仓库注册为 Controller 管理目标
 repo-harness repo register /path/to/your-project
-
-# 当前兼容入口仍接受 --repo，用于生成/读取该仓库的本地 MCP 配置；
-# 运行态会逐步迁移到 controller home，并通过 repoId 选择目标仓库。
 repo-harness mcp setup chatgpt --repo /path/to/your-project
-repo-harness mcp keepalive --repo /path/to/your-project --profile controller \
-  --enable-dev-runner --dev-runner-agents codex,claude \
-  --tunnel quick
 ```
 
-需要稳定域名时使用 named Cloudflare Tunnel。使用 ngrok 时，先通过 `--tunnel none` 启动本地 MCP，再由 ngrok 转发本地 MCP 端口。完整步骤见使用指南。
+MCP 默认只监听本机：
+
+```text
+http://127.0.0.1:8765/mcp
+```
+
+ChatGPT 不能直接访问本机 loopback，因此需要一个稳定的公网 HTTPS `/mcp` 地址。当前推荐顺序：
+
+1. **Tailscale Funnel**：不买域名、不配 DNS，适合个人长期自用。
+2. **Cloudflare named tunnel + 自有域名**：最标准，适合长期团队或公开域名。
+3. **ngrok/Cloudflare quick tunnel**：适合临时测试，不建议长期放到 ChatGPT Project Connector。
+
+Tailscale Funnel 示例：
+
+```bash
+# 第一次需要安装 Tailscale 并登录
+brew install --cask tailscale
+tailscale up
+
+# 开启公网 HTTPS Funnel 到本地 MCP 端口
+tailscale funnel --bg 8765
+tailscale funnel status
+```
+
+如果输出类似：
+
+```text
+https://your-machine.your-tailnet.ts.net (Funnel on)
+|-- / proxy http://127.0.0.1:8765
+```
+
+则 ChatGPT Connector 填：
+
+```text
+https://your-machine.your-tailnet.ts.net/mcp
+```
+
+并用同一 endpoint 启动 repo-harness：
+
+```bash
+repo-harness mcp keepalive --repo /path/to/your-project --profile controller \
+  --enable-dev-runner --dev-runner-agents codex,claude \
+  --tunnel tailscale \
+  --public-endpoint https://your-machine.your-tailnet.ts.net/mcp
+```
+
+完整步骤、Cloudflare named tunnel 和 ngrok 兼容方式见使用指南。
 
 ### 6. macOS 一键生命周期入口
 
@@ -155,9 +194,17 @@ bash scripts/controller-runtime.sh status --repo .
 
 `start` 会在真正拉起 daemon、MCP Gateway 和 Local Bridge 之前，先做 Bun、兼容仓库根目录、包版本、PID 状态、MCP / Local Controller 端口、controller home 以及 detached repo-harness 孤儿进程检查。长期架构上，MCP Gateway 和 Local Bridge 是全局 controller 服务，仓库通过 registry、`repoId` 和 `checkoutId` 被选择；`--repo` 只作为兼容默认仓库和配置引导入口。日志默认写到 `.ai/local/logs/repo-harness-controller.log`。
 
+`controller-runtime.sh` 默认不会再启动 legacy ngrok rotation，避免旧公网入口和当前 Tailscale/Cloudflare endpoint 混淆。只有显式设置下面环境变量才会启用旧 ngrok rotation：
+
+```bash
+REPO_HARNESS_CONTROLLER_EXTERNAL_TUNNEL=ngrok scripts/controller-runtime.sh start
+```
+
+稳定公网 endpoint 应写入 controllerHome-backed MCP service config；legacy `.repo-harness/mcp.local.json` 只作为 fallback 兼容。
+
 ## 连接 ChatGPT
 
-1. 准备一个以 `/mcp` 结尾、可通过 HTTPS 访问的 MCP 地址。
+1. 准备一个以 `/mcp` 结尾、可通过 HTTPS 访问的 MCP 地址；个人长期使用优先考虑 Tailscale Funnel，例如 `https://your-machine.your-tailnet.ts.net/mcp`。
 2. 在 ChatGPT 中进入 **Settings → Apps & Connectors → Advanced settings**，开启 developer mode。
 3. 创建 Connector，填入公开 MCP 地址，例如 `https://mcp.example.com/mcp`。
 4. 新建聊天，从输入框附近的工具菜单添加这个 Connector。
