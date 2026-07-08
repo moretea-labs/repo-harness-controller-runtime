@@ -133,5 +133,6 @@ describe("controller context pack", () => {
     expect(pack.files.length).toBe(0);
     expect(pack.deniedPaths[0]?.path).toBe(".env");
     expect(pack.deniedPaths[0]?.reason).toContain("denied");
+    expect(pack.validation).toEqual({ policy: "minimal", checks: [] });
   });
 });
