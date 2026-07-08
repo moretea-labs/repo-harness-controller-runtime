@@ -101,7 +101,7 @@
       "id": "T3",
       "title": "Implement authorized local recovery actions",
       "objective": "Implement explicit bounded recovery actions for local failures: restart controller daemon or local bridge, refresh registration, rebuild runtime projections, reconcile stale jobs and leases, and clean abandoned worktrees. Mutating actions must require authorization and write audit evidence.",
-      "status": "ready",
+      "status": "done",
       "dependsOn": [
         "T2"
       ],
@@ -124,10 +124,12 @@
       ],
       "risk": "high",
       "recommendedAgent": "codex",
-      "notes": [],
+      "notes": [
+        "Completed authorized local recovery actions. Existing recovery apply path already covered repository refresh, projection rebuild, local-job reconciliation, runtime-storage finalization, controller ensure, local bridge safe skip, self-fix gating, patch handoff, and audit evidence. Commit 6b1c984 added the missing authorized cleanup apply action backed by applyRuntimeCleanup, with explicit authorization, repo-scoped affected paths, no process kill, and package:check:type passed in EJOB-1783493280232-f50ceb40."
+      ],
       "runIds": [],
       "createdAt": "2026-07-05T09:39:05.185Z",
-      "updatedAt": "2026-07-05T09:39:05.185Z",
+      "updatedAt": "2026-07-08T07:00:12.234Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     },
     {
@@ -203,6 +205,6 @@
     }
   ],
   "createdAt": "2026-07-05T09:39:05.185Z",
-  "updatedAt": "2026-07-08T06:38:52.885Z",
+  "updatedAt": "2026-07-08T07:00:12.234Z",
   "repoId": "repo_123b7cf58b6b17b5cbe46a56"
 }

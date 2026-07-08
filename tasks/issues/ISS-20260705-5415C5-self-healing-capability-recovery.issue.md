@@ -2,7 +2,7 @@
 id: "ISS-20260705-5415C5"
 kind: "feature"
 status: "planned"
-updated_at: "2026-07-08T06:38:52.885Z"
+updated_at: "2026-07-08T07:00:12.234Z"
 source: "repo-harness-controller-v8"
 ---
 
@@ -59,7 +59,7 @@ Add a structured recovery system for repo-harness capability degradation. It mus
 
 ### T3 — Implement authorized local recovery actions
 
-- Status: `ready`
+- Status: `done`
 - Objective: Implement explicit bounded recovery actions for local failures: restart controller daemon or local bridge, refresh registration, rebuild runtime projections, reconcile stale jobs and leases, and clean abandoned worktrees. Mutating actions must require authorization and write audit evidence.
 - Depends on: `T2`
 - Allowed paths: `src/**`, `tests/**`
