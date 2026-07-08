@@ -342,3 +342,16 @@ self_healing_monitor_tick
 - next actions。
 
 GUI / scheduler 可以周期性调用它；若未来要自动 apply，仍应只允许低风险、白名单、可审计 maintenance action，并需要独立预算和冷却时间。
+
+## Operator runbook
+
+Use this runbook when repo-harness cannot continue a task normally, or when ChatGPT receives a platform/tooling block while local state may still be recoverable.
+
+1. Run the read-only probe first: `capability_recovery_probe`. Do not restart or retry a failing agent until the failure class is known.
+2. For runtime metadata failures such as stale Local Jobs, unreadable job records, stale projections, or runtime-storage blockers, run `runtime_maintenance_status`, then apply only the named safe action with `runtime_maintenance_apply` and matching authorization.
+3. For authorized local recovery through `capability_recovery_apply`, use the exact action id as authorization. Mutating actions must remain bounded to repo-harness runtime storage, controller metadata, configured repository records, or handoff artifacts.
+4. For `platform_blocked` or `dirty_worktree_conflict`, create a patch handoff instead of repeating the same blocked tool call. Review `.ai/harness/handoff/patch.json` for `diffHash`, `touchedPaths`, `checks`, provenance, and integration notes before applying anything.
+5. For `auth_required`, browser domain grants, or external filesystem grants, prepare the typed handoff/preview and stop. Token material, arbitrary URL access, and broad filesystem reads require local user action.
+6. Escalate to source repair only after bounded local maintenance and typed grants cannot explain the failure, and the evidence points to a repeatable repo-harness defect.
+
+Automatic recovery is safe only for read-only probes, projection rebuilds, stale Local Job reconciliation, quarantining malformed runtime metadata, and explicitly authorized cleanup of safe repo-harness runtime artifacts. User action is required for secrets, external writes, destructive Git operations, branch deletion, process killing outside the repo-harness supervisor, unclear dirty worktrees, and any operation that would touch non-runtime user files.
