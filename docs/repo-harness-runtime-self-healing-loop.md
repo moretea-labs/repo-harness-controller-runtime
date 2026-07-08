@@ -190,8 +190,6 @@ Minimum behavior:
 - `dirty_worktree_conflict`: packet records dirty protected paths and failed edit operations; integration must switch to patch handoff or manual review.
 - `platform_blocked` / payload truncation: packet points to summary/detail pagination or bounded artifact reads instead of repeating the same full response.
 
-
-
 1. 重新运行 capability recovery probe。
 2. 重试被阻塞的原始 intent。
 3. 如果仍失败，再进入 restart fallback。
@@ -233,7 +231,6 @@ Minimum record:
 ```
 
 Failure memory is advisory. It may suppress clearly wasteful retries, but it must not authorize source changes, token changes, process kills, branch deletion, or external writes.
-
 
 ## 插件授权、浏览器、外部文件的同一恢复循环
 

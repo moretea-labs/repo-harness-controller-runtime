@@ -20,6 +20,15 @@ const AUTH_PATTERNS = [
   /re-authorization required/i,
 ];
 
+const USER_ACTION_PATTERNS = [
+  /you(?:'|’)ve hit your usage limit/i,
+  /usage limit/i,
+  /upgrade to pro/i,
+  /purchase more credits/i,
+  /try again at/i,
+  /user action required/i,
+];
+
 const RUNTIME_STORAGE_PATTERNS = [
   /runtime_storage_not_ready/i,
   /runtime storage.*not ready/i,
@@ -63,6 +72,15 @@ const EXTERNAL_FILESYSTEM_GRANT_PATTERNS = [
   /outside.*repository/i,
 ];
 
+const DIRTY_WORKTREE_CONFLICT_PATTERNS = [
+  /edit operations? failed precondition checks?/i,
+  /failed precondition checks?/i,
+  /dirty worktree/i,
+  /dirty paths?/i,
+  /would overwrite.*local changes/i,
+  /integration.*conflict/i,
+];
+
 const POLICY_PATTERNS = [
   /policy denied/i,
   /policy_denied/i,
@@ -78,6 +96,10 @@ const AGENT_RUNTIME_PATTERNS = [
   /failed to initialize mcp/i,
   /timeout waiting for child process/i,
   /mcp startup failed/i,
+  /controller process \d+ is no longer running/i,
+  /response payload is not completed/i,
+  /contentlengtherror/i,
+  /not enough data to satisfy content length header/i,
 ];
 
 const SOURCE_DEFECT_PATTERNS = [
@@ -98,6 +120,8 @@ export function classifyFailure(message: string | undefined): RecoveryClass {
   if (AUTH_PATTERNS.some((pattern) => pattern.test(text))) return 'auth_required';
   if (BROWSER_GRANT_PATTERNS.some((pattern) => pattern.test(text))) return 'browser_domain_grant_required';
   if (EXTERNAL_FILESYSTEM_GRANT_PATTERNS.some((pattern) => pattern.test(text))) return 'external_filesystem_grant_required';
+  if (DIRTY_WORKTREE_CONFLICT_PATTERNS.some((pattern) => pattern.test(text))) return 'dirty_worktree_conflict';
+  if (USER_ACTION_PATTERNS.some((pattern) => pattern.test(text))) return 'user_action_required';
   if (POLICY_PATTERNS.some((pattern) => pattern.test(text))) return 'policy_denied';
   if (AGENT_RUNTIME_PATTERNS.some((pattern) => pattern.test(text))) return 'agent_runtime_failure';
   if (SOURCE_DEFECT_PATTERNS.some((pattern) => pattern.test(text))) return 'source_defect_suspected';

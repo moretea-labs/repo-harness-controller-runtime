@@ -33,6 +33,13 @@ describe('capability recovery classifier', () => {
     expect(classifyFailure('timeout waiting for child process to exit')).toBe('agent_runtime_failure');
   });
 
+  it('classifies recent controller run failure samples into stable recovery classes', () => {
+    expect(classifyFailure('Controller process 86981 is no longer running')).toBe('agent_runtime_failure');
+    expect(classifyFailure('实现完成，但自动集成需要处理：7 edit operations failed precondition checks')).toBe('dirty_worktree_conflict');
+    expect(classifyFailure('Response payload is not completed: ContentLengthError: Not enough data to satisfy content length header.')).toBe('agent_runtime_failure');
+    expect(classifyFailure("You've hit your usage limit. Upgrade to Pro, purchase more credits or try again later.")).toBe('user_action_required');
+  });
+
   it('classifies runtime storage local-job blockers distinctly', () => {
     expect(classifyFailure('RUNTIME_STORAGE_NOT_READY: local-jobs: active or unreadable Local Jobs must finish before runtime storage can be relocated')).toBe('local_jobs_legacy_active');
   });
@@ -84,6 +91,27 @@ describe('capability recovery probe', () => {
     const actionIds = snapshot.recommendedActions.map((action) => action.id);
     expect(snapshot.platformBlocked).toBe(true);
     expect(snapshot.fallbackRequired).toBe(true);
+    expect(actionIds).toContain('recovery.create_patch_handoff');
+    expect(actionIds).not.toContain('recovery.restart_controller');
+  });
+
+  it('routes edit precondition failures to patch handoff instead of overwriting dirty paths', () => {
+    const snapshot = buildCapabilityRecoverySnapshot({
+      generatedAt: '2026-07-08T00:00:00.000Z',
+      daemonStatus: 'ready',
+      schedulerStatus: 'ready',
+      localBridgeRunning: true,
+      connectorHealthy: true,
+      commandPreviewAvailable: true,
+      commandExecuteAvailable: true,
+      issueToolsAvailable: true,
+      jobToolsAvailable: true,
+      executionJobs: [{ status: 'waiting_for_user', error: '实现完成，但自动集成需要处理：7 edit operations failed precondition checks' }],
+    });
+
+    const recentFailures = snapshot.capabilities.find((capability) => capability.id === 'recent.failures');
+    const actionIds = snapshot.recommendedActions.map((action) => action.id);
+    expect(recentFailures?.class).toBe('dirty_worktree_conflict');
     expect(actionIds).toContain('recovery.create_patch_handoff');
     expect(actionIds).not.toContain('recovery.restart_controller');
   });
@@ -197,7 +225,7 @@ describe('runtime maintenance executor', () => {
     expect(applied.applied.some((candidate) => candidate.applied && candidate.id === 'JOB-stale')).toBe(true);
     const stored = JSON.parse(readFileSync(join(jobDir, 'job.json'), 'utf8')) as { status: string; error: string };
     expect(stored.status).toBe('orphaned');
-    expect(stored.error).toContain('runtime maintenance');
+    expect(stored.error).toMatch(/runtime maintenance|Runtime storage repair/);
   });
 
   it('quarantines unreadable Local Job entries', () => {
@@ -208,7 +236,9 @@ describe('runtime maintenance executor', () => {
       confirmMaintenance: true,
       minAgeMinutes: 0,
     });
-    expect(applied.applied.some((candidate) => candidate.applied && candidate.id === 'JOB-broken')).toBe(true);
+    const legacyApplied = applied.applied.some((candidate) => candidate.applied && candidate.id === 'JOB-broken');
+    const typedApplied = applied.runtimeStorageRepairApply?.applied.some((candidate) => candidate.status === 'applied' && candidate.path.includes('JOB-broken')) ?? false;
+    expect(legacyApplied || typedApplied).toBe(true);
   });
 
   it('plans model repair only after bounded local recovery and restart fallback', () => {

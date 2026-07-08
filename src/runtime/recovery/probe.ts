@@ -59,10 +59,12 @@ function failingJobClass(input: CapabilityRecoveryInput): RecoveryClass {
 }
 
 function suggestedActionsForClass(recoveryClass: RecoveryClass): RecoveryActionDescriptor[] {
-  if (recoveryClass === 'platform_blocked') return [RECOVERY_ACTIONS.createPatchHandoff];
+  if (recoveryClass === 'platform_blocked' || recoveryClass === 'dirty_worktree_conflict') return [RECOVERY_ACTIONS.createPatchHandoff];
   if (recoveryClass === 'auth_required') return [RECOVERY_ACTIONS.workspaceAuthLoginPrepare];
   if (recoveryClass === 'browser_domain_grant_required') return [RECOVERY_ACTIONS.browserDomainAccessPreview];
   if (recoveryClass === 'external_filesystem_grant_required') return [RECOVERY_ACTIONS.externalFilesystemGrantPreview];
+  if (recoveryClass === 'agent_runtime_failure') return [RECOVERY_ACTIONS.reconcileJobs];
+  if (recoveryClass === 'source_defect_suspected') return [RECOVERY_ACTIONS.createSelfFixTask];
   if (['runtime_storage_not_ready', 'local_jobs_legacy_active', 'local_jobs_unreadable', 'local_jobs_reconciliation_required', 'maintenance_executor_required'].includes(recoveryClass)) {
     return [RECOVERY_ACTIONS.localJobsReconcile, RECOVERY_ACTIONS.finalizeRuntimeStorageRelocation];
   }
@@ -171,7 +173,7 @@ export function buildCapabilityRecoverySnapshot(input: CapabilityRecoveryInput):
 
   const jobClass = failingJobClass(input);
   if (jobClass !== 'unknown') {
-    capabilities.push(capability(at, 'recent.failures', 'Recent failures', 'degraded', jobClass, `Recent job failures classify as ${jobClass}.`, jobClass === 'agent_runtime_failure' ? [RECOVERY_ACTIONS.reconcileJobs] : ['runtime_storage_not_ready', 'local_jobs_legacy_active', 'local_jobs_unreadable'].includes(jobClass) ? runtimeStorageActions(jobClass) : jobClass === 'source_defect_suspected' ? [RECOVERY_ACTIONS.createSelfFixTask] : [], { localJobs: input.localJobs?.length ?? 0, executionJobs: input.executionJobs?.length ?? 0 }));
+    capabilities.push(capability(at, 'recent.failures', 'Recent failures', 'degraded', jobClass, `Recent job failures classify as ${jobClass}.`, suggestedActionsForClass(jobClass), { localJobs: input.localJobs?.length ?? 0, executionJobs: input.executionJobs?.length ?? 0 }));
   }
 
   for (const plugin of input.pluginStates ?? []) {
