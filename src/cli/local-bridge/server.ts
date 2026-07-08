@@ -20,7 +20,7 @@ import {
   integrateAgentJob,
   taskRunDiff,
 } from "../agent-jobs/integration";
-import { listControllerChecks, runControllerCheckAsync } from "../controller/check-runner";
+import { listControllerChecks, runControllerCheck, runControllerCheckAsync } from "../controller/check-runner";
 import {
   acceptVerifiedTask,
   archiveIssue,
@@ -1766,6 +1766,27 @@ export async function startLocalBridgeServer(
     try {
       if (!Array.isArray(request.body?.dependsOn)) throw new Error("dependsOn must be an array");
       response.json(setTaskDependencies(requestRepositoryRoot(request, options, controllerHome), request.params.issueId, request.params.taskId, request.body.dependsOn.map(String)));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/checks/run", (request, response) => {
+    try {
+      const repoRoot = requestRepositoryRoot(request, options, controllerHome);
+      const requested = Array.isArray(request.body?.checkIds) ? request.body.checkIds.map(String) : [];
+      const ids: string[] = requested.length > 0 ? requested.slice(0, 8) : ["package:check:type"];
+      const results = ids.map((checkId: string) => {
+        const result = runControllerCheck(repoRoot, checkId, typeof request.body?.timeoutMs === "number" ? request.body.timeoutMs : undefined);
+        return {
+          checkId,
+          ok: result.ok,
+          status: result.status,
+          timedOut: result.timedOut,
+          artifactPath: result.artifactPath,
+          executedAt: result.executedAt,
+        };
+      });
+      response.json({ ok: results.every((entry: { ok: boolean }) => entry.ok), results });
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
