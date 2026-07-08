@@ -154,6 +154,44 @@ npm run controller:restart
 
 每次 maintenance apply 返回 `continuation.afterSuccess`：
 
+### Continuation packet contract
+
+Every `failed`, `unknown`, or `waiting_for_user` run should be resumable through a durable continuation packet. The packet is not a user-facing status message; it is the controller handoff that prevents the next attempt from restarting the whole investigation.
+
+```ts
+type ContinuationPacket = {
+  objective: string;
+  repoId: string;
+  issueId?: string;
+  taskId?: string;
+  runId?: string;
+  lastKnownPhase: string;
+  completedSteps: string[];
+  blockedStep: string;
+  touchedPaths: string[];
+  dirtyProtectedPaths: string[];
+  diagnosis: FailureDiagnosis;
+  nextSafeActions: string[];
+  retryBudget: {
+    maxAttempts: number;
+    disallowedActions: string[];
+  };
+  userActionRequired?: {
+    reason: string;
+    instruction: string;
+  };
+};
+```
+
+Minimum behavior:
+
+- `auth_required`: packet records the blocked tool/provider and requires user re-authorization; retry budget forbids same-agent immediate retry.
+- `agent_runtime_failure`: packet records process death/orphan status and points to local reconcile before retry.
+- `dirty_worktree_conflict`: packet records dirty protected paths and failed edit operations; integration must switch to patch handoff or manual review.
+- `platform_blocked` / payload truncation: packet points to summary/detail pagination or bounded artifact reads instead of repeating the same full response.
+
+
+
 1. 重新运行 capability recovery probe。
 2. 重试被阻塞的原始 intent。
 3. 如果仍失败，再进入 restart fallback。
@@ -165,6 +203,37 @@ npm run controller:restart
 - State-only recovery 不修改源码。
 - Model repair 只生成补丁或计划，不绕过 repo-harness policy。
 - 所有操作必须绑定 repoId，并写 audit / evidence。
+
+## Failure memory
+
+The first implementation should use append-only, controllerHome-backed records rather than a complex knowledge base. The goal is to stop repeated bad retries and make common failure signatures deterministic.
+
+Suggested storage:
+
+```text
+_ops/controller-home/repositories/<repo-id>/failure-memory/
+  signatures.jsonl
+  recipes.json
+  recent-failures.json
+```
+
+Minimum record:
+
+```json
+{
+  "signature": "Auth(AuthorizationRequired)",
+  "recoveryClass": "auth_required",
+  "firstSeenAt": "2026-07-08T03:44:12Z",
+  "lastSeenAt": "2026-07-08T03:47:23Z",
+  "count": 2,
+  "localRecoverable": false,
+  "recommendedAction": "request_user_auth",
+  "avoidActions": ["retry_same_agent_immediately"]
+}
+```
+
+Failure memory is advisory. It may suppress clearly wasteful retries, but it must not authorize source changes, token changes, process kills, branch deletion, or external writes.
+
 
 ## 插件授权、浏览器、外部文件的同一恢复循环
 
