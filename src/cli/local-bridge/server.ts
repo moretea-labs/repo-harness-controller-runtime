@@ -876,7 +876,8 @@ export async function startLocalBridgeServer(
       "Set-Cookie",
       `${cookieName}=${encodeURIComponent(token)}; Path=/api; HttpOnly; SameSite=Strict`,
     );
-    response.type("html").send(localBridgeDashboardHtml());
+    response.setHeader("Content-Type", "text/html; charset=utf-8");
+    response.send(localBridgeDashboardHtml());
   });
   app.get("/health", (_request, response) => {
     const toolNames = controllerExpectedToolNames(runtimePolicy(options.repoRoot, { profile: "controller" }));
