@@ -1,8 +1,8 @@
 ---
 id: "ISS-20260706-965B13"
 kind: "investigation"
-status: "in_progress"
-updated_at: "2026-07-06T14:31:44.625Z"
+status: "done"
+updated_at: "2026-07-08T06:33:59.823Z"
 source: "repo-harness-controller-v8"
 ---
 
@@ -30,7 +30,7 @@ Add a durable repo-harness philosophy note: autonomous-first, policy-bound, self
 
 ### T1 — Autonomous assistant policy
 
-- Status: `review`
+- Status: `done`
 - Objective: Add a durable repo-harness philosophy note: autonomous-first, policy-bound, self-improving personal assistant; reduce user interruption; try safe repairs before escalation.
 - Depends on: none
 - Allowed paths: `docs`, `plans`
