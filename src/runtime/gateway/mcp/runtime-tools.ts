@@ -82,6 +82,7 @@ import {
 import { buildModelClientSummary, buildModelControlPlaneSummary, deepSeekControllerManifest, deepSeekFunctionToolManifest, prepareDeepSeekControllerHandoff, prepareDeepSeekControllerRequest, prepareDeepSeekToolCall } from '../../model-clients';
 import { buildAssistantReadinessReport } from '../../assistant/readiness';
 import { buildGmailTriagePlan, readGmailTriageRules, upsertGmailTriageRule } from '../../personal-assistant/gmail-triage-manager';
+import { gitSnapshot } from '../../../cli/repository/inspector';
 import { buildWorkflowWatchdogReport } from '../../watchdog/workflow-watchdog';
 import { applyRuntimeCleanup, previewRuntimeCleanup } from '../../maintenance/cleanup';
 import {
@@ -1250,6 +1251,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         const stale = projectionAgeMs > 10_000;
         const readiness = controllerReadiness(ctx, repository);
         const activeCheckout = repository.checkouts.find((checkout) => checkout.checkoutId === repository.activeCheckoutId);
+        const liveGit = gitSnapshot(repository.canonicalRoot);
         const board = projectBoard(repository.canonicalRoot);
         const taskLedger = buildControllerTaskLedgerProjection(repository.canonicalRoot);
         const currentIssueRecord = board.currentIssueId
@@ -1322,9 +1324,9 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         const cachedPayload = cached?.payload ?? {};
         return result({
           ...cachedPayload,
-          git: cached?.payload.git ?? {
+          git: liveGit.branch || liveGit.status || liveGit.diffStat ? liveGit : {
             branch: activeCheckout?.branch ?? null,
-            status: 'No cached repository scan is available; showing bounded runtime state only.',
+            status: 'No live repository scan is available; showing bounded runtime state only.',
             diffStat: '',
           },
           currentIssueId: board.currentIssueId,
