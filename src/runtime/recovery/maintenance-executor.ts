@@ -5,6 +5,12 @@ import type { RepositoryRecord } from '../../cli/repositories/types';
 import { rebuildRepositoryProjection } from '../projections/materialized-view';
 import { classifyFailure, dominantRecoveryClass } from './classifier';
 import type { RecoveryClass } from './types';
+import {
+  applyRuntimeStorageRepair,
+  previewRuntimeStorageRepair,
+  type RuntimeStorageRepairApplyResult,
+  type RuntimeStorageRepairPreview,
+} from './local-jobs-repair';
 
 export type RuntimeMaintenanceActionId =
   | 'local_jobs_reconcile'
@@ -70,6 +76,7 @@ export interface RuntimeMaintenanceStatus {
   runtimeStorageError?: string;
   candidates: RuntimeMaintenanceCandidate[];
   summary: RuntimeMaintenanceSummary;
+  runtimeStorageRepair: RuntimeStorageRepairPreview;
   recommendedActions: RuntimeMaintenanceActionId[];
   restartEscalation: {
     recommended: boolean;
@@ -88,6 +95,7 @@ export interface RuntimeMaintenanceApplyResult extends Omit<RuntimeMaintenanceSt
   mode: 'apply';
   actionId: RuntimeMaintenanceActionId;
   applied: Array<RuntimeMaintenanceCandidate & { applied: boolean; result?: string; error?: string }>;
+  runtimeStorageRepairApply?: RuntimeStorageRepairApplyResult;
   projection?: unknown;
 }
 
@@ -228,6 +236,26 @@ function uniqueActions(candidates: RuntimeMaintenanceCandidate[], storageReady: 
   if (!storageReady) actions.push('runtime_storage_finalize_relocation');
   actions.push('full_maintenance_pass');
   return Array.from(new Set(actions));
+}
+
+function typedRepairActions(preview: RuntimeStorageRepairPreview): RuntimeMaintenanceActionId[] {
+  const actions: RuntimeMaintenanceActionId[] = [];
+  if (preview.candidates.some((candidate) => candidate.safe && candidate.action === 'terminalize')) actions.push('local_jobs_reconcile');
+  if (preview.candidates.some((candidate) => candidate.safe && candidate.action === 'quarantine')) actions.push('quarantine_unreadable_local_jobs');
+  if (preview.safeCandidateCount > 0) actions.push('full_maintenance_pass');
+  return actions;
+}
+
+function selectedTypedRepairCandidateIds(actionId: RuntimeMaintenanceActionId, preview: RuntimeStorageRepairPreview): string[] {
+  return preview.candidates
+    .filter((candidate) => {
+      if (!candidate.safe) return false;
+      if (actionId === 'full_maintenance_pass') return true;
+      if (actionId === 'local_jobs_reconcile') return candidate.action === 'terminalize';
+      if (actionId === 'quarantine_unreadable_local_jobs') return candidate.action === 'quarantine';
+      return false;
+    })
+    .map((candidate) => candidate.candidateId);
 }
 
 function runtimeStorageCandidates(report: RepositoryRuntimeStorageReport | undefined): RuntimeMaintenanceCandidate[] {
@@ -390,11 +418,19 @@ export function buildRuntimeMaintenanceStatus(
 ): RuntimeMaintenanceStatus {
   const normalized = normalizedOptions(options);
   const storage = safeRuntimeStorage(repository, controllerHome);
+  const runtimeStorageRepair = previewRuntimeStorageRepair(coerceRepository(repository), controllerHome, {
+    minAgeMinutes: normalized.minAgeMinutes,
+    maxCandidates: normalized.maxCandidates,
+  });
   const localJobCandidates = scanLocalJobCandidates(repository.canonicalRoot, normalized);
   const storageCandidates = runtimeStorageCandidates(storage.report);
   const candidates = [...localJobCandidates, ...storageCandidates].slice(0, normalized.maxCandidates);
   const summary = summarize(candidates);
-  const readyForExecution = storage.report?.readyForExecution === true && summary.safeCandidates === 0 && summary.unsafeCandidates === 0;
+  const readyForExecution = storage.report?.readyForExecution === true
+    && summary.safeCandidates === 0
+    && summary.unsafeCandidates === 0
+    && runtimeStorageRepair.safeCandidateCount === 0
+    && runtimeStorageRepair.unsafeCandidateCount === 0;
   return {
     schemaVersion: 1,
     generatedAt: now(),
@@ -405,12 +441,16 @@ export function buildRuntimeMaintenanceStatus(
     runtimeStorageError: storage.error,
     candidates,
     summary,
-    recommendedActions: uniqueActions(candidates, storage.report?.readyForExecution === true),
+    runtimeStorageRepair,
+    recommendedActions: Array.from(new Set([
+      ...uniqueActions(candidates, storage.report?.readyForExecution === true),
+      ...typedRepairActions(runtimeStorageRepair),
+    ])),
     restartEscalation: {
       recommended: storage.error !== undefined || (storage.report?.readyForExecution === false && candidates.length === 0),
       reason: storage.error
         ? 'Runtime storage inspection failed; restart can refresh daemon state after local metadata repair has been attempted.'
-        : storage.report?.readyForExecution === false && candidates.length === 0
+        : storage.report?.readyForExecution === false && candidates.length === 0 && runtimeStorageRepair.candidates.length === 0
           ? 'Storage remains blocked but no safe metadata candidate was found; restart or manual review is the next bounded fallback.'
           : 'Restart is not the first-line action; use runtime maintenance first.',
       safeCommand: 'npm run controller:restart',
@@ -500,6 +540,15 @@ export function applyRuntimeMaintenance(
   if (options.confirmMaintenance !== true) throw new Error('RUNTIME_MAINTENANCE_CONFIRMATION_REQUIRED: confirmMaintenance=true is required.');
   if (!VALID_MAINTENANCE_ACTIONS.has(options.actionId)) throw new Error(`RUNTIME_MAINTENANCE_ACTION_UNKNOWN: ${options.actionId}`);
   const before = buildRuntimeMaintenanceStatus(repository, controllerHome, options);
+  const typedCandidateIds = selectedTypedRepairCandidateIds(options.actionId, before.runtimeStorageRepair);
+  const runtimeStorageRepairApply = typedCandidateIds.length > 0
+    ? applyRuntimeStorageRepair(coerceRepository(repository), controllerHome, {
+      confirmRepair: true,
+      candidateIds: typedCandidateIds,
+      minAgeMinutes: options.minAgeMinutes,
+      maxCandidates: options.maxCandidates,
+    })
+    : undefined;
   const applied = before.candidates.map((candidate) => {
     if (!shouldApply(options.actionId, candidate)) return { ...candidate, applied: false, result: 'not_selected' };
     try {
@@ -518,7 +567,7 @@ export function applyRuntimeMaintenance(
     }
   });
 
-  if (options.actionId === 'runtime_storage_finalize_relocation' || options.actionId === 'full_maintenance_pass' || applied.some((candidate) => candidate.applied)) {
+  if (options.actionId === 'runtime_storage_finalize_relocation' || options.actionId === 'full_maintenance_pass' || applied.some((candidate) => candidate.applied) || runtimeStorageRepairApply) {
     rebuildActiveIndex(repository.canonicalRoot);
   }
   const storage = safeRuntimeStorage(repository, controllerHome);
@@ -532,6 +581,7 @@ export function applyRuntimeMaintenance(
     runtimeStorage: after.runtimeStorage ?? storage.report,
     runtimeStorageError: after.runtimeStorageError ?? storage.error,
     applied,
+    runtimeStorageRepairApply,
     projection,
   };
 }

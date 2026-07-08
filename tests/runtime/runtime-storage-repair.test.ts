@@ -3,8 +3,14 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { spawnSync } from 'child_process';
+import { repositoryControllerRoot } from '../../src/cli/repositories/controller-home';
 import { registerRepository } from '../../src/cli/repositories/registry';
-import { applyRuntimeStorageRepair, previewRuntimeStorageRepair } from '../../src/runtime/recovery';
+import {
+  applyRuntimeMaintenance,
+  applyRuntimeStorageRepair,
+  buildRuntimeMaintenanceStatus,
+  previewRuntimeStorageRepair,
+} from '../../src/runtime/recovery';
 
 const roots: string[] = [];
 
@@ -25,8 +31,8 @@ function fixture() {
   return { repoRoot, controllerHome, repository };
 }
 
-function writeLocalJob(repoRoot: string, jobId: string, job: Record<string, unknown>) {
-  const dir = join(repoRoot, '.ai/harness/local-jobs', jobId);
+function writeJobAtLocalJobsRoot(localJobsRoot: string, jobId: string, job: Record<string, unknown>) {
+  const dir = join(localJobsRoot, jobId);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'job.json'), `${JSON.stringify({
     schemaVersion: 1,
@@ -40,6 +46,10 @@ function writeLocalJob(repoRoot: string, jobId: string, job: Record<string, unkn
     updatedAt: '2026-07-06T00:00:00.000Z',
     ...job,
   }, null, 2)}\n`, 'utf-8');
+}
+
+function writeLocalJob(repoRoot: string, jobId: string, job: Record<string, unknown>) {
+  writeJobAtLocalJobsRoot(join(repoRoot, '.ai/harness/local-jobs'), jobId, job);
 }
 
 describe('runtime storage local-jobs repair', () => {
@@ -71,5 +81,27 @@ describe('runtime storage local-jobs repair', () => {
     const applied = applyRuntimeStorageRepair(repository, controllerHome, { confirmRepair: true, minAgeMinutes: 0 });
     expect(applied.applied[0]?.status).toBe('applied');
     expect(applied.auditPath).toBe('.ai/harness/controller/runtime-storage-repair.jsonl');
+  });
+
+  it('routes controller-home local job repair through runtime maintenance status and apply', () => {
+    const { controllerHome, repository } = fixture();
+    const controllerLocalJobsRoot = join(repositoryControllerRoot(controllerHome, repository.repoId), 'local-jobs');
+    writeJobAtLocalJobsRoot(controllerLocalJobsRoot, 'JOB-controller-missing-ejob', {
+      result: { executionJobId: 'EJOB-controller-missing', controllerHome },
+    });
+
+    const status = buildRuntimeMaintenanceStatus(repository, controllerHome, { minAgeMinutes: 0 });
+    expect(status.runtimeStorageRepair.inspectedRoots.some((root) => root.kind === 'controller' && root.exists)).toBe(true);
+    expect(status.runtimeStorageRepair.candidates.map((candidate) => candidate.kind)).toContain('missing_projected_execution_job');
+    expect(status.recommendedActions).toContain('local_jobs_reconcile');
+
+    const applied = applyRuntimeMaintenance(repository, controllerHome, {
+      actionId: 'local_jobs_reconcile',
+      confirmMaintenance: true,
+      minAgeMinutes: 0,
+    });
+    expect(applied.runtimeStorageRepairApply?.applied.some((entry) => entry.status === 'applied')).toBe(true);
+    const repaired = JSON.parse(readFileSync(join(controllerLocalJobsRoot, 'JOB-controller-missing-ejob/job.json'), 'utf-8')) as { status: string };
+    expect(repaired.status).toBe('failed');
   });
 });
