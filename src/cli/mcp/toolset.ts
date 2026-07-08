@@ -8,6 +8,7 @@ export const CORE_CONTROLLER_TOOL_NAMES = [
   'controller_capabilities',
   'controller_ready',
   'controller_context',
+  'controller_context_pack',
   'capability_recovery_probe',
   'capability_recovery_plan',
   'capability_recovery_apply',

@@ -4,6 +4,7 @@ const READ_ONLY_TOOLS = new Set([
   'controller_capabilities',
   'controller_ready',
   'controller_context',
+  'controller_context_pack',
   'project_snapshot',
   'get_project_state',
   'get_project_governance',

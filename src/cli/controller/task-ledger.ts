@@ -5,7 +5,7 @@ import { listControllerWorklogEvents } from "./worklog";
 
 const LEDGER_JSON_PATH = ".ai/harness/controller/task-ledger.json";
 const LEDGER_HANDOFF_PATH = ".ai/harness/handoff/controller-current.md";
-const LEDGER_SCHEMA_VERSION = 1;
+const LEDGER_SCHEMA_VERSION = 2;
 
 export interface TaskLedgerTaskProjection {
   issueId: string;
@@ -29,6 +29,28 @@ export interface TaskLedgerTaskProjection {
   runIds: string[];
 }
 
+export type TaskLedgerStatusKind =
+  | "empty"
+  | "needs_issue_selection"
+  | "active_work"
+  | "needs_review"
+  | "needs_retry_decision"
+  | "blocked"
+  | "ready_to_dispatch"
+  | "queueable_pending"
+  | "continue_current"
+  | "complete_or_idle";
+
+export interface TaskLedgerStatusProjection {
+  kind: TaskLedgerStatusKind;
+  severity: "info" | "action" | "warning" | "blocked";
+  label: string;
+  reason: string;
+  issueId?: string;
+  taskId?: string;
+  nextAction: string;
+}
+
 export interface TaskLedgerIssueProjection {
   id: string;
   title: string;
@@ -50,6 +72,7 @@ export interface TaskLedgerProjection {
   archivedCounts: Record<string, number>;
   issueCount: number;
   archivedIssueCount: number;
+  status: TaskLedgerStatusProjection;
   issues: TaskLedgerIssueProjection[];
   attention: TaskLedgerTaskProjection[];
   readyTasks: Array<Record<string, string>>;
@@ -184,6 +207,146 @@ function compactBoardTasks(value: unknown): Array<Record<string, string>> {
     })));
 }
 
+
+function terminalOrInactiveStatus(status: string | undefined): boolean {
+  return ["done", "cancelled", "superseded", "verified"].includes(status ?? "");
+}
+
+function taskReference(task: TaskLedgerTaskProjection | Record<string, string> | undefined): { issueId?: string; taskId?: string } {
+  if (!task) return {};
+  return {
+    issueId: typeof task.issueId === "string" ? task.issueId : undefined,
+    taskId: typeof task.taskId === "string" ? task.taskId : undefined,
+  };
+}
+
+function statusProjection(input: {
+  currentIssueId?: string;
+  issues: TaskLedgerIssueProjection[];
+  attention: TaskLedgerTaskProjection[];
+  readyTasks: Array<Record<string, string>>;
+  queueableTasks: Array<Record<string, string>>;
+}): TaskLedgerStatusProjection {
+  const current = input.currentIssueId
+    ? input.issues.find((issue) => issue.id === input.currentIssueId)
+    : undefined;
+  const running = input.attention.find((task) => task.multipleActiveRuns || ["queued", "running"].includes(task.effectiveStatus ?? "") || task.activeRunId);
+  const review = input.attention.find((task) => ["review", "integrated", "verifying"].includes(task.effectiveStatus ?? ""));
+  const retry = input.attention.find((task) => task.retryable || task.requiresExplicitRetry);
+  const blocked = input.attention.find((task) => ["blocked", "changes_requested"].includes(task.effectiveStatus ?? ""));
+  const ready = input.readyTasks[0];
+  const queueable = input.queueableTasks[0];
+  const nonTerminalCurrentTask = current?.tasks.find((task) => !terminalOrInactiveStatus(task.effectiveStatus));
+
+  if (!input.issues.length) {
+    return {
+      kind: "empty",
+      severity: "info",
+      label: "No controller Issue",
+      reason: "No durable controller Issues are available in this repository.",
+      nextAction: "Create or import a controller Issue before starting implementation.",
+    };
+  }
+
+  if (!current) {
+    return {
+      kind: "needs_issue_selection",
+      severity: "action",
+      label: "Select current Issue",
+      reason: "Issues exist but no current active Issue is selected.",
+      nextAction: "Select a current Issue before dispatching or continuing work.",
+    };
+  }
+
+  if (running) {
+    return {
+      kind: "active_work",
+      severity: running.multipleActiveRuns ? "warning" : "info",
+      label: running.multipleActiveRuns ? "Multiple active runs" : "Work in progress",
+      reason: running.multipleActiveRuns
+        ? "A Task has multiple active Runs and needs coordination before more work is dispatched."
+        : "A Task has active queued/running work or an active Run.",
+      ...taskReference(running),
+      nextAction: `Monitor Task ${running.issueId}/${running.taskId}; avoid overlapping changes until the active Run settles.`,
+    };
+  }
+
+  if (review) {
+    return {
+      kind: "needs_review",
+      severity: "action",
+      label: "Review required",
+      reason: "A Task is in review, integrated, or verifying state.",
+      ...taskReference(review),
+      nextAction: `Review Task ${review.issueId}/${review.taskId}; inspect raw diff and evidence before accepting or requesting changes.`,
+    };
+  }
+
+  if (retry) {
+    return {
+      kind: "needs_retry_decision",
+      severity: "action",
+      label: "Retry decision required",
+      reason: "A Task has retryable or explicitly retry-required state.",
+      ...taskReference(retry),
+      nextAction: `Decide whether to retry Task ${retry.issueId}/${retry.taskId} or update its plan first.`,
+    };
+  }
+
+  if (blocked) {
+    return {
+      kind: "blocked",
+      severity: "blocked",
+      label: "Blocked or changes requested",
+      reason: "A Task is blocked or has requested changes.",
+      ...taskReference(blocked),
+      nextAction: `Resolve blocker or requested changes for Task ${blocked.issueId}/${blocked.taskId}.`,
+    };
+  }
+
+  if (ready) {
+    return {
+      kind: "ready_to_dispatch",
+      severity: "action",
+      label: "Ready task available",
+      reason: "At least one Task is ready to dispatch.",
+      ...taskReference(ready),
+      nextAction: `Dispatch a small path-independent slice for Task ${ready.issueId}/${ready.taskId}; keep validation targeted.`,
+    };
+  }
+
+  if (queueable) {
+    return {
+      kind: "queueable_pending",
+      severity: "info",
+      label: "Queueable task available",
+      reason: "At least one Task is queueable but may still need approval, retry, or readiness review.",
+      ...taskReference(queueable),
+      nextAction: `Inspect Task ${queueable.issueId}/${queueable.taskId} readiness before dispatching.`,
+    };
+  }
+
+  if (nonTerminalCurrentTask) {
+    return {
+      kind: "continue_current",
+      severity: "info",
+      label: "Continue current Issue",
+      reason: "Current Issue has non-terminal Tasks but no immediate review, retry, blocker, or ready queue item was detected.",
+      ...taskReference(nonTerminalCurrentTask),
+      nextAction: `Inspect Issue ${current.id} and expand raw source context before choosing the next implementation slice.`,
+    };
+  }
+
+  return {
+    kind: "complete_or_idle",
+    severity: "info",
+    label: "No immediate task action",
+    reason: "No active, blocked, review, retry, ready, or queueable Task was detected.",
+    issueId: current.id,
+    nextAction: "Close out completed work or create/import the next Issue.",
+  };
+}
+
 function buildSuggestedNextActions(input: {
   currentIssueId?: string;
   issues: TaskLedgerIssueProjection[];
@@ -219,6 +382,13 @@ export function buildControllerTaskLedgerProjection(repoRoot: string): TaskLedge
   const attention = buildAttentionTasks(issues);
   const readyTasks = compactBoardTasks(board.readyTasks);
   const queueableTasks = compactBoardTasks(board.queueableTasks);
+  const status = statusProjection({
+    currentIssueId: board.currentIssueId,
+    issues,
+    attention,
+    readyTasks,
+    queueableTasks,
+  });
   return {
     schemaVersion: LEDGER_SCHEMA_VERSION,
     generatedAt: new Date().toISOString(),
@@ -229,6 +399,7 @@ export function buildControllerTaskLedgerProjection(repoRoot: string): TaskLedge
     archivedCounts: copyCounts(board.archivedCounts),
     issueCount: issues.length,
     archivedIssueCount: typeof board.archivedIssueCount === "number" ? board.archivedIssueCount : 0,
+    status,
     issues: issues.slice(0, 20),
     attention,
     readyTasks,
@@ -292,6 +463,8 @@ export function renderControllerTaskLedgerHandoff(projection: TaskLedgerProjecti
     `- Issue count: ${projection.issueCount}`,
     `- Archived Issue count: ${projection.archivedIssueCount}`,
     `- Effective task counts: \`${JSON.stringify(projection.counts)}\``,
+    `- Continuation state: \`${projection.status.kind}\` — ${projection.status.label}`,
+    `- Continuation reason: ${projection.status.reason}`,
     "",
     "## Next Actions",
     "",

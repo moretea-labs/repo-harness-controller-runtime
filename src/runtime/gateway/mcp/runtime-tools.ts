@@ -36,6 +36,7 @@ import {
   buildControllerTaskLedgerProjection,
   writeControllerTaskLedgerArtifacts,
 } from '../../../cli/controller/task-ledger';
+import { buildControllerContextPack } from '../../../cli/controller/context-pack';
 import { listControllerChecks } from '../../../cli/controller/check-runner';
 import { listActiveAgentJobSnapshots } from '../../../cli/agent-jobs/job-manager';
 import {
@@ -1213,6 +1214,26 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           nonBlocking: true,
         });
       }
+      case 'controller_context_pack': {
+        const repository = selected(ctx, args);
+        const pack = buildControllerContextPack(repository.canonicalRoot, ctx.policy, {
+          description: typeof args.description === 'string' ? args.description : undefined,
+          issueId: typeof args.issue_id === 'string' ? args.issue_id : undefined,
+          taskId: typeof args.task_id === 'string' ? args.task_id : undefined,
+          knownPaths: stringList(args.known_paths),
+          includeGlobs: stringList(args.include_globs),
+          excludeGlobs: stringList(args.exclude_globs),
+          searchTerms: stringList(args.search_terms),
+          maxFiles: typeof args.max_files === 'number' ? args.max_files : undefined,
+          maxSnippets: typeof args.max_snippets === 'number' ? args.max_snippets : undefined,
+          maxCharsPerSnippet: typeof args.max_chars_per_snippet === 'number' ? args.max_chars_per_snippet : undefined,
+        });
+        return result({
+          repoId: repository.repoId,
+          repository: repositorySummary(repository),
+          contextPack: pack,
+        });
+      }
       case 'controller_context': {
         const repository = selected(ctx, args);
         const runtimeRoot = repositoryControllerRoot(ctx.controllerHome, repository.repoId);
@@ -1309,6 +1330,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           currentIssueId: board.currentIssueId,
           currentIssue,
           taskLedger,
+          taskLedgerStatus: taskLedger.status,
           readyTasks: board.readyTasks.slice(0, 20),
           activeRuns,
           localBridge: {
@@ -1388,9 +1410,19 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           ? selected(ctx, args)
           : (ctx.explicitRepository ?? (registered.length === 1 ? registered[0] : undefined));
         const readiness = controllerReadiness(ctx, repository);
+        const taskLedger = repository ? buildControllerTaskLedgerProjection(repository.canonicalRoot) : undefined;
         return result({
           ready: readiness.ready,
           state: readiness.state,
+          taskLedgerStatus: taskLedger?.status,
+          taskLedgerCounts: taskLedger ? {
+            issueCount: taskLedger.issueCount,
+            archivedIssueCount: taskLedger.archivedIssueCount,
+            effective: taskLedger.counts,
+            attention: taskLedger.attention.length,
+            ready: taskLedger.readyTasks.length,
+            queueable: taskLedger.queueableTasks.length,
+          } : undefined,
           gateway: { ready: true, thin: true, longOperationsAreDurable: true },
           daemon: readiness.daemon,
           durableScheduler: readiness.durableScheduler,
@@ -2015,13 +2047,24 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         const repository = selected(ctx, args);
         const jobId = String(args.job_id ?? '').trim();
         const job = getExecutionJob(ctx.controllerHome, repository.repoId, jobId);
-        return result({ summary: summarizeJobResultForLowInterception(job) });
+        const taskLedger = buildControllerTaskLedgerProjection(repository.canonicalRoot);
+        return result({
+          summary: summarizeJobResultForLowInterception(job),
+          taskLedgerStatus: taskLedger.status,
+          next: taskLedger.status.nextAction,
+        });
       }
       case 'work_status_digest': {
         const repository = selected(ctx, args);
         const workRef = String(args.work_ref ?? '').trim();
         const job = getExecutionJob(ctx.controllerHome, repository.repoId, workRef);
-        return result({ digest: summarizeJobResultForLowInterception(job), workRef });
+        const taskLedger = buildControllerTaskLedgerProjection(repository.canonicalRoot);
+        return result({
+          digest: summarizeJobResultForLowInterception(job),
+          workRef,
+          taskLedgerStatus: taskLedger.status,
+          next: taskLedger.status.nextAction,
+        });
       }
       case 'model_clients_summary': {
         return result({ clients: buildModelClientSummary(), policyOwner: 'repo-harness', transportEncryption: 'not-configured-by-this-tool' });

@@ -237,6 +237,7 @@ describe("MCP controller profile", () => {
       expect(capabilities.value.expectedTools).toContain("launch_issue");
       expect(capabilities.value.expectedTools).toContain("submit_local_job");
       expect(capabilities.value.expectedTools).toContain("controller_context");
+      expect(capabilities.value.expectedTools).toContain("controller_context_pack");
       expect(capabilities.value.expectedTools).toContain("repository_command_preview");
       expect(capabilities.value.expectedTools).toContain("repository_command_execute");
       expect(capabilities.value.expectedTools).toEqual(
@@ -542,6 +543,19 @@ describe("MCP controller profile", () => {
       expect(context.value.readyTasks.length).toBeGreaterThan(0);
       expect(context.value.checks.some((check: { id: string }) => check.id === "focused")).toBe(true);
       expect(context.value.recommendedExecution.recommendedMode).toBe("direct_edit");
+
+      const pack = await jsonTool(ctx, "controller_context_pack", {
+        issue_id: created.value.id,
+        task_id: "T1",
+        known_paths: ["src/example.ts"],
+        search_terms: ["value"],
+        max_files: 2,
+        max_snippets: 4,
+      });
+      expect(pack.value.source).toBe("controller-context-pack");
+      expect(pack.value.contextContract.rawCodeRequiredForImplementation).toBe(true);
+      expect(pack.value.files[0].path).toBe("src/example.ts");
+      expect(pack.value.files[0].snippets[0].content).toContain("value = 1");
     });
   });
 
@@ -551,7 +565,7 @@ describe("MCP controller profile", () => {
       const repository = registerRepository({ path: repoRoot, controllerHome });
       const core = createMultiRepositoryContext({ repo: repoRoot, profile: "controller", toolset: "core", controllerHome });
       const full = createMultiRepositoryContext({ repo: repoRoot, profile: "controller", toolset: "full", controllerHome });
-      expect(exposedControllerToolDefinitions(core)).toHaveLength(54);
+      expect(exposedControllerToolDefinitions(core)).toHaveLength(55);
       expect(exposedControllerToolDefinitions(core).map((tool) => tool.name)).toContain("create_campaign");
       expect(exposedControllerToolDefinitions(core).map((tool) => tool.name)).toContain("submit_campaign_review");
       expect(exposedControllerToolDefinitions(core).map((tool) => tool.name)).toContain("finish_task_run");
@@ -780,6 +794,8 @@ describe("MCP controller profile", () => {
       expect(["degraded", "not_ready"]).toContain(readyValue.state);
       expect(readyValue.reasons.map((entry: { code: string }) => entry.code)).toContain("WORKER_NOT_RUNNING");
       expect(readyValue.reasons.map((entry: { code: string }) => entry.code)).toContain("QUEUE_NOT_PROGRESSING");
+      expect(readyValue.taskLedgerStatus.kind).toBe("empty");
+      expect(readyValue.taskLedgerCounts.issueCount).toBe(0);
 
       const context = await callRuntimeTool(multi, "controller_context", { repo_id: repository.repoId });
       const contextValue = JSON.parse(context!.content[0].text);
@@ -787,6 +803,17 @@ describe("MCP controller profile", () => {
       expect(contextValue.contextProjection.strategy).toBe("event-driven");
       expect(contextValue.contextProjection.readOnly).toBe(true);
       expect(contextValue.controllerReady.ready).toBe(false);
+      expect(contextValue.taskLedgerStatus.kind).toBe("empty");
+
+      writeFileSync(join(repoRoot, "src/context-pack.ts"), "export const contextPackValue = 1;\n");
+      const pack = await callRuntimeTool(multi, "controller_context_pack", {
+        repo_id: repository.repoId,
+        known_paths: ["src/context-pack.ts"],
+        search_terms: ["contextPackValue"],
+      });
+      const packValue = JSON.parse(pack!.content[0].text);
+      expect(packValue.contextPack.source).toBe("controller-context-pack");
+      expect(packValue.contextPack.files[0].snippets[0].content).toContain("contextPackValue");
     });
   });
 
@@ -858,6 +885,15 @@ describe("MCP controller profile", () => {
       expect(fullValue.requestedDetailLevel).toBe("full");
       expect(JSON.stringify(fullValue.job)).not.toContain(repoRoot);
       expect(fullValue.next).toContain("Raw job state is intentionally not returned");
+
+      const digest = await callRuntimeTool(multi, "work_status_digest", {
+        repo_id: repository.repoId,
+        work_ref: created.job.jobId,
+      });
+      const digestValue = JSON.parse(digest!.content[0].text);
+      expect(digestValue.digest.status).toBe("failed");
+      expect(digestValue.taskLedgerStatus.kind).toBe("empty");
+      expect(digestValue.next).toContain("Create or import");
     });
   });
 

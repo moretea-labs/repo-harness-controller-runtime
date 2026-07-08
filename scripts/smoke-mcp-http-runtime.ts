@@ -72,7 +72,7 @@ try {
   if (health.body.toolset !== 'core') throw new Error(`TOOLSET_CHANGED: ${String(health.body.toolset)}`);
   if (health.body.toolCount !== 29) throw new Error(`TOOL_COUNT_CHANGED: ${String(health.body.toolCount)}`);
   if (health.body.compatibilityToolCount !== 86) throw new Error(`LEGACY_MCP_TOOL_COUNT_CHANGED: ${String(health.body.compatibilityToolCount)}`);
-  if (health.body.toolSurfaceFingerprint !== 'bd5bd8c9ae39ccdf') throw new Error(`FINGERPRINT_CHANGED: ${String(health.body.toolSurfaceFingerprint)}`);
+  if (health.body.toolSurfaceFingerprint !== '75fc20396887283e') throw new Error(`FINGERPRINT_CHANGED: ${String(health.body.toolSurfaceFingerprint)}`);
 
   let ready = await waitJson(`http://127.0.0.1:${port}/ready`, 20_000);
   const readyDeadline = Date.now() + 20_000;

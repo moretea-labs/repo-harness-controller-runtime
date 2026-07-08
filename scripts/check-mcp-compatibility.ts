@@ -4,8 +4,8 @@ import { controllerExpectedToolNames } from '../src/cli/mcp/tools';
 import { runtimeToolDefinitions } from '../src/runtime/gateway/mcp/runtime-tools';
 import { CORE_CONTROLLER_TOOL_NAMES } from '../src/cli/mcp/toolset';
 
-const EXPECTED_COMPATIBILITY_FINGERPRINT = 'bd5bd8c9ae39ccdf';
-const EXPECTED_COMPATIBILITY_TOOL_COUNT = 115;
+const EXPECTED_COMPATIBILITY_FINGERPRINT = '75fc20396887283e';
+const EXPECTED_COMPATIBILITY_TOOL_COUNT = 116;
 
 const policy = runtimePolicy(process.cwd(), {
   profile: 'controller',
@@ -31,7 +31,7 @@ if (compatibilityFingerprint !== EXPECTED_COMPATIBILITY_FINGERPRINT) {
 }
 if (duplicateCompatibility.length) failures.push(`legacy duplicate names: ${[...new Set(duplicateCompatibility)].join(', ')}`);
 if (collisions.length) failures.push(`runtime-control tools collide with legacy tools: ${collisions.join(', ')}`);
-if (coreNames.length !== 54) failures.push(`core Controller tool count changed: expected 54, got ${coreNames.length}`);
+if (coreNames.length !== 55) failures.push(`core Controller tool count changed: expected 55, got ${coreNames.length}`);
 const missingCore = coreNames.filter((name) => !fullNames.includes(name));
 if (missingCore.length) failures.push(`core tools missing from full surface: ${missingCore.join(', ')}`);
 

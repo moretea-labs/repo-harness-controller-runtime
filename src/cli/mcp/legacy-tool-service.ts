@@ -76,6 +76,7 @@ import { assessWorkMode } from "../controller/work-mode";
 import { taskExecutionPolicy, taskWriteScopesConflict } from "../controller/execution-policy";
 import { finishTaskRun } from "../controller/completion-orchestrator";
 import { buildControllerTaskLedgerProjection } from "../controller/task-ledger";
+import { buildControllerContextPack } from "../controller/context-pack";
 import { loadControllerProjectState, saveControllerProjectState } from "../controller/project-state";
 import {
   CONTROLLER_SCHEMA_VERSION,
@@ -1501,6 +1502,28 @@ export function buildMcpToolDefinitions(
             requires_long_running_checks: { type: "boolean" },
             needs_dependencies: { type: "boolean" },
             risk: { type: "string", enum: ["readonly", "low", "medium", "high", "destructive"] },
+          },
+          additionalProperties: false,
+        },
+        annotations: readOnly,
+      },
+      {
+        name: "controller_context_pack",
+        description:
+          "Build a bounded code context pack for a task: relevant files, search-hit line ranges, and raw snippets. This is for scoped investigation, not blind implementation.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            description: { type: "string" },
+            issue_id: { type: "string" },
+            task_id: { type: "string" },
+            known_paths: { type: "array", items: { type: "string" } },
+            include_globs: { type: "array", items: { type: "string" } },
+            exclude_globs: { type: "array", items: { type: "string" } },
+            search_terms: { type: "array", items: { type: "string" } },
+            max_files: { type: "number" },
+            max_snippets: { type: "number" },
+            max_chars_per_snippet: { type: "number" },
           },
           additionalProperties: false,
         },
@@ -2970,6 +2993,27 @@ export async function callMcpTool(
         audit(ctx, name, "ok", args);
         return textResult(payload);
       }
+      case "controller_context_pack": {
+        if (ctx.policy.profile !== "controller")
+          return errorResult(
+            "TOOL_DISABLED",
+            "controller_context_pack requires the controller profile",
+          );
+        const pack = buildControllerContextPack(ctx.repoRoot, ctx.policy, {
+          description: typeof args.description === "string" ? args.description : undefined,
+          issueId: typeof args.issue_id === "string" ? args.issue_id : undefined,
+          taskId: typeof args.task_id === "string" ? args.task_id : undefined,
+          knownPaths: stringList(args.known_paths),
+          includeGlobs: stringList(args.include_globs),
+          excludeGlobs: stringList(args.exclude_globs),
+          searchTerms: stringList(args.search_terms),
+          maxFiles: typeof args.max_files === "number" ? args.max_files : undefined,
+          maxSnippets: typeof args.max_snippets === "number" ? args.max_snippets : undefined,
+          maxCharsPerSnippet: typeof args.max_chars_per_snippet === "number" ? args.max_chars_per_snippet : undefined,
+        });
+        audit(ctx, name, "ok", args);
+        return textResult(pack);
+      }
       case "controller_context": {
         if (ctx.policy.profile !== "controller")
           return errorResult(
@@ -3004,6 +3048,7 @@ export async function callMcpTool(
           git: gitSnapshot(ctx.repoRoot),
           currentIssueId: board.currentIssueId,
           taskLedger,
+          taskLedgerStatus: taskLedger.status,
           currentIssue: board.issues.find((issue) => issue.id === board.currentIssueId)
             ? {
                 id: board.issues.find((issue) => issue.id === board.currentIssueId)?.id,
