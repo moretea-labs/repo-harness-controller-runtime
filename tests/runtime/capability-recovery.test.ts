@@ -360,6 +360,8 @@ describe('sandbox patch handoff artifact', () => {
 
     expect(artifact.id).toMatch(/^PATCH-/);
     expect(artifact.touchedPaths).toEqual(['src/a.ts']);
+    expect(artifact.checks).toEqual([{ id: 'package:check:type', status: 'passed' }]);
+    expect(artifact.provenance).toEqual({ actor: 'codex', workspace: 'isolated_worktree', source: 'blocked-chatgpt-session' });
     expect(artifact.integration.safeToApply).toBe(true);
   });
 

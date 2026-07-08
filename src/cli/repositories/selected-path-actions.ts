@@ -2,6 +2,7 @@ import { spawnSync } from 'child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { join, relative, resolve } from 'path';
 import { capProcessOutput, redactProcessOutput } from '../../effects/process-runner';
+import { buildPatchHandoffArtifact } from '../../runtime/recovery/patch-handoff';
 import { executeRepositoryGitCommand, type RepositoryGitExecution } from './git-command-executor';
 import type { RepositoryRecord } from './types';
 
@@ -139,9 +140,39 @@ function artifactPreview(repository: RepositoryRecord, path: string): HandoffArt
   };
 }
 
-function ensureFallbackArtifact(repository: RepositoryRecord, reason: string): void {
+function repositoryChangedPaths(repository: RepositoryRecord): string[] {
+  const tracked = runGit(repository, ['diff', '--name-only'], 64 * 1024).stdout;
+  const staged = runGit(repository, ['diff', '--cached', '--name-only'], 64 * 1024).stdout;
+  const untracked = runGit(repository, ['ls-files', '--others', '--exclude-standard'], 64 * 1024).stdout;
+  return [...new Set([tracked, staged, untracked].join('\n').split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean))].sort();
+}
+
+function writePatchHandoffArtifact(repository: RepositoryRecord, handoffDir: string, reason: string): HandoffArtifactPreview {
+  const diff = runGit(repository, ['diff', '--binary'], 512 * 1024).stdout;
+  const stagedDiff = runGit(repository, ['diff', '--cached', '--binary'], 512 * 1024).stdout;
+  const touchedPaths = repositoryChangedPaths(repository);
+  const artifact = buildPatchHandoffArtifact({
+    baseHead: gitText(repository, ['rev-parse', '--verify', 'HEAD']) || 'unknown',
+    branch: gitText(repository, ['branch', '--show-current']) || 'detached',
+    diff: [diff, stagedDiff].filter(Boolean).join('\n'),
+    touchedPaths,
+    checks: [],
+    actor: 'repo-harness',
+    source: `fallback-handoff:${reason}`,
+    notes: [
+      'Integration must use selected-path review gates.',
+      'Do not overwrite unrelated dirty files; rerun conflict detection before applying this patch.',
+    ],
+  });
+  const patchPath = join(handoffDir, 'patch.json');
+  writeFileSync(patchPath, `${JSON.stringify(artifact, null, 2)}\n`, 'utf-8');
+  return artifactPreview(repository, '.ai/harness/handoff/patch.json');
+}
+
+function ensureFallbackArtifact(repository: RepositoryRecord, reason: string): HandoffArtifactPreview {
   const handoffDir = join(repository.canonicalRoot, '.ai', 'harness', 'handoff');
   mkdirSync(handoffDir, { recursive: true });
+  const patchArtifact = writePatchHandoffArtifact(repository, handoffDir, reason);
   const timestamp = new Date().toISOString();
   const currentPath = join(handoffDir, 'current.md');
   const resumePath = join(handoffDir, 'resume.md');
@@ -156,6 +187,7 @@ function ensureFallbackArtifact(repository: RepositoryRecord, reason: string): v
       '## Exact Next Step',
       '',
       '- Inspect the selected-path Git diff and continue from this repository state.',
+      '- Review `.ai/harness/handoff/patch.json` before any integration attempt.',
       '',
     ].join('\n'), 'utf-8');
   }
@@ -165,10 +197,12 @@ function ensureFallbackArtifact(repository: RepositoryRecord, reason: string): v
       '',
       `- Repository: \`${repository.canonicalRoot}\``,
       `- Reason: \`${reason}\``,
+      '- Patch artifact: `.ai/harness/handoff/patch.json`',
       '- Next: open `.ai/harness/handoff/current.md` and continue from the recorded state.',
       '',
     ].join('\n'), 'utf-8');
   }
+  return patchArtifact;
 }
 
 export function selectedPathDiff(
@@ -289,7 +323,7 @@ export function prepareFallbackHandoffArtifacts(
 
   const beforeCurrent = existsSync(join(repository.canonicalRoot, '.ai', 'harness', 'handoff', 'current.md'));
   const beforeResume = existsSync(join(repository.canonicalRoot, '.ai', 'harness', 'handoff', 'resume.md'));
-  ensureFallbackArtifact(repository, reason);
+  const patchArtifact = ensureFallbackArtifact(repository, reason);
   const fallbackUsed = !usedScript || !ok || !beforeCurrent || !beforeResume;
 
   return {
@@ -301,6 +335,7 @@ export function prepareFallbackHandoffArtifacts(
     artifacts: [
       artifactPreview(repository, '.ai/harness/handoff/current.md'),
       artifactPreview(repository, '.ai/harness/handoff/resume.md'),
+      patchArtifact,
     ],
   };
 }
