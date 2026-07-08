@@ -166,6 +166,9 @@ describe("Controller V8 ChatGPT execution bridge", () => {
     expect(dashboard).toContain("执行任务");
     expect(dashboard).toContain("执行计划");
     expect(dashboard).toContain("renderPlan");
+    expect(dashboard).toContain("handleAttention");
+    expect(dashboard).toContain("确认完成");
+    expect(dashboard).toContain("打回修改");
     expect(dashboard).toContain("Recipe System");
     expect(dashboard).toContain("Worker 抽象");
     expect(dashboard).toContain("仓库中心");
