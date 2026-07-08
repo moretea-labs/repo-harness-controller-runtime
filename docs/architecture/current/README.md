@@ -94,6 +94,7 @@ The approved top-level layers are:
 - Verification records own exact-revision completion evidence.
 - Event logs own audit history.
 - Atomic snapshots and indexes are projections optimized for reads and recovery.
+- The controller task ledger projection (`.ai/harness/controller/task-ledger.json` and `.ai/harness/handoff/controller-current.md`) is a compact recovery/read model derived from durable Issue, Task, Run, and worklog state; it must not become a competing mutable task source.
 - Chat history, UI state, worker self-reports, and in-memory maps are never durable truth.
 
 ## Historical Documents

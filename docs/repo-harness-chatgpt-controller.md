@@ -23,6 +23,17 @@ Issue
   -> Task T3
 ```
 
+## Recovery projection
+
+`controller_context` now includes a `taskLedger` projection derived from the durable Issue, Task, Run, and worklog state. The projection is intentionally compact: it identifies the current Issue, attention Tasks, ready/queueable work, recent evidence, and suggested next actions without replaying the whole repository or returning raw logs.
+
+`prepare_handoff_artifacts` also writes:
+
+- `.ai/harness/controller/task-ledger.json` — machine-readable recovery/status projection.
+- `.ai/harness/handoff/controller-current.md` — human-readable handoff optimized for a fresh ChatGPT controller session.
+
+This projection is a recovery and planning aid only. Implementation decisions must still expand the exact source snippets, related types/callers, current diff, and focused verification output at the decision point.
+
 Issue and Task definitions are written under `tasks/issues/` in both JSON and readable Markdown. Runtime agent evidence is written under `.ai/harness/jobs/`. Direct-edit evidence and backups are written under `.ai/harness/edit-sessions/`.
 
 Task statuses include:

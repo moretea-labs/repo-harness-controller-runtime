@@ -32,6 +32,10 @@ import {
 import { ensureRepositoryRuntimeStorage } from '../../../cli/repositories/runtime-storage';
 import { assessWorkMode } from '../../../cli/controller/work-mode';
 import { projectBoard } from '../../../cli/controller/issue-store';
+import {
+  buildControllerTaskLedgerProjection,
+  writeControllerTaskLedgerArtifacts,
+} from '../../../cli/controller/task-ledger';
 import { listControllerChecks } from '../../../cli/controller/check-runner';
 import { listActiveAgentJobSnapshots } from '../../../cli/agent-jobs/job-manager';
 import {
@@ -1113,10 +1117,17 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
       }
       case 'prepare_handoff_artifacts': {
         const repository = selected(ctx, args);
+        const handoff = prepareFallbackHandoffArtifacts(repository, { reason: args.reason });
+        const taskLedger = writeControllerTaskLedgerArtifacts(repository.canonicalRoot, { reason: args.reason });
         return result({
           repoId: repository.repoId,
           checkoutId: repository.activeCheckoutId,
-          ...prepareFallbackHandoffArtifacts(repository, { reason: args.reason }),
+          ...handoff,
+          taskLedger: taskLedger.projection,
+          artifacts: [
+            ...handoff.artifacts,
+            ...taskLedger.artifacts,
+          ],
         });
       }
 
@@ -1219,6 +1230,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         const readiness = controllerReadiness(ctx, repository);
         const activeCheckout = repository.checkouts.find((checkout) => checkout.checkoutId === repository.activeCheckoutId);
         const board = projectBoard(repository.canonicalRoot);
+        const taskLedger = buildControllerTaskLedgerProjection(repository.canonicalRoot);
         const currentIssueRecord = board.currentIssueId
           ? board.issues.find((issue) => issue.id === board.currentIssueId)
           : undefined;
@@ -1296,6 +1308,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           },
           currentIssueId: board.currentIssueId,
           currentIssue,
+          taskLedger,
           readyTasks: board.readyTasks.slice(0, 20),
           activeRuns,
           localBridge: {

@@ -75,6 +75,7 @@ import { inspectProjectGovernance, reconcileProjectGovernance } from "../control
 import { assessWorkMode } from "../controller/work-mode";
 import { taskExecutionPolicy, taskWriteScopesConflict } from "../controller/execution-policy";
 import { finishTaskRun } from "../controller/completion-orchestrator";
+import { buildControllerTaskLedgerProjection } from "../controller/task-ledger";
 import { loadControllerProjectState, saveControllerProjectState } from "../controller/project-state";
 import {
   CONTROLLER_SCHEMA_VERSION,
@@ -2894,6 +2895,7 @@ export async function callMcpTool(
             persistedCheckReuse: true,
             directVerification: true,
             controllerContextAggregation: true,
+            taskLedgerProjection: true,
             assistantPluginRuntime: true,
           },
           runner: {
@@ -2975,6 +2977,7 @@ export async function callMcpTool(
             "controller_context requires the controller profile",
           );
         const board = projectBoard(ctx.repoRoot);
+        const taskLedger = buildControllerTaskLedgerProjection(ctx.repoRoot);
         const runs = listAgentJobs(ctx.repoRoot, 8);
         const reconciliation = reconcileLocalBridgeJobs(ctx.repoRoot);
         const jobs = listLocalBridgeJobs(ctx.repoRoot, 8);
@@ -3000,6 +3003,7 @@ export async function callMcpTool(
         const payload = {
           git: gitSnapshot(ctx.repoRoot),
           currentIssueId: board.currentIssueId,
+          taskLedger,
           currentIssue: board.issues.find((issue) => issue.id === board.currentIssueId)
             ? {
                 id: board.issues.find((issue) => issue.id === board.currentIssueId)?.id,
@@ -4592,6 +4596,7 @@ export async function callMcpTool(
       case "latest_handoff": {
         const paths = [
           ".ai/harness/handoff/resume.md",
+          ".ai/harness/handoff/controller-current.md",
           ".ai/harness/handoff/codex-goal.md",
           ".ai/harness/handoff/chatgpt-plan.md",
         ];
