@@ -1,5 +1,5 @@
 import { existsSync, statSync } from "fs";
-import { readRepositoryRange, searchRepository } from "../repository/inspector";
+import { gitSnapshot, readRepositoryRange, searchRepository } from "../repository/inspector";
 import { resolveMcpPath, globMatches } from "../mcp/paths";
 import type { McpPolicy } from "../mcp/types";
 import { redactMcpText } from "../mcp/redaction";
@@ -64,6 +64,11 @@ export interface ControllerContextPackProjection {
     taskStatus?: string;
   };
   goal: string;
+  git: {
+    branch: string | null;
+    status: string;
+    diffStat: string;
+  };
   search: {
     terms: string[];
     includeGlobs: string[];
@@ -243,6 +248,7 @@ export function buildControllerContextPack(
   const includeGlobs = cleanList([...(options.includeGlobs ?? []), ...knownGlobs]);
   const excludeGlobs = cleanList(options.excludeGlobs);
   const focus = issueTaskFocus(repoRoot, options.issueId, options.taskId);
+  const git = gitSnapshot(repoRoot);
   const compactTask = ledgerTask(repoRoot, focus.issue?.id, focus.task?.id);
   const allowedPathGlobs = cleanList(compactTask?.allowedPaths);
   const taskChecks = cleanList(compactTask?.checks);
@@ -374,6 +380,7 @@ export function buildControllerContextPack(
       taskStatus: compactTask?.effectiveStatus ?? focus.task?.status,
     },
     goal,
+    git,
     search: {
       terms,
       includeGlobs: searchIncludeGlobs,
