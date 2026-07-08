@@ -40,6 +40,8 @@ import {
   getProjectProgress,
   getTaskProgressDetail,
 } from "../controller/progress";
+import { buildControllerTaskLedgerProjection } from "../controller/task-ledger";
+import { buildControllerOperationalPlan } from "../controller/operational-plan";
 import { exportControllerWorklog, listControllerWorklogEvents, parseWorklogCategory } from "../controller/worklog";
 import { inspectProjectGovernance, reconcileProjectGovernance } from "../controller/governance";
 import { clearCurrentIssue, loadControllerProjectState, saveControllerProjectState } from "../controller/project-state";
@@ -291,6 +293,8 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
   const editSessions = listEditSessions(repoRoot, 30);
   const localJobs = listLocalBridgeJobs(repoRoot, 30);
   const board = projectBoard(repoRoot);
+  const taskLedger = buildControllerTaskLedgerProjection(repoRoot);
+  const operationalPlan = buildControllerOperationalPlan(repoRoot, taskLedger);
   const completionBacklog = inspectCompletionBacklog(repoRoot, { limit: 100 });
   const completionQueues = completionDecisionQueues(repoRoot, { limit: 100 });
   const stuckStates = inspectStuckControllerStates(repoRoot, { limit: 100 });
@@ -476,6 +480,8 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
       localRiskApprovalGate: false,
     },
     board,
+    taskLedger,
+    operationalPlan,
     projectState: loadControllerProjectState(repoRoot),
     governance: inspectProjectGovernance(repoRoot),
     recovery,
@@ -735,6 +741,7 @@ function buildUserControllerExperienceSnapshot(repoRoot: string, controllerHome 
   const repositories = userFacingRepositories(repoRoot, controllerHome, selectedRepoId);
   const currentRepository = repositories.find((entry) => entry.current) ?? repositories[0];
   const plugins = snapshot.assistantPlugins.map(userFacingPluginStatus);
+  const operationalPlan = snapshot.operationalPlan;
   const readyPlugins = plugins.filter((plugin) => plugin.status === 'ready');
   const attentionItems = userFacingAttentionItems(snapshot);
   const blocked = snapshot.recovery.overallState === 'blocked' || snapshot.recovery.overallState === 'unavailable';
@@ -771,6 +778,16 @@ function buildUserControllerExperienceSnapshot(repoRoot: string, controllerHome 
       ready: readyPlugins.length,
       total: plugins.length,
       lines: plugins.slice(0, 5).map((plugin) => `${plugin.name}  ${plugin.statusLabel}`),
+    },
+    operationalPlan,
+    operationalPlanSummary: {
+      status: operationalPlan.status,
+      validationPolicy: operationalPlan.validationStrategy.policy,
+      checks: operationalPlan.validationStrategy.checks,
+      dirty: operationalPlan.diffProjection.dirty,
+      recommendedWorker: operationalPlan.workerAbstraction.recommendedWorker,
+      panels: operationalPlan.guiInteraction.primaryPanels,
+      actions: operationalPlan.guiInteraction.primaryActions,
     },
     plugins,
     attentionItems,
