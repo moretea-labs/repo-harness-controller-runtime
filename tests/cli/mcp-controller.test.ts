@@ -813,6 +813,7 @@ describe("MCP controller profile", () => {
       expect(contextValue.controllerReady.ready).toBe(false);
       expect(contextValue.taskLedgerStatus.kind).toBe("empty");
       expect(contextValue.git.branch).not.toBe("stale-branch-from-projection");
+      expect(typeof contextValue.git.dirty).toBe("boolean");
 
       writeFileSync(join(repoRoot, "src/context-pack.ts"), "export const contextPackValue = 1;\n");
       const pack = await callRuntimeTool(multi, "controller_context_pack", {
@@ -822,6 +823,7 @@ describe("MCP controller profile", () => {
       });
       const packValue = JSON.parse(pack!.content[0].text);
       expect(packValue.contextPack.source).toBe("controller-context-pack");
+      expect(packValue.contextPack.schemaVersion).toBe(3);
       expect(packValue.contextPack.git.branch).toBe("main");
       expect(typeof packValue.contextPack.git.dirty).toBe("boolean");
       expect(packValue.contextPack.files[0].snippets[0].content).toContain("contextPackValue");

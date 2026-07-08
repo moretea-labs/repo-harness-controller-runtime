@@ -112,6 +112,7 @@ describe("controller context pack", () => {
     });
 
     expect(pack.source).toBe("controller-context-pack");
+    expect(pack.schemaVersion).toBe(3);
     expect(pack.focus.issueId).toBe(issue.id);
     expect(pack.contextContract.rawCodeRequiredForImplementation).toBe(true);
     expect(pack.validation).toEqual({ policy: "task-targeted", checks: ["check:type"] });
