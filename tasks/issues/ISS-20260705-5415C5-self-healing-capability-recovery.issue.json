@@ -136,7 +136,7 @@
       "id": "T4",
       "title": "Implement sandbox patch handoff workflow",
       "objective": "Implement a fallback workflow where blocked ChatGPT sessions can create or resume a local agent task that produces a patch artifact in an isolated worktree, runs verification, and integrates only through existing review and acceptance gates.",
-      "status": "ready",
+      "status": "done",
       "dependsOn": [
         "T2"
       ],
@@ -160,17 +160,19 @@
       ],
       "risk": "high",
       "recommendedAgent": "codex",
-      "notes": [],
+      "notes": [
+        "Completed sandbox patch handoff workflow. Existing create_patch_handoff path now produces markdown resume/current artifacts plus commit 3cfbbbc adds durable .ai/harness/handoff/patch.json containing diff hash, touched paths, checks, provenance, and integration notes. Integration remains selected-path gated and explicitly instructs rerunning conflict detection before applying so unrelated dirty files are not overwritten. package:check:type passed in EJOB-1783494510206-2dcb23ef."
+      ],
       "runIds": [],
       "createdAt": "2026-07-05T09:39:05.185Z",
-      "updatedAt": "2026-07-05T09:39:05.185Z",
+      "updatedAt": "2026-07-08T07:09:29.749Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     },
     {
       "id": "T5",
       "title": "Verify recovery system end to end",
       "objective": "Add targeted regression tests and run type checks for the recovery probe, recovery actions, platform-block fallback, stale job cleanup, and sandbox patch flow. Prepare a concise operator runbook.",
-      "status": "planned",
+      "status": "ready",
       "dependsOn": [
         "T2",
         "T3",
@@ -205,6 +207,6 @@
     }
   ],
   "createdAt": "2026-07-05T09:39:05.185Z",
-  "updatedAt": "2026-07-08T07:00:12.234Z",
+  "updatedAt": "2026-07-08T07:09:29.749Z",
   "repoId": "repo_123b7cf58b6b17b5cbe46a56"
 }

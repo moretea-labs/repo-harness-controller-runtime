@@ -2,7 +2,7 @@
 id: "ISS-20260705-5415C5"
 kind: "feature"
 status: "planned"
-updated_at: "2026-07-08T07:00:12.234Z"
+updated_at: "2026-07-08T07:09:29.749Z"
 source: "repo-harness-controller-v8"
 ---
 
@@ -68,7 +68,7 @@ Add a structured recovery system for repo-harness capability degradation. It mus
 
 ### T4 — Implement sandbox patch handoff workflow
 
-- Status: `ready`
+- Status: `done`
 - Objective: Implement a fallback workflow where blocked ChatGPT sessions can create or resume a local agent task that produces a patch artifact in an isolated worktree, runs verification, and integrates only through existing review and acceptance gates.
 - Depends on: `T2`
 - Allowed paths: `src/**`, `tests/**`, `docs/**`
@@ -77,7 +77,7 @@ Add a structured recovery system for repo-harness capability degradation. It mus
 
 ### T5 — Verify recovery system end to end
 
-- Status: `planned`
+- Status: `ready`
 - Objective: Add targeted regression tests and run type checks for the recovery probe, recovery actions, platform-block fallback, stale job cleanup, and sandbox patch flow. Prepare a concise operator runbook.
 - Depends on: `T2`, `T3`, `T4`
 - Allowed paths: `src/**`, `tests/**`, `docs/**`
