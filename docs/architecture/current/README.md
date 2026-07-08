@@ -95,7 +95,7 @@ The approved top-level layers are:
 - Event logs own audit history.
 - Atomic snapshots and indexes are projections optimized for reads and recovery.
 - The controller task ledger projection (`.ai/harness/controller/task-ledger.json` and `.ai/harness/handoff/controller-current.md`) is a compact recovery/read model derived from durable Issue, Task, Run, and worklog state; its `status` field is a deterministic continuation hint for controller recovery, not a competing mutable task source.
-- The controller context pack is a transient Projection Plane read model for scoped code investigation. It may rank candidate files and return bounded raw snippets, but it must not become source-of-truth for implementation decisions or replace exact source, diff, and validation review.
+- The controller context pack is a transient Projection Plane read model for scoped code investigation. It may return live Git metadata, validation hints, ranked candidate files, and bounded raw snippets, but it must not become source-of-truth for implementation decisions or replace exact source, diff, and validation review.
 - Chat history, UI state, worker self-reports, and in-memory maps are never durable truth.
 
 ## Historical Documents
