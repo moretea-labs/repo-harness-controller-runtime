@@ -790,8 +790,7 @@ export async function startLocalBridgeServer(
   reconcileLocalBridgeJobs(options.repoRoot);
   const token = options.token ?? randomBytes(32).toString("base64url");
   const app = express();
-  const streamClients = new Set<Response>();
-  let streamSignature = controllerStateSignature(options.repoRoot);
+  const streamClients = new Map<Response, { repoRoot: string; signature: string }>();
   let streamIdleTicks = 0;
   const sendStreamEvent = (response: Response, type: string): void => {
     response.write(`event: ${type}\n`);
@@ -799,17 +798,23 @@ export async function startLocalBridgeServer(
   };
   const streamInterval = setInterval(() => {
     if (streamClients.size === 0) return;
-    const next = controllerStateSignature(options.repoRoot);
-    if (next !== streamSignature) {
-      streamSignature = next;
+    let refreshed = false;
+    for (const [client, state] of streamClients) {
+      const next = controllerStateSignature(state.repoRoot);
+      if (next !== state.signature) {
+        streamClients.set(client, { ...state, signature: next });
+        sendStreamEvent(client, "refresh");
+        refreshed = true;
+      }
+    }
+    if (refreshed) {
       streamIdleTicks = 0;
-      for (const client of streamClients) sendStreamEvent(client, "refresh");
       return;
     }
     streamIdleTicks += 1;
     if (streamIdleTicks >= 8) {
       streamIdleTicks = 0;
-      for (const client of streamClients) sendStreamEvent(client, "heartbeat");
+      for (const client of streamClients.keys()) sendStreamEvent(client, "heartbeat");
     }
   }, 2_000);
   streamInterval.unref();
@@ -1164,14 +1169,19 @@ export async function startLocalBridgeServer(
     }
   });
   app.get("/api/stream", (request, response) => {
-    response.status(200);
-    response.setHeader("Content-Type", "text/event-stream");
-    response.setHeader("Cache-Control", "no-cache, no-transform");
-    response.setHeader("Connection", "keep-alive");
-    response.flushHeaders();
-    streamClients.add(response);
-    sendStreamEvent(response, "connected");
-    request.on("close", () => streamClients.delete(response));
+    try {
+      const repoRoot = requestRepositoryRoot(request, options, controllerHome);
+      response.status(200);
+      response.setHeader("Content-Type", "text/event-stream");
+      response.setHeader("Cache-Control", "no-cache, no-transform");
+      response.setHeader("Connection", "keep-alive");
+      response.flushHeaders();
+      streamClients.set(response, { repoRoot, signature: controllerStateSignature(repoRoot) });
+      sendStreamEvent(response, "connected");
+      request.on("close", () => streamClients.delete(response));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
   });
   app.get("/api/progress", (request, response) => {
     try {
@@ -2187,7 +2197,7 @@ export async function startLocalBridgeServer(
   server.requestTimeout = 120_000;
   server.on("close", () => {
     clearInterval(streamInterval);
-    for (const client of streamClients) client.end();
+    for (const client of streamClients.keys()) client.end();
     streamClients.clear();
     localSnapshotCache.delete(options.repoRoot);
   });
