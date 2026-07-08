@@ -1328,6 +1328,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             branch: activeCheckout?.branch ?? null,
             status: 'No live repository scan is available; showing bounded runtime state only.',
             diffStat: '',
+            dirty: false,
           },
           currentIssueId: board.currentIssueId,
           currentIssue,

@@ -68,6 +68,7 @@ export interface ControllerContextPackProjection {
     branch: string | null;
     status: string;
     diffStat: string;
+    dirty: boolean;
   };
   search: {
     terms: string[];

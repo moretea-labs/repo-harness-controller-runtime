@@ -823,6 +823,7 @@ describe("MCP controller profile", () => {
       const packValue = JSON.parse(pack!.content[0].text);
       expect(packValue.contextPack.source).toBe("controller-context-pack");
       expect(packValue.contextPack.git.branch).toBe("main");
+      expect(typeof packValue.contextPack.git.dirty).toBe("boolean");
       expect(packValue.contextPack.files[0].snippets[0].content).toContain("contextPackValue");
     });
   });

@@ -158,14 +158,16 @@ export function readRepositoryRange(repoRoot: string, policy: McpPolicy, path: s
   };
 }
 
-export function gitSnapshot(repoRoot: string): { branch: string | null; status: string; diffStat: string } {
+export function gitSnapshot(repoRoot: string): { branch: string | null; status: string; diffStat: string; dirty: boolean } {
   const branchResult = runProcess('git', ['branch', '--show-current'], { cwd: repoRoot, timeoutMs: 10_000, maxOutputBytes: 32 * 1024 });
   const statusResult = runProcess('git', ['status', '--short', '--branch'], { cwd: repoRoot, timeoutMs: 10_000, maxOutputBytes: 64 * 1024 });
   const diffResult = runProcess('git', ['diff', '--stat'], { cwd: repoRoot, timeoutMs: 10_000, maxOutputBytes: 64 * 1024 });
+  const status = statusResult.ok ? statusResult.stdout.trim() : statusResult.error || statusResult.stderr.trim();
   return {
     branch: branchResult.ok ? branchResult.stdout.trim() || null : null,
-    status: statusResult.ok ? statusResult.stdout.trim() : statusResult.error || statusResult.stderr.trim(),
+    status,
     diffStat: diffResult.ok ? diffResult.stdout.trim() : diffResult.error || diffResult.stderr.trim(),
+    dirty: status.split(/\r?\n/).some((line) => line.trim() && !line.startsWith("##")),
   };
 }
 
