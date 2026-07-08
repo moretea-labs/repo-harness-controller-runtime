@@ -114,6 +114,7 @@ describe("controller context pack", () => {
     expect(pack.source).toBe("controller-context-pack");
     expect(pack.focus.issueId).toBe(issue.id);
     expect(pack.contextContract.rawCodeRequiredForImplementation).toBe(true);
+    expect(pack.validation).toEqual({ policy: "task-targeted", checks: ["check:type"] });
     expect(pack.files.map((file) => file.path)).toContain("src/runtime/example.ts");
     expect(pack.files[0]?.snippets[0]?.content).toContain("loadRuntimeConfig");
     expect(pack.next.join("\n")).toContain("raw diff");

@@ -6,7 +6,7 @@ import { redactMcpText } from "../mcp/redaction";
 import { projectBoard } from "./issue-store";
 import { buildControllerTaskLedgerProjection, type TaskLedgerTaskProjection } from "./task-ledger";
 
-const CONTEXT_PACK_SCHEMA_VERSION = 2;
+const CONTEXT_PACK_SCHEMA_VERSION = 3;
 const DEFAULT_MAX_FILES = 8;
 const DEFAULT_MAX_SNIPPETS = 20;
 const DEFAULT_SNIPPET_CONTEXT_BEFORE = 12;
@@ -87,6 +87,10 @@ export interface ControllerContextPackProjection {
     maxFiles: number;
     maxSnippets: number;
     maxCharsPerSnippet: number;
+  };
+  validation: {
+    policy: "task-targeted" | "minimal";
+    checks: string[];
   };
   contextContract: {
     strategy: string;
@@ -396,6 +400,10 @@ export function buildControllerContextPack(
     deniedPaths: deniedPaths.slice(0, 20),
     omitted: omitted.slice(0, 30),
     limits: { maxFiles, maxSnippets, maxCharsPerSnippet },
+    validation: {
+      policy: taskChecks.length > 0 ? "task-targeted" : "minimal",
+      checks: taskChecks,
+    },
     contextContract: {
       strategy: "Use this pack for scoped investigation only. Do not treat search ranking or summaries as proof of the correct implementation.",
       rawCodeRequiredForImplementation: true,
