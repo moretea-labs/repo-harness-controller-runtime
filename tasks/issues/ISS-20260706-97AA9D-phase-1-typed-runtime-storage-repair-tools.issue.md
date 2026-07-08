@@ -1,8 +1,8 @@
 ---
 id: "ISS-20260706-97AA9D"
 kind: "feature"
-status: "planned"
-updated_at: "2026-07-06T09:04:19.605Z"
+status: "done"
+updated_at: "2026-07-08T03:50:34.000Z"
 source: "repo-harness-controller-v8"
 ---
 
@@ -44,12 +44,21 @@ Implement typed runtime storage/local-jobs repair preview and apply actions for 
 
 ### T1 — Implement typed runtime storage repair
 
-- Status: `ready`
+- Status: `cancelled`
 - Objective: Add runtime storage/local-jobs repair preview and apply actions, wire them into MCP runtime tools, update compatibility checks, and add focused tests and docs. Preserve repository scoping and yaozhunshi exclusion.
 - Depends on: none
 - Allowed paths: `src/runtime/recovery/**`, `src/runtime/gateway/mcp/**`, `tests/runtime/**`, `scripts/check-mcp-compatibility.ts`, `docs/**`
 - Checks: `package:check:type`, `package:check:mcp-compatibility`
 - Execution hint: agent / codex
+
+### T2 — Validate typed runtime storage repair tools
+
+- Status: `done`
+- Objective: Validate the already available runtime_storage_repair_preview and runtime_storage_repair_apply MCP tools, record targeted verification evidence, and close the Phase 1 runtime storage repair work without expanding scope.
+- Depends on: none
+- Allowed paths: `src/runtime/recovery/**`, `src/runtime/gateway/mcp/**`, `tests/runtime/**`, `scripts/check-mcp-compatibility.ts`, `docs/**`
+- Checks: `package:check:type`, `package:check:mcp-compatibility`
+- Execution hint: selected at runtime
 
 ## Related Artifacts
 

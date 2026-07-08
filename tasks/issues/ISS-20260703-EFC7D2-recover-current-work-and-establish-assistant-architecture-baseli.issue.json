@@ -4,7 +4,7 @@
   "title": "Recover current work and establish assistant architecture baseline",
   "slug": "recover-current-work-and-establish-assistant-architecture-baseli",
   "kind": "investigation",
-  "status": "completed",
+  "status": "done",
   "summary": "Work directly in the current checkout. Inspect branch history, all dirty files, existing assistant/Gmail/Calendar/plugin code, and runtime architecture. Preserve every legitimate existing change. Finalize incomplete MCP lifecycle/source packaging edits, document the concrete personal-assistant plugin architecture, threat model, capability matrix and migration plan, run focused checks, and commit a coherent baseline. Do not reset, stash away, or overwrite user work.",
   "goals": [
     "Work directly in the current checkout. Inspect branch history, all dirty files, existing assistant/Gmail/Calendar/plugin code, and runtime architecture. Preserve every legitimate existing change. Finalize incomplete MCP lifecycle/source packaging edits, document the concrete personal-assistant plugin architecture, threat model, capability matrix and migration plan, run focused checks, and commit a coherent baseline. Do not reset, stash away, or overwrite user work."
@@ -56,6 +56,7 @@
     }
   ],
   "createdAt": "2026-07-03T13:33:59.744Z",
-  "updatedAt": "2026-07-03T14:35:00.000Z",
-  "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+  "updatedAt": "2026-07-08T03:39:20.968Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+  "archivedAt": "2026-07-08T03:39:20.968Z"
 }

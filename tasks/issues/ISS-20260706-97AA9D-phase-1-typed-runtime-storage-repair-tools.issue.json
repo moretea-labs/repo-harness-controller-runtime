@@ -4,7 +4,7 @@
   "title": "Phase 1 typed runtime storage repair tools",
   "slug": "phase-1-typed-runtime-storage-repair-tools",
   "kind": "feature",
-  "status": "planned",
+  "status": "done",
   "summary": "Implement typed runtime storage/local-jobs repair preview and apply actions for repo-harness self-healing. This phase is scoped only to repo-harness-controller-runtime and must not touch yaozhunshi or other repositories.",
   "goals": [
     "Expose runtime storage repair preview/apply actions with repoId scoping.",
@@ -35,7 +35,7 @@
       "id": "T1",
       "title": "Implement typed runtime storage repair",
       "objective": "Add runtime storage/local-jobs repair preview and apply actions, wire them into MCP runtime tools, update compatibility checks, and add focused tests and docs. Preserve repository scoping and yaozhunshi exclusion.",
-      "status": "ready",
+      "status": "cancelled",
       "dependsOn": [],
       "allowedPaths": [
         "src/runtime/recovery/**",
@@ -61,14 +61,184 @@
       ],
       "risk": "medium",
       "recommendedAgent": "codex",
-      "notes": [],
-      "runIds": [],
+      "notes": [
+        "Accepted RUN-iss-20260706-97aa9d-t1-1783482246905-82e93b8d for asynchronous launch.",
+        "Dispatched RUN-iss-20260706-97aa9d-t1-1783482246905-82e93b8d to codex.",
+        "RUN-iss-20260706-97aa9d-t1-1783482246905-82e93b8d ended as failed; explicit retry is required. Reading additional input from stdin...\n2026-07-08T03:44:12.890600Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when Auth(AuthorizationRequired)",
+        "Explicit retry requested from RUN-iss-20260706-97aa9d-t1-1783482246905-82e93b8d.",
+        "Accepted RUN-iss-20260706-97aa9d-t1-1783482438059-419905f7 for asynchronous launch.",
+        "Dispatched RUN-iss-20260706-97aa9d-t1-1783482438059-419905f7 to codex.",
+        "RUN-iss-20260706-97aa9d-t1-1783482438059-419905f7 ended as failed; explicit retry is required. Reading additional input from stdin...\n2026-07-08T03:47:23.438303Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when Auth(AuthorizationRequired)",
+        "Discard failed Codex run caused by Codex usage limit/AuthRequired before any implementation work.",
+        "Discard retry failed for the same Codex usage limit/AuthRequired before implementation work."
+      ],
+      "runIds": [
+        "RUN-iss-20260706-97aa9d-t1-1783482246905-82e93b8d",
+        "RUN-iss-20260706-97aa9d-t1-1783482438059-419905f7"
+      ],
       "createdAt": "2026-07-06T09:04:19.605Z",
-      "updatedAt": "2026-07-06T09:04:19.605Z",
+      "updatedAt": "2026-07-08T03:47:52.150Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    },
+    {
+      "id": "T2",
+      "title": "Validate typed runtime storage repair tools",
+      "objective": "Validate the already available runtime_storage_repair_preview and runtime_storage_repair_apply MCP tools, record targeted verification evidence, and close the Phase 1 runtime storage repair work without expanding scope.",
+      "status": "done",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src/runtime/recovery/**",
+        "src/runtime/gateway/mcp/**",
+        "tests/runtime/**",
+        "scripts/check-mcp-compatibility.ts",
+        "docs/**"
+      ],
+      "forbiddenPaths": [
+        ".ai/harness/**",
+        "_ops/**",
+        ".git/**"
+      ],
+      "checks": [
+        "package:check:type",
+        "package:check:mcp-compatibility"
+      ],
+      "acceptanceCriteria": [
+        "Preview reports inspected repository and controller local-jobs roots without mutation.",
+        "Apply requires confirm_repair=true and records audit evidence while remaining repo-scoped.",
+        "Safety metadata confirms no cross-repo cleanup and no process kill.",
+        "Targeted package:type and package:mcp-compatibility checks pass."
+      ],
+      "risk": "low",
+      "notes": [
+        "Verification evidence is incomplete or failed: Required named checks or equivalent command evidence are missing or failed.",
+        "Verification evidence passed and low_risk_change policy auto-completed the Task."
+      ],
+      "runIds": [],
+      "createdAt": "2026-07-08T03:48:41.827Z",
+      "updatedAt": "2026-07-08T03:50:05.032Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+      "verification": {
+        "reviewer": "ChatGPT",
+        "checkResults": [
+          {
+            "checkId": "package:check:type",
+            "ok": true,
+            "summary": "Passed with persisted evidence: .ai/harness/checks/controller/latest-package-check-type.json"
+          },
+          {
+            "checkId": "package:check:mcp-compatibility",
+            "ok": true,
+            "summary": "Passed with persisted evidence: .ai/harness/checks/controller/latest-package-check-mcp-compatibility.json"
+          }
+        ],
+        "commandEvidence": [
+          {
+            "command": [
+              "repo-harness3.runtime_storage_repair_preview",
+              "--repo_id",
+              "repo_123b7cf58b6b17b5cbe46a56",
+              "--min_age_minutes",
+              "60",
+              "--max_candidates",
+              "20"
+            ],
+            "ok": true,
+            "exitCode": 0,
+            "stdout": "Preview returned schemaVersion=1, inspected repository and controller local-jobs roots, candidates=[], mutates=false, safety.repoScoped=true, crossRepositoryCleanup=false, processKill=false, deletesSourceFiles=false.",
+            "reportedBy": "ChatGPT",
+            "executedAt": "2026-07-08T03:50:05.029Z",
+            "source": "reported"
+          },
+          {
+            "command": [
+              "repo-harness3.runtime_storage_repair_apply",
+              "--repo_id",
+              "repo_123b7cf58b6b17b5cbe46a56",
+              "--confirm_repair",
+              "false"
+            ],
+            "ok": true,
+            "exitCode": 0,
+            "stdout": "Rejected without mutation with RUNTIME_STORAGE_REPAIR_CONFIRMATION_REQUIRED.",
+            "reportedBy": "ChatGPT",
+            "executedAt": "2026-07-08T03:50:05.029Z",
+            "source": "reported"
+          },
+          {
+            "command": [
+              "repo-harness3.runtime_storage_repair_apply",
+              "--repo_id",
+              "repo_123b7cf58b6b17b5cbe46a56",
+              "--confirm_repair",
+              "true",
+              "--min_age_minutes",
+              "60",
+              "--max_candidates",
+              "20"
+            ],
+            "ok": true,
+            "exitCode": 0,
+            "stdout": "Apply inspected repository and controller local-jobs roots, candidates=[], applied=[], auditPath=.ai/harness/controller/runtime-storage-repair.jsonl, safety.repoScoped=true, crossRepositoryCleanup=false, processKill=false, deletesSourceFiles=false.",
+            "reportedBy": "ChatGPT",
+            "executedAt": "2026-07-08T03:50:05.029Z",
+            "source": "reported"
+          },
+          {
+            "command": [
+              "bun",
+              "run",
+              "check:type"
+            ],
+            "ok": true,
+            "exitCode": 0,
+            "stdout": "package:check:type durable check succeeded after repository revision changed in job EJOB-1783482566422-33bcb4a0.",
+            "reportedBy": "ChatGPT",
+            "executedAt": "2026-07-08T03:50:05.029Z",
+            "source": "reported"
+          },
+          {
+            "command": [
+              "bun",
+              "run",
+              "check:mcp-compatibility"
+            ],
+            "ok": true,
+            "exitCode": 0,
+            "stdout": "package:check:mcp-compatibility durable check succeeded in job EJOB-1783482312986-501ac2c0.",
+            "reportedBy": "ChatGPT",
+            "executedAt": "2026-07-08T03:50:05.029Z",
+            "source": "reported"
+          }
+        ],
+        "acceptanceResults": [
+          {
+            "criterion": "Preview reports inspected repository and controller local-jobs roots without mutation.",
+            "ok": true,
+            "evidence": "runtime_storage_repair_preview returned inspectedRoots for repository and controller local-jobs and mutates=false."
+          },
+          {
+            "criterion": "Apply requires confirm_repair=true and records audit evidence while remaining repo-scoped.",
+            "ok": true,
+            "evidence": "confirm_repair=false was rejected; confirm_repair=true returned auditPath=.ai/harness/controller/runtime-storage-repair.jsonl and repo-scoped safety metadata."
+          },
+          {
+            "criterion": "Safety metadata confirms no cross-repo cleanup and no process kill.",
+            "ok": true,
+            "evidence": "Preview/apply returned safety.crossRepositoryCleanup=false and safety.processKill=false."
+          },
+          {
+            "criterion": "Targeted package:type and package:mcp-compatibility checks pass.",
+            "ok": true,
+            "evidence": "Fresh package:check:type and existing package:check:mcp-compatibility durable jobs both succeeded."
+          }
+        ],
+        "verifiedAt": "2026-07-08T03:50:05.029Z",
+        "autoCompleted": true,
+        "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+      }
     }
   ],
   "createdAt": "2026-07-06T09:04:19.605Z",
-  "updatedAt": "2026-07-06T09:04:19.605Z",
+  "updatedAt": "2026-07-08T03:50:34.000Z",
   "repoId": "repo_123b7cf58b6b17b5cbe46a56"
 }

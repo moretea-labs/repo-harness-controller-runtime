@@ -1,8 +1,9 @@
 ---
 id: "ISS-20260703-D6A261"
 kind: "investigation"
-status: "completed"
-updated_at: "2026-07-03T14:47:05.000Z"
+status: "done"
+updated_at: "2026-07-08T03:39:16.501Z"
+archived_at: "2026-07-08T03:39:16.501Z"
 source: "repo-harness-controller-v8"
 ---
 
@@ -20,10 +21,10 @@ Work directly in the current checkout. Inspect branch history, all dirty files, 
 
 ## Acceptance Criteria
 
-- [x] No existing user changes lost.
-- [x] Dirty files reviewed and committed coherently.
-- [x] Architecture and threat model are concrete and source-aligned.
-- [x] Focused checks pass.
+- [ ] No existing user changes lost.
+- [ ] Dirty files reviewed and committed coherently.
+- [ ] Architecture and threat model are concrete and source-aligned.
+- [ ] Focused checks pass.
 
 ## GitHub
 

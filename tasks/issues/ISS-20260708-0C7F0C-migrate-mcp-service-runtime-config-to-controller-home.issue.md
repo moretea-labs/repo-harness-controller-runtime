@@ -1,8 +1,9 @@
 ---
 id: "ISS-20260708-0C7F0C"
 kind: "governance"
-status: "planned"
-updated_at: "2026-07-08T01:42:04.219Z"
+status: "done"
+updated_at: "2026-07-08T03:16:13.321Z"
+archived_at: "2026-07-08T03:16:13.321Z"
 source: "repo-harness-controller-v8"
 ---
 
@@ -41,7 +42,7 @@ MCP HTTP service-level config, auth tokens, OAuth token store, runtime state, re
 
 ### T1 — Add controllerHome-backed MCP config paths
 
-- Status: `ready`
+- Status: `done`
 - Objective: Add non-breaking helper functions for controllerHome MCP config/token/oauth/runtime paths and fallback readers that check controllerHome first, then legacy repo-local paths.
 - Depends on: none
 - Allowed paths: `src/cli/mcp/auth.ts`, `src/cli/repositories/controller-home.ts`, `tests/**/*.test.ts`
@@ -50,7 +51,7 @@ MCP HTTP service-level config, auth tokens, OAuth token store, runtime state, re
 
 ### T2 — Migrate HTTP transport service config reads
 
-- Status: `ready`
+- Status: `done`
 - Objective: After controllerHome-backed helper functions exist, update src/cli/mcp/transports/http.ts to use controllerHome-backed auth/public-origin/runtime-state paths in controller profile while keeping legacy repoRoot fallback.
 - Depends on: none
 - Allowed paths: `src/cli/mcp/transports/http.ts`, `tests/**/*.test.ts`
@@ -59,7 +60,7 @@ MCP HTTP service-level config, auth tokens, OAuth token store, runtime state, re
 
 ### T3 — Update setup restart keepalive config flow
 
-- Status: `ready`
+- Status: `done`
 - Objective: After controllerHome-backed helper functions exist, update MCP setup, restart, and keepalive code to read/write service-level config from controllerHome in controller profile and document migration/fallback behavior.
 - Depends on: none
 - Allowed paths: `src/cli/mcp/setup.ts`, `src/cli/mcp/restart.ts`, `src/cli/mcp/keepalive.ts`, `docs/architecture/current/controller-repository-decoupling.md`, `tests/**/*.test.ts`

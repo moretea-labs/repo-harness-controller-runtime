@@ -4,7 +4,7 @@
   "title": "Migrate MCP service runtime config to controller home",
   "slug": "migrate-mcp-service-runtime-config-to-controller-home",
   "kind": "governance",
-  "status": "planned",
+  "status": "done",
   "summary": "MCP HTTP service-level config, auth tokens, OAuth token store, runtime state, restart/keepalive setup, and public-origin resolution still rely on repo-local .repo-harness/mcp.* files. This blocks fully repository-decoupled controller startup because service identity and selected repository identity remain partially coupled.",
   "goals": [
     "Introduce controllerHome-backed MCP service config/runtime paths while preserving repo-local legacy fallback.",
@@ -32,7 +32,7 @@
       "id": "T1",
       "title": "Add controllerHome-backed MCP config paths",
       "objective": "Add non-breaking helper functions for controllerHome MCP config/token/oauth/runtime paths and fallback readers that check controllerHome first, then legacy repo-local paths.",
-      "status": "ready",
+      "status": "done",
       "dependsOn": [],
       "allowedPaths": [
         "src/cli/mcp/auth.ts",
@@ -48,17 +48,19 @@
         "Fallback behavior is explicit and unit-covered or minimally verified."
       ],
       "risk": "medium",
-      "notes": [],
+      "notes": [
+        "Completed by bounded direct edit session EDIT-1783475246918-6aca4e95. Implemented controllerHome-backed MCP path helpers and legacy repo-local fallback readers. Typecheck passed. Code commit: 981077b."
+      ],
       "runIds": [],
       "createdAt": "2026-07-08T01:42:04.219Z",
-      "updatedAt": "2026-07-08T01:42:04.219Z",
+      "updatedAt": "2026-07-08T02:36:28.085Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     },
     {
       "id": "T2",
       "title": "Migrate HTTP transport service config reads",
       "objective": "After controllerHome-backed helper functions exist, update src/cli/mcp/transports/http.ts to use controllerHome-backed auth/public-origin/runtime-state paths in controller profile while keeping legacy repoRoot fallback.",
-      "status": "ready",
+      "status": "done",
       "dependsOn": [],
       "allowedPaths": [
         "src/cli/mcp/transports/http.ts",
@@ -73,17 +75,19 @@
         "Legacy repo-local config still resolves when controllerHome config is absent."
       ],
       "risk": "medium",
-      "notes": [],
+      "notes": [
+        "Completed by bounded direct edit session EDIT-1783475246918-6aca4e95. HTTP transport now reads controllerHome-backed service config first with repo-local fallback; controller /health no longer depends on startup repoRoot repoId. Typecheck passed. Code commit: 981077b."
+      ],
       "runIds": [],
       "createdAt": "2026-07-08T01:42:04.219Z",
-      "updatedAt": "2026-07-08T01:42:04.219Z",
+      "updatedAt": "2026-07-08T02:36:37.455Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     },
     {
       "id": "T3",
       "title": "Update setup restart keepalive config flow",
       "objective": "After controllerHome-backed helper functions exist, update MCP setup, restart, and keepalive code to read/write service-level config from controllerHome in controller profile and document migration/fallback behavior.",
-      "status": "ready",
+      "status": "done",
       "dependsOn": [],
       "allowedPaths": [
         "src/cli/mcp/setup.ts",
@@ -101,14 +105,17 @@
         "Keepalive/restart use the same service-level config root as HTTP transport."
       ],
       "risk": "medium",
-      "notes": [],
+      "notes": [
+        "Completed by bounded direct edit session EDIT-1783475246918-6aca4e95. setup/restart/keepalive/doctor now use controllerHome-backed service config/runtime in controller profile; docs updated. Typecheck passed. Commits: 981077b and 0b13daf."
+      ],
       "runIds": [],
       "createdAt": "2026-07-08T01:42:04.219Z",
-      "updatedAt": "2026-07-08T01:42:04.219Z",
+      "updatedAt": "2026-07-08T02:36:40.980Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     }
   ],
   "createdAt": "2026-07-08T01:42:04.219Z",
-  "updatedAt": "2026-07-08T01:42:04.219Z",
-  "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+  "updatedAt": "2026-07-08T03:16:13.321Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+  "archivedAt": "2026-07-08T03:16:13.321Z"
 }
