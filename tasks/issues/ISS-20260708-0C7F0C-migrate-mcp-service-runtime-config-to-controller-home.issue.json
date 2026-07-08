@@ -51,7 +51,8 @@
       "notes": [],
       "runIds": [],
       "createdAt": "2026-07-08T01:42:04.219Z",
-      "updatedAt": "2026-07-08T01:42:04.219Z"
+      "updatedAt": "2026-07-08T01:42:04.219Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     },
     {
       "id": "T2",
@@ -75,7 +76,8 @@
       "notes": [],
       "runIds": [],
       "createdAt": "2026-07-08T01:42:04.219Z",
-      "updatedAt": "2026-07-08T01:42:04.219Z"
+      "updatedAt": "2026-07-08T01:42:04.219Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     },
     {
       "id": "T3",
@@ -102,9 +104,11 @@
       "notes": [],
       "runIds": [],
       "createdAt": "2026-07-08T01:42:04.219Z",
-      "updatedAt": "2026-07-08T01:42:04.219Z"
+      "updatedAt": "2026-07-08T01:42:04.219Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     }
   ],
   "createdAt": "2026-07-08T01:42:04.219Z",
-  "updatedAt": "2026-07-08T01:42:04.219Z"
+  "updatedAt": "2026-07-08T01:42:04.219Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56"
 }
