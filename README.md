@@ -210,7 +210,7 @@ REPO_HARNESS_CONTROLLER_EXTERNAL_TUNNEL=ngrok scripts/controller-runtime.sh star
 4. 新建聊天，从输入框附近的工具菜单添加这个 Connector。
 5. 在允许写入前，先测试仓库读取、`controller_capabilities` 和 `project_snapshot`。
 
-当前接入流程、权限建议、隧道方案和故障排查见[完整使用指南](docs/public-usage-guide.zh-CN.md#连接-chatgpt)。
+公开使用说明以本 README 为准；英文用户切换到 [README.en.md](README.en.md)。
 
 ## 在 ChatGPT Project 中固定默认仓库
 
@@ -228,20 +228,14 @@ REPO_HARNESS_CONTROLLER_EXTERNAL_TUNNEL=ngrok scripts/controller-runtime.sh star
 
 Project instructions 是长期会话默认值，不是服务端权限边界。启用多个仓库时，Controller 仍要求工具调用显式携带 `repoId`，避免误改其他仓库。这是安全设计，不应取消。
 
-## 文档
+## 文档治理
 
-- [当前 Controller Runtime 架构](docs/architecture/current/README.md)
-- [已验证实现状态与兼容边界](docs/architecture/current/implementation-status.md)
-- [Controller 与仓库解耦计划](docs/architecture/current/controller-repository-decoupling.md)
-- [目标架构迁移报告](ARCHITECTURE_MIGRATION_REPORT.md)
-- [性能与 502 故障排查](docs/operations/controller-performance-and-502.md)
-- [完整使用指南（简体中文）](docs/public-usage-guide.zh-CN.md)
-- [Complete usage guide](docs/public-usage-guide.md)
-- [ChatGPT MCP 接入参考](docs/repo-harness-chatgpt-mcp-setup.md)
-- [ChatGPT Controller 工作流](docs/repo-harness-chatgpt-controller.md)
-- [本地执行桥](docs/repo-harness-local-execution-bridge.md)
-- [V8 Controller 设计](docs/architecture/history/repo-harness-chatgpt-bridge-v8.md)
-- [变更日志](docs/CHANGELOG.md)
+公开使用文档只保留：
+
+- [简体中文 README](README.md)
+- [English README](README.en.md)
+
+`docs/` 目录仅保留架构、历史设计、运维和内部参考材料，不作为普通用户入口。
 
 ## 安全边界
 

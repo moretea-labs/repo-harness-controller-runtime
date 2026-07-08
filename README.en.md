@@ -27,7 +27,7 @@ The project is designed for real repositories rather than disposable chat sessio
 - **Agents are optional workers.** Codex, Claude, or GitHub Copilot can be delegated larger implementation work, but they are not required for every change.
 - **Repository state survives conversations.** Issues, Tasks, Runs, verification evidence, and handoffs are file-backed.
 - **Multiple repositories are explicit.** Each registered repository receives a stable `repoId`; ambiguous multi-repository operations must name the target repository.
-- **Local runtime, public HTTPS endpoint.** The MCP service stays on loopback and can be exposed through Cloudflare Tunnel or an external tunnel such as ngrok.
+- **Local runtime, public HTTPS endpoint.** The MCP service stays on loopback; use Tailscale Funnel or Cloudflare named tunnel for a stable public HTTPS `/mcp` endpoint instead of temporary tunnel URLs.
 
 ## What it includes
 
@@ -50,7 +50,7 @@ The project is designed for real repositories rather than disposable chat sessio
 - Git
 - Bun 1.0 or newer
 - macOS or Linux for the primary local workflow
-- `cloudflared` only when using the built-in Cloudflare tunnel modes
+- Recommended stable public endpoint: Tailscale CLI / macOS app, or your own domain with `cloudflared`
 
 ### 2. Run from source
 
@@ -93,17 +93,58 @@ Keep the returned `repoId`. It is the stable execution identity used by ChatGPT 
 
 ### 5. Start the ChatGPT Controller endpoint
 
-For a temporary Cloudflare URL:
+Register the repository and generate the ChatGPT MCP config:
 
 ```bash
-cd /path/to/your-project
-repo-harness mcp setup chatgpt --repo .
-repo-harness mcp keepalive --repo . --profile controller \
-  --enable-dev-runner --dev-runner-agents codex,claude \
-  --tunnel quick
+repo-harness repo register /path/to/your-project
+repo-harness mcp setup chatgpt --repo /path/to/your-project
 ```
 
-For a stable domain, use a named Cloudflare Tunnel. For ngrok, start the MCP server with `--tunnel none` and forward the local MCP port externally. Both procedures are documented in the complete guide.
+By default, MCP only listens on loopback:
+
+```text
+http://127.0.0.1:8765/mcp
+```
+
+ChatGPT needs a public HTTPS URL ending in `/mcp`. Recommended options:
+
+1. **Tailscale Funnel**: no custom domain or DNS; best for personal long-running use.
+2. **Cloudflare named tunnel + your own domain**: best for standard long-running deployments.
+3. **ngrok / Cloudflare quick tunnel**: suitable for temporary testing, not long-running ChatGPT Project connectors.
+
+Tailscale Funnel example:
+
+```bash
+# First-time setup
+brew install --cask tailscale
+tailscale up
+
+# Publish local MCP through HTTPS Funnel
+tailscale funnel --bg 8765
+tailscale funnel status
+```
+
+If the output looks like this:
+
+```text
+https://your-machine.your-tailnet.ts.net (Funnel on)
+|-- / proxy http://127.0.0.1:8765
+```
+
+use this ChatGPT Connector URL:
+
+```text
+https://your-machine.your-tailnet.ts.net/mcp
+```
+
+Then start repo-harness with the same endpoint:
+
+```bash
+repo-harness mcp keepalive --repo /path/to/your-project --profile controller \
+  --enable-dev-runner --dev-runner-agents codex,claude \
+  --tunnel tailscale \
+  --public-endpoint https://your-machine.your-tailnet.ts.net/mcp
+```
 
 ### 6. One-command local lifecycle on macOS
 
@@ -126,15 +167,23 @@ bash scripts/controller-runtime.sh status --repo .
 
 `start` performs bounded preflight checks for Bun, repository root resolution, package version, tracked PID state, MCP and Local Controller ports, controller home, and detached repo-harness orphan processes before launching the daemon, MCP Gateway, and Local Bridge. Logs default to `.ai/local/logs/repo-harness-controller.log`.
 
+`controller-runtime.sh` no longer starts the legacy ngrok rotation by default, which prevents old public endpoints from conflicting with the current Tailscale or Cloudflare endpoint. Enable the legacy ngrok rotation only when explicitly needed:
+
+```bash
+REPO_HARNESS_CONTROLLER_EXTERNAL_TUNNEL=ngrok scripts/controller-runtime.sh start
+```
+
+Stable public endpoints should be stored in the controllerHome-backed MCP service config; legacy `.repo-harness/mcp.local.json` is only a fallback.
+
 ## Connect ChatGPT
 
-1. Make the MCP endpoint reachable over HTTPS, ending in `/mcp`.
+1. Make the MCP endpoint reachable over HTTPS, ending in `/mcp`; for personal long-running use, prefer Tailscale Funnel, for example `https://your-machine.your-tailnet.ts.net/mcp`.
 2. In ChatGPT, enable developer mode in **Settings → Apps & Connectors → Advanced settings**.
 3. Create a connector and enter the public MCP URL, for example `https://mcp.example.com/mcp`.
 4. Start a new chat and add the connector from the composer tools menu.
 5. Before allowing writes, test repository inspection and `project_snapshot` first.
 
-See the [complete usage guide](docs/public-usage-guide.md#connect-chatgpt) for the current setup flow, permission recommendations, tunnel options, and troubleshooting.
+This README is the public usage guide. Switch to [README.md](README.md) for Simplified Chinese.
 
 ## Make one repository the default in a ChatGPT Project
 
@@ -152,19 +201,14 @@ Prefer repository search plus Direct Edit for bounded changes. Do not start an A
 
 Project instructions are a durable conversation default, not a server-side authorization boundary. The controller still requires an explicit `repoId` when multiple repositories are enabled. This is intentional protection against changing the wrong repository.
 
-## Documentation
+## Documentation policy
 
-- [Current Controller Runtime architecture](docs/architecture/current/README.md)
-- [Verified implementation status and compatibility boundary](docs/architecture/current/implementation-status.md)
-- [Target architecture migration report](ARCHITECTURE_MIGRATION_REPORT.md)
-- [Performance and 502 troubleshooting](docs/operations/controller-performance-and-502.md)
-- [Complete usage guide](docs/public-usage-guide.md)
-- [完整使用指南（简体中文）](docs/public-usage-guide.zh-CN.md)
-- [ChatGPT MCP setup reference](docs/repo-harness-chatgpt-mcp-setup.md)
-- [ChatGPT Controller workflow](docs/repo-harness-chatgpt-controller.md)
-- [Local execution bridge](docs/repo-harness-local-execution-bridge.md)
-- [V8 Controller design](docs/repo-harness-chatgpt-bridge-v8.md)
-- [Changelog](docs/CHANGELOG.md)
+Public usage documentation is limited to:
+
+- [English README](README.en.md)
+- [简体中文 README](README.md)
+
+The `docs/` directory remains for architecture notes, historical design records, operations notes, and internal references. It is not the normal user entry point.
 
 ## Security model
 
