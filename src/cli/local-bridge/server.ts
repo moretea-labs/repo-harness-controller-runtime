@@ -1770,6 +1770,27 @@ export async function startLocalBridgeServer(
       response.status(400).json({ error: errorMessage(error) });
     }
   });
+  app.get("/api/recipes/:recipeId/prepare", (request, response) => {
+    try {
+      const repoRoot = requestRepositoryRoot(request, options, controllerHome);
+      const ledger = buildControllerTaskLedgerProjection(repoRoot);
+      const plan = buildControllerOperationalPlan(repoRoot, ledger);
+      const recipe = plan.recipeSystem.recipes.find((entry) => entry.id === request.params.recipeId);
+      if (!recipe) throw new Error(`recipe not found: ${request.params.recipeId}`);
+      response.json({
+        recipe,
+        status: plan.status,
+        recommendedWorker: plan.workerAbstraction.recommendedWorker,
+        diffProjection: plan.diffProjection,
+        validationStrategy: plan.validationStrategy,
+        taskRecovery: plan.taskRecovery,
+        next: recipe.steps.map((step, index) => ({ step, index: index + 1, done: false })),
+      });
+    } catch (error) {
+      response.status(404).json({ error: errorMessage(error) });
+    }
+  });
+
   app.post("/api/checks/run", (request, response) => {
     try {
       const repoRoot = requestRepositoryRoot(request, options, controllerHome);
