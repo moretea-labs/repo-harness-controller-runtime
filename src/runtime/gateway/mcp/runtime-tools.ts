@@ -1600,6 +1600,19 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             }) as unknown as Record<string, unknown>;
             break;
           }
+          case 'recovery.cleanup_apply': {
+            payload = applyRuntimeCleanup(repository.canonicalRoot, {
+              minAgeMinutes: typeof args.min_age_minutes === 'number' ? args.min_age_minutes : undefined,
+              includeTempDirs: true,
+              includeTerminalLocalJobs: true,
+              includeLegacyRuns: true,
+              includeHistoricalAttention: true,
+              maxCandidates: typeof args.max_candidates === 'number' ? args.max_candidates : undefined,
+              confirmCleanup: true,
+            }) as unknown as Record<string, unknown>;
+            affectedPaths = ['.ai/harness/local-jobs-archive', '.ai/harness/jobs-archive', '.ai/harness/controller/acknowledged-attention.jsonl'];
+            break;
+          }
           case 'recovery.reconcile_jobs':
           case 'recovery.local_jobs_reconcile': {
             const maintenance = applyRuntimeMaintenance(repository, ctx.controllerHome, {

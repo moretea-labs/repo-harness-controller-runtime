@@ -171,6 +171,8 @@ describe('authorized recovery actions', () => {
   it('requires explicit authorization for mutating recovery', () => {
     expect(() => assertRecoveryAuthorized(RECOVERY_ACTIONS.rebuildProjection)).toThrow('RECOVERY_AUTHORIZATION_REQUIRED');
     expect(() => assertRecoveryAuthorized(RECOVERY_ACTIONS.rebuildProjection, RECOVERY_ACTIONS.rebuildProjection.id)).not.toThrow();
+    expect(() => assertRecoveryAuthorized(RECOVERY_ACTIONS.cleanupApply)).toThrow('RECOVERY_AUTHORIZATION_REQUIRED');
+    expect(() => assertRecoveryAuthorized(RECOVERY_ACTIONS.cleanupApply, RECOVERY_ACTIONS.cleanupApply.id)).not.toThrow();
   });
 
   it('builds audit evidence records', () => {

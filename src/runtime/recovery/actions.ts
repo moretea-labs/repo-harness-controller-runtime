@@ -81,6 +81,16 @@ export const RECOVERY_ACTIONS = {
     localOnly: true,
     boundedTo: ['repo_harness_runtime_storage'],
   },
+  cleanupApply: {
+    id: 'recovery.cleanup_apply',
+    title: 'Apply runtime cleanup',
+    description: 'Apply safe repo-harness runtime cleanup candidates after explicit authorization. Does not kill processes or touch source files.',
+    class: 'local_recoverable',
+    risk: 'medium',
+    confirmation: 'authorization',
+    localOnly: true,
+    boundedTo: ['repo_harness_runtime_storage', 'repo_harness_temp_dirs'],
+  },
   restartLocalBridge: {
     id: 'recovery.restart_local_bridge',
     title: 'Restart local bridge',
