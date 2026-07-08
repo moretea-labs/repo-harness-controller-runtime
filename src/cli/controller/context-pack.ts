@@ -6,7 +6,7 @@ import { redactMcpText } from "../mcp/redaction";
 import { projectBoard } from "./issue-store";
 import { buildControllerTaskLedgerProjection, type TaskLedgerTaskProjection } from "./task-ledger";
 
-const CONTEXT_PACK_SCHEMA_VERSION = 1;
+const CONTEXT_PACK_SCHEMA_VERSION = 2;
 const DEFAULT_MAX_FILES = 8;
 const DEFAULT_MAX_SNIPPETS = 20;
 const DEFAULT_SNIPPET_CONTEXT_BEFORE = 12;
