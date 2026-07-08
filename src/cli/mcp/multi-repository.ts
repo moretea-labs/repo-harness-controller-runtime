@@ -1,4 +1,4 @@
-import { loadMcpLocalConfig } from './auth';
+import { loadMcpLocalConfig, loadMcpServiceLocalConfig } from './auth';
 import { getMcpPolicy, parseMcpProfile } from './policy';
 import { buildMcpToolDefinitions, callMcpTool, type CallToolResult, type McpToolContext, type McpToolDefinition } from './tools';
 import { DEFAULT_AGENT_TIMEOUT_MS, MAX_AGENT_TIMEOUT_MS, normalizeAgentTimeoutMs } from '../controller/runtime-config';
@@ -90,7 +90,9 @@ function parseAgentList(value: unknown): McpAgentRunnerName[] {
 
 export function runtimePolicy(repoRoot: string, opts: McpServerOptions) {
   const profile = parseMcpProfile(opts.profile ?? 'controller');
-  const config = loadMcpLocalConfig(repoRoot);
+  const config = profile === 'controller' && opts.controllerHome
+    ? loadMcpServiceLocalConfig(opts.controllerHome, repoRoot)
+    : loadMcpLocalConfig(repoRoot);
   const envDevRunner = parseBooleanSetting(process.env.REPO_HARNESS_MCP_DEV_RUNNER);
   const configuredDevRunner = envDevRunner ?? config?.devMode?.agentRunner === true;
   const devAgentRunner = opts.enableDevRunner === true || configuredDevRunner;
@@ -223,8 +225,10 @@ export function createMcpToolContext(opts: McpServerOptions): MultiRepositoryMcp
     ? registerRepository({ path: opts.repo, controllerHome })
     : undefined;
   const policyRoot = explicitRepository?.canonicalRoot ?? controllerHome;
-  const policy = runtimePolicy(policyRoot, opts);
-  const config = loadMcpLocalConfig(policyRoot);
+  const policy = runtimePolicy(policyRoot, { ...opts, controllerHome });
+  const config = policy.profile === 'controller'
+    ? loadMcpServiceLocalConfig(controllerHome, explicitRepository?.canonicalRoot)
+    : loadMcpLocalConfig(policyRoot);
   const toolset = parseMcpToolset(
     opts.toolset ?? process.env.REPO_HARNESS_MCP_TOOLSET ?? config?.toolset,
     policy.profile,

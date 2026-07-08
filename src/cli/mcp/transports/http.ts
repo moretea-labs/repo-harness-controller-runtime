@@ -9,17 +9,22 @@ import type { OAuthClientInformationFull } from '@modelcontextprotocol/sdk/share
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { buildMultiRepositoryToolDefinitions, createMcpToolContext, createRepoHarnessMcpServerFromContext, type McpServerOptions } from '../server';
 import {
-  loadMcpLocalConfig,
+  loadMcpServiceLocalConfig,
   mcpOAuthTokenStorePath,
+  mcpServiceOAuthTokenStorePath,
   parseMcpHttpAuthMode,
   readMcpBearerToken,
   readMcpOAuthPassphrase,
+  readMcpServiceBearerToken,
+  readMcpServiceOAuthPassphrase,
+  type McpLocalConfig,
   type McpHttpAuthMode,
 } from '../auth';
 import { createMcpOAuthProvider, McpOAuthTokenStore } from '../oauth';
 import { resolveMcpRepoRoot } from '../repo';
 import { buildMcpToolDefinitions, controllerExpectedToolNames } from '../tools';
 import { repositoryToolDefinitions } from '../repository-tools';
+import { resolveControllerHome } from '../../repositories/controller-home';
 import { injectDurableCommandFields } from '../../../runtime/gateway/mcp/router';
 import { exposedControllerToolDefinitions } from '../toolset';
 import { ensureControllerDaemon, readControllerDaemonStatus } from '../../../runtime/control-plane/daemon-client';
@@ -126,16 +131,16 @@ export function sendMcpRequestError(res: Response, error: unknown): void {
   res.status(response.status).json(response.body);
 }
 
-function getConfiguredPublicOrigin(repoRoot: string): string | undefined {
+function getConfiguredPublicOrigin(config: McpLocalConfig | null): string | undefined {
   const configured = process.env.REPO_HARNESS_MCP_PUBLIC_ORIGIN?.trim();
   if (configured) {
     try {
       return new URL(configured).origin;
     } catch (_error) {
-      // Fall through to repo-local config.
+      // Fall through to service or legacy config.
     }
   }
-  const endpoint = loadMcpLocalConfig(repoRoot)?.chatgpt?.endpoint?.trim();
+  const endpoint = config?.chatgpt?.endpoint?.trim();
   if (!endpoint) return undefined;
   try {
     return new URL(endpoint).origin;
@@ -511,16 +516,26 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   const host = opts.host ?? '127.0.0.1';
   const port = opts.port ?? 8765;
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? '.');
-  const authMode = parseMcpHttpAuthMode(opts.auth);
-  const authToken = opts.authToken ?? readMcpBearerToken(repoRoot);
-  const oauthPassphrase = authMode === 'oauth' ? readMcpOAuthPassphrase(repoRoot) : null;
-  const tokenStore = authMode === 'oauth' ? new McpOAuthTokenStore(mcpOAuthTokenStorePath(repoRoot)) : null;
+  const controllerHome = resolveControllerHome(opts.controllerHome);
+  const serviceConfig = loadMcpServiceLocalConfig(controllerHome, repoRoot);
+  const profile = opts.profile ?? serviceConfig?.profile ?? 'controller';
+  const usesControllerServiceConfig = profile === 'controller';
+  const authMode = parseMcpHttpAuthMode(opts.auth ?? (usesControllerServiceConfig ? serviceConfig?.auth?.mode : undefined));
+  const authToken = opts.authToken ?? (usesControllerServiceConfig
+    ? readMcpServiceBearerToken(controllerHome, repoRoot)
+    : readMcpBearerToken(repoRoot));
+  const oauthPassphrase = authMode === 'oauth'
+    ? (usesControllerServiceConfig ? readMcpServiceOAuthPassphrase(controllerHome, repoRoot) : readMcpOAuthPassphrase(repoRoot))
+    : null;
+  const tokenStore = authMode === 'oauth'
+    ? new McpOAuthTokenStore(usesControllerServiceConfig ? mcpServiceOAuthTokenStorePath(controllerHome, repoRoot) : mcpOAuthTokenStorePath(repoRoot))
+    : null;
   tokenStore?.load();
   const oauthProvider = tokenStore ? createMcpOAuthProvider(tokenStore) : null;
-  const configuredPublicOrigin = getConfiguredPublicOrigin(repoRoot);
+  const configuredPublicOrigin = getConfiguredPublicOrigin(usesControllerServiceConfig ? serviceConfig : null);
   const transports = new Map<string, ManagedTransport>();
   const runtimeStats: McpRuntimeStats = { initializing: 0, activePosts: 0, rejectedOverload: 0 };
-  const toolContext = createMcpToolContext({ ...opts, repo: repoRoot });
+  const toolContext = createMcpToolContext({ ...opts, repo: repoRoot, controllerHome, profile });
   const runtimeControllerHome = 'controllerHome' in toolContext ? toolContext.controllerHome : undefined;
   if (runtimeControllerHome) ensureControllerDaemon(runtimeControllerHome);
   const compatibilityToolDefinitions = buildMcpToolDefinitions(toolContext.policy, { enableChatgptBrowser: opts.enableChatgptBrowser === true });
@@ -540,7 +555,7 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   const runtimeToolSurfaceFingerprint = toolContext.policy.profile === 'controller'
     ? controllerToolSurfaceFingerprint(runtimeToolNames)
     : undefined;
-  const repoId = repositoryIdentity(repoRoot);
+  const repoId = toolContext.policy.profile === 'controller' ? undefined : repositoryIdentity(repoRoot);
   const startedAt = new Date().toISOString();
   const app = express();
   app.set('trust proxy', 1);
@@ -565,7 +580,7 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
       toolset: 'controllerHome' in toolContext ? toolContext.toolset : 'full',
       toolCount: toolDefinitions.length,
       compatibilityToolCount: compatibilityToolDefinitions.length,
-      repoId,
+      ...(repoId ? { repoId } : {}),
       startedAt,
       runner: {
         enabled: toolContext.policy.execution.agentRunner,

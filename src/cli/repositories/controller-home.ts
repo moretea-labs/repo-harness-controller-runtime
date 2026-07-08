@@ -13,7 +13,7 @@ export function resolveControllerHome(explicit?: string): string {
 
 export function ensureControllerHome(explicit?: string): string {
   const home = resolveControllerHome(explicit);
-  for (const child of ['', 'repositories', 'locks', 'indexes', 'audit']) {
+  for (const child of ['', 'repositories', 'locks', 'indexes', 'audit', 'mcp']) {
     mkdirSync(join(home, child), { recursive: true });
   }
   return home;

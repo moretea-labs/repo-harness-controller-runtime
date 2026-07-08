@@ -3,10 +3,10 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync }
 import { dirname, join, relative, resolve } from 'path';
 import { runProcess } from '../../effects/process-runner';
 import {
-  loadMcpLocalConfig,
-  loadMcpRuntimeState,
-  mcpOAuthPath,
-  mcpTokenPath,
+  loadMcpServiceLocalConfig,
+  loadMcpServiceRuntimeState,
+  mcpControllerHomeOAuthPath,
+  mcpControllerHomeTokenPath,
   type McpRuntimeState,
 } from './auth';
 import {
@@ -17,6 +17,7 @@ import {
 import { resolveMcpRepoRoot } from './repo';
 import { runMcpDoctor, runMcpSetupChatgpt, runMcpSetupCodex, type McpSetupResult } from './setup';
 import { CONTROLLER_TOOL_SURFACE } from '../controller/runtime-config';
+import { ensureControllerHome } from '../repositories/controller-home';
 import { getGitHubPluginStatus, loadGitHubPluginConfig, saveGitHubPluginConfig } from '../github/plugin';
 
 const LOCAL_HEALTH_TIMEOUT_MS = 4_000;
@@ -307,9 +308,10 @@ function resolveLogPaths(repoRoot: string, explicitLogFile?: string): { stdoutPa
 }
 
 function resolveRestartConfig(repoRoot: string, explicitLogFile?: string): ResolvedMcpRestartConfig {
+  const controllerHome = ensureControllerHome();
   const doctor = parseDoctorReport(runMcpDoctor({ repo: repoRoot, json: true }));
-  const localConfig = loadMcpLocalConfig(repoRoot);
-  const runtime = loadMcpRuntimeState(repoRoot);
+  const localConfig = loadMcpServiceLocalConfig(controllerHome, repoRoot);
+  const runtime = loadMcpServiceRuntimeState(controllerHome, repoRoot);
   const publicEndpoint = normalizeKeepalivePublicEndpoint(localConfig?.chatgpt?.endpoint);
   const tunnelMode = inferMcpTunnelMode(
     runtime?.tunnelMode,
@@ -343,8 +345,8 @@ function resolveRestartConfig(repoRoot: string, explicitLogFile?: string): Resol
     localUiAutoOpen: localConfig?.localController?.autoOpen ?? false,
     tunnelMode,
     tunnelName: runtime?.tunnel?.name,
-    oauthFile: localConfig?.auth?.oauthFile ?? '.repo-harness/mcp.oauth.json',
-    tokenFile: localConfig?.auth?.tokenFile ?? '.repo-harness/mcp.tokens.json',
+    oauthFile: relative(repoRoot, mcpControllerHomeOAuthPath(controllerHome)),
+    tokenFile: relative(repoRoot, mcpControllerHomeTokenPath(controllerHome)),
     stdoutLogPath: logs.stdoutPath,
     stderrLogPath: logs.stderrPath,
   };
@@ -746,7 +748,8 @@ function configureGitHubPlugin(
 
 export async function runMcpRestart(opts: McpRestartOptions): Promise<McpSetupResult> {
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? '.');
-  const runtimeBefore = loadMcpRuntimeState(repoRoot);
+  const controllerHome = ensureControllerHome();
+  const runtimeBefore = loadMcpServiceRuntimeState(controllerHome, repoRoot);
   const launchAgents = findRepoLaunchAgents(repoRoot);
 
   const chatgptSetup = runMcpSetupChatgpt({ repo: repoRoot });

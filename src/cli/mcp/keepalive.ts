@@ -4,8 +4,12 @@ import { resolve } from 'path';
 import {
   loadMcpLocalConfig,
   loadMcpRuntimeState,
+  loadMcpServiceLocalConfig,
+  loadMcpServiceRuntimeState,
+  mcpControllerHomeRuntimeStatePath,
   mcpRuntimeStatePath,
   writeMcpRuntimeState,
+  writeMcpServiceRuntimeState,
   type McpRuntimeState,
   type McpRuntimeTunnelMode,
 } from './auth';
@@ -13,6 +17,7 @@ import type { McpServerOptions } from './server';
 import { loadLocalBridgeConfig } from '../local-bridge/job-store';
 import { startLocalBridgeServer, type LocalBridgeServerHandle } from '../local-bridge/server';
 import { runtimePolicy } from './multi-repository';
+import { ensureControllerHome } from '../repositories/controller-home';
 import { resolveMcpRepoRoot } from './repo';
 import {
   CONTROLLER_SCHEMA_VERSION,
@@ -273,12 +278,15 @@ function attachLineLogging(
 
 export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<void> {
   const repoRoot = resolveMcpRepoRoot(rawOpts.repo ?? '.');
-  const localConfig = loadMcpLocalConfig(repoRoot);
+  const controllerHome = ensureControllerHome(rawOpts.controllerHome);
+  const serviceConfig = loadMcpServiceLocalConfig(controllerHome, repoRoot);
+  const profile = rawOpts.profile ?? serviceConfig?.profile ?? 'controller';
+  const localConfig = profile === 'controller' ? serviceConfig : loadMcpLocalConfig(repoRoot);
   const host = rawOpts.host ?? localConfig?.server?.host ?? '127.0.0.1';
   const port = rawOpts.port ?? localConfig?.server?.port ?? 8765;
-  const profile = rawOpts.profile ?? localConfig?.profile ?? 'controller';
   const toolset = parseMcpToolset(rawOpts.toolset ?? localConfig?.toolset ?? 'core', profile);
   const policy = runtimePolicy(repoRoot, {
+    controllerHome,
     profile,
     toolset,
     enableDevRunner: rawOpts.enableDevRunner,
@@ -303,8 +311,10 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
   const expectedRuntimeToolSurfaceFingerprint = profile === 'controller'
     ? controllerToolSurfaceFingerprint(expectedRuntimeToolNames)
     : undefined;
-  const expectedRepoId = repositoryIdentity(repoRoot);
-  const previousRuntime = loadMcpRuntimeState(repoRoot);
+  const expectedRepoId = profile === 'controller' ? undefined : repositoryIdentity(repoRoot);
+  const previousRuntime = profile === 'controller'
+    ? loadMcpServiceRuntimeState(controllerHome, repoRoot)
+    : loadMcpRuntimeState(repoRoot);
   const existingHealth = await jsonHealth(localHealthUrl(host, port));
   if (existingHealth?.status === 'ok') {
     const existingMatches = existingHealth.toolSurface === expectedToolSurface
@@ -314,7 +324,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
       && (expectedRuntimeToolSurfaceFingerprint === undefined || existingHealth.runtimeToolSurfaceFingerprint === expectedRuntimeToolSurfaceFingerprint)
       && existingHealth.toolset === toolset
       && existingHealth.profile === profile
-      && existingHealth.repoId === expectedRepoId;
+      && (expectedRepoId === undefined || existingHealth.repoId === expectedRepoId);
     const previousPid = previousRuntime?.server.pid;
     if (isPidAlive(previousPid) && existingHealth.server === 'repo-harness-mcp') {
       console.error(`[repo-harness mcp keepalive] Replacing previous repo-harness MCP process ${previousPid}.`);
@@ -402,7 +412,11 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
 
   const persistRuntime = (): void => {
     runtime.updatedAt = nowIso();
-    writeMcpRuntimeState(repoRoot, runtime);
+    if (profile === 'controller') {
+      writeMcpServiceRuntimeState(controllerHome, runtime);
+    } else {
+      writeMcpRuntimeState(repoRoot, runtime);
+    }
   };
 
   const recordError = (
@@ -438,7 +452,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
         expectedRuntimeToolSurfaceFingerprint === undefined || localHealth.runtimeToolSurfaceFingerprint === expectedRuntimeToolSurfaceFingerprint ? null : `runtime fingerprint ${String(localHealth.runtimeToolSurfaceFingerprint ?? 'missing')} != ${expectedRuntimeToolSurfaceFingerprint}`,
         localHealth.toolset === toolset ? null : `toolset ${String(localHealth.toolset ?? 'missing')} != ${toolset}`,
         localHealth.profile === profile ? null : `profile ${String(localHealth.profile ?? 'missing')} != ${profile}`,
-        localHealth.repoId === expectedRepoId ? null : `repository identity ${String(localHealth.repoId ?? 'missing')} != ${expectedRepoId}`,
+        expectedRepoId === undefined || localHealth.repoId === expectedRepoId ? null : `repository identity ${String(localHealth.repoId ?? 'missing')} != ${expectedRepoId}`,
       ].filter(Boolean).join('; ')
       : '';
     runtime.server.healthy = localHealth?.status === 'ok' && mismatch.length === 0;
@@ -523,7 +537,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
     if (rawOpts.devRunnerAgents) args.push('--dev-runner-agents', rawOpts.devRunnerAgents);
     if (rawOpts.devRunnerTimeoutMs) args.push('--dev-runner-timeout-ms', String(rawOpts.devRunnerTimeoutMs));
     if (rawOpts.devRunnerMaxTimeoutMs) args.push('--dev-runner-max-timeout-ms', String(rawOpts.devRunnerMaxTimeoutMs));
-    const env = { ...process.env };
+    const env: NodeJS.ProcessEnv = { ...process.env, REPO_HARNESS_CONTROLLER_HOME: controllerHome };
     if (configuredEndpoint && tunnelMode === 'named') {
       env.REPO_HARNESS_MCP_PUBLIC_ORIGIN = endpointOrigin(configuredEndpoint);
     }
@@ -707,7 +721,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
   if (configuredEndpoint) {
     console.error(`[repo-harness mcp keepalive] Configured public endpoint: ${configuredEndpoint}`);
   }
-  console.error(`[repo-harness mcp keepalive] Runtime state: ${mcpRuntimeStatePath(repoRoot)}`);
+  console.error(`[repo-harness mcp keepalive] Runtime state: ${profile === 'controller' ? mcpControllerHomeRuntimeStatePath(controllerHome) : mcpRuntimeStatePath(repoRoot)}`);
   persistRuntime();
 
   await startLocalController();

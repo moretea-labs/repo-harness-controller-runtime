@@ -2,10 +2,14 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { isIP } from "net";
 import { dirname, join, relative } from "path";
 import {
-  ensureMcpBearerToken,
-  ensureMcpOAuthPassphrase,
-  loadMcpLocalConfig,
-  loadMcpRuntimeState,
+  ensureMcpControllerHomeBearerToken,
+  ensureMcpControllerHomeOAuthPassphrase,
+  loadMcpServiceLocalConfig,
+  loadMcpServiceRuntimeState,
+  mcpControllerHomeLocalConfigPath,
+  mcpControllerHomeOAuthPath,
+  mcpControllerHomeRuntimeStatePath,
+  mcpControllerHomeTokenPath,
   mcpOAuthPath,
   mcpRuntimeStatePath,
   mcpTokenPath,
@@ -16,6 +20,7 @@ import {
   DEFAULT_AGENT_TIMEOUT_MS,
   MAX_AGENT_TIMEOUT_MS,
 } from "../controller/runtime-config";
+import { ensureControllerHome } from "../repositories/controller-home";
 
 export interface McpSetupResult {
   status: "ok";
@@ -209,7 +214,7 @@ curl http://127.0.0.1:8765/health
 repo-harness mcp doctor --repo .
 \`\`\`
 
-The generated ignored file \`.repo-harness/mcp.local.json\` stores the default \`controller\` profile, allowed local agents, timeout, endpoint, and \`chatgpt.serverName\`. OAuth credentials stay in \`.repo-harness/mcp.oauth.json\`; the bearer fallback stays in ignored token files.
+The controller profile stores service-level MCP config under \`controllerHome/mcp/mcp.local.json\`, including allowed local agents, timeout, endpoint, and \`chatgpt.serverName\`. OAuth credentials live in \`controllerHome/mcp/mcp.oauth.json\`; the bearer fallback lives in \`controllerHome/mcp/mcp.tokens.json\`. Existing repo-local \`.repo-harness/mcp.*\` files remain a legacy fallback.
 
 Repository-specific MCP access rules may be added in \`.repo-harness/mcp.policy.json\`. Repository policy can narrow access, but immutable secret, credential, Git-internal, and build-output denies remain enforced.
 
@@ -241,10 +246,10 @@ The real endpoint stays in ignored local config; the tracked guide stays placeho
 ## Create the ChatGPT Connector
 
 1. Open ChatGPT Settings and enable Developer Mode.
-2. Create a custom Connector using the server name from \`.repo-harness/mcp.local.json\` under \`chatgpt.serverName\`.
+2. Create a custom Connector using the server name from \`controllerHome/mcp/mcp.local.json\` under \`chatgpt.serverName\`.
 3. Paste the public HTTPS URL ending in \`/mcp\`.
 4. Configure Connector authentication as OAuth. A bearer token remains available only as a local fallback for non-ChatGPT clients; start such a client with \`--auth bearer\` when required.
-5. Scan tools and authorize with the passphrase from \`.repo-harness/mcp.oauth.json\`.
+5. Scan tools and authorize with the passphrase from \`controllerHome/mcp/mcp.oauth.json\`.
 6. Keep write confirmations enabled.
 7. Re-scan tools after updating repo-harness tool schemas.
 
@@ -372,7 +377,7 @@ The executor profile remains read-oriented. Controller-dispatched Codex work is 
 ## Troubleshooting
 
 - ChatGPT cannot connect: verify the HTTPS tunnel ends in \`/mcp\` and local \`/health\` responds.
-- ChatGPT auth loops: retry authorization and inspect \`.repo-harness/mcp.oauth.json\`; do not paste the passphrase into chat.
+- ChatGPT auth loops: retry authorization and inspect \`controllerHome/mcp/mcp.oauth.json\` first, then legacy \`.repo-harness/mcp.oauth.json\` only when using fallback; do not paste the passphrase into chat.
 - Tool scan misses tools: run \`repo-harness mcp restart --repo .\`, then rescan or recreate the versioned Connector and verify \`controller_capabilities.expectedTools\` includes \`repository_latest_source_diagnose\` and \`repository_bootstrap_local_project\`.
 - Codex cannot see the MCP server: rerun \`repo-harness mcp setup codex --repo . --scope project\`.
 - A quick tunnel URL changed: update the Connector URL or switch to a named tunnel.
@@ -388,8 +393,9 @@ export function runMcpSetupChatgpt(opts: {
   serverName?: string;
 }): McpSetupResult {
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? ".");
+  const controllerHome = ensureControllerHome();
   const changed: string[] = [];
-  const existingConfig = loadMcpLocalConfig(repoRoot);
+  const existingConfig = loadMcpServiceLocalConfig(controllerHome, repoRoot);
   const host = opts.host ?? existingConfig?.server?.host ?? "127.0.0.1";
   const port = opts.port ?? String(existingConfig?.server?.port ?? 8765);
   const existingServerName = existingConfig?.chatgpt?.serverName;
@@ -403,10 +409,10 @@ export function runMcpSetupChatgpt(opts: {
   const endpoint = normalizePublicMcpEndpoint(
     opts.endpoint ?? existingConfig?.chatgpt?.endpoint,
   );
-  const configPath = join(repoRoot, ".repo-harness", "mcp.local.json");
+  const configPath = mcpControllerHomeLocalConfigPath(controllerHome);
   const guidePath = join(repoRoot, "docs", "repo-harness-chatgpt-mcp-setup.md");
-  const token = ensureMcpBearerToken(repoRoot);
-  const oauth = ensureMcpOAuthPassphrase(repoRoot);
+  const token = ensureMcpControllerHomeBearerToken(controllerHome);
+  const oauth = ensureMcpControllerHomeOAuthPassphrase(controllerHome);
   if (token.changed) changed.push(token.path);
   if (oauth.changed) changed.push(oauth.path);
   const config = {
@@ -420,8 +426,8 @@ export function runMcpSetupChatgpt(opts: {
     },
     auth: existingConfig?.auth ?? {
       mode: "oauth",
-      oauthFile: ".repo-harness/mcp.oauth.json",
-      tokenFile: ".repo-harness/mcp.tokens.json",
+      oauthFile: "mcp/mcp.oauth.json",
+      tokenFile: "mcp/mcp.tokens.json",
     },
     chatgpt: {
       ...existingConfig?.chatgpt,
@@ -489,7 +495,7 @@ export function runMcpSetupChatgpt(opts: {
       `[repo-harness mcp] Bearer fallback token: ${relative(repoRoot, token.path)}`,
       `[repo-harness mcp] Config: ${relative(repoRoot, configPath)}`,
       `[repo-harness mcp] Guide: ${relative(repoRoot, guidePath)} (generic; endpoint stays in ignored local config)`,
-      `[repo-harness mcp] Runtime state: ${relative(repoRoot, mcpRuntimeStatePath(repoRoot))}`,
+      `[repo-harness mcp] Runtime state: ${relative(repoRoot, mcpControllerHomeRuntimeStatePath(controllerHome))}`,
       `Next: repo-harness mcp keepalive --repo . --host ${host} --port ${port} --profile controller --toolset ${config.toolset} --enable-dev-runner --dev-runner-agents codex --tunnel quick`,
     ],
   };
@@ -748,8 +754,9 @@ export function runMcpDoctor(opts: {
   json?: boolean;
 }): McpSetupResult {
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? ".");
-  const localConfig = loadMcpLocalConfig(repoRoot);
-  const runtimeState = loadMcpRuntimeState(repoRoot);
+  const controllerHome = ensureControllerHome();
+  const localConfig = loadMcpServiceLocalConfig(controllerHome, repoRoot);
+  const runtimeState = loadMcpServiceRuntimeState(controllerHome, repoRoot);
   const configuredServerName = localConfig?.chatgpt?.serverName;
   const host = localConfig?.server?.host ?? "127.0.0.1";
   const port = localConfig?.server?.port ?? 8765;
@@ -770,15 +777,15 @@ export function runMcpDoctor(opts: {
     repo: repoRoot,
     mcp: {
       toolset: localConfig?.toolset === "full" ? "full" : "core",
-      localConfig: existsSync(
+      localConfig: existsSync(mcpControllerHomeLocalConfigPath(controllerHome)) || existsSync(
         join(repoRoot, ".repo-harness", "mcp.local.json"),
       ),
       guide: existsSync(
         join(repoRoot, "docs", "repo-harness-chatgpt-mcp-setup.md"),
       ),
       authConfigured:
-        (authMode === "oauth" && existsSync(mcpOAuthPath(repoRoot))) ||
-        (authMode === "bearer" && existsSync(mcpTokenPath(repoRoot))),
+        (authMode === "oauth" && (existsSync(mcpControllerHomeOAuthPath(controllerHome)) || existsSync(mcpOAuthPath(repoRoot)))) ||
+        (authMode === "bearer" && (existsSync(mcpControllerHomeTokenPath(controllerHome)) || existsSync(mcpTokenPath(repoRoot)))),
       localController: {
         enabled: localConfig?.localController?.enabled ?? true,
         host: localConfig?.localController?.host ?? "127.0.0.1",

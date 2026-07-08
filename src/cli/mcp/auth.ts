@@ -1,6 +1,7 @@
 import { randomBytes } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
+import { resolveControllerHome } from '../repositories/controller-home';
 
 export interface McpLocalConfig {
   version?: number;
@@ -118,6 +119,52 @@ export function mcpRuntimeStatePath(repoRoot: string): string {
   return join(repoRoot, '.repo-harness', 'mcp.runtime.json');
 }
 
+function mcpControllerHomePath(controllerHome: string, filename: string): string {
+  return join(resolveControllerHome(controllerHome), 'mcp', filename);
+}
+
+export function mcpControllerHomeLocalConfigPath(controllerHome: string): string {
+  return mcpControllerHomePath(controllerHome, 'mcp.local.json');
+}
+
+export function mcpControllerHomeTokenPath(controllerHome: string): string {
+  return mcpControllerHomePath(controllerHome, 'mcp.tokens.json');
+}
+
+export function mcpControllerHomeOAuthPath(controllerHome: string): string {
+  return mcpControllerHomePath(controllerHome, 'mcp.oauth.json');
+}
+
+export function mcpControllerHomeOAuthTokenStorePath(controllerHome: string): string {
+  return mcpControllerHomePath(controllerHome, 'mcp.oauth-tokens.json');
+}
+
+export function mcpServiceOAuthTokenStorePath(controllerHome: string, legacyRepoRoot?: string): string {
+  const controllerPath = mcpControllerHomeOAuthTokenStorePath(controllerHome);
+  if (existsSync(controllerPath) || !legacyRepoRoot) return controllerPath;
+  const legacyPath = mcpOAuthTokenStorePath(legacyRepoRoot);
+  return existsSync(legacyPath) ? legacyPath : controllerPath;
+}
+
+export function mcpControllerHomeRuntimeStatePath(controllerHome: string): string {
+  return mcpControllerHomePath(controllerHome, 'mcp.runtime.json');
+}
+
+function readJsonFile<T>(path: string): T | null {
+  if (!existsSync(path)) return null;
+  try {
+    return JSON.parse(readFileSync(path, 'utf-8')) as T;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function writeJsonFile(path: string, value: unknown): string {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf-8', mode: 0o600 });
+  return path;
+}
+
 export function loadMcpLocalConfig(repoRoot: string): McpLocalConfig | null {
   const path = mcpLocalConfigPath(repoRoot);
   if (!existsSync(path)) return null;
@@ -138,11 +185,25 @@ export function loadMcpRuntimeState(repoRoot: string): McpRuntimeState | null {
   }
 }
 
+export function loadMcpServiceLocalConfig(controllerHome: string, legacyRepoRoot?: string): McpLocalConfig | null {
+  return readJsonFile<McpLocalConfig>(mcpControllerHomeLocalConfigPath(controllerHome))
+    ?? (legacyRepoRoot ? loadMcpLocalConfig(legacyRepoRoot) : null);
+}
+
+export function loadMcpServiceRuntimeState(controllerHome: string, legacyRepoRoot?: string): McpRuntimeState | null {
+  return readJsonFile<McpRuntimeState>(mcpControllerHomeRuntimeStatePath(controllerHome))
+    ?? (legacyRepoRoot ? loadMcpRuntimeState(legacyRepoRoot) : null);
+}
+
 export function writeMcpRuntimeState(repoRoot: string, state: McpRuntimeState): string {
   const path = mcpRuntimeStatePath(repoRoot);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`, { encoding: 'utf-8', mode: 0o600 });
   return path;
+}
+
+export function writeMcpServiceRuntimeState(controllerHome: string, state: McpRuntimeState): string {
+  return writeJsonFile(mcpControllerHomeRuntimeStatePath(controllerHome), state);
 }
 
 export function readMcpBearerToken(repoRoot: string): string | null {
@@ -165,6 +226,23 @@ export function ensureMcpBearerToken(repoRoot: string): { token: string; path: s
   const token = randomBytes(32).toString('base64url');
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${JSON.stringify({ version: 1, bearerToken: token }, null, 2)}\n`, { encoding: 'utf-8', mode: 0o600 });
+  return { token, path, changed: true };
+}
+
+export function readMcpServiceBearerToken(controllerHome: string, legacyRepoRoot?: string): string | null {
+  if (process.env.REPO_HARNESS_MCP_TOKEN?.trim()) return process.env.REPO_HARNESS_MCP_TOKEN.trim();
+  const parsed = readJsonFile<{ bearerToken?: unknown }>(mcpControllerHomeTokenPath(controllerHome));
+  if (typeof parsed?.bearerToken === 'string' && parsed.bearerToken.trim().length > 0) return parsed.bearerToken.trim();
+  return legacyRepoRoot ? readMcpBearerToken(legacyRepoRoot) : null;
+}
+
+export function ensureMcpControllerHomeBearerToken(controllerHome: string): { token: string; path: string; changed: boolean } {
+  const path = mcpControllerHomeTokenPath(controllerHome);
+  const existing = readMcpServiceBearerToken(controllerHome);
+  if (existing) return { token: existing, path, changed: false };
+
+  const token = randomBytes(32).toString('base64url');
+  writeJsonFile(path, { version: 1, bearerToken: token });
   return { token, path, changed: true };
 }
 
@@ -196,5 +274,24 @@ export function ensureMcpOAuthPassphrase(repoRoot: string): { passphrase: string
   const passphrase = randomBytes(24).toString('base64url');
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${JSON.stringify({ version: 1, passphrase }, null, 2)}\n`, { encoding: 'utf-8', mode: 0o600 });
+  return { passphrase, path, changed: true };
+}
+
+export function readMcpServiceOAuthPassphrase(controllerHome: string, legacyRepoRoot?: string): string | null {
+  if (process.env.REPO_HARNESS_MCP_OAUTH_PASSPHRASE?.trim()) {
+    return process.env.REPO_HARNESS_MCP_OAUTH_PASSPHRASE.trim();
+  }
+  const parsed = readJsonFile<{ passphrase?: unknown }>(mcpControllerHomeOAuthPath(controllerHome));
+  if (typeof parsed?.passphrase === 'string' && parsed.passphrase.trim().length > 0) return parsed.passphrase.trim();
+  return legacyRepoRoot ? readMcpOAuthPassphrase(legacyRepoRoot) : null;
+}
+
+export function ensureMcpControllerHomeOAuthPassphrase(controllerHome: string): { passphrase: string; path: string; changed: boolean } {
+  const path = mcpControllerHomeOAuthPath(controllerHome);
+  const existing = readMcpServiceOAuthPassphrase(controllerHome);
+  if (existing) return { passphrase: existing, path, changed: false };
+
+  const passphrase = randomBytes(24).toString('base64url');
+  writeJsonFile(path, { version: 1, passphrase });
   return { passphrase, path, changed: true };
 }
