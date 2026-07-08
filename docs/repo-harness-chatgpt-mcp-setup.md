@@ -31,7 +31,7 @@ curl http://127.0.0.1:8765/health
 repo-harness mcp doctor --repo .
 ```
 
-The generated ignored file `.repo-harness/mcp.local.json` stores the default `controller` profile, allowed local agents, timeout, endpoint, and `chatgpt.serverName`. OAuth credentials stay in `.repo-harness/mcp.oauth.json`; the bearer fallback stays in ignored token files.
+The controller profile stores service-level MCP config under `controllerHome/mcp/mcp.local.json`, including allowed local agents, timeout, endpoint, and `chatgpt.serverName`. OAuth credentials live in `controllerHome/mcp/mcp.oauth.json`; the bearer fallback lives in `controllerHome/mcp/mcp.tokens.json`. Existing repo-local `.repo-harness/mcp.*` files remain a legacy fallback.
 
 Repository-specific MCP access rules may be added in `.repo-harness/mcp.policy.json`. Repository policy can narrow access, but immutable secret, credential, Git-internal, and build-output denies remain enforced.
 
@@ -63,10 +63,10 @@ The real endpoint stays in ignored local config; the tracked guide stays placeho
 ## Create the ChatGPT Connector
 
 1. Open ChatGPT Settings and enable Developer Mode.
-2. Create a custom Connector using the server name from `.repo-harness/mcp.local.json` under `chatgpt.serverName`.
+2. Create a custom Connector using the server name from `controllerHome/mcp/mcp.local.json` under `chatgpt.serverName`.
 3. Paste the public HTTPS URL ending in `/mcp`.
 4. Configure Connector authentication as OAuth. A bearer token remains available only as a local fallback for non-ChatGPT clients; start such a client with `--auth bearer` when required.
-5. Scan tools and authorize with the passphrase from `.repo-harness/mcp.oauth.json`.
+5. Scan tools and authorize with the passphrase from `controllerHome/mcp/mcp.oauth.json`.
 6. Keep write confirmations enabled.
 7. Re-scan tools after updating repo-harness tool schemas.
 
@@ -194,7 +194,7 @@ The executor profile remains read-oriented. Controller-dispatched Codex work is 
 ## Troubleshooting
 
 - ChatGPT cannot connect: verify the HTTPS tunnel ends in `/mcp` and local `/health` responds.
-- ChatGPT auth loops: retry authorization and inspect `.repo-harness/mcp.oauth.json`; do not paste the passphrase into chat.
+- ChatGPT auth loops: retry authorization and inspect `controllerHome/mcp/mcp.oauth.json` first, then legacy `.repo-harness/mcp.oauth.json` only when using fallback; do not paste the passphrase into chat.
 - Tool scan misses tools: run `repo-harness mcp restart --repo .`, then rescan or recreate the versioned Connector and verify `controller_capabilities.expectedTools` includes `repository_latest_source_diagnose` and `repository_bootstrap_local_project`.
 - Codex cannot see the MCP server: rerun `repo-harness mcp setup codex --repo . --scope project`.
 - A quick tunnel URL changed: update the Connector URL or switch to a named tunnel.
