@@ -5,7 +5,7 @@ import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
 import { reconcileAgentJobs } from "../agent-jobs/job-manager";
 import { reconcileLocalBridgeJobs } from "../local-bridge/job-store";
-import { loadMcpLocalConfig, loadMcpRuntimeState, mcpRuntimeStatePath, type McpRuntimeState } from "../mcp/auth";
+import { loadMcpLocalConfig, loadMcpRuntimeState, loadMcpServiceLocalConfig, loadMcpServiceRuntimeState, mcpRuntimeStatePath, type McpRuntimeState } from "../mcp/auth";
 import { inferMcpTunnelMode, isExpectedLocalControllerHealth, normalizeKeepalivePublicEndpoint, resolveSelfCliInvocation } from "../mcp/keepalive";
 import { resolveMcpRepoRoot } from "../mcp/repo";
 import { resolveControllerHome } from "../repositories/controller-home";
@@ -45,6 +45,7 @@ export interface ControllerServiceState {
     localControllerHost: string;
     localControllerPort: number;
     tunnelMode: "none" | "quick" | "named" | "tailscale";
+    publicEndpoint?: string;
   };
 }
 
@@ -321,24 +322,27 @@ function resolveServiceConfig(repoRoot: string, explicitLogFile?: string): {
   localControllerHost: string;
   localControllerPort: number;
   tunnelMode: "none" | "quick" | "named" | "tailscale";
+  publicEndpoint?: string;
   toolset: "core" | "full";
   logPath: string;
 } {
-  const localConfig = loadMcpLocalConfig(repoRoot);
-  const runtime = loadMcpRuntimeState(repoRoot);
+  const controllerHome = resolveControllerHome();
+  const localConfig = loadMcpServiceLocalConfig(controllerHome, repoRoot) ?? loadMcpLocalConfig(repoRoot);
+  const runtime = loadMcpServiceRuntimeState(controllerHome, repoRoot) ?? loadMcpRuntimeState(repoRoot);
   const publicEndpoint = normalizeKeepalivePublicEndpoint(localConfig?.chatgpt?.endpoint);
   const tunnelMode = publicEndpoint || runtime?.tunnel?.name
     ? inferMcpTunnelMode(runtime?.tunnelMode, publicEndpoint, runtime?.tunnel?.name)
     : "none";
   return {
     repoRoot,
-    controllerHome: resolveControllerHome(),
+    controllerHome,
     packageVersion: currentPackageVersion(),
     mcpHost: localConfig?.server?.host ?? "127.0.0.1",
     mcpPort: localConfig?.server?.port ?? 8765,
     localControllerHost: localConfig?.localController?.host ?? "127.0.0.1",
     localControllerPort: localConfig?.localController?.port ?? 8766,
     tunnelMode,
+    publicEndpoint,
     toolset: localConfig?.toolset === "full" ? "full" : "core",
     logPath: resolve(explicitLogFile ?? defaultControllerServiceLogPath(repoRoot)),
   };
@@ -545,24 +549,26 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
   );
   let pid: number;
   try {
+    const keepaliveArgs = [
+      ...cli.args,
+      "mcp",
+      "keepalive",
+      "--repo",
+      repoRoot,
+      "--host",
+      config.mcpHost,
+      "--port",
+      String(config.mcpPort),
+      "--toolset",
+      config.toolset,
+      "--no-local-ui",
+      "--tunnel",
+      config.tunnelMode,
+    ];
+    if (config.publicEndpoint) keepaliveArgs.push("--public-endpoint", config.publicEndpoint);
     pid = spawnDetached(
       cli.command,
-      [
-        ...cli.args,
-        "mcp",
-        "keepalive",
-        "--repo",
-        repoRoot,
-        "--host",
-        config.mcpHost,
-        "--port",
-        String(config.mcpPort),
-        "--toolset",
-        config.toolset,
-        "--no-local-ui",
-        "--tunnel",
-        config.tunnelMode,
-      ],
+      keepaliveArgs,
       repoRoot,
       config.logPath,
     );
@@ -593,6 +599,7 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
       localControllerHost: config.localControllerHost,
       localControllerPort: config.localControllerPort,
       tunnelMode: config.tunnelMode,
+      publicEndpoint: config.publicEndpoint,
     },
   });
 
