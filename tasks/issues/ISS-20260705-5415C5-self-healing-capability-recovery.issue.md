@@ -2,7 +2,7 @@
 id: "ISS-20260705-5415C5"
 kind: "feature"
 status: "planned"
-updated_at: "2026-07-05T09:39:05.185Z"
+updated_at: "2026-07-08T06:38:52.885Z"
 source: "repo-harness-controller-v8"
 ---
 
@@ -41,7 +41,7 @@ Add a structured recovery system for repo-harness capability degradation. It mus
 
 ### T1 — Define recovery taxonomy and state machine
 
-- Status: `ready`
+- Status: `done`
 - Objective: Document the failure taxonomy, state machine, audit model, and safety boundaries for repo-harness capability recovery. Include client-side platform blocks as a non-local class that cannot be fixed by restarting local services.
 - Depends on: none
 - Allowed paths: `docs/**`, `src/**`, `tests/**`
@@ -50,7 +50,7 @@ Add a structured recovery system for repo-harness capability degradation. It mus
 
 ### T2 — Implement capability probe and recovery planner
 
-- Status: `planned`
+- Status: `done`
 - Objective: Implement a read-only capability probe that returns a matrix of capability states, classified failure reasons, suggested recovery actions, and fallback paths without modifying repositories by default.
 - Depends on: `T1`
 - Allowed paths: `src/**`, `tests/**`
@@ -59,7 +59,7 @@ Add a structured recovery system for repo-harness capability degradation. It mus
 
 ### T3 — Implement authorized local recovery actions
 
-- Status: `planned`
+- Status: `ready`
 - Objective: Implement explicit bounded recovery actions for local failures: restart controller daemon or local bridge, refresh registration, rebuild runtime projections, reconcile stale jobs and leases, and clean abandoned worktrees. Mutating actions must require authorization and write audit evidence.
 - Depends on: `T2`
 - Allowed paths: `src/**`, `tests/**`
@@ -68,7 +68,7 @@ Add a structured recovery system for repo-harness capability degradation. It mus
 
 ### T4 — Implement sandbox patch handoff workflow
 
-- Status: `planned`
+- Status: `ready`
 - Objective: Implement a fallback workflow where blocked ChatGPT sessions can create or resume a local agent task that produces a patch artifact in an isolated worktree, runs verification, and integrates only through existing review and acceptance gates.
 - Depends on: `T2`
 - Allowed paths: `src/**`, `tests/**`, `docs/**`

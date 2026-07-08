@@ -32,7 +32,7 @@
       "id": "T1",
       "title": "Define recovery taxonomy and state machine",
       "objective": "Document the failure taxonomy, state machine, audit model, and safety boundaries for repo-harness capability recovery. Include client-side platform blocks as a non-local class that cannot be fixed by restarting local services.",
-      "status": "ready",
+      "status": "done",
       "dependsOn": [],
       "allowedPaths": [
         "docs/**",
@@ -54,17 +54,19 @@
       ],
       "risk": "readonly",
       "recommendedAgent": "codex",
-      "notes": [],
+      "notes": [
+        "Completed recovery taxonomy/state-machine documentation. Commit 7c05055 adds recovery state machine, current failure mapping, failure diagnosis contract, dirty workspace boundary, continuation packet contract, and failure memory notes. package:check:type passed in EJOB-1783492605338-c0fe15e5."
+      ],
       "runIds": [],
       "createdAt": "2026-07-05T09:39:05.185Z",
-      "updatedAt": "2026-07-05T09:39:05.185Z",
+      "updatedAt": "2026-07-08T06:38:32.962Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     },
     {
       "id": "T2",
       "title": "Implement capability probe and recovery planner",
       "objective": "Implement a read-only capability probe that returns a matrix of capability states, classified failure reasons, suggested recovery actions, and fallback paths without modifying repositories by default.",
-      "status": "planned",
+      "status": "done",
       "dependsOn": [
         "T1"
       ],
@@ -87,17 +89,19 @@
       ],
       "risk": "medium",
       "recommendedAgent": "codex",
-      "notes": [],
+      "notes": [
+        "Completed first read-only capability probe/planner expansion. Commit 7a68d6b adds stable classification for recent controller run failures, user-action quota failures, dirty worktree conflicts, and bounded recovery action routing with focused tests. package:check:type passed in EJOB-1783492605338-c0fe15e5; targeted test preview was allowed but execution was blocked by platform safety, so the focused tests are committed for normal CI execution."
+      ],
       "runIds": [],
       "createdAt": "2026-07-05T09:39:05.185Z",
-      "updatedAt": "2026-07-05T09:39:05.185Z",
+      "updatedAt": "2026-07-08T06:38:52.885Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     },
     {
       "id": "T3",
       "title": "Implement authorized local recovery actions",
       "objective": "Implement explicit bounded recovery actions for local failures: restart controller daemon or local bridge, refresh registration, rebuild runtime projections, reconcile stale jobs and leases, and clean abandoned worktrees. Mutating actions must require authorization and write audit evidence.",
-      "status": "planned",
+      "status": "ready",
       "dependsOn": [
         "T2"
       ],
@@ -130,7 +134,7 @@
       "id": "T4",
       "title": "Implement sandbox patch handoff workflow",
       "objective": "Implement a fallback workflow where blocked ChatGPT sessions can create or resume a local agent task that produces a patch artifact in an isolated worktree, runs verification, and integrates only through existing review and acceptance gates.",
-      "status": "planned",
+      "status": "ready",
       "dependsOn": [
         "T2"
       ],
@@ -199,6 +203,6 @@
     }
   ],
   "createdAt": "2026-07-05T09:39:05.185Z",
-  "updatedAt": "2026-07-05T09:39:05.185Z",
+  "updatedAt": "2026-07-08T06:38:52.885Z",
   "repoId": "repo_123b7cf58b6b17b5cbe46a56"
 }
