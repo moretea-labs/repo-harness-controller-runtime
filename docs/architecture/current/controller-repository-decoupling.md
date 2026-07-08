@@ -106,12 +106,15 @@ controllerHome/repositories/<repoId>/controller-state
 
 ### 1. MCP Gateway 身份边界复核
 
-本轮主要完成 Local Bridge request-scoped routing。MCP Gateway 仍需要单独复核：
+已复核 MCP Gateway 的 controller profile 主路径：
 
-- 启动入口是否仍把 `--repo` 当作服务身份，而不是默认仓库 fallback。
-- 工具 schema 是否全部以 `repo_id` / `checkout_id` 表达仓库作用域。
-- 多仓库启用时，未传 repo_id 的行为是否只允许 sole-repository fallback 或返回明确错误。
-- connector / ChatGPT 配置是否可以指向全局 controller，而不要求用户从某个仓库目录启动。
+- `src/cli/mcp/server.ts` 在 controller profile 下创建 multi-repository context；`--repo .` 会被降级为未指定 repo，避免把当前目录强行当作服务身份。
+- `src/cli/mcp/multi-repository.ts` 会给工具 schema 注入 `repo_id` / `checkout_id`，并在调用时通过 Repository Registry 解析目标仓库。
+- 未传 `repo_id` 时只允许 explicit repository fallback 或 sole-repository fallback；多仓库场景应返回解析错误。
+- MCP tool 调用会使用目标仓库的 `repository.canonicalRoot` 构造 scoped context，并把 repository/runtimeStorage envelope 写回结果。
+- `src/cli/mcp/repository-tools.ts` 的 repository/git/safe-patch/command tools 已按 `repo_id` / `checkout_id` 解析目标仓库，并把 command job payload 绑定到 `repoId` / `checkoutId`。
+
+仍需后续补充的只有 durable router 和 runtime gateway 的源代码级复核；本轮读取 `src/runtime/gateway/mcp/router.ts` 被安全层拦截，尚未完成该文件的直接审查。
 
 ### 2. 服务级运行态迁移
 
