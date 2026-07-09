@@ -90,6 +90,7 @@ export interface SafeJobResultSummary {
     suggestedFixes: string[];
   };
   resultAvailable: boolean;
+  resultPreview?: Record<string, unknown>;
   evidenceIds: string[];
   redaction: {
     rawStdoutReturned: false;

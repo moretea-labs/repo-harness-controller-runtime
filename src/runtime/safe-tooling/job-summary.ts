@@ -22,6 +22,44 @@ function classifyError(message: string): SafeErrorClass {
   return 'unknown';
 }
 
+function safeString(value: unknown, maxChars: number): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const sanitized = sanitizeMessage(value);
+  return sanitized.length > maxChars ? sanitized.slice(0, maxChars) : sanitized;
+}
+
+function objectValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function safeTextPreview(value: unknown): Record<string, unknown> | undefined {
+  const text = objectValue(value);
+  if (!text) return undefined;
+  const preview = safeString(text.text, 4000);
+  if (preview === undefined) return undefined;
+  return { text: preview, truncated: text.truncated === true, charCount: typeof text.charCount === 'number' ? text.charCount : preview.length };
+}
+
+function safeSessionPreview(value: unknown): Record<string, unknown> | undefined {
+  const session = objectValue(value);
+  if (!session) return undefined;
+  return { sessionId: safeString(session.sessionId, 120), url: safeString(session.url, 500), title: safeString(session.title, 300) };
+}
+
+function safeScreenshotPreview(value: unknown): Record<string, unknown> | undefined {
+  const screenshot = objectValue(value);
+  if (!screenshot) return undefined;
+  return { url: safeString(screenshot.url, 500), title: safeString(screenshot.title, 300), relativePath: safeString(screenshot.relativePath, 500), bytes: typeof screenshot.bytes === 'number' ? screenshot.bytes : undefined };
+}
+
+function safeBrowserResultPreview(actionId: string | undefined, result: unknown): Record<string, unknown> | undefined {
+  const payload = objectValue(result);
+  if (!payload) return undefined;
+  const session = safeSessionPreview(payload.session) ?? { sessionId: safeString(payload.sessionId, 120), url: safeString(payload.url, 500), title: safeString(payload.title, 300) };
+  const preview: Record<string, unknown> = { provider: payload.provider === 'playwright' ? 'playwright' : undefined, actionId, session, url: safeString(payload.url, 500), title: safeString(payload.title, 300), text: safeTextPreview(payload.text), screenshot: safeScreenshotPreview(payload.screenshot) };
+  return Object.fromEntries(Object.entries(preview).filter(([, value]) => value !== undefined));
+}
+
 function suggestedFixesFor(message: string, errorClass: SafeErrorClass): string[] {
   const lowered = message.toLowerCase();
   if (errorClass === 'dependency_missing' && lowered.includes('playwright')) {
@@ -42,6 +80,9 @@ export function summarizeJobResultForLowInterception(job: ExecutionJob): SafeJob
     : {};
   const pluginId = typeof payloadArguments.pluginId === 'string' ? payloadArguments.pluginId : undefined;
   const actionId = typeof payloadArguments.actionId === 'string' ? payloadArguments.actionId : undefined;
+  const resultPreview = pluginId === 'browser'
+    ? safeBrowserResultPreview(actionId, job.result)
+    : undefined;
   return {
     jobId: job.jobId,
     repoId: job.repoId,
@@ -57,6 +98,7 @@ export function summarizeJobResultForLowInterception(job: ExecutionJob): SafeJob
       suggestedFixes: suggestedFixesFor(message, errorClass),
     } : undefined,
     resultAvailable: job.result !== undefined,
+    ...(resultPreview ? { resultPreview } : {}),
     evidenceIds: [...job.evidenceIds],
     redaction: {
       rawStdoutReturned: false,

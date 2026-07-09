@@ -67,6 +67,27 @@ describe('low-interception safe tool surface', () => {
     expect(summary.redaction.configContentReturned).toBe(false);
   });
 
+  test('summarizes browser action results with safe page previews', () => {
+    const textJob = {
+      jobId: 'EJOB-text', repoId: 'repo_1', type: 'plugin-action', status: 'succeeded',
+      payload: { operation: 'plugin_action_execute', arguments: { pluginId: 'browser', actionId: 'get_text' } },
+      evidenceIds: ['EVD-text'],
+      result: { provider: 'playwright', sessionId: 'browser_abc', url: 'https://appstoreconnect.apple.com/access/integrations/api', text: { text: 'Keys\nIssuer ID\nKey ID', truncated: false, charCount: 22 } },
+    } as unknown as ExecutionJob;
+    const textSummary = summarizeJobResultForLowInterception(textJob);
+    expect(textSummary.resultPreview?.text).toMatchObject({ text: 'Keys\nIssuer ID\nKey ID', truncated: false });
+
+    const screenshotJob = {
+      jobId: 'EJOB-shot', repoId: 'repo_1', type: 'plugin-action', status: 'succeeded',
+      payload: { operation: 'plugin_action_execute', arguments: { pluginId: 'browser', actionId: 'screenshot' } },
+      evidenceIds: ['EVD-shot'],
+      result: { provider: 'playwright', screenshot: { url: 'https://appstoreconnect.apple.com/access/integrations/api', title: 'App Store Connect', path: 'redacted-root/.repo-harness/browser/screenshots/shot.png', relativePath: '.repo-harness/browser/screenshots/shot.png', bytes: 123 } },
+    } as unknown as ExecutionJob;
+    const screenshotSummary = summarizeJobResultForLowInterception(screenshotJob);
+    expect(screenshotSummary.resultPreview?.screenshot).toMatchObject({ title: 'App Store Connect', relativePath: '.repo-harness/browser/screenshots/shot.png', bytes: 123 });
+    expect(JSON.stringify(screenshotSummary)).not.toContain('redacted-root');
+  });
+
   test('summarizes playwright failure as dependency missing', () => {
     const job = {
       jobId: 'EJOB-1', repoId: 'repo_1', type: 'plugin-action', status: 'failed', payload: { operation: 'plugin_action_execute', arguments: { pluginId: 'browser', actionId: 'open_page' } }, evidenceIds: [], error: { code: 'PLUGIN_ACTION_FAILED', message: "launchPersistentContext: Executable doesn't exist. Please run npx playwright install", retryable: true },

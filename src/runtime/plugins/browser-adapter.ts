@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'crypto';
 import { createRequire } from 'module';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
-import { dirname, join, resolve } from 'path';
+import { dirname, join, relative, resolve } from 'path';
 import type {
   AssistantPluginActionDescriptor,
   AssistantPluginActionExecutionInput,
@@ -48,6 +48,7 @@ interface BrowserActionTarget {
 
 interface BrowserActionScreenshot {
   path: string;
+  relativePath: string;
   bytes: number;
 }
 
@@ -323,7 +324,7 @@ function screenshotFilePath(repoRoot: string, actionId: string, sessionId: strin
 async function captureActionScreenshot(page: PageLike, repoRoot: string, actionId: string, sessionId: string, url: string): Promise<BrowserActionScreenshot | undefined> {
   const path = screenshotFilePath(repoRoot, actionId, sessionId, url);
   const bytes = (await page.screenshot({ path, fullPage: true })).length;
-  return { path, bytes };
+  return { path, relativePath: relative(repoRoot, path), bytes };
 }
 
 function responseWithWarnings(base: Record<string, unknown>, warnings: string[]): Record<string, unknown> {
@@ -847,6 +848,7 @@ export async function executeBrowserPluginAction(input: AssistantPluginActionExe
           url: normalizedUrl(page.url()),
           title: await page.title(),
           path: file,
+          relativePath: relative(input.repoRoot, file),
           bytes: (await page.screenshot({ path: file, fullPage: input.args.full_page === true })).length,
         }));
         return { provider: 'playwright', screenshot };
