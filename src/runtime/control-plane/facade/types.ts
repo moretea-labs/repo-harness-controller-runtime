@@ -110,6 +110,12 @@ export interface HandoffItem {
   updatedAt: string;
 }
 
+export interface HandoffInboxStore {
+  schemaVersion: 1;
+  updatedAt: string;
+  items: HandoffItem[];
+}
+
 export interface WorkContractConstraints {
   maxChangedFiles?: number;
   maxChangedLines?: number;

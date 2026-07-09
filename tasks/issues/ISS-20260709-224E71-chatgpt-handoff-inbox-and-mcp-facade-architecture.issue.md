@@ -2,7 +2,7 @@
 id: "ISS-20260709-224E71"
 kind: "feature"
 status: "in_progress"
-updated_at: "2026-07-09T05:57:05.092Z"
+updated_at: "2026-07-09T06:12:14.430Z"
 source: "repo-harness-controller-v8"
 ---
 
@@ -54,6 +54,15 @@ Design and implement the next repo-harness control-plane slice: a Handoff Inbox 
 - Depends on: none
 - Allowed paths: `src/**`, `tests/**`, `docs/**`
 - Checks: `typecheck`, `test`
+- Execution hint: selected at runtime
+
+### T3 — Implement handoff inbox MVP store
+
+- Status: `done`
+- Objective: Add a minimal controller-home-backed Handoff Inbox store for creating, listing, reading, acknowledging, and resolving handoff items using the facade contracts without changing existing direct edit, MCP routing, or plugin behavior.
+- Depends on: none
+- Allowed paths: `src/runtime/control-plane/facade/**`, `tests/runtime/**`, `docs/architecture/chatgpt-handoff-facade.md`
+- Checks: `package:check:type`
 - Execution hint: selected at runtime
 
 ## Related Artifacts
