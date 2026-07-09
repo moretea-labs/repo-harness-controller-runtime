@@ -49,6 +49,9 @@ describe('console facade api', () => {
     expect(center.readiness.label).toMatch(/就绪|需要设置|暂不可用|读取失败|未知|可用|系统/);
     expect(center.currentRepository?.name).toBe('Console Fixture');
     expect(center.modePreviewDefault.label).toBeTruthy();
+    expect(center.pluginSummary).toBeTruthy();
+    expect(Array.isArray(center.plugins)).toBe(true);
+    expect(center.pluginSummary!.total).toBeGreaterThanOrEqual(0);
     expect(JSON.stringify(center.readiness)).not.toContain('stdout');
     expect(JSON.stringify(center.readiness)).not.toContain('stderr');
   });

@@ -25,9 +25,13 @@ button,input,textarea{font:inherit}button{cursor:pointer}.mono{font-family:ui-mo
 .main{padding:18px;overflow:auto}
 .view{display:none}.view.active{display:block}
 .page-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:16px}.page-head h1{margin:0 0 4px;font-size:24px}.page-head p{margin:0;color:var(--muted)}
-.grid{display:grid;gap:14px}.grid.two{grid-template-columns:1.4fr .9fr}.grid.cards{grid-template-columns:repeat(3,1fr)}
+.grid{display:grid;gap:14px}.grid.two{grid-template-columns:1.4fr .9fr}.grid.cards{grid-template-columns:repeat(3,1fr)}.grid.stats{grid-template-columns:repeat(4,minmax(0,1fr))}
 .panel{background:rgba(15,22,32,.92);border:1px solid var(--line);border-radius:var(--radius);padding:16px;box-shadow:0 18px 40px rgba(0,0,0,.22)}
 .panel h2,.panel h3{margin:0 0 8px}.muted{color:var(--muted)}.faint{color:var(--faint)}
+.stat strong{display:block;font-size:22px;margin-top:4px}.stat span{color:var(--muted);font-size:12px}
+.plugin-card{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:start}
+.action-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;padding:10px 0;border-top:1px solid var(--line)}
+.action-row:first-child{border-top:0;padding-top:0}
 .composer textarea,.composer input,.input,textarea,input[type=text],input[type=number]{width:100%;border:1px solid var(--line);background:rgba(0,0,0,.22);color:var(--text);border-radius:12px;padding:12px 14px}
 .composer textarea{min-height:120px;resize:vertical}
 .composer .row{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:center}
@@ -56,7 +60,7 @@ details.advanced{margin-top:12px;border-top:1px dashed var(--line);padding-top:1
 .opbar.err{border-color:rgba(248,113,113,.35);background:rgba(248,113,113,.08)}
 .btn:disabled{opacity:.55;cursor:not-allowed}
 .busy-banner{font-size:12px;color:var(--muted)}
-@media(max-width:980px){.body{grid-template-columns:1fr}.side{display:none}.grid.two,.grid.cards{grid-template-columns:1fr}.top{flex-wrap:wrap;height:auto;padding:10px 12px}}
+@media(max-width:980px){.body{grid-template-columns:1fr}.side{display:none}.grid.two,.grid.cards,.grid.stats{grid-template-columns:1fr}.top{flex-wrap:wrap;height:auto;padding:10px 12px}}
 </style>
 </head>
 <body>
@@ -66,6 +70,7 @@ details.advanced{margin-top:12px;border-top:1px dashed var(--line);padding-top:1
     <button class="chip" id="repoChip" onclick="switchView('repositories')">仓库 · <strong id="topRepo">—</strong></button>
     <span class="chip"><span class="dot" id="readyDot"></span><strong id="topReady">检查中</strong></span>
     <span class="chip"><span class="dot" id="connectorDot"></span><span id="topConnector">连接</span></span>
+    <button class="chip" onclick="switchView('capabilities')">插件 <strong id="topPlugins">—</strong></button>
     <button class="chip" onclick="switchView('inbox')">待决定 <span class="count" id="topHandoffs">0</span></button>
     <div class="top-actions">
       <button class="btn ghost" onclick="refreshAll()">刷新</button>
@@ -78,6 +83,7 @@ details.advanced{margin-top:12px;border-top:1px dashed var(--line);padding-top:1
         <button class="active" data-view="home">⌂ 指挥中心</button>
         <button data-view="inbox">△ 待决定 <span class="count" id="sideHandoffs">0</span></button>
         <button data-view="work">▷ 当前任务</button>
+        <button data-view="capabilities">◇ 能力 / 插件 <span class="count" id="sidePlugins" style="display:none">0</span></button>
         <button data-view="readiness">◎ 系统状态</button>
         <button data-view="repositories">□ 仓库</button>
         <button data-view="advanced">⌁ 高级诊断</button>
@@ -87,6 +93,7 @@ details.advanced{margin-top:12px;border-top:1px dashed var(--line);padding-top:1
       <section class="view active" id="view-home"></section>
       <section class="view" id="view-inbox"></section>
       <section class="view" id="view-work"></section>
+      <section class="view" id="view-capabilities"></section>
       <section class="view" id="view-readiness"></section>
       <section class="view" id="view-repositories"></section>
       <section class="view" id="view-advanced"></section>
@@ -110,10 +117,12 @@ var selectedRepoId=queryRepoId()||safeGet('repoHarnessSelectedRepoId')||'';
 var commandCenter=null;
 var selectedWorkId=safeGet('repoHarnessSelectedWorkId')||'';
 var selectedHandoffId='';
+var selectedPluginId=safeGet('repoHarnessSelectedPluginId')||'';
 var modePreview=null;
 var advancedRaw=null;
 var lastFacade=null;
 var lastOperation=null; // {phase,statusLabel,summary,errorMessage,at}
+var pluginActionResult=null;
 var busy=false;
 var pollTimer=null;
 
@@ -152,6 +161,7 @@ function advancedBlock(data){
 
 function renderChrome(){
   var cc=obj(commandCenter), ready=obj(cc.readiness), repo=obj(cc.currentRepository);
+  var plug=obj(cc.pluginSummary);
   document.getElementById('topRepo').textContent=repo.name||'未选择';
   document.getElementById('topReady').textContent=ready.label||'未知';
   setDot('readyDot', ready.state==='blocked'?'red':ready.state==='needs_setup'?'amber':'green');
@@ -160,10 +170,20 @@ function renderChrome(){
   var n=ready.pendingHandoffCount||arr(cc.handoffs).length||0;
   document.getElementById('topHandoffs').textContent=n;
   document.getElementById('sideHandoffs').textContent=n;
+  var readyPlugins=plug.ready||0, totalPlugins=plug.total||arr(cc.plugins).length||0;
+  document.getElementById('topPlugins').textContent=totalPlugins?(readyPlugins+'/'+totalPlugins):'—';
+  var need=plug.needsAttention||0;
+  var sidePlugins=document.getElementById('sidePlugins');
+  if(sidePlugins){
+    if(need>0){sidePlugins.style.display='inline-grid';sidePlugins.textContent=String(need)}
+    else {sidePlugins.style.display='none'}
+  }
 }
 
 function renderHome(){
   var cc=obj(commandCenter), ready=obj(cc.readiness), work=obj(cc.currentWork), handoffs=arr(cc.handoffs).slice(0,3);
+  var plug=obj(cc.pluginSummary);
+  var plugins=arr(cc.plugins).slice(0,4);
   var warnings=arr(cc.warnings).map(function(w){return '<div class="warn">'+esc(w)+'</div>'}).join('');
   var mode=obj(modePreview||cc.modePreviewDefault);
   var el=document.getElementById('view-home');
@@ -192,7 +212,14 @@ function renderHome(){
         '<div class="section-title"><h2>系统状态</h2>'+pill(ready.state==='ready'?'green':ready.state==='needs_setup'?'amber':'red', ready.label||'未知')+'</div>'+
         '<p class="muted">'+esc(ready.headline||'')+'</p>'+
         '<p class="faint">'+esc(ready.description||'')+'</p>'+
-        '<div class="actions">'+btn('查看详情','data-nav="readiness"')+btn('处理待决定','data-nav="inbox"')+'</div>'+
+        '<div class="actions">'+btn('查看详情','data-nav="readiness"')+btn('处理待决定','data-nav="inbox"')+btn('管理插件','data-nav="capabilities"')+'</div>'+
+        '<div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">'+
+          '<div class="section-title"><h3 style="margin:0">插件能力</h3>'+pill((plug.needsAttention||0)?'amber':'green',(plug.ready||0)+'/'+(plug.total||0)+' 可用')+'</div>'+
+          '<p class="muted" style="white-space:pre-line">'+(arr(plug.lines).length?esc(arr(plug.lines).slice(0,3).join('\\n')):'尚未发现插件')+'</p>'+
+          (plugins.length?'<div class="list" style="margin-top:8px">'+plugins.map(function(p){
+            return '<div class="card-row" style="padding:10px"><div><strong>'+esc(p.name)+'</strong><div class="muted">'+esc(p.nextStep||'')+'</div></div>'+pill(p.tone,p.statusLabel)+'</div>';
+          }).join('')+'</div>':'')+
+        '</div>'+
       '</div>'+
     '</div>'+
     '<div class="grid two" style="margin-top:14px">'+
@@ -358,6 +385,95 @@ function renderRepositories(){
   bindActions(root);
 }
 
+function rememberPlugin(id){
+  selectedPluginId=id||'';
+  safeSet('repoHarnessSelectedPluginId', selectedPluginId);
+}
+
+function pluginById(id){
+  return arr(obj(commandCenter).plugins).find(function(p){return p.id===id})||null;
+}
+
+function renderCapabilities(){
+  var cc=obj(commandCenter);
+  var plugins=arr(cc.plugins);
+  var summary=obj(cc.pluginSummary);
+  var selected=selectedPluginId?pluginById(selectedPluginId):null;
+  if(selectedPluginId&&!selected&&plugins.length){
+    selected=plugins[0];
+    rememberPlugin(selected.id);
+  }
+  var ready=summary.ready||plugins.filter(function(p){return p.status==='ready'}).length;
+  var need=summary.needsAttention||plugins.filter(function(p){return p.status!=='ready'&&p.status!=='disabled'}).length;
+  var failed=plugins.filter(function(p){return p.status==='failed'||p.status==='disabled'}).length;
+  var root=document.getElementById('view-capabilities');
+  root.innerHTML=
+    '<div class="page-head"><div><h1>能力 / 插件</h1><p>预览并管理 repo-harness 可调用的助手插件；动作可预览/试运行，高风险写入需确认。</p></div>'+
+      '<div class="actions"><button class="btn" onclick="refreshPlugins()">检查连接</button></div></div>'+
+    '<div class="grid stats" style="margin-bottom:14px">'+
+      '<div class="panel stat"><span>能力总数</span><strong>'+plugins.length+'</strong></div>'+
+      '<div class="panel stat"><span>可用</span><strong>'+ready+'</strong></div>'+
+      '<div class="panel stat"><span>需要配置</span><strong>'+need+'</strong></div>'+
+      '<div class="panel stat"><span>不可用</span><strong>'+failed+'</strong></div>'+
+    '</div>'+
+    '<div class="grid two">'+
+      '<div class="list">'+
+        (plugins.length?plugins.map(function(p){
+          var active=selected&&selected.id===p.id;
+          return '<div class="panel plugin-card" style="cursor:pointer;border-color:'+(active?'rgba(96,165,250,.45)':'')+'" data-open-plugin="'+esc(p.id)+'">'+
+            '<div><h3 style="margin:0 0 6px">'+esc(p.name)+'</h3>'+
+              '<div class="muted">'+esc(p.description||'')+'</div>'+
+              '<div class="muted" style="margin-top:6px">'+esc(p.nextStep||'')+'</div>'+
+              (arr(p.capabilityLabels).length?'<div class="evidence" style="margin-top:8px">'+arr(p.capabilityLabels).map(function(c){return '<span>'+esc(c)+'</span>'}).join('')+'</div>':'')+
+            '</div>'+
+            '<div style="text-align:right">'+pill(p.tone,p.statusLabel)+
+              '<div class="actions" style="margin-top:8px;justify-content:flex-end">'+btn(active?'已选中':'查看', 'data-open-plugin="'+esc(p.id)+'"', active?'primary':'')+'</div>'+
+            '</div></div>';
+        }).join(''):'<div class="empty">当前仓库没有发现插件</div>')+
+      '</div>'+
+      '<div class="panel" id="pluginDetail">'+renderPluginDetail(selected)+'</div>'+
+    '</div>'+
+    (pluginActionResult?'<div class="panel" style="margin-top:14px"><div class="section-title"><h2>最近动作结果</h2></div><pre class="mono" style="white-space:pre-wrap;font-size:12px;color:var(--muted)">'+esc(JSON.stringify(pluginActionResult,null,2))+'</pre></div>':'');
+  bindActions(root);
+}
+
+function renderPluginDetail(p){
+  if(!p||!p.id){
+    return '<div class="empty">选择左侧插件查看能力、健康状态与可执行动作</div>';
+  }
+  var actions=arr(p.actions);
+  var previewActions=actions.filter(function(a){return a.canPreview});
+  var otherActions=actions.filter(function(a){return !a.canPreview});
+  return '<div class="section-title"><h2 style="margin:0">'+esc(p.name)+'</h2>'+pill(p.tone,p.statusLabel)+'</div>'+
+    '<p class="muted">'+esc(p.nextStep||'')+'</p>'+
+    '<div class="meta muted" style="display:flex;gap:10px;flex-wrap:wrap;margin:8px 0 12px">'+
+      '<span>提供方：'+esc(p.provider||'—')+'</span>'+
+      '<span>健康：'+esc(p.healthLabel||'—')+'</span>'+
+      '<span>生命周期：'+esc(p.lifecycleLabel||'—')+'</span>'+
+      '<span>动作：'+esc(String(p.actionCount||actions.length))+'</span>'+
+    '</div>'+
+    (arr(p.warnings).length?'<div class="warn">'+esc(arr(p.warnings).join(' · '))+'</div>':'')+
+    (arr(p.capabilityLabels).length?'<p><strong>能力域</strong></p><div class="evidence">'+arr(p.capabilityLabels).map(function(c){return '<span>'+esc(c)+'</span>'}).join('')+'</div>':'')+
+    '<div style="margin-top:14px"><div class="section-title"><h3 style="margin:0">预览 / 状态动作</h3><span class="muted">只读或配置检查，优先使用</span></div>'+
+      (previewActions.length?previewActions.map(function(a){return pluginActionRow(p.id,a,true)}).join(''):'<div class="empty">没有可预览动作</div>')+
+    '</div>'+
+    '<div style="margin-top:14px"><div class="section-title"><h3 style="margin:0">写入 / 高风险动作</h3><span class="muted">执行前会要求确认</span></div>'+
+      (otherActions.length?otherActions.map(function(a){return pluginActionRow(p.id,a,false)}).join(''):'<div class="empty">没有写入动作</div>')+
+    '</div>'+
+    advancedBlock(p.advanced);
+}
+
+function pluginActionRow(pluginId, action, isPreview){
+  var id=esc(pluginId), aid=esc(action.id);
+  return '<div class="action-row">'+
+    '<div><div><strong>'+esc(action.title||action.id)+'</strong> '+pill(action.readOnly?'green':action.risk==='destructive'?'red':'amber', action.riskLabel)+'</div>'+
+      '<div class="muted">'+esc(action.description||'')+'</div>'+
+      '<div class="faint">'+esc(action.confirmationLabel||'')+'</div></div>'+
+    '<div class="actions">'+
+      btn(isPreview?'运行预览':'执行', 'data-plugin-act="run" data-plugin-id="'+id+'" data-action-id="'+aid+'"', isPreview?'primary':'')+
+    '</div></div>';
+}
+
 function renderAdvanced(){
   var root=document.getElementById('view-advanced');
   root.innerHTML=
@@ -392,6 +508,15 @@ function bindActions(root){
   root.querySelectorAll('[data-select-repo]').forEach(function(el){
     el.addEventListener('click',function(ev){ev.stopPropagation();selectRepo(el.getAttribute('data-select-repo'))});
   });
+  root.querySelectorAll('[data-open-plugin]').forEach(function(el){
+    el.addEventListener('click',function(ev){ev.stopPropagation();openPlugin(el.getAttribute('data-open-plugin'))});
+  });
+  root.querySelectorAll('[data-plugin-act]').forEach(function(el){
+    el.addEventListener('click',function(ev){
+      ev.stopPropagation();
+      runPluginAction(el.getAttribute('data-plugin-id'), el.getAttribute('data-action-id'));
+    });
+  });
   root.querySelectorAll('[data-copy]').forEach(function(el){
     el.addEventListener('click',function(ev){ev.stopPropagation();copyText(el.getAttribute('data-copy-text')||'')});
   });
@@ -407,6 +532,7 @@ function renderAll(){
     renderHome();
     renderInbox();
     renderWork();
+    renderCapabilities();
     renderReadiness();
     renderRepositories();
     renderAdvanced();
@@ -417,6 +543,81 @@ function renderAll(){
 
 function openWork(id){rememberWork(id);switchView('work');refreshWorkDetail(id)}
 function openHandoff(id){selectedHandoffId=id;switchView('inbox');renderInbox()}
+function openPlugin(id){
+  rememberPlugin(id);
+  switchView('capabilities');
+  renderCapabilities();
+  // Refresh detail from console API for latest health/actions.
+  api('/api/console/plugins/'+encodeURIComponent(id)+repoQuery()).then(function(res){
+    if(res&&res.plugin){
+      commandCenter=commandCenter||{};
+      var list=arr(commandCenter.plugins);
+      var idx=list.findIndex(function(p){return p.id===id});
+      if(idx>=0)list[idx]=res.plugin; else list.push(res.plugin);
+      commandCenter.plugins=list;
+      commandCenter.pluginSummary=obj(commandCenter.pluginSummary);
+      renderCapabilities();
+    }
+  }).catch(function(){});
+}
+function refreshPlugins(){
+  api('/api/console/plugins'+repoQuery()).then(function(res){
+    commandCenter=commandCenter||{};
+    commandCenter.plugins=arr(res.plugins);
+    commandCenter.pluginSummary=obj(res.summary);
+    renderChrome();
+    renderCapabilities();
+    toast('插件状态已刷新');
+  }).catch(function(e){toast(e.message)});
+}
+function runPluginAction(pluginId, actionId){
+  if(busy){toast('上一步仍在处理，请稍候');return}
+  var plugin=pluginById(pluginId)||{};
+  var action=arr(plugin.actions).find(function(a){return a.id===actionId})||{id:actionId,title:actionId};
+  var confirmAuth=false;
+  var confirmationText=undefined;
+  if(action.confirmation&&action.confirmation!=='none'){
+    if(action.requiredConfirmationText){
+      var typed=prompt('该动作需要强确认，请输入：'+action.requiredConfirmationText,'');
+      if(typed==null)return;
+      if(typed!==action.requiredConfirmationText){toast('确认文本不匹配');return}
+      confirmationText=typed;
+      confirmAuth=true;
+    } else {
+      if(!confirm('确认执行插件动作「'+(action.title||actionId)+'」？\\n风险：'+(action.riskLabel||action.risk||'未知')))return;
+      confirmAuth=true;
+    }
+  }
+  var requestId='gui-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,8);
+  setBusy(true,'运行插件动作…');
+  api('/api/plugins/'+encodeURIComponent(pluginId)+'/actions/'+encodeURIComponent(actionId)+repoQuery(),{
+    method:'POST',
+    body:JSON.stringify({
+      requestId:requestId,
+      arguments:{},
+      confirmAuthorization:confirmAuth,
+      confirmationText:confirmationText
+    })
+  }).then(function(res){
+    pluginActionResult={
+      at:new Date().toISOString(),
+      pluginId:pluginId,
+      actionId:actionId,
+      accepted:res.accepted,
+      deduplicated:res.deduplicated,
+      job:res.job,
+      action:res.action
+    };
+    setLastOp({phase:'succeeded',statusLabel:'动作已提交',summary:'插件动作 '+(action.title||actionId)+' 已提交'},'插件动作已提交');
+    toast(res.deduplicated?'动作已去重复用':'插件动作已提交');
+    return refreshAll({silent:true}).then(function(){renderCapabilities()});
+  }).catch(function(e){
+    pluginActionResult={at:new Date().toISOString(),pluginId:pluginId,actionId:actionId,error:e.message,payload:e.payload||null};
+    setLastOp(e.payload||{phase:'failed',summary:e.message},e.message);
+    toast(e.message);
+    renderCapabilities();
+  }).finally(function(){setBusy(false)});
+}
 function copyText(text){if(!text){toast('没有可复制内容');return}navigator.clipboard.writeText(text).then(function(){toast('已复制')}).catch(function(){toast('复制失败')})}
 function toggleAddRepo(){var el=document.getElementById('repoAdd');if(el)el.style.display=el.style.display==='none'?'block':'none'}
 

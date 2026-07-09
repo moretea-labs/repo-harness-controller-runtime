@@ -4,6 +4,11 @@ import { controllerExpectedToolNames } from '../mcp/tools';
 import { runtimePolicy } from '../mcp/multi-repository';
 import { readControllerDaemonStatus } from '../../runtime/control-plane/daemon-client';
 import {
+  getAssistantPluginManifest,
+  listAssistantPluginManifests,
+} from '../../runtime/plugins/store';
+import type { AssistantPluginManifest } from '../../runtime/plugins/types';
+import {
   acknowledgeHandoffItem,
   buildFacadeResult,
   buildSyncOperationDigest,
@@ -46,6 +51,9 @@ import type {
   HandoffCardViewModel,
   ModePreviewViewModel,
   PlainStatusTone,
+  PluginActionViewModel,
+  PluginCardViewModel,
+  PluginSummaryViewModel,
   RepositoryCardViewModel,
   SuggestedActionViewModel,
   SystemReadinessViewModel,
@@ -389,6 +397,125 @@ export async function buildSystemReadiness(
   };
 }
 
+function riskLabel(risk: string): string {
+  if (risk === 'readonly') return '只读';
+  if (risk === 'workspace_write') return '本地写入';
+  if (risk === 'remote_write') return '远程写入';
+  if (risk === 'destructive') return '破坏性';
+  return risk || '未知';
+}
+
+function confirmationLabel(confirmation: string): string {
+  if (confirmation === 'none') return '无需确认';
+  if (confirmation === 'authorization') return '需要授权确认';
+  if (confirmation === 'strong_confirmation') return '需要强确认';
+  return confirmation || '未知';
+}
+
+function mapPluginAction(action: AssistantPluginManifest['actions'][number]): PluginActionViewModel {
+  return {
+    id: action.actionId,
+    title: action.title || action.actionId,
+    description: action.description || '',
+    risk: action.risk,
+    riskLabel: riskLabel(action.risk),
+    readOnly: action.readOnly === true || action.risk === 'readonly',
+    confirmation: action.confirmation,
+    confirmationLabel: confirmationLabel(action.confirmation),
+    canPreview: action.readOnly === true || action.risk === 'readonly' || action.actionId === 'configure' || action.actionId === 'auth_status',
+    requiredConfirmationText: action.requiredConfirmationText,
+  };
+}
+
+export function mapPluginCard(manifest: AssistantPluginManifest): PluginCardViewModel {
+  const health = manifest.health;
+  const lifecycle = manifest.lifecycle;
+  const ready = manifest.enabled !== false
+    && health.ready !== false
+    && health.state !== 'error'
+    && lifecycle.state !== 'error';
+  const needsAuthorization = [...(health.errors ?? []), ...(health.warnings ?? []), lifecycle.reason ?? '']
+    .some((entry) => /auth|token|credential|permission|scope|授权|登录/i.test(String(entry)));
+  const status: PluginCardViewModel['status'] = manifest.enabled === false
+    ? 'disabled'
+    : ready
+      ? 'ready'
+      : needsAuthorization
+        ? 'authorization_required'
+        : health.state === 'error' || lifecycle.state === 'error'
+          ? 'failed'
+          : 'needs_setup';
+  const tone: PlainStatusTone = status === 'ready'
+    ? 'green'
+    : status === 'failed'
+      ? 'red'
+      : status === 'disabled'
+        ? 'gray'
+        : 'amber';
+  const nextStep = status === 'ready'
+    ? '已连接，可用于任务执行'
+    : status === 'authorization_required'
+      ? '需要完成授权后才能使用'
+      : status === 'disabled'
+        ? '插件已禁用'
+        : '需要配置并测试连接';
+  const actions = manifest.actions.map(mapPluginAction);
+  return {
+    id: manifest.pluginId,
+    name: manifest.displayName || manifest.pluginId,
+    provider: manifest.provider,
+    status,
+    statusLabel: status === 'ready'
+      ? '可用'
+      : status === 'authorization_required'
+        ? '待授权'
+        : status === 'failed'
+          ? '异常'
+          : status === 'disabled'
+            ? '已禁用'
+            : '需配置',
+    tone,
+    enabled: manifest.enabled !== false,
+    actionCount: actions.length,
+    description: `${actions.length} 个可用动作 · ${manifest.provider}`,
+    nextStep,
+    healthLabel: health.state || 'unknown',
+    lifecycleLabel: lifecycle.state || 'unknown',
+    capabilityLabels: (manifest.capabilities ?? []).slice(0, 6).map((entry) => entry.title || entry.capabilityId),
+    actions,
+    warnings: [...(health.warnings ?? []), ...(health.errors ?? [])].slice(0, 6).map(String),
+    advanced: {
+      pluginId: manifest.pluginId,
+      provider: manifest.provider,
+      revision: manifest.revision,
+    },
+  };
+}
+
+export function listConsolePlugins(ctx: ConsoleFacadeContext): PluginCardViewModel[] {
+  return listAssistantPluginManifests(ctx.controllerHome, ctx.repository).map(mapPluginCard);
+}
+
+export function getConsolePlugin(ctx: ConsoleFacadeContext, pluginId: string): PluginCardViewModel | null {
+  try {
+    return mapPluginCard(getAssistantPluginManifest(ctx.controllerHome, ctx.repository, pluginId));
+  } catch {
+    return null;
+  }
+}
+
+export function buildPluginSummary(plugins: PluginCardViewModel[]): PluginSummaryViewModel {
+  const ready = plugins.filter((entry) => entry.status === 'ready').length;
+  const needsAttention = plugins.filter((entry) =>
+    entry.status === 'authorization_required' || entry.status === 'failed' || entry.status === 'needs_setup').length;
+  return {
+    ready,
+    total: plugins.length,
+    needsAttention,
+    lines: plugins.slice(0, 6).map((entry) => `${entry.name} · ${entry.statusLabel}`),
+  };
+}
+
 export async function buildCommandCenter(
   ctx: ConsoleFacadeContext,
   repositories: RepositoryCardViewModel[],
@@ -398,6 +525,8 @@ export async function buildCommandCenter(
   const activeWork = listWorkContracts({ ...store(ctx), status: 'active', limit: 20 }).map(mapWorkSummary);
   const allRecent = listWorkContracts({ ...store(ctx), status: 'all', limit: 12 }).map(mapWorkSummary);
   const handoffs = listHandoffItems({ ...store(ctx), status: 'pending', limit: 20 }).map(mapHandoffCard);
+  const plugins = listConsolePlugins(ctx);
+  const pluginSummary = buildPluginSummary(plugins);
   const banner = readiness.connectorFreshness?.severity === 'warning' || readiness.connectorFreshness?.severity === 'error'
     ? readiness.connectorFreshness.summary
     : undefined;
@@ -410,6 +539,8 @@ export async function buildCommandCenter(
     currentWork: activeWork[0],
     recentWork: allRecent,
     handoffs,
+    pluginSummary,
+    plugins,
     modePreviewDefault: plainMode('direct_control'),
     // Only surface confirmed warnings — never "maybe missing" when ChatGPT snapshot is unobserved.
     warnings: banner ? [banner] : [],

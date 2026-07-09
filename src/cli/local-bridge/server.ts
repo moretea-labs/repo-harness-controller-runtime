@@ -80,8 +80,11 @@ import {
   applyConsoleSafePatch,
   buildAdvancedDiagnosticsEnvelope,
   buildCommandCenter,
+  buildPluginSummary,
   buildSystemReadiness,
   evaluateConsoleConnectorFreshness,
+  getConsolePlugin,
+  listConsolePlugins,
   continueConsoleWork,
   delegateConsoleWork,
   dismissConsoleHandoff,
@@ -1094,6 +1097,35 @@ export async function startLocalBridgeServer(
   app.get("/api/console/readiness", async (request, response) => {
     try {
       response.json(await buildSystemReadiness(consoleCtx(request)));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  /** User-facing plugin/capability catalog for the console. */
+  app.get("/api/console/plugins", (request, response) => {
+    try {
+      const ctx = consoleCtx(request);
+      const plugins = listConsolePlugins(ctx);
+      response.json({
+        schemaVersion: 1,
+        generatedAt: new Date().toISOString(),
+        summary: buildPluginSummary(plugins),
+        plugins,
+      });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.get("/api/console/plugins/:pluginId", (request, response) => {
+    try {
+      const plugin = getConsolePlugin(consoleCtx(request), request.params.pluginId);
+      if (!plugin) {
+        response.status(404).json({ error: `PLUGIN_NOT_FOUND: ${request.params.pluginId}` });
+        return;
+      }
+      response.json({ schemaVersion: 1, plugin });
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }

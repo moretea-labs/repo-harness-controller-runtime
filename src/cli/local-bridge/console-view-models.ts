@@ -131,6 +131,49 @@ export interface RepositoryCardViewModel {
   };
 }
 
+export interface PluginActionViewModel {
+  id: string;
+  title: string;
+  description: string;
+  risk: string;
+  riskLabel: string;
+  readOnly: boolean;
+  confirmation: string;
+  confirmationLabel: string;
+  canPreview: boolean;
+  requiredConfirmationText?: string;
+}
+
+export interface PluginCardViewModel {
+  id: string;
+  name: string;
+  provider: string;
+  status: 'ready' | 'authorization_required' | 'failed' | 'disabled' | 'needs_setup';
+  statusLabel: string;
+  tone: PlainStatusTone;
+  enabled: boolean;
+  actionCount: number;
+  description: string;
+  nextStep: string;
+  healthLabel: string;
+  lifecycleLabel: string;
+  capabilityLabels: string[];
+  actions: PluginActionViewModel[];
+  warnings: string[];
+  advanced?: {
+    pluginId: string;
+    provider: string;
+    revision?: number;
+  };
+}
+
+export interface PluginSummaryViewModel {
+  ready: number;
+  total: number;
+  needsAttention: number;
+  lines: string[];
+}
+
 export interface CommandCenterViewModel {
   schemaVersion: 1;
   generatedAt: string;
@@ -140,6 +183,9 @@ export interface CommandCenterViewModel {
   currentWork?: WorkSummaryViewModel;
   recentWork: WorkSummaryViewModel[];
   handoffs: HandoffCardViewModel[];
+  /** Assistant/plugin capabilities available to the controller. */
+  pluginSummary?: PluginSummaryViewModel;
+  plugins?: PluginCardViewModel[];
   modePreviewDefault: ModePreviewViewModel;
   warnings: string[];
 }

@@ -1381,7 +1381,16 @@ printf '%s\n' '{"type":"turn.completed"}'
     expect(dashboard).not.toContain("?token=");
     expect(dashboard).toContain("repo-harness · 执行助手控制台");
     expect(dashboard).toContain("指挥中心");
+    expect(dashboard).toContain("能力 / 插件");
+    expect(dashboard).toContain("/api/console/plugins");
     expect(dashboard).toContain("正在读取控制台状态");
     expect(dashboard).toContain("/api/console/command-center");
+
+    const plugins = await fetch(new URL("/api/console/plugins", handle.url), {
+      headers: { "x-repo-harness-local-token": handle.token },
+    }).then((response) => response.json());
+    expect(Array.isArray(plugins.plugins)).toBe(true);
+    expect(plugins.summary).toBeTruthy();
+    expect(typeof plugins.summary.total).toBe("number");
   });
 });
