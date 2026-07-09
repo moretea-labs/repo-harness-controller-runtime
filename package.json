@@ -32,6 +32,7 @@
     "docs/repo-harness-github-issue-launcher.md",
     "docs/repo-harness-local-execution-bridge.md",
     "docs/repo-harness-runtime-self-healing-loop.md",
+    "docs/repo-harness-autonomous-goal-loop.md",
     "README.zh-CN.md",
     "install.sh",
     "install.ps1",

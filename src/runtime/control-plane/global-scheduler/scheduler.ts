@@ -12,6 +12,7 @@ import { reconcileExecutionJobsAsync } from './reconciliation';
 import { tickSchedules } from '../../workflow/schedules/engine';
 import { tickPortfolioWorkflows } from '../../workflow/portfolio/engine';
 import { tickCampaigns } from '../../workflow/campaigns/engine';
+import { tickGoalLoopsForController } from '../goal-loop';
 import { readJsonFile, writeJsonAtomic } from '../../shared/json-files';
 import { isProcessAlive, terminateProcessTree } from '../../shared/process-tree';
 import { readSchedulerWakeSignal, waitForSchedulerWakeSignal } from './wake-signal';
@@ -140,6 +141,7 @@ export class GlobalScheduler {
   private lastScheduleTick = 0;
   private lastPortfolioTick = 0;
   private lastCampaignTick = 0;
+  private lastGoalLoopTick = 0;
   private lastReconcile = 0;
   private lastPersistedAt = 0;
   private readonly lastRepoDispatch = new Map<string, number>();
@@ -343,6 +345,19 @@ export class GlobalScheduler {
     if (now - this.lastCampaignTick >= 1_000) {
       tickCampaigns(this.controllerHome, repositories.map((repo) => repo.repoId));
       this.lastCampaignTick = now;
+    }
+    // Autonomous goal loop: one bounded transition per active GoalContract per tick.
+    // ChatGPT is not required to manually drive every continuation.
+    if (now - this.lastGoalLoopTick >= 5_000) {
+      try {
+        tickGoalLoopsForController(
+          this.controllerHome,
+          repositories.map((repo) => repo.repoId),
+        );
+      } catch (error) {
+        console.error('[repo-harness goal-loop] tick failed:', error);
+      }
+      this.lastGoalLoopTick = now;
     }
     let activeJobs = 0;
     try {

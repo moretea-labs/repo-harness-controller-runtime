@@ -41,6 +41,15 @@ const READ_ONLY_TOOLS = new Set([
   'runtime_maintenance_status',
   'self_healing_loop_plan',
   'self_healing_monitor_tick',
+  'goal_list',
+  'goal_get',
+  'goal_status',
+  'goal_handoff_packet_get',
+  'provider_list',
+  'provider_health',
+  'provider_config_status',
+  'executor_route_preview',
+  'repair_plan',
   'workspace_auth_status',
   'workspace_auth_login_prepare',
   'external_filesystem_targets_list',
@@ -57,6 +66,8 @@ const REPO_STATE_TOOLS = new Set([
   'create_campaign', 'add_campaign_task', 'pause_campaign', 'resume_campaign', 'cancel_campaign',
   'submit_campaign_review', 'accept_campaign', 'reconcile_campaign',
   'capability_recovery_apply', 'runtime_maintenance_apply', 'external_filesystem_grant_apply',
+  'goal_create', 'goal_start', 'goal_continue', 'goal_stop', 'goal_finalize', 'goal_tick_once',
+  'goal_handoff_packet_create', 'executor_dispatch', 'repair_continue',
 ]);
 const CHECK_TOOLS = new Set(['run_check', 'verify_edit_session']);
 const INTEGRATION_TOOLS = new Set(['integrate_task_run']);

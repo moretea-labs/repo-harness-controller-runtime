@@ -57,6 +57,7 @@ import type {
   CommandCenterViewModel,
   ConnectorFreshnessViewModel,
   ConsoleErrorViewModel,
+  GoalLoopStatusViewModel,
   HandoffCardViewModel,
   ModePreviewViewModel,
   PlainStatusTone,
@@ -69,6 +70,10 @@ import type {
   VerificationViewModel,
   WorkSummaryViewModel,
 } from './console-view-models';
+import {
+  goalStatus as goalLoopStatusSnapshot,
+  type GoalLoopContext,
+} from '../../runtime/control-plane/goal-loop';
 
 export type ConsoleFacadeContext = {
   controllerHome: string;
@@ -723,6 +728,7 @@ export async function buildCommandCenter(
   const handoffs = listHandoffItems({ ...store(ctx), status: 'pending', limit: 20 }).map(mapHandoffCard);
   const plugins = listConsolePlugins(ctx);
   const pluginSummary = buildPluginSummary(plugins);
+  const goalLoop = buildGoalLoopStatusView(ctx);
   const banner = readiness.connectorFreshness?.severity === 'warning' || readiness.connectorFreshness?.severity === 'error'
     ? readiness.connectorFreshness.summary
     : undefined;
@@ -736,6 +742,7 @@ export async function buildCommandCenter(
     currentWork: activeWork[0],
     recentWork: allRecent,
     handoffs,
+    goalLoop,
     pluginSummary,
     plugins,
     modePreviewDefault: plainMode('direct_control'),
@@ -749,6 +756,44 @@ export async function buildCommandCenter(
         actionLabel: '去设置仓库',
       }
       : { needed: false, title: '', body: '', actionLabel: '' },
+  };
+}
+
+export function buildGoalLoopStatusView(ctx: ConsoleFacadeContext): GoalLoopStatusViewModel {
+  const goalCtx: GoalLoopContext = {
+    goalStore: store(ctx),
+    packetStore: store(ctx),
+    repoId: ctx.repository.repoId,
+  };
+  const snapshot = goalLoopStatusSnapshot(goalCtx) as {
+    activeGoals?: Array<Record<string, unknown>>;
+    activeCount?: number;
+    invokableProviders?: string[];
+    handoffOnlyProviders?: string[];
+    providers?: Array<Record<string, unknown>>;
+  };
+  const goals = (snapshot.activeGoals ?? []).map((goal) => ({
+    title: String(goal.title ?? ''),
+    stage: String(goal.stage ?? ''),
+    currentStep: String(goal.currentStep ?? ''),
+    providerSelected: typeof goal.providerSelected === 'string' ? goal.providerSelected : undefined,
+    waitingReason: typeof goal.waitingReason === 'string' ? goal.waitingReason : undefined,
+    nextSafeAction: typeof goal.nextSafeAction === 'string' ? goal.nextSafeAction : undefined,
+    handoffPacketAvailable: goal.handoffPacketAvailable === true,
+    approvalRequired: Boolean(goal.waitingReason) || String(goal.stage) === 'waiting_for_user',
+  }));
+  return {
+    activeCount: snapshot.activeCount ?? goals.length,
+    goals,
+    invokableProviders: snapshot.invokableProviders ?? [],
+    handoffOnlyProviders: snapshot.handoffOnlyProviders ?? [],
+    providerHealth: (snapshot.providers ?? []).map((provider) => ({
+      providerId: String(provider.providerId ?? ''),
+      status: String(provider.status ?? ''),
+      directDispatchAllowed: provider.directDispatchAllowed === true,
+      handoffOnly: provider.handoffOnly === true,
+      summary: String(provider.summary ?? ''),
+    })),
   };
 }
 

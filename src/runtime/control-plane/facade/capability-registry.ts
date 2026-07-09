@@ -75,6 +75,14 @@ const CORE_CAPABILITIES: CapabilityDescriptor[] = [
     summary: 'Delegate bounded cerebellum work to Codex/Claude with context packs; outputs evidence, handoff, patch proposal, and suggested actions only — never finalize.',
   },
   {
+    capabilityId: 'controller.autonomous_goal_loop',
+    domain: 'controller',
+    operationClass: 'execute',
+    risk: 'workspace_write',
+    exposedVia: 'rh_work',
+    summary: 'Daemon-owned GoalContract loop with provider registry, executor routing, verification, repair, and ChatGPT handoff packets. Models never bypass policy; ChatGPT is handoff-only.',
+  },
+  {
     capabilityId: 'controller.work_contract',
     domain: 'controller',
     operationClass: 'execute',

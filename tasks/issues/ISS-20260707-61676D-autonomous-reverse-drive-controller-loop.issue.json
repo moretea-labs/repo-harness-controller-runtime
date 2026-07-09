@@ -4,7 +4,7 @@
   "title": "Autonomous reverse-drive controller loop",
   "slug": "autonomous-reverse-drive-controller-loop",
   "kind": "feature",
-  "status": "planned",
+  "status": "done",
   "summary": "Make repo-harness a self-driving local assistant that can monitor work, produce continuation packets, request future ChatGPT attention through scheduled tasks or UI notifications, and fall back to local/backup model paths when ChatGPT tool calls are blocked.",
   "goals": [
     "Define ChatGPT as primary policy/controller while repo-harness owns local daemon execution, monitoring, schedules, and continuation state.",

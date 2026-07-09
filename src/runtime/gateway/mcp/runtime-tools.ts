@@ -131,6 +131,36 @@ import {
   verifyGoalWorkloop,
   type FacadeTool,
 } from '../../control-plane/facade';
+import {
+  executorDispatch,
+  executorRoutePreview,
+  goalContinue,
+  goalCreate,
+  goalFinalize,
+  goalGet,
+  goalHandoffPacketCreate,
+  goalHandoffPacketGet,
+  goalList,
+  goalStart,
+  goalStatus,
+  goalStop,
+  goalTickOnce,
+  providerConfigStatusAction,
+  providerHealthAction,
+  providerListAction,
+  repairContinue,
+  repairPlan,
+  summarizeGoalContract,
+  tickActiveGoals,
+  type GoalContract,
+  type GoalLoopContext,
+  type GoalStatus,
+  type TaskIntent,
+} from '../../control-plane/goal-loop';
+
+function summarizeGoalPublic(goal: GoalContract) {
+  return summarizeGoalContract(goal);
+}
 
 function definition(name: string, description: string, properties: Record<string, unknown>, required: string[] = [], readOnly = true): McpToolDefinition {
   return {
@@ -348,6 +378,107 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
     objective: { type: 'string' },
     active_mode: { type: 'boolean', description: 'Defaults to false. Active mode may recommend authorized local maintenance but still does not mutate state in this tool.' },
   }),
+  definition('goal_create', 'Create a durable GoalContract (objective-level loop state above Issue/Task).', {
+    repo_id: repoId,
+    title: { type: 'string' },
+    objective: { type: 'string' },
+    mode: { type: 'string', enum: ['manual', 'supervised', 'autonomous'] },
+    issue_id: { type: 'string' },
+    task_ids: { type: 'array', items: { type: 'string' } },
+    acceptance_criteria: { type: 'array', items: { type: 'string' } },
+    check_ids: { type: 'array', items: { type: 'string' } },
+    allowed_executors: { type: 'array', items: { type: 'string' } },
+    forbidden_executors: { type: 'array', items: { type: 'string' } },
+    retry_budget: { type: 'number' },
+  }, ['title', 'objective'], false),
+  definition('goal_list', 'List GoalContracts for a repository.', {
+    repo_id: repoId,
+    status: { type: 'string', enum: ['active', 'all', 'created', 'planning', 'ready', 'dispatching', 'running', 'verifying', 'repairing', 'waiting_for_user', 'handoff_ready', 'finalized', 'failed', 'stopped'] },
+    limit: { type: 'number' },
+  }),
+  definition('goal_get', 'Get one GoalContract by id.', {
+    repo_id: repoId,
+    goal_id: { type: 'string' },
+  }, ['goal_id']),
+  definition('goal_start', 'Start a GoalContract (created -> planning) or tick if already active.', {
+    repo_id: repoId,
+    goal_id: { type: 'string' },
+  }, ['goal_id'], false),
+  definition('goal_continue', 'Advance a GoalContract by one bounded daemon-style transition.', {
+    repo_id: repoId,
+    goal_id: { type: 'string' },
+  }, ['goal_id'], false),
+  definition('goal_stop', 'Stop a GoalContract.', {
+    repo_id: repoId,
+    goal_id: { type: 'string' },
+    reason: { type: 'string' },
+  }, ['goal_id'], false),
+  definition('goal_finalize', 'Finalize a GoalContract when verification evidence exists.', {
+    repo_id: repoId,
+    goal_id: { type: 'string' },
+    force: { type: 'boolean' },
+  }, ['goal_id'], false),
+  definition('goal_status', 'User-facing goal loop status (active goals, stage, provider health, handoff).', {
+    repo_id: repoId,
+    goal_id: { type: 'string' },
+  }),
+  definition('goal_tick_once', 'Daemon-owned single tick for one goal (or all active goals when goal_id omitted).', {
+    repo_id: repoId,
+    goal_id: { type: 'string' },
+    task_intent: { type: 'string', enum: ['deterministic_edit', 'code_implementation', 'code_repair', 'architecture_planning', 'ios_build_or_sim', 'browser_automation', 'verification_repair', 'review', 'unknown'] },
+    verification_ok: { type: 'boolean' },
+    verification_check_id: { type: 'string' },
+    provider_failure: { type: 'boolean' },
+    external_write: { type: 'boolean' },
+    approval_confirmed: { type: 'boolean' },
+  }, [], false),
+  definition('goal_handoff_packet_create', 'Create a ChatGPT/supervisor continuation packet (handoff-only path).', {
+    repo_id: repoId,
+    goal_id: { type: 'string' },
+    blockers: { type: 'array', items: { type: 'string' } },
+    required_user_decision: { type: 'string' },
+    recommended_provider: { type: 'string' },
+  }, ['goal_id'], false),
+  definition('goal_handoff_packet_get', 'Read a durable goal handoff/continuation packet.', {
+    repo_id: repoId,
+    packet_id: { type: 'string' },
+  }, ['packet_id']),
+  definition('provider_list', 'List model/code executor providers (invokable vs handoff-only).', {
+    repo_id: repoId,
+  }),
+  definition('provider_health', 'Bounded redacted provider health (never returns tokens).', {
+    repo_id: repoId,
+    provider_id: { type: 'string' },
+  }),
+  definition('provider_config_status', 'Summarize invokable vs missing_auth vs handoff-only providers.', {
+    repo_id: repoId,
+  }),
+  definition('executor_route_preview', 'Preview which provider the ExecutorRouter would select.', {
+    repo_id: repoId,
+    goal_id: { type: 'string' },
+    task_intent: { type: 'string', enum: ['deterministic_edit', 'code_implementation', 'code_repair', 'architecture_planning', 'ios_build_or_sim', 'browser_automation', 'verification_repair', 'review', 'unknown'] },
+    risk: { type: 'string', enum: ['readonly', 'local_repo_write', 'workspace_write', 'remote_write', 'destructive', 'raw_secret_config'] },
+    objective: { type: 'string' },
+  }),
+  definition('executor_dispatch', 'Policy-gated dispatch to an invokable provider; repo-harness applies/verifies patches (no raw shell exposure).', {
+    repo_id: repoId,
+    goal_id: { type: 'string' },
+    provider_id: { type: 'string' },
+    task_intent: { type: 'string', enum: ['deterministic_edit', 'code_implementation', 'code_repair', 'architecture_planning', 'ios_build_or_sim', 'browser_automation', 'verification_repair', 'review', 'unknown'] },
+    risk: { type: 'string', enum: ['readonly', 'local_repo_write', 'workspace_write', 'remote_write', 'destructive', 'raw_secret_config'] },
+    approval_confirmed: { type: 'boolean' },
+    external_write: { type: 'boolean' },
+    strong_confirmation_text: { type: 'string' },
+  }, ['goal_id'], false),
+  definition('repair_plan', 'Classify goal failure and recommend repair provider/status.', {
+    repo_id: repoId,
+    goal_id: { type: 'string' },
+  }, ['goal_id']),
+  definition('repair_continue', 'Continue the self-healing repair loop for a goal (one bounded transition).', {
+    repo_id: repoId,
+    goal_id: { type: 'string' },
+    force_failure_class: { type: 'string' },
+  }, ['goal_id'], false),
   definition('workspace_auth_status', 'Summarize Workspace/Gmail auth readiness without returning or persisting secrets.', {
     repo_id: repoId,
   }),
@@ -2192,6 +2323,144 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             canAutoModifySource: report.automationPolicy.canAutoModifySource,
           },
         });
+      }
+      case 'goal_create':
+      case 'goal_list':
+      case 'goal_get':
+      case 'goal_start':
+      case 'goal_continue':
+      case 'goal_stop':
+      case 'goal_finalize':
+      case 'goal_status':
+      case 'goal_tick_once':
+      case 'goal_handoff_packet_create':
+      case 'goal_handoff_packet_get':
+      case 'provider_list':
+      case 'provider_health':
+      case 'provider_config_status':
+      case 'executor_route_preview':
+      case 'executor_dispatch':
+      case 'repair_plan':
+      case 'repair_continue': {
+        const repository = selected(ctx, args);
+        const goalCtx: GoalLoopContext = {
+          goalStore: { controllerHome: ctx.controllerHome, repoId: repository.repoId },
+          packetStore: { controllerHome: ctx.controllerHome, repoId: repository.repoId },
+          repoId: repository.repoId,
+        };
+        const goalId = typeof args.goal_id === 'string' ? args.goal_id : '';
+        const taskIntent = typeof args.task_intent === 'string' ? args.task_intent as TaskIntent : undefined;
+        switch (name) {
+          case 'goal_create': {
+            const goal = goalCreate(goalCtx, {
+              title: String(args.title ?? ''),
+              objective: String(args.objective ?? ''),
+              mode: args.mode === 'manual' || args.mode === 'supervised' || args.mode === 'autonomous' ? args.mode : 'autonomous',
+              issueId: typeof args.issue_id === 'string' ? args.issue_id : undefined,
+              taskIds: Array.isArray(args.task_ids) ? args.task_ids.map(String) : undefined,
+              acceptanceCriteria: Array.isArray(args.acceptance_criteria) ? args.acceptance_criteria.map(String) : undefined,
+              checkIds: Array.isArray(args.check_ids) ? args.check_ids.map(String) : undefined,
+              allowedExecutors: Array.isArray(args.allowed_executors) ? args.allowed_executors.map(String) : undefined,
+              forbiddenExecutors: Array.isArray(args.forbidden_executors) ? args.forbidden_executors.map(String) : undefined,
+              retryBudget: typeof args.retry_budget === 'number' ? args.retry_budget : undefined,
+            });
+            return result({ goal, summary: summarizeGoalPublic(goal) });
+          }
+          case 'goal_list': {
+            const status = typeof args.status === 'string' ? args.status as GoalStatus | 'active' | 'all' : 'active';
+            const goals = goalList(goalCtx, status, typeof args.limit === 'number' ? args.limit : 50);
+            return result({ goals: goals.map(summarizeGoalPublic), count: goals.length });
+          }
+          case 'goal_get': {
+            const goal = goalGet(goalCtx, goalId);
+            if (!goal) return result({ error: { code: 'GOAL_NOT_FOUND', message: `Goal not found: ${goalId}` } }, true);
+            return result({ goal, summary: summarizeGoalPublic(goal) });
+          }
+          case 'goal_start':
+            return result({ tick: goalStart(goalCtx, goalId) });
+          case 'goal_continue':
+            return result({ tick: goalContinue(goalCtx, goalId) });
+          case 'goal_stop':
+            return result({ goal: summarizeGoalPublic(goalStop(goalCtx, goalId, typeof args.reason === 'string' ? args.reason : undefined)) });
+          case 'goal_finalize': {
+            const finalized = goalFinalize(goalCtx, goalId, { force: args.force === true });
+            return result({ ok: finalized.ok, reason: finalized.reason, goal: summarizeGoalPublic(finalized.goal) }, !finalized.ok);
+          }
+          case 'goal_status':
+            return result(goalStatus(goalCtx, goalId || undefined));
+          case 'goal_tick_once': {
+            if (goalId) {
+              return result({
+                tick: goalTickOnce(goalCtx, goalId, {
+                  taskIntent,
+                  providerFailure: args.provider_failure === true,
+                  externalWrite: args.external_write === true,
+                  approvalConfirmed: args.approval_confirmed === true,
+                  verificationResult: typeof args.verification_check_id === 'string'
+                    ? {
+                        checkId: args.verification_check_id,
+                        ok: args.verification_ok === true,
+                      }
+                    : undefined,
+                }),
+              });
+            }
+            return result({ ticks: tickActiveGoals(goalCtx) });
+          }
+          case 'goal_handoff_packet_create':
+            return result({
+              packet: goalHandoffPacketCreate(goalCtx, goalId, {
+                blockers: Array.isArray(args.blockers) ? args.blockers.map(String) : undefined,
+                requiredUserDecision: typeof args.required_user_decision === 'string' ? args.required_user_decision : undefined,
+                recommendedProvider: typeof args.recommended_provider === 'string' ? args.recommended_provider : undefined,
+              }),
+            });
+          case 'goal_handoff_packet_get': {
+            const packet = goalHandoffPacketGet(goalCtx, String(args.packet_id ?? ''));
+            if (!packet) return result({ error: { code: 'PACKET_NOT_FOUND', message: 'Handoff packet not found.' } }, true);
+            return result({ packet });
+          }
+          case 'provider_list':
+            return result({ providers: providerListAction(goalCtx), policyOwner: 'repo-harness' });
+          case 'provider_health':
+            return result({
+              health: providerHealthAction(goalCtx, typeof args.provider_id === 'string' ? args.provider_id : undefined),
+              redacted: true,
+            });
+          case 'provider_config_status':
+            return result(providerConfigStatusAction(goalCtx));
+          case 'executor_route_preview':
+            return result({
+              route: executorRoutePreview(goalCtx, {
+                goalId: goalId || undefined,
+                taskIntent,
+                risk: typeof args.risk === 'string' ? args.risk as 'readonly' | 'local_repo_write' | 'workspace_write' | 'remote_write' | 'destructive' | 'raw_secret_config' : undefined,
+                objective: typeof args.objective === 'string' ? args.objective : undefined,
+              }),
+            });
+          case 'executor_dispatch':
+            return result(executorDispatch(goalCtx, {
+              goalId,
+              providerId: typeof args.provider_id === 'string' ? args.provider_id : undefined,
+              taskIntent,
+              risk: typeof args.risk === 'string' ? args.risk as 'readonly' | 'local_repo_write' | 'workspace_write' | 'remote_write' | 'destructive' | 'raw_secret_config' : undefined,
+              approvalConfirmed: args.approval_confirmed === true,
+              externalWrite: args.external_write === true,
+              strongConfirmationText: typeof args.strong_confirmation_text === 'string' ? args.strong_confirmation_text : undefined,
+            }));
+          case 'repair_plan':
+            return result(repairPlan(goalCtx, goalId));
+          case 'repair_continue':
+            return result({
+              tick: repairContinue(goalCtx, goalId, {
+                forceFailureClass: typeof args.force_failure_class === 'string'
+                  ? args.force_failure_class as import('../../control-plane/goal-loop').FailureClass
+                  : undefined,
+              }),
+            });
+          default:
+            return result({ error: { code: 'GOAL_LOOP_UNKNOWN', message: name } }, true);
+        }
       }
       case 'workspace_auth_status': {
         const repository = selected(ctx, args);
