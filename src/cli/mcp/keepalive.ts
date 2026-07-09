@@ -2,13 +2,9 @@ import { spawn, type ChildProcess } from 'child_process';
 import { accessSync, constants } from 'fs';
 import { resolve } from 'path';
 import {
-  loadMcpLocalConfig,
-  loadMcpRuntimeState,
   loadMcpServiceLocalConfig,
   loadMcpServiceRuntimeState,
   mcpControllerHomeRuntimeStatePath,
-  mcpRuntimeStatePath,
-  writeMcpRuntimeState,
   writeMcpServiceRuntimeState,
   type McpRuntimeState,
   type McpRuntimeTunnelMode,
@@ -290,7 +286,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
   const controllerHome = ensureControllerHome(rawOpts.controllerHome);
   const serviceConfig = loadMcpServiceLocalConfig(controllerHome, repoRoot);
   const profile = rawOpts.profile ?? serviceConfig?.profile ?? 'controller';
-  const localConfig = profile === 'controller' ? serviceConfig : loadMcpLocalConfig(repoRoot);
+  const localConfig = serviceConfig;
   const host = rawOpts.host ?? localConfig?.server?.host ?? '127.0.0.1';
   const port = rawOpts.port ?? localConfig?.server?.port ?? 8765;
   const toolset = parseMcpToolset(rawOpts.toolset ?? localConfig?.toolset ?? 'core', profile);
@@ -321,9 +317,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
     ? controllerToolSurfaceFingerprint(expectedRuntimeToolNames)
     : undefined;
   const expectedRepoId = profile === 'controller' ? undefined : repositoryIdentity(repoRoot);
-  const previousRuntime = profile === 'controller'
-    ? loadMcpServiceRuntimeState(controllerHome, repoRoot)
-    : loadMcpRuntimeState(repoRoot);
+  const previousRuntime = loadMcpServiceRuntimeState(controllerHome, repoRoot);
   const existingHealth = await jsonHealth(localHealthUrl(host, port));
   if (existingHealth?.status === 'ok') {
     const existingMatches = existingHealth.toolSurface === expectedToolSurface
@@ -355,7 +349,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
   const tunnelName = rawOpts.cloudflareTunnelName?.trim() || undefined;
   const tunnelMode = inferMcpTunnelMode(rawOpts.tunnel, configuredEndpoint, tunnelName);
   if (tunnelMode === 'named' && !configuredEndpoint) {
-    throw new Error('named tunnel mode requires --public-endpoint or chatgpt.endpoint in .repo-harness/mcp.local.json');
+    throw new Error('named tunnel mode requires --public-endpoint or chatgpt.endpoint in controllerHome/mcp/mcp.local.json');
   }
   if (tunnelMode === 'named' && !tunnelName) {
     throw new Error('named tunnel mode requires --cloudflare-tunnel-name');
@@ -426,11 +420,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
 
   const persistRuntime = (): void => {
     runtime.updatedAt = nowIso();
-    if (profile === 'controller') {
-      writeMcpServiceRuntimeState(controllerHome, runtime);
-    } else {
-      writeMcpRuntimeState(repoRoot, runtime);
-    }
+    writeMcpServiceRuntimeState(controllerHome, runtime);
   };
 
   const recordError = (
@@ -748,7 +738,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
   if (configuredEndpoint) {
     console.error(`[repo-harness mcp keepalive] Configured public endpoint: ${configuredEndpoint}`);
   }
-  console.error(`[repo-harness mcp keepalive] Runtime state: ${profile === 'controller' ? mcpControllerHomeRuntimeStatePath(controllerHome) : mcpRuntimeStatePath(repoRoot)}`);
+  console.error(`[repo-harness mcp keepalive] Runtime state: ${mcpControllerHomeRuntimeStatePath(controllerHome)}`);
   persistRuntime();
 
   await startLocalController();

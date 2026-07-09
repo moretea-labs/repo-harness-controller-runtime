@@ -30,26 +30,29 @@ export class McpOAuthTokenStore implements OAuthRegisteredClientsStore {
   private refreshTokens = new Map<string, string>();
   private clients = new Map<string, OAuthClientInformationFull>();
 
-  constructor(private readonly path: string) {}
+  constructor(private readonly path: string, private readonly fallbackPaths: string[] = []) {}
 
   load(): void {
-    if (!existsSync(this.path)) return;
-    try {
-      const data = JSON.parse(readFileSync(this.path, 'utf-8')) as TokenData;
-      const refreshTargets = new Set(Object.values(data.refreshTokens ?? {}));
-      for (const [token, info] of Object.entries(data.accessTokens ?? {})) {
-        if (!info.expiresAt || info.expiresAt > nowSeconds() || refreshTargets.has(token)) {
-          this.accessTokens.set(token, info);
+    for (const path of [this.path, ...this.fallbackPaths]) {
+      if (!existsSync(path)) continue;
+      try {
+        const data = JSON.parse(readFileSync(path, 'utf-8')) as TokenData;
+        const refreshTargets = new Set(Object.values(data.refreshTokens ?? {}));
+        for (const [token, info] of Object.entries(data.accessTokens ?? {})) {
+          if (!info.expiresAt || info.expiresAt > nowSeconds() || refreshTargets.has(token)) {
+            this.accessTokens.set(token, info);
+          }
         }
+        for (const [token, accessToken] of Object.entries(data.refreshTokens ?? {})) {
+          this.refreshTokens.set(token, accessToken);
+        }
+        for (const [clientId, client] of Object.entries(data.clients ?? {})) {
+          this.clients.set(clientId, client);
+        }
+        return;
+      } catch (_error) {
+        // Corrupt local auth state should not prevent starting the server.
       }
-      for (const [token, accessToken] of Object.entries(data.refreshTokens ?? {})) {
-        this.refreshTokens.set(token, accessToken);
-      }
-      for (const [clientId, client] of Object.entries(data.clients ?? {})) {
-        this.clients.set(clientId, client);
-      }
-    } catch (_error) {
-      // Corrupt local auth state should not prevent starting the server.
     }
   }
 

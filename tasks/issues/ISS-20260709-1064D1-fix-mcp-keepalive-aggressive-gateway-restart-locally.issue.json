@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 5,
+  "id": "ISS-20260709-1064D1",
+  "title": "Fix MCP keepalive aggressive gateway restart locally",
+  "slug": "fix-mcp-keepalive-aggressive-gateway-restart-locally",
+  "kind": "bug",
+  "status": "planned",
+  "summary": "GitHub Copilot cloud execution for ISS-20260626-A674DE/T10 failed because Copilot Coding Agent is not enabled for the user or repository. Create a local fallback task to fix the same MCP keepalive aggressive restart behavior using a local executor, limited to the intended keepalive source and tests.",
+  "goals": [
+    "Prevent transient /health failures from restarting an otherwise live MCP Gateway.",
+    "Restart immediately when the Gateway process has actually exited.",
+    "Only restart a still-running Gateway after a sustained outage window around five minutes.",
+    "Preserve existing Tailscale/Funnel and controllerHome-backed MCP config behavior."
+  ],
+  "nonGoals": [
+    "Do not change worker runtime, queue, lease, GUI, or repository registry behavior.",
+    "Do not remove Tailscale Funnel support.",
+    "Do not merge automatically without review."
+  ],
+  "acceptanceCriteria": [
+    "Transient health check failures mark the Gateway degraded but do not restart a live Gateway.",
+    "Exited Gateway process still triggers immediate restart.",
+    "Sustained health loss beyond the safety window can restart a still-running Gateway.",
+    "Targeted keepalive tests and package type check pass or failures are clearly reported."
+  ],
+  "relatedArtifacts": [],
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Fix keepalive restart policy",
+      "objective": "Inspect and update MCP keepalive restart policy so short health failures do not kill live Gateway sessions, process exit still restarts immediately, and sustained unhealthiness beyond the configured safety window restarts safely. Change only the keepalive implementation and targeted tests.",
+      "status": "blocked",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src/cli/mcp/keepalive.ts",
+        "tests/cli/mcp-keepalive.test.ts"
+      ],
+      "forbiddenPaths": [
+        "src/runtime/**",
+        "src/cli/agent-jobs/**",
+        "src/cli/local-bridge/**",
+        "src/gui/**",
+        ".ai/**",
+        "_ops/**"
+      ],
+      "checks": [
+        "package:check:type"
+      ],
+      "acceptanceCriteria": [
+        "Short /health failure does not restart a still-running Gateway.",
+        "Process exit restarts immediately.",
+        "Sustained failure restarts only after the safety window.",
+        "No unrelated files are changed."
+      ],
+      "risk": "high",
+      "recommendedAgent": "claude",
+      "notes": [
+        "Accepted RUN-iss-20260709-1064d1-t1-1783555108504-f6a1ebaa for asynchronous launch.",
+        "Dispatched RUN-iss-20260709-1064d1-t1-1783555108504-f6a1ebaa to codex.",
+        "RUN-iss-20260709-1064d1-t1-1783555108504-f6a1ebaa ended as failed; explicit retry is required. Reading additional input from stdin..."
+      ],
+      "runIds": [
+        "RUN-iss-20260709-1064d1-t1-1783555108504-f6a1ebaa"
+      ],
+      "createdAt": "2026-07-08T23:54:15.536Z",
+      "updatedAt": "2026-07-08T23:58:43.655Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    }
+  ],
+  "createdAt": "2026-07-08T23:54:15.536Z",
+  "updatedAt": "2026-07-08T23:58:43.655Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+}

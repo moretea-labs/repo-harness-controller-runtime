@@ -10,11 +10,9 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { buildMultiRepositoryToolDefinitions, createMcpToolContext, createRepoHarnessMcpServerFromContext, type McpServerOptions } from '../server';
 import {
   loadMcpServiceLocalConfig,
-  mcpOAuthTokenStorePath,
+  mcpServiceOAuthTokenStoreFallbackPaths,
   mcpServiceOAuthTokenStorePath,
   parseMcpHttpAuthMode,
-  readMcpBearerToken,
-  readMcpOAuthPassphrase,
   readMcpServiceBearerToken,
   readMcpServiceOAuthPassphrase,
   type McpLocalConfig,
@@ -519,20 +517,20 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   const controllerHome = resolveControllerHome(opts.controllerHome);
   const serviceConfig = loadMcpServiceLocalConfig(controllerHome, repoRoot);
   const profile = opts.profile ?? serviceConfig?.profile ?? 'controller';
-  const usesControllerServiceConfig = profile === 'controller';
-  const authMode = parseMcpHttpAuthMode(opts.auth ?? (usesControllerServiceConfig ? serviceConfig?.auth?.mode : undefined));
-  const authToken = opts.authToken ?? (usesControllerServiceConfig
-    ? readMcpServiceBearerToken(controllerHome, repoRoot)
-    : readMcpBearerToken(repoRoot));
+  const authMode = parseMcpHttpAuthMode(opts.auth ?? serviceConfig?.auth?.mode);
+  const authToken = opts.authToken ?? readMcpServiceBearerToken(controllerHome, repoRoot);
   const oauthPassphrase = authMode === 'oauth'
-    ? (usesControllerServiceConfig ? readMcpServiceOAuthPassphrase(controllerHome, repoRoot) : readMcpOAuthPassphrase(repoRoot))
+    ? readMcpServiceOAuthPassphrase(controllerHome, repoRoot)
     : null;
   const tokenStore = authMode === 'oauth'
-    ? new McpOAuthTokenStore(usesControllerServiceConfig ? mcpServiceOAuthTokenStorePath(controllerHome, repoRoot) : mcpOAuthTokenStorePath(repoRoot))
+    ? new McpOAuthTokenStore(
+      mcpServiceOAuthTokenStorePath(controllerHome),
+      mcpServiceOAuthTokenStoreFallbackPaths(controllerHome, repoRoot),
+    )
     : null;
   tokenStore?.load();
   const oauthProvider = tokenStore ? createMcpOAuthProvider(tokenStore) : null;
-  const configuredPublicOrigin = getConfiguredPublicOrigin(usesControllerServiceConfig ? serviceConfig : null);
+  const configuredPublicOrigin = getConfiguredPublicOrigin(serviceConfig);
   const transports = new Map<string, ManagedTransport>();
   const runtimeStats: McpRuntimeStats = { initializing: 0, activePosts: 0, rejectedOverload: 0 };
   const toolContext = createMcpToolContext({ ...opts, repo: repoRoot, controllerHome, profile });

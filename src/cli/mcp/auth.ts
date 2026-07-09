@@ -139,11 +139,14 @@ export function mcpControllerHomeOAuthTokenStorePath(controllerHome: string): st
   return mcpControllerHomePath(controllerHome, 'mcp.oauth-tokens.json');
 }
 
-export function mcpServiceOAuthTokenStorePath(controllerHome: string, legacyRepoRoot?: string): string {
-  const controllerPath = mcpControllerHomeOAuthTokenStorePath(controllerHome);
-  if (existsSync(controllerPath) || !legacyRepoRoot) return controllerPath;
+export function mcpServiceOAuthTokenStorePath(controllerHome: string): string {
+  return mcpControllerHomeOAuthTokenStorePath(controllerHome);
+}
+
+export function mcpServiceOAuthTokenStoreFallbackPaths(_controllerHome: string, legacyRepoRoot?: string): string[] {
+  if (!legacyRepoRoot) return [];
   const legacyPath = mcpOAuthTokenStorePath(legacyRepoRoot);
-  return existsSync(legacyPath) ? legacyPath : controllerPath;
+  return existsSync(legacyPath) ? [legacyPath] : [];
 }
 
 export function mcpControllerHomeRuntimeStatePath(controllerHome: string): string {

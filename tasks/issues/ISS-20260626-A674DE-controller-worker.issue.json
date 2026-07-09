@@ -453,7 +453,7 @@
       "id": "T10",
       "title": "通过 GitHub PR 修复 MCP 会话终止",
       "objective": "在 GitHub 远程分支修复 keepalive 对仍存活 MCP Gateway 的激进重启：短暂 /health 失败仅标记 degraded 并保留现有 session；Gateway 进程退出时立即重启；仅持续失联超过约 5 分钟才重启仍存活 Gateway。补充定向回归测试并创建 PR 到 main。",
-      "status": "ready",
+      "status": "blocked",
       "dependsOn": [],
       "allowedPaths": [
         "src/cli/mcp/keepalive.ts",
@@ -475,14 +475,19 @@
       ],
       "risk": "high",
       "recommendedAgent": "github-copilot",
-      "notes": [],
-      "runIds": [],
+      "notes": [
+        "Accepted RUN-iss-20260626-a674de-t10-1783554747715-be1ae2df for asynchronous launch.",
+        "RUN-iss-20260626-a674de-t10-1783554747715-be1ae2df failed to start and remains recorded as an attempt; explicit retry is required: failed to start GitHub Copilot cloud session: gh: user or repo does not have CCA enabled (HTTP 409)"
+      ],
+      "runIds": [
+        "RUN-iss-20260626-a674de-t10-1783554747715-be1ae2df"
+      ],
       "createdAt": "2026-06-29T13:26:56.663Z",
-      "updatedAt": "2026-06-29T13:26:56.663Z",
+      "updatedAt": "2026-07-08T23:52:31.558Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     }
   ],
   "createdAt": "2026-06-26T15:05:42.497Z",
-  "updatedAt": "2026-06-30T08:22:10.598Z",
+  "updatedAt": "2026-07-08T23:52:31.558Z",
   "repoId": "repo_123b7cf58b6b17b5cbe46a56"
 }

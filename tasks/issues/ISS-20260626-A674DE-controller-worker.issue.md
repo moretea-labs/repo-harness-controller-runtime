@@ -2,7 +2,7 @@
 id: "ISS-20260626-A674DE"
 kind: "bug"
 status: "in_progress"
-updated_at: "2026-06-30T08:22:10.598Z"
+updated_at: "2026-07-08T23:52:31.558Z"
 source: "repo-harness-controller-v8"
 ---
 
@@ -125,7 +125,7 @@ source: "repo-harness-controller-v8"
 
 ### T10 — 通过 GitHub PR 修复 MCP 会话终止
 
-- Status: `ready`
+- Status: `blocked`
 - Objective: 在 GitHub 远程分支修复 keepalive 对仍存活 MCP Gateway 的激进重启：短暂 /health 失败仅标记 degraded 并保留现有 session；Gateway 进程退出时立即重启；仅持续失联超过约 5 分钟才重启仍存活 Gateway。补充定向回归测试并创建 PR 到 main。
 - Depends on: none
 - Allowed paths: `src/cli/mcp/keepalive.ts`, `tests/cli/mcp-keepalive.test.ts`
