@@ -12,7 +12,7 @@ export interface AssistantCapabilitySummary {
 export interface AssistantReadinessReport {
   schemaVersion: 1;
   generatedAt: string;
-  status: 'ready_for_mock' | 'needs_google_setup' | 'needs_attention';
+  status: 'ready_for_live' | 'ready_for_mock' | 'needs_google_setup' | 'needs_attention';
   summary: string;
   plugins: Array<{
     pluginId: string;
@@ -23,6 +23,8 @@ export interface AssistantReadinessReport {
     ready: boolean;
     providerMode?: unknown;
     credentialSource?: unknown;
+    readinessMode?: unknown;
+    userFacingStatus?: unknown;
     warnings: string[];
     errors: string[];
     actions: Array<{ actionId: string; readOnly: boolean; risk: string; confirmation: string }>;
@@ -47,6 +49,18 @@ function pluginMode(plugin: ReturnType<typeof listAssistantPluginManifests>[numb
 function credentialSource(plugin: ReturnType<typeof listAssistantPluginManifests>[number]): unknown {
   return plugin.health.details && typeof plugin.health.details === 'object'
     ? (plugin.health.details as Record<string, unknown>).credentialSource
+    : undefined;
+}
+
+function readinessMode(plugin: ReturnType<typeof listAssistantPluginManifests>[number]): unknown {
+  return plugin.health.details && typeof plugin.health.details === 'object'
+    ? (plugin.health.details as Record<string, unknown>).readinessMode
+    : undefined;
+}
+
+function userFacingStatus(plugin: ReturnType<typeof listAssistantPluginManifests>[number]): unknown {
+  return plugin.health.details && typeof plugin.health.details === 'object'
+    ? (plugin.health.details as Record<string, unknown>).userFacingStatus
     : undefined;
 }
 
@@ -95,10 +109,7 @@ function googleCapability(
       recommendedNextActions: [],
     };
   }
-  const readinessMode = plugin.health.details && typeof plugin.health.details === 'object'
-    ? (plugin.health.details as Record<string, unknown>).readinessMode
-    : undefined;
-  if (readinessMode === 'missing_token') {
+  if (readinessMode(plugin) === 'missing_token') {
     return {
       capabilityId,
       state: 'needs_configuration',
@@ -178,16 +189,22 @@ export function buildAssistantReadinessReport(controllerHome: string, repository
     automationCapability('app_store_connect', 'App Store Connect', byId.get('app_store_connect')),
     automationCapability('browser_automation', 'Browser automation', byId.get('browser')),
   ];
-  const liveReady = capabilities.filter((capability) => capability.state === 'ready').length;
-  const mockReady = capabilities.filter((capability) => capability.state === 'mock').length;
+  const googleCapabilities = capabilities.filter((capability) =>
+    capability.capabilityId === 'gmail_read'
+      || capability.capabilityId === 'calendar_read'
+      || capability.capabilityId === 'tasks_read');
+  const liveGoogleReady = googleCapabilities.filter((capability) => capability.state === 'ready').length;
+  const mockGoogleReady = googleCapabilities.filter((capability) => capability.state === 'mock').length;
   const errors = capabilities.filter((capability) => capability.state === 'error').length;
   const status: AssistantReadinessReport['status'] = errors > 0
     ? 'needs_attention'
-    : liveReady >= 2
-      ? 'ready_for_mock'
-      : 'needs_google_setup';
+    : liveGoogleReady > 0
+      ? 'ready_for_live'
+      : mockGoogleReady > 0
+        ? 'ready_for_mock'
+        : 'needs_google_setup';
   const recommendations = [
-    ...(mockReady > 0 ? ['Mock provider is useful for dry runs, but real Gmail/Calendar/Tasks routines require google-workspace credentials.'] : []),
+    ...(mockGoogleReady > 0 ? ['Mock provider is useful for dry runs, but real Gmail/Calendar/Tasks routines require google-workspace credentials.'] : []),
     ...(capabilities.some((capability) => capability.state === 'disabled') ? ['Enable Gmail, Calendar, and Tasks plugins before expecting natural-language routines to collect real data.'] : []),
     ...(routines.length === 0 ? ['Create one routine such as: 每天早上 9 点整理过去 24 小时重要邮件。'] : []),
     ...(memory.length === 0 ? ['Seed assistant memory with communication tone, work keywords, and default safety preferences.'] : []),
@@ -196,9 +213,9 @@ export function buildAssistantReadinessReport(controllerHome: string, repository
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
     status,
-    summary: liveReady > 0
-      ? `Assistant has ${liveReady} live Google capability group(s) and ${mockReady} mock group(s).`
-      : `Assistant has ${mockReady} mock Google capability group(s); live Google setup is still needed.`,
+    summary: liveGoogleReady > 0 || mockGoogleReady > 0
+      ? `Assistant has ${liveGoogleReady} live Google capability group(s) and ${mockGoogleReady} mock group(s).`
+      : 'Assistant has 0 live Google capability group(s) and 0 mock group(s); live Google setup is still needed.',
     plugins: plugins.map((plugin) => ({
       pluginId: plugin.pluginId,
       provider: plugin.provider,
@@ -208,6 +225,8 @@ export function buildAssistantReadinessReport(controllerHome: string, repository
       ready: plugin.health.ready,
       providerMode: pluginMode(plugin),
       credentialSource: credentialSource(plugin),
+      readinessMode: readinessMode(plugin),
+      userFacingStatus: userFacingStatus(plugin),
       warnings: plugin.health.warnings,
       errors: plugin.health.errors,
       actions: plugin.actions.map((action) => ({

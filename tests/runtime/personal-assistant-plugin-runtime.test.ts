@@ -4,6 +4,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { spawnSync } from "child_process";
 import { registerRepository } from "../../src/cli/repositories/registry";
+import { buildAssistantReadinessReport } from "../../src/runtime/assistant/readiness";
 import { executeExecutionJob } from "../../src/runtime/execution/workers/executor";
 import {
   listAssistantPluginManifests,
@@ -16,6 +17,7 @@ const originalFetch = globalThis.fetch;
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
   delete process.env.REPO_HARNESS_CONTROLLER_HOME;
+  delete process.env.REPO_HARNESS_GMAIL_ACCESS_TOKEN;
   delete process.env.REPO_HARNESS_GOOGLE_ACCESS_TOKEN;
   delete process.env.REPO_HARNESS_GOOGLE_WORKSPACE_ACCESS_TOKEN;
   delete process.env.REPO_HARNESS_GOOGLE_CALENDAR_ACCESS_TOKEN;
@@ -266,6 +268,58 @@ describe("personal assistant plugin runtime", () => {
     expect(taskCreate.execution.ok).toBe(true);
     const taskCreateResult = taskCreate.execution.result?.result as Record<string, unknown> | undefined;
     expect(taskCreateResult?.task).toBeDefined();
+  });
+
+  test("reports mock and live Gmail readiness in the assistant summary", async () => {
+    const { controllerHome, repository } = repoFixture();
+
+    const mockConfig = await executePluginAction(controllerHome, repository, {
+      pluginId: "gmail",
+      actionId: "configure",
+      requestId: "gmail-mock-config",
+      args: {
+        enabled: true,
+        provider: "mock",
+        account_email: "assistant@example.com",
+      },
+      confirmAuthorization: true,
+      origin: { surface: "local-ui", actor: "test" },
+    });
+    expect(mockConfig.execution.ok).toBe(true);
+
+    const mockReadiness = buildAssistantReadinessReport(controllerHome, repository);
+    expect(mockReadiness.status).toBe("ready_for_mock");
+    expect(mockReadiness.summary).toBe("Assistant has 0 live Google capability group(s) and 1 mock group(s).");
+    expect(mockReadiness.plugins.find((plugin) => plugin.pluginId === "gmail")).toMatchObject({
+      providerMode: "mock",
+      readinessMode: "mock_provider_ready",
+      userFacingStatus: "mock ready",
+    });
+
+    process.env.REPO_HARNESS_GMAIL_ACCESS_TOKEN = "test-live-token";
+    const liveConfig = await executePluginAction(controllerHome, repository, {
+      pluginId: "gmail",
+      actionId: "configure",
+      requestId: "gmail-live-config",
+      args: {
+        enabled: true,
+        provider: "google-workspace",
+        account_email: "assistant@example.com",
+      },
+      confirmAuthorization: true,
+      origin: { surface: "local-ui", actor: "test" },
+    });
+    expect(liveConfig.execution.ok).toBe(true);
+
+    const liveReadiness = buildAssistantReadinessReport(controllerHome, repository);
+    expect(liveReadiness.status).toBe("ready_for_live");
+    expect(liveReadiness.summary).toBe("Assistant has 1 live Google capability group(s) and 0 mock group(s).");
+    expect(liveReadiness.plugins.find((plugin) => plugin.pluginId === "gmail")).toMatchObject({
+      providerMode: "google-workspace",
+      credentialSource: "env:REPO_HARNESS_GMAIL_ACCESS_TOKEN",
+      readinessMode: "live_provider_ready",
+      userFacingStatus: "ready",
+    });
   });
 
   test("returns structured auth and rate-limit failures for Google providers", async () => {
