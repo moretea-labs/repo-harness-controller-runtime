@@ -95,11 +95,72 @@ function googleCapability(
       recommendedNextActions: [],
     };
   }
+  const readinessMode = plugin.health.details && typeof plugin.health.details === 'object'
+    ? (plugin.health.details as Record<string, unknown>).readinessMode
+    : undefined;
+  if (readinessMode === 'missing_token') {
+    return {
+      capabilityId,
+      state: 'needs_configuration',
+      summary: `${displayName} live token is missing; mock mode remains available for dry runs.`,
+      recommendedNextActions: [
+        `Set the matching REPO_HARNESS_*_ACCESS_TOKEN, or switch ${plugin.pluginId} provider to mock.`,
+      ],
+    };
+  }
   return {
     capabilityId,
     state: 'needs_configuration',
-    summary: plugin.health.errors[0] ?? `${displayName} needs configuration.`,
+    summary: plugin.health.errors[0] ?? plugin.health.warnings[0] ?? `${displayName} needs configuration.`,
     recommendedNextActions: [`Configure ${plugin.pluginId} credentials and run a read-only self-test.`],
+  };
+}
+
+function automationCapability(
+  capabilityId: string,
+  displayName: string,
+  plugin: ReturnType<typeof listAssistantPluginManifests>[number] | undefined,
+): AssistantCapabilitySummary {
+  if (!plugin) {
+    return {
+      capabilityId,
+      state: 'needs_configuration',
+      summary: `${displayName} plugin is not registered.`,
+      recommendedNextActions: ['Verify plugin registration.'],
+    };
+  }
+  const userFacing = plugin.health.details && typeof plugin.health.details === 'object'
+    ? String((plugin.health.details as Record<string, unknown>).userFacingStatus ?? '')
+    : '';
+  if (!plugin.enabled) {
+    return {
+      capabilityId,
+      state: 'disabled',
+      summary: userFacing || `${displayName} is disabled.`,
+      recommendedNextActions: [`Enable ${plugin.pluginId} via configure.`],
+    };
+  }
+  if (plugin.health.ready) {
+    return {
+      capabilityId,
+      state: pluginMode(plugin) === 'mock' ? 'mock' : 'ready',
+      summary: userFacing || `${displayName} is ready.`,
+      recommendedNextActions: [],
+    };
+  }
+  if (plugin.health.state === 'error') {
+    return {
+      capabilityId,
+      state: 'error',
+      summary: plugin.health.errors[0] ?? `${displayName} is in error state.`,
+      recommendedNextActions: plugin.health.errors,
+    };
+  }
+  return {
+    capabilityId,
+    state: 'needs_configuration',
+    summary: userFacing || plugin.health.warnings[0] || `${displayName} needs setup.`,
+    recommendedNextActions: plugin.health.warnings.slice(0, 3),
   };
 }
 
@@ -113,6 +174,9 @@ export function buildAssistantReadinessReport(controllerHome: string, repository
     googleCapability('gmail_read', 'Gmail read', byId.get('gmail')),
     googleCapability('calendar_read', 'Google Calendar read', byId.get('google_calendar')),
     googleCapability('tasks_read', 'Google Tasks read', byId.get('google_tasks')),
+    automationCapability('ios_smoke_review', 'iOS smoke review', byId.get('ios')),
+    automationCapability('app_store_connect', 'App Store Connect', byId.get('app_store_connect')),
+    automationCapability('browser_automation', 'Browser automation', byId.get('browser')),
   ];
   const liveReady = capabilities.filter((capability) => capability.state === 'ready').length;
   const mockReady = capabilities.filter((capability) => capability.state === 'mock').length;

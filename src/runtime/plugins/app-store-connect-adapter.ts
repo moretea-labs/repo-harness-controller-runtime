@@ -247,9 +247,17 @@ async function apiRequest<T>(config: AppStoreConnectPluginConfig, options: {
   }
 }
 
+function userFacingAscStatus(config: AppStoreConnectPluginConfig, auth: AppStoreConnectAuthState): string {
+  if (!config.enabled) return 'auth missing';
+  if (config.provider === 'mock' && auth.ready) return 'ready';
+  if (!auth.ready) return 'auth missing';
+  return 'write gated';
+}
+
 function pluginState(config: AppStoreConnectPluginConfig, auth: AppStoreConnectAuthState): { lifecycleState: 'enabled' | 'disabled' | 'degraded' | 'error'; health: AssistantPluginHealth } {
-  const lifecycleState = !config.enabled ? 'disabled' : auth.ready ? 'enabled' : auth.errors.length > 0 ? 'error' : 'degraded';
-  const healthState = !config.enabled ? 'disabled' : auth.ready ? 'ready' : auth.errors.length > 0 ? 'error' : 'degraded';
+  const missingAuth = config.enabled && config.provider !== 'mock' && !auth.ready;
+  const lifecycleState = !config.enabled ? 'disabled' : auth.ready ? 'enabled' : missingAuth ? 'degraded' : 'error';
+  const healthState = !config.enabled ? 'disabled' : auth.ready ? 'ready' : missingAuth ? 'degraded' : 'error';
   return {
     lifecycleState,
     health: {
@@ -257,8 +265,10 @@ function pluginState(config: AppStoreConnectPluginConfig, auth: AppStoreConnectA
       checkedAt: now(),
       ready: config.enabled && auth.ready,
       probed: config.enabled ? auth.probed : false,
-      errors: config.enabled ? [...auth.errors] : [],
-      warnings: !config.enabled ? ['Plugin is disabled. Enable it before using App Store Connect actions.'] : [...auth.warnings],
+      errors: config.enabled && !missingAuth ? [...auth.errors] : [],
+      warnings: !config.enabled
+        ? ['Plugin is disabled. Enable it before using App Store Connect actions.']
+        : [...auth.warnings, ...(missingAuth ? auth.errors : [])],
       details: {
         provider: config.provider,
         issuerId: auth.issuerId ? 'configured' : undefined,
@@ -268,6 +278,15 @@ function pluginState(config: AppStoreConnectPluginConfig, auth: AppStoreConnectA
         defaultLocale: config.defaultLocale,
         credentialSource: auth.credentialSource,
         credentialPersistence: 'private keys are read from environment or local path and are never persisted by repo-harness',
+        userFacingStatus: userFacingAscStatus(config, auth),
+        readinessMode: !config.enabled
+          ? 'disabled'
+          : config.provider === 'mock'
+            ? 'mock_provider_ready'
+            : auth.ready
+              ? 'live_provider_ready'
+              : 'auth_missing',
+        writePolicy: 'remote writes require confirmAuthorization; production actions require strong confirmation text',
       },
     },
   };
@@ -280,14 +299,49 @@ function permission(scope: string, mode: 'read' | 'write', description: string, 
 function permissions(ready: boolean): AssistantPluginPermissionScope[] {
   return [
     permission('appstoreconnect.apps.read', 'read', 'Read App Store Connect apps, versions, localizations, builds, and TestFlight groups.', ready),
-    permission('appstoreconnect.metadata.write', 'write', 'Patch App Store Connect app info localizations after dry-run review and authorization.', ready),
+    permission('appstoreconnect.metadata.write', 'write', 'Patch App Store Connect metadata after dry-run review and authorization.', ready),
+    permission('appstoreconnect.testflight.write', 'write', 'Assign builds to TestFlight groups and prepare beta review submissions.', ready),
+    permission('appstoreconnect.release.write', 'write', 'Create App Store versions and gated review submissions.', ready),
   ];
 }
 
 function capabilities(): AssistantPluginCapability[] {
   return [
-    { capabilityId: 'app-store-read', title: 'App Store Status', description: 'Query apps, App Store versions, localization metadata, builds, and TestFlight groups through the official API.', scopes: ['appstoreconnect.apps.read'], actions: ['auth_status', 'list_apps', 'list_app_store_versions', 'get_app_info', 'list_builds', 'list_beta_groups'] },
-    { capabilityId: 'app-store-metadata', title: 'App Metadata Update', description: 'Prepare and apply App Info Localization metadata changes through the official API, with dry-run support.', scopes: ['appstoreconnect.metadata.write'], actions: ['preview_app_info_localization_update', 'update_app_info_localization'] },
+    {
+      capabilityId: 'app-store-read',
+      title: 'App Store Status',
+      description: 'Query apps, versions, localizations, builds, TestFlight groups/testers, and review submissions.',
+      scopes: ['appstoreconnect.apps.read'],
+      actions: [
+        'auth_status', 'list_apps', 'list_app_store_versions', 'list_app_store_version_localizations',
+        'get_app_info', 'list_app_infos', 'list_builds', 'list_testflight_builds', 'get_build_detail',
+        'list_beta_groups', 'list_beta_testers', 'list_review_submissions',
+      ],
+    },
+    {
+      capabilityId: 'app-store-metadata',
+      title: 'App Metadata Update',
+      description: 'Preview and apply metadata localization updates with dry-run support.',
+      scopes: ['appstoreconnect.metadata.write'],
+      actions: [
+        'preview_app_info_localization_update', 'update_app_info_localization',
+        'preview_app_store_version_metadata_update', 'update_app_store_version_metadata',
+      ],
+    },
+    {
+      capabilityId: 'app-store-testflight',
+      title: 'TestFlight Operations',
+      description: 'Assign builds to beta groups and prepare beta App Review submissions with strong confirmation.',
+      scopes: ['appstoreconnect.testflight.write'],
+      actions: ['assign_build_to_beta_group', 'submit_beta_app_review'],
+    },
+    {
+      capabilityId: 'app-store-release',
+      title: 'Release Operations',
+      description: 'Create App Store versions and gated review submissions with strong confirmation.',
+      scopes: ['appstoreconnect.release.write'],
+      actions: ['create_app_store_version', 'create_review_submission', 'submit_for_review'],
+    },
   ];
 }
 
@@ -297,17 +351,55 @@ function actions(): AssistantPluginActionDescriptor[] {
   return [
     {
       actionId: 'configure', title: 'Configure App Store Connect plugin', description: 'Enable official App Store Connect API access and save non-secret defaults.', readOnly: false, risk: 'workspace_write', confirmation: 'authorization', defaultTimeoutMs: 30_000, cancellable: true, idempotent: true,
-      scopes: ['appstoreconnect.apps.read', 'appstoreconnect.metadata.write'], resourceClaims: [{ resource: 'repo-state', mode: 'write' }],
+      scopes: ['appstoreconnect.apps.read', 'appstoreconnect.metadata.write', 'appstoreconnect.testflight.write', 'appstoreconnect.release.write'], resourceClaims: [{ resource: 'repo-state', mode: 'write' }],
       argumentsSchema: { type: 'object', properties: { enabled: { type: 'boolean' }, provider: { type: 'string', enum: ['mock', 'app-store-connect-api'] }, issuer_id: { type: 'string' }, key_id: { type: 'string' }, private_key_path: { type: 'string' }, clear_private_key_path: { type: 'boolean' }, clear_api_identity: { type: 'boolean' }, team_id: { type: 'string' }, clear_team_id: { type: 'boolean' }, default_app_id: { type: 'string' }, clear_default_app_id: { type: 'boolean' }, default_locale: { type: 'string' }, default_timeout_ms: { type: 'number' } }, additionalProperties: false },
     },
     { actionId: 'auth_status', title: 'Check App Store Connect auth', description: 'Report API readiness without returning secrets.', readOnly: true, risk: 'readonly', confirmation: 'none', defaultTimeoutMs: 10_000, cancellable: true, idempotent: true, scopes: ['appstoreconnect.apps.read'], resourceClaims: [], argumentsSchema: { type: 'object', properties: {}, additionalProperties: false } },
     { actionId: 'list_apps', title: 'List apps', description: 'List App Store Connect apps, optionally filtered by bundle ID or name.', readOnly: true, risk: 'readonly', confirmation: 'none', defaultTimeoutMs: 45_000, cancellable: true, idempotent: true, scopes: ['appstoreconnect.apps.read'], resourceClaims: readRemote, argumentsSchema: { type: 'object', properties: { bundle_id: { type: 'string' }, name: { type: 'string' }, limit: { type: 'number' } }, additionalProperties: false } },
     { actionId: 'list_app_store_versions', title: 'List App Store versions', description: 'List App Store versions for one app.', readOnly: true, risk: 'readonly', confirmation: 'none', defaultTimeoutMs: 45_000, cancellable: true, idempotent: true, scopes: ['appstoreconnect.apps.read'], resourceClaims: readRemote, argumentsSchema: { type: 'object', properties: { app_id: { type: 'string' }, limit: { type: 'number' } }, additionalProperties: false } },
+    { actionId: 'list_app_store_version_localizations', title: 'List App Store version localizations', description: 'List localizations for one App Store version.', readOnly: true, risk: 'readonly', confirmation: 'none', defaultTimeoutMs: 45_000, cancellable: true, idempotent: true, scopes: ['appstoreconnect.apps.read'], resourceClaims: readRemote, argumentsSchema: { type: 'object', properties: { version_id: { type: 'string' }, limit: { type: 'number' } }, required: ['version_id'], additionalProperties: false } },
     { actionId: 'get_app_info', title: 'Get app info', description: 'Get App Info records and localizations for one app.', readOnly: true, risk: 'readonly', confirmation: 'none', defaultTimeoutMs: 45_000, cancellable: true, idempotent: true, scopes: ['appstoreconnect.apps.read'], resourceClaims: readRemote, argumentsSchema: { type: 'object', properties: { app_id: { type: 'string' } }, additionalProperties: false } },
-    { actionId: 'list_builds', title: 'List builds', description: 'List recent builds for one app.', readOnly: true, risk: 'readonly', confirmation: 'none', defaultTimeoutMs: 45_000, cancellable: true, idempotent: true, scopes: ['appstoreconnect.apps.read'], resourceClaims: readRemote, argumentsSchema: { type: 'object', properties: { app_id: { type: 'string' }, limit: { type: 'number' } }, additionalProperties: false } },
+    { actionId: 'list_app_infos', title: 'List app infos', description: 'List App Info records for one app.', readOnly: true, risk: 'readonly', confirmation: 'none', defaultTimeoutMs: 45_000, cancellable: true, idempotent: true, scopes: ['appstoreconnect.apps.read'], resourceClaims: readRemote, argumentsSchema: { type: 'object', properties: { app_id: { type: 'string' }, limit: { type: 'number' } }, additionalProperties: false } },
+    { actionId: 'list_builds', title: 'List builds', description: 'List recent builds for one app with processing state fields.', readOnly: true, risk: 'readonly', confirmation: 'none', defaultTimeoutMs: 45_000, cancellable: true, idempotent: true, scopes: ['appstoreconnect.apps.read'], resourceClaims: readRemote, argumentsSchema: { type: 'object', properties: { app_id: { type: 'string' }, limit: { type: 'number' } }, additionalProperties: false } },
+    { actionId: 'list_testflight_builds', title: 'List TestFlight builds', description: 'List builds with TestFlight processing/export compliance fields.', readOnly: true, risk: 'readonly', confirmation: 'none', defaultTimeoutMs: 45_000, cancellable: true, idempotent: true, scopes: ['appstoreconnect.apps.read'], resourceClaims: readRemote, argumentsSchema: { type: 'object', properties: { app_id: { type: 'string' }, limit: { type: 'number' } }, additionalProperties: false } },
+    { actionId: 'get_build_detail', title: 'Get build detail', description: 'Get one build record with processing and TestFlight attributes.', readOnly: true, risk: 'readonly', confirmation: 'none', defaultTimeoutMs: 45_000, cancellable: true, idempotent: true, scopes: ['appstoreconnect.apps.read'], resourceClaims: readRemote, argumentsSchema: { type: 'object', properties: { build_id: { type: 'string' } }, required: ['build_id'], additionalProperties: false } },
     { actionId: 'list_beta_groups', title: 'List TestFlight beta groups', description: 'List TestFlight beta groups for one app.', readOnly: true, risk: 'readonly', confirmation: 'none', defaultTimeoutMs: 45_000, cancellable: true, idempotent: true, scopes: ['appstoreconnect.apps.read'], resourceClaims: readRemote, argumentsSchema: { type: 'object', properties: { app_id: { type: 'string' }, limit: { type: 'number' } }, additionalProperties: false } },
+    { actionId: 'list_beta_testers', title: 'List beta testers', description: 'List TestFlight beta testers for one app.', readOnly: true, risk: 'readonly', confirmation: 'none', defaultTimeoutMs: 45_000, cancellable: true, idempotent: true, scopes: ['appstoreconnect.apps.read'], resourceClaims: readRemote, argumentsSchema: { type: 'object', properties: { app_id: { type: 'string' }, limit: { type: 'number' } }, additionalProperties: false } },
+    { actionId: 'list_review_submissions', title: 'List review submissions', description: 'List App Store review submissions for one app when available.', readOnly: true, risk: 'readonly', confirmation: 'none', defaultTimeoutMs: 45_000, cancellable: true, idempotent: true, scopes: ['appstoreconnect.apps.read'], resourceClaims: readRemote, argumentsSchema: { type: 'object', properties: { app_id: { type: 'string' }, limit: { type: 'number' } }, additionalProperties: false } },
     { actionId: 'preview_app_info_localization_update', title: 'Preview app metadata update', description: 'Build the App Info Localization PATCH payload without sending it.', readOnly: true, risk: 'readonly', confirmation: 'none', defaultTimeoutMs: 10_000, cancellable: true, idempotent: true, scopes: ['appstoreconnect.metadata.write'], resourceClaims: [], argumentsSchema: { type: 'object', properties: { localization_id: { type: 'string' }, name: { type: 'string' }, subtitle: { type: 'string' }, privacy_policy_url: { type: 'string' }, privacy_policy_text: { type: 'string' } }, required: ['localization_id'], additionalProperties: false } },
     { actionId: 'update_app_info_localization', title: 'Update app metadata localization', description: 'Patch App Store Connect App Info Localization metadata through the official API. Use dry_run=true before applying.', readOnly: false, risk: 'remote_write', confirmation: 'authorization', defaultTimeoutMs: 60_000, cancellable: true, idempotent: false, scopes: ['appstoreconnect.metadata.write'], resourceClaims: writeRemote, argumentsSchema: { type: 'object', properties: { localization_id: { type: 'string' }, name: { type: 'string' }, subtitle: { type: 'string' }, privacy_policy_url: { type: 'string' }, privacy_policy_text: { type: 'string' }, dry_run: { type: 'boolean' } }, required: ['localization_id'], additionalProperties: false } },
+    { actionId: 'preview_app_store_version_metadata_update', title: 'Preview version metadata update', description: 'Build the App Store Version Localization PATCH payload without sending it.', readOnly: true, risk: 'readonly', confirmation: 'none', defaultTimeoutMs: 10_000, cancellable: true, idempotent: true, scopes: ['appstoreconnect.metadata.write'], resourceClaims: [], argumentsSchema: { type: 'object', properties: { localization_id: { type: 'string' }, description: { type: 'string' }, keywords: { type: 'string' }, marketing_url: { type: 'string' }, promotional_text: { type: 'string' }, support_url: { type: 'string' }, whats_new: { type: 'string' } }, required: ['localization_id'], additionalProperties: false } },
+    { actionId: 'update_app_store_version_metadata', title: 'Update version metadata localization', description: 'Patch App Store Version Localization metadata. Use dry_run=true before applying.', readOnly: false, risk: 'remote_write', confirmation: 'authorization', defaultTimeoutMs: 60_000, cancellable: true, idempotent: false, scopes: ['appstoreconnect.metadata.write'], resourceClaims: writeRemote, argumentsSchema: { type: 'object', properties: { localization_id: { type: 'string' }, description: { type: 'string' }, keywords: { type: 'string' }, marketing_url: { type: 'string' }, promotional_text: { type: 'string' }, support_url: { type: 'string' }, whats_new: { type: 'string' }, dry_run: { type: 'boolean' } }, required: ['localization_id'], additionalProperties: false } },
+    {
+      actionId: 'create_app_store_version', title: 'Create App Store version', description: 'Create a new App Store version for an app platform. Requires strong confirmation.',
+      readOnly: false, risk: 'remote_write', confirmation: 'strong_confirmation', requiredConfirmationText: 'create-app-store-version',
+      defaultTimeoutMs: 60_000, cancellable: true, idempotent: false, scopes: ['appstoreconnect.release.write'], resourceClaims: writeRemote,
+      argumentsSchema: { type: 'object', properties: { app_id: { type: 'string' }, version_string: { type: 'string' }, platform: { type: 'string', enum: ['IOS', 'MAC_OS', 'TV_OS', 'VISION_OS'] }, copyright: { type: 'string' }, dry_run: { type: 'boolean' } }, required: ['version_string'], additionalProperties: false },
+    },
+    {
+      actionId: 'assign_build_to_beta_group', title: 'Assign build to TestFlight group', description: 'Add a build to a TestFlight beta group. Requires strong confirmation.',
+      readOnly: false, risk: 'remote_write', confirmation: 'strong_confirmation', requiredConfirmationText: 'assign-testflight-build',
+      defaultTimeoutMs: 60_000, cancellable: true, idempotent: false, scopes: ['appstoreconnect.testflight.write'], resourceClaims: writeRemote,
+      argumentsSchema: { type: 'object', properties: { build_id: { type: 'string' }, beta_group_id: { type: 'string' }, dry_run: { type: 'boolean' } }, required: ['build_id', 'beta_group_id'], additionalProperties: false },
+    },
+    {
+      actionId: 'submit_beta_app_review', title: 'Submit beta App Review', description: 'Create a beta app review submission for a build. Requires strong confirmation.',
+      readOnly: false, risk: 'remote_write', confirmation: 'strong_confirmation', requiredConfirmationText: 'submit-beta-review',
+      defaultTimeoutMs: 60_000, cancellable: true, idempotent: false, scopes: ['appstoreconnect.testflight.write'], resourceClaims: writeRemote,
+      argumentsSchema: { type: 'object', properties: { build_id: { type: 'string' }, dry_run: { type: 'boolean' } }, required: ['build_id'], additionalProperties: false },
+    },
+    {
+      actionId: 'create_review_submission', title: 'Create review submission', description: 'Create an App Store review submission shell for an app. Requires strong confirmation.',
+      readOnly: false, risk: 'remote_write', confirmation: 'strong_confirmation', requiredConfirmationText: 'submit-app-review',
+      defaultTimeoutMs: 60_000, cancellable: true, idempotent: false, scopes: ['appstoreconnect.release.write'], resourceClaims: writeRemote,
+      argumentsSchema: { type: 'object', properties: { app_id: { type: 'string' }, platform: { type: 'string', enum: ['IOS', 'MAC_OS', 'TV_OS', 'VISION_OS'] }, dry_run: { type: 'boolean' } }, additionalProperties: false },
+    },
+    {
+      actionId: 'submit_for_review', title: 'Submit for App Review', description: 'Submit an existing review submission. Requires strong confirmation. Prefer dry_run first.',
+      readOnly: false, risk: 'remote_write', confirmation: 'strong_confirmation', requiredConfirmationText: 'submit-app-review',
+      defaultTimeoutMs: 60_000, cancellable: true, idempotent: false, scopes: ['appstoreconnect.release.write'], resourceClaims: writeRemote,
+      argumentsSchema: { type: 'object', properties: { review_submission_id: { type: 'string' }, dry_run: { type: 'boolean' } }, required: ['review_submission_id'], additionalProperties: false },
+    },
   ];
 }
 
@@ -340,15 +432,179 @@ function localizationPatch(args: Record<string, unknown>): Record<string, unknow
   return { data: { type: 'appInfoLocalizations', id, attributes } };
 }
 
+function versionLocalizationPatch(args: Record<string, unknown>): Record<string, unknown> {
+  const attributes: Record<string, string> = {};
+  const mapping = new Map([
+    ['description', 'description'],
+    ['keywords', 'keywords'],
+    ['marketing_url', 'marketingUrl'],
+    ['promotional_text', 'promotionalText'],
+    ['support_url', 'supportUrl'],
+    ['whats_new', 'whatsNew'],
+  ]);
+  for (const [argName, attributeName] of mapping) {
+    const value = stringValue(args[argName]);
+    if (value !== undefined) attributes[attributeName] = value;
+  }
+  if (Object.keys(attributes).length === 0) throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', 'Provide at least one version metadata field to update.', { retryable: false });
+  const id = stringValue(args.localization_id);
+  if (!id) throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', 'localization_id is required.', { retryable: false });
+  return { data: { type: 'appStoreVersionLocalizations', id, attributes } };
+}
+
+function requiredArg(args: Record<string, unknown>, name: string): string {
+  const value = stringValue(args[name]);
+  if (!value) throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', `${name} is required.`, { retryable: false });
+  return value;
+}
+
+function mockBuild(id: string) {
+  return {
+    type: 'builds',
+    id: stableMockId('build', { id }),
+    attributes: {
+      version: '42',
+      uploadedDate: now(),
+      processingState: 'VALID',
+      expired: false,
+      usesNonExemptEncryption: false,
+      minOsVersion: '17.0',
+    },
+  };
+}
+
 function mockResponse(actionId: string, args: Record<string, unknown>, config: AppStoreConnectPluginConfig): Record<string, unknown> {
   const id = stringValue(args.app_id) ?? config.defaultAppId ?? stableMockId('app', args);
-  if (actionId === 'auth_status') return { ready: true, provider: 'mock', warnings: ['Mock provider enabled.'] };
+  if (actionId === 'auth_status') {
+    return {
+      ready: true,
+      provider: 'mock',
+      warnings: ['Mock provider enabled.'],
+      userFacingStatus: 'ready',
+      readinessMode: 'mock_provider_ready',
+    };
+  }
   if (actionId === 'list_apps') return { data: [{ type: 'apps', id, attributes: { name: 'Mock App', bundleId: stringValue(args.bundle_id) ?? 'com.example.app', sku: 'MOCK' } }], meta: { provider: 'mock' } };
   if (actionId === 'list_app_store_versions') return { data: [{ type: 'appStoreVersions', id: stableMockId('version', { id }), attributes: { versionString: '1.0.0', appStoreState: 'PREPARE_FOR_SUBMISSION', platform: 'IOS' } }] };
-  if (actionId === 'get_app_info') return { data: [{ type: 'appInfos', id: stableMockId('info', { id }) }], included: [{ type: 'appInfoLocalizations', id: stableMockId('loc', { id }), attributes: { locale: config.defaultLocale, name: 'Mock App' } }] };
-  if (actionId === 'list_builds') return { data: [{ type: 'builds', id: stableMockId('build', { id }), attributes: { version: '1.0.0', processingState: 'VALID' } }] };
+  if (actionId === 'list_app_store_version_localizations') {
+    return {
+      data: [{
+        type: 'appStoreVersionLocalizations',
+        id: stableMockId('vloc', { version: args.version_id }),
+        attributes: { locale: config.defaultLocale, description: 'Mock description', keywords: 'mock,app', whatsNew: 'Bug fixes' },
+      }],
+    };
+  }
+  if (actionId === 'get_app_info' || actionId === 'list_app_infos') {
+    return {
+      data: [{ type: 'appInfos', id: stableMockId('info', { id }) }],
+      included: [{ type: 'appInfoLocalizations', id: stableMockId('loc', { id }), attributes: { locale: config.defaultLocale, name: 'Mock App' } }],
+    };
+  }
+  if (actionId === 'list_builds' || actionId === 'list_testflight_builds') {
+    return {
+      data: [mockBuild(id)],
+      meta: {
+        provider: 'mock',
+        testFlightFields: ['processingState', 'usesNonExemptEncryption', 'expired', 'uploadedDate'],
+      },
+    };
+  }
+  if (actionId === 'get_build_detail') {
+    const buildId = stringValue(args.build_id) ?? stableMockId('build', args);
+    return { data: { ...mockBuild(id), id: buildId } };
+  }
   if (actionId === 'list_beta_groups') return { data: [{ type: 'betaGroups', id: stableMockId('beta', { id }), attributes: { name: 'Internal Testers', isInternalGroup: true } }] };
-  if (actionId === 'preview_app_info_localization_update' || actionId === 'update_app_info_localization') return { dryRun: true, request: { method: 'PATCH', path: `/v1/appInfoLocalizations/${stringValue(args.localization_id) ?? ''}`, body: localizationPatch(args) }, provider: 'mock' };
+  if (actionId === 'list_beta_testers') {
+    return {
+      data: [{
+        type: 'betaTesters',
+        id: stableMockId('tester', { id }),
+        attributes: { firstName: 'Mock', lastName: 'Tester', email: 'tester@example.com', state: 'ACCEPTED' },
+      }],
+    };
+  }
+  if (actionId === 'list_review_submissions') {
+    return {
+      data: [{
+        type: 'reviewSubmissions',
+        id: stableMockId('review', { id }),
+        attributes: { state: 'READY_FOR_REVIEW', platform: 'IOS', submittedDate: null },
+      }],
+    };
+  }
+  if (actionId === 'preview_app_info_localization_update' || (actionId === 'update_app_info_localization' && args.dry_run === true)) {
+    return { dryRun: true, request: { method: 'PATCH', path: `/v1/appInfoLocalizations/${stringValue(args.localization_id) ?? ''}`, body: localizationPatch(args) }, provider: 'mock' };
+  }
+  if (actionId === 'update_app_info_localization') {
+    return { dryRun: false, provider: 'mock', data: localizationPatch(args).data, applied: true };
+  }
+  if (actionId === 'preview_app_store_version_metadata_update' || (actionId === 'update_app_store_version_metadata' && args.dry_run === true)) {
+    return { dryRun: true, request: { method: 'PATCH', path: `/v1/appStoreVersionLocalizations/${stringValue(args.localization_id) ?? ''}`, body: versionLocalizationPatch(args) }, provider: 'mock' };
+  }
+  if (actionId === 'update_app_store_version_metadata') {
+    return { dryRun: false, provider: 'mock', data: versionLocalizationPatch(args).data, applied: true };
+  }
+  if (actionId === 'create_app_store_version') {
+    const body = {
+      data: {
+        type: 'appStoreVersions',
+        attributes: {
+          platform: stringValue(args.platform) ?? 'IOS',
+          versionString: requiredArg(args, 'version_string'),
+          copyright: stringValue(args.copyright),
+        },
+        relationships: { app: { data: { type: 'apps', id } } },
+      },
+    };
+    if (args.dry_run === true) return { dryRun: true, request: { method: 'POST', path: '/v1/appStoreVersions', body }, provider: 'mock' };
+    return { dryRun: false, provider: 'mock', data: { ...body.data, id: stableMockId('version', body) }, applied: true };
+  }
+  if (actionId === 'assign_build_to_beta_group') {
+    const buildId = requiredArg(args, 'build_id');
+    const betaGroupId = requiredArg(args, 'beta_group_id');
+    const body = { data: [{ type: 'builds', id: buildId }] };
+    if (args.dry_run === true) {
+      return { dryRun: true, request: { method: 'POST', path: `/v1/betaGroups/${betaGroupId}/relationships/builds`, body }, provider: 'mock' };
+    }
+    return { dryRun: false, provider: 'mock', assigned: true, buildId, betaGroupId };
+  }
+  if (actionId === 'submit_beta_app_review') {
+    const buildId = requiredArg(args, 'build_id');
+    const body = { data: { type: 'betaAppReviewSubmissions', relationships: { build: { data: { type: 'builds', id: buildId } } } } };
+    if (args.dry_run === true) return { dryRun: true, request: { method: 'POST', path: '/v1/betaAppReviewSubmissions', body }, provider: 'mock' };
+    return { dryRun: false, provider: 'mock', data: { type: 'betaAppReviewSubmissions', id: stableMockId('beta_review', { buildId }), attributes: { betaReviewState: 'WAITING_FOR_REVIEW' } }, applied: true };
+  }
+  if (actionId === 'create_review_submission') {
+    const body = {
+      data: {
+        type: 'reviewSubmissions',
+        attributes: { platform: stringValue(args.platform) ?? 'IOS' },
+        relationships: { app: { data: { type: 'apps', id } } },
+      },
+    };
+    if (args.dry_run === true) return { dryRun: true, request: { method: 'POST', path: '/v1/reviewSubmissions', body }, provider: 'mock' };
+    return { dryRun: false, provider: 'mock', data: { ...body.data, id: stableMockId('review', body) }, applied: true };
+  }
+  if (actionId === 'submit_for_review') {
+    const reviewSubmissionId = requiredArg(args, 'review_submission_id');
+    const body = { data: { type: 'reviewSubmissionItems', relationships: { reviewSubmission: { data: { type: 'reviewSubmissions', id: reviewSubmissionId } } } } };
+    if (args.dry_run === true) {
+      return {
+        dryRun: true,
+        request: { method: 'PATCH', path: `/v1/reviewSubmissions/${reviewSubmissionId}`, body: { data: { type: 'reviewSubmissions', id: reviewSubmissionId, attributes: { submitted: true } } } },
+        provider: 'mock',
+        note: 'Production submit is gated; dry_run never calls Apple.',
+      };
+    }
+    return {
+      dryRun: false,
+      provider: 'mock',
+      data: { type: 'reviewSubmissions', id: reviewSubmissionId, attributes: { state: 'WAITING_FOR_REVIEW', submittedDate: now() } },
+      applied: true,
+      related: body,
+    };
+  }
   throw new AssistantPluginError('PLUGIN_ACTION_NOT_SUPPORTED', `app_store_connect/${actionId} is not supported.`, { retryable: false });
 }
 
@@ -399,17 +655,52 @@ export async function executeAppStoreConnectPluginAction(input: AssistantPluginA
 
   switch (input.actionId) {
     case 'auth_status':
-      return { ready: auth.ready, provider: auth.provider, issuerId: auth.issuerId ? 'configured' : undefined, keyId: auth.keyId ? 'configured' : undefined, credentialSource: auth.credentialSource, errors: auth.errors, warnings: auth.warnings };
+      return {
+        ready: auth.ready,
+        provider: auth.provider,
+        issuerId: auth.issuerId ? 'configured' : undefined,
+        keyId: auth.keyId ? 'configured' : undefined,
+        credentialSource: auth.credentialSource,
+        errors: auth.errors,
+        warnings: auth.warnings,
+        userFacingStatus: userFacingAscStatus(config, auth),
+      };
     case 'list_apps':
       return apiRequest(config, { path: '/v1/apps', query: { 'filter[bundleId]': stringValue(input.args.bundle_id), 'filter[name]': stringValue(input.args.name), limit: limit(input.args.limit) } });
     case 'list_app_store_versions':
       return apiRequest(config, { path: '/v1/appStoreVersions', query: { 'filter[app]': appId(input.args, config), limit: limit(input.args.limit) } });
+    case 'list_app_store_version_localizations':
+      return apiRequest(config, {
+        path: `/v1/appStoreVersions/${encodeURIComponent(requiredArg(input.args, 'version_id'))}/appStoreVersionLocalizations`,
+        query: { limit: limit(input.args.limit) },
+      });
     case 'get_app_info':
-      return apiRequest(config, { path: `/v1/apps/${encodeURIComponent(appId(input.args, config))}/appInfos`, query: { include: 'appInfoLocalizations' } });
+    case 'list_app_infos':
+      return apiRequest(config, { path: `/v1/apps/${encodeURIComponent(appId(input.args, config))}/appInfos`, query: { include: 'appInfoLocalizations', limit: limit(input.args.limit) } });
     case 'list_builds':
-      return apiRequest(config, { path: '/v1/builds', query: { 'filter[app]': appId(input.args, config), limit: limit(input.args.limit) } });
+    case 'list_testflight_builds':
+      return apiRequest(config, {
+        path: '/v1/builds',
+        query: {
+          'filter[app]': appId(input.args, config),
+          limit: limit(input.args.limit),
+          'fields[builds]': 'version,uploadedDate,expirationDate,expired,processingState,usesNonExemptEncryption,minOsVersion,iconAssetToken',
+        },
+      });
+    case 'get_build_detail':
+      return apiRequest(config, {
+        path: `/v1/builds/${encodeURIComponent(requiredArg(input.args, 'build_id'))}`,
+        query: {
+          'fields[builds]': 'version,uploadedDate,expirationDate,expired,processingState,usesNonExemptEncryption,minOsVersion,iconAssetToken',
+          include: 'buildBetaDetail,preReleaseVersion',
+        },
+      });
     case 'list_beta_groups':
       return apiRequest(config, { path: '/v1/betaGroups', query: { 'filter[app]': appId(input.args, config), limit: limit(input.args.limit) } });
+    case 'list_beta_testers':
+      return apiRequest(config, { path: '/v1/betaTesters', query: { 'filter[apps]': appId(input.args, config), limit: limit(input.args.limit) } });
+    case 'list_review_submissions':
+      return apiRequest(config, { path: '/v1/reviewSubmissions', query: { 'filter[app]': appId(input.args, config), limit: limit(input.args.limit) } });
     case 'preview_app_info_localization_update':
       return { dryRun: true, request: { method: 'PATCH', path: `/v1/appInfoLocalizations/${stringValue(input.args.localization_id) ?? ''}`, body: localizationPatch(input.args) } };
     case 'update_app_info_localization': {
@@ -417,6 +708,74 @@ export async function executeAppStoreConnectPluginAction(input: AssistantPluginA
       const localizationId = stringValue(input.args.localization_id) ?? '';
       if (input.args.dry_run === true) return { dryRun: true, request: { method: 'PATCH', path: `/v1/appInfoLocalizations/${localizationId}`, body } };
       return apiRequest(config, { path: `/v1/appInfoLocalizations/${encodeURIComponent(localizationId)}`, method: 'PATCH', body });
+    }
+    case 'preview_app_store_version_metadata_update':
+      return { dryRun: true, request: { method: 'PATCH', path: `/v1/appStoreVersionLocalizations/${stringValue(input.args.localization_id) ?? ''}`, body: versionLocalizationPatch(input.args) } };
+    case 'update_app_store_version_metadata': {
+      const body = versionLocalizationPatch(input.args);
+      const localizationId = stringValue(input.args.localization_id) ?? '';
+      if (input.args.dry_run === true) return { dryRun: true, request: { method: 'PATCH', path: `/v1/appStoreVersionLocalizations/${localizationId}`, body } };
+      return apiRequest(config, { path: `/v1/appStoreVersionLocalizations/${encodeURIComponent(localizationId)}`, method: 'PATCH', body });
+    }
+    case 'create_app_store_version': {
+      const body = {
+        data: {
+          type: 'appStoreVersions',
+          attributes: {
+            platform: stringValue(input.args.platform) ?? 'IOS',
+            versionString: requiredArg(input.args, 'version_string'),
+            copyright: stringValue(input.args.copyright),
+          },
+          relationships: { app: { data: { type: 'apps', id: appId(input.args, config) } } },
+        },
+      };
+      if (input.args.dry_run === true) return { dryRun: true, request: { method: 'POST', path: '/v1/appStoreVersions', body } };
+      return apiRequest(config, { path: '/v1/appStoreVersions', method: 'POST', body });
+    }
+    case 'assign_build_to_beta_group': {
+      const buildId = requiredArg(input.args, 'build_id');
+      const betaGroupId = requiredArg(input.args, 'beta_group_id');
+      const body = { data: [{ type: 'builds', id: buildId }] };
+      if (input.args.dry_run === true) {
+        return { dryRun: true, request: { method: 'POST', path: `/v1/betaGroups/${betaGroupId}/relationships/builds`, body } };
+      }
+      return apiRequest(config, { path: `/v1/betaGroups/${encodeURIComponent(betaGroupId)}/relationships/builds`, method: 'POST', body });
+    }
+    case 'submit_beta_app_review': {
+      const buildId = requiredArg(input.args, 'build_id');
+      const body = {
+        data: {
+          type: 'betaAppReviewSubmissions',
+          relationships: { build: { data: { type: 'builds', id: buildId } } },
+        },
+      };
+      if (input.args.dry_run === true) return { dryRun: true, request: { method: 'POST', path: '/v1/betaAppReviewSubmissions', body } };
+      return apiRequest(config, { path: '/v1/betaAppReviewSubmissions', method: 'POST', body });
+    }
+    case 'create_review_submission': {
+      const body = {
+        data: {
+          type: 'reviewSubmissions',
+          attributes: { platform: stringValue(input.args.platform) ?? 'IOS' },
+          relationships: { app: { data: { type: 'apps', id: appId(input.args, config) } } },
+        },
+      };
+      if (input.args.dry_run === true) return { dryRun: true, request: { method: 'POST', path: '/v1/reviewSubmissions', body } };
+      return apiRequest(config, { path: '/v1/reviewSubmissions', method: 'POST', body });
+    }
+    case 'submit_for_review': {
+      const reviewSubmissionId = requiredArg(input.args, 'review_submission_id');
+      const body = {
+        data: {
+          type: 'reviewSubmissions',
+          id: reviewSubmissionId,
+          attributes: { submitted: true },
+        },
+      };
+      if (input.args.dry_run === true) {
+        return { dryRun: true, request: { method: 'PATCH', path: `/v1/reviewSubmissions/${reviewSubmissionId}`, body } };
+      }
+      return apiRequest(config, { path: `/v1/reviewSubmissions/${encodeURIComponent(reviewSubmissionId)}`, method: 'PATCH', body });
     }
     default:
       throw new AssistantPluginError('PLUGIN_ACTION_NOT_SUPPORTED', `app_store_connect/${input.actionId} is not supported.`, { retryable: false });

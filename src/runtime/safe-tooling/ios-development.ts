@@ -72,10 +72,24 @@ function safeRepoRelativePath(repoRoot: string, value: string | undefined): stri
   return rel;
 }
 
-function safeArtifactDir(repository: RepositoryRecord, leaf: 'screenshots' | 'logs' | 'build-reports' | 'DerivedData'): string {
-  const root = resolve(repository.canonicalRoot, '.repo-harness', 'ios', leaf);
+function safeArtifactDir(
+  repository: RepositoryRecord,
+  leaf: 'screenshots' | 'logs' | 'build-reports' | 'DerivedData',
+  overrideRoot?: string,
+): string {
+  const root = overrideRoot
+    ? resolve(overrideRoot, leaf)
+    : resolve(repository.canonicalRoot, '.repo-harness', 'ios', leaf);
   mkdirSync(root, { recursive: true });
   return root;
+}
+
+function artifactRelativePath(repository: RepositoryRecord, absolutePath: string, overrideRoot?: string): string {
+  if (overrideRoot) {
+    const rel = relative(resolve(overrideRoot), resolve(absolutePath));
+    if (rel && !rel.startsWith(`..${sep}`) && rel !== '..') return `controller-artifacts/ios/${rel}`;
+  }
+  return relative(repository.canonicalRoot, absolutePath);
 }
 
 function timestamp(): string {
@@ -307,50 +321,508 @@ export function iosAppLaunch(input: { udid: string; bundleId: string; arguments?
   return { ready: result.ok, launched: result.ok, udid, bundleId, stdout: result.stdout.trim(), error: result.ok ? undefined : { code: 'IOS_LAUNCH_FAILED', message: result.stderr || result.stdout } };
 }
 
-export function iosSimulatorScreenshot(repository: RepositoryRecord, input: { udid: string; label?: string }) {
+export function iosSimulatorScreenshot(repository: RepositoryRecord, input: { udid: string; label?: string; artifactRoot?: string }) {
   const unsupported = assertDarwin();
   if (unsupported) return unsupported;
   const udid = String(input.udid ?? '').trim();
   if (!udid) throw new Error('IOS_SIMULATOR_UDID_REQUIRED');
-  const dir = safeArtifactDir(repository, 'screenshots');
+  const dir = safeArtifactDir(repository, 'screenshots', input.artifactRoot);
   const file = join(dir, `${timestamp()}-${sanitize(input.label ?? udid)}.png`);
   const result = runCommand('xcrun', ['simctl', 'io', udid, 'screenshot', file], { timeoutMs: 60_000 });
   return {
     ready: result.ok,
-    screenshot: result.ok ? relative(repository.canonicalRoot, file) : undefined,
+    screenshot: result.ok ? artifactRelativePath(repository, file, input.artifactRoot) : undefined,
+    absolutePath: result.ok ? file : undefined,
     artifactType: 'ios_simulator_screenshot',
     udid,
+    command: result.command,
     error: result.ok ? undefined : { code: 'IOS_SCREENSHOT_FAILED', message: result.stderr || result.stdout },
     safety: { boundedPath: true, arbitraryPathAccepted: false },
   };
 }
 
-export function iosSimulatorLogTail(repository: RepositoryRecord, input: { udid: string; process?: string; last?: string; maxBytes?: number }) {
+export function iosSimulatorLogTail(repository: RepositoryRecord, input: { udid: string; process?: string; last?: string; maxBytes?: number; artifactRoot?: string }) {
   const unsupported = assertDarwin();
   if (unsupported) return unsupported;
   const udid = String(input.udid ?? '').trim();
   const predicate = input.process ? `process == "${String(input.process).replace(/"/g, '')}"` : 'process != ""';
   const result = runCommand('xcrun', ['simctl', 'spawn', udid, 'log', 'show', '--last', input.last ?? '2m', '--predicate', predicate], { timeoutMs: 60_000 });
   const text = boundedText(result.stdout || result.stderr, input.maxBytes ?? 20_000);
-  const dir = safeArtifactDir(repository, 'logs');
+  const dir = safeArtifactDir(repository, 'logs', input.artifactRoot);
   const file = join(dir, `${timestamp()}-${sanitize(input.process ?? udid)}.log`);
   writeFileSync(file, text.content, 'utf-8');
-  return { ready: result.ok, path: relative(repository.canonicalRoot, file), content: text.content, truncated: text.truncated, error: result.ok ? undefined : { code: 'IOS_LOG_TAIL_FAILED', message: result.stderr || result.stdout } };
+  return {
+    ready: result.ok,
+    path: artifactRelativePath(repository, file, input.artifactRoot),
+    absolutePath: file,
+    content: text.content,
+    truncated: text.truncated,
+    command: result.command,
+    error: result.ok ? undefined : { code: 'IOS_LOG_TAIL_FAILED', message: result.stderr || result.stdout },
+  };
+}
+
+export type IosSmokeStageId =
+  | 'project_discovery'
+  | 'scheme_selection'
+  | 'build'
+  | 'simulator_preparation'
+  | 'install'
+  | 'launch'
+  | 'screenshot'
+  | 'logs';
+
+export type IosSmokeStageStatus = 'passed' | 'failed' | 'skipped';
+
+export interface IosSmokeStageResult {
+  stage: IosSmokeStageId;
+  status: IosSmokeStageStatus;
+  summary: string;
+  command?: string[];
+  evidence?: Record<string, unknown>;
+  repairHint?: string;
+  artifacts?: string[];
+}
+
+export interface IosSmokeReviewInput {
+  udid?: string;
+  simulatorName?: string;
+  scheme?: string;
+  bundleId?: string;
+  workspace?: string;
+  project?: string;
+  configuration?: string;
+  appPath?: string;
+  screenshotLabel?: string;
+  skipBuild?: boolean;
+  artifactRoot?: string;
+}
+
+function stagePassed(stage: IosSmokeStageId, summary: string, extra: Partial<IosSmokeStageResult> = {}): IosSmokeStageResult {
+  return { stage, status: 'passed', summary, ...extra };
+}
+
+function stageFailed(stage: IosSmokeStageId, summary: string, repairHint: string, extra: Partial<IosSmokeStageResult> = {}): IosSmokeStageResult {
+  return { stage, status: 'failed', summary, repairHint, ...extra };
+}
+
+function stageSkipped(stage: IosSmokeStageId, summary: string): IosSmokeStageResult {
+  return { stage, status: 'skipped', summary };
+}
+
+/**
+ * Staged iOS smoke review. Each stage records independent evidence; later stages
+ * are skipped when an earlier stage fails, without erasing successful evidence.
+ */
+export function iosSmokeReview(repository: RepositoryRecord, input: IosSmokeReviewInput = {}) {
+  const stages: IosSmokeStageResult[] = [];
+  const artifacts: string[] = [];
+  const commands: string[][] = [];
+  let blockedStage: IosSmokeStageId | undefined;
+  let overallStatus: 'passed' | 'failed' = 'passed';
+
+  const failRemaining = (fromIndex: number, reason: string) => {
+    const remaining: IosSmokeStageId[] = [
+      'project_discovery', 'scheme_selection', 'build', 'simulator_preparation',
+      'install', 'launch', 'screenshot', 'logs',
+    ].slice(fromIndex) as IosSmokeStageId[];
+    for (const stage of remaining) {
+      if (!stages.some((entry) => entry.stage === stage)) {
+        stages.push(stageSkipped(stage, reason));
+      }
+    }
+  };
+
+  // 1. project_discovery
+  const discovered = iosProjectDiscover(repository);
+  if (!discovered.ready) {
+    overallStatus = 'failed';
+    blockedStage = 'project_discovery';
+    stages.push(stageFailed(
+      'project_discovery',
+      'No Xcode workspace, project, or Package.swift was discovered.',
+      'Add an .xcworkspace/.xcodeproj or Package.swift under the repository root.',
+      { evidence: discovered as unknown as Record<string, unknown> },
+    ));
+    failRemaining(1, 'Skipped because project_discovery failed.');
+    return { ready: false, overallStatus, blockedStage, stages, artifacts, commands, discovery: discovered };
+  }
+  stages.push(stagePassed('project_discovery', `Discovered ${discovered.defaultContainer?.type ?? 'project'} at ${discovered.defaultContainer?.path ?? '(unknown)'}.`, {
+    evidence: {
+      workspace: discovered.workspace,
+      project: discovered.project,
+      packageSwift: discovered.packageSwift,
+      infoPlists: discovered.infoPlists?.slice(0, 10),
+      defaultContainer: discovered.defaultContainer,
+    },
+  }));
+
+  // 2. scheme_selection
+  let selectedScheme = String(input.scheme ?? '').trim();
+  let schemesList: ReturnType<typeof iosSchemesList> | undefined;
+  const platformBlock = assertDarwin();
+  if (platformBlock) {
+    overallStatus = 'failed';
+    blockedStage = 'scheme_selection';
+    stages.push(stageFailed('scheme_selection', platformBlock.error?.message ?? 'iOS tooling unavailable on this platform.', 'Run smoke review on macOS with Xcode installed.', {
+      evidence: platformBlock as unknown as Record<string, unknown>,
+    }));
+    failRemaining(2, 'Skipped because scheme_selection failed.');
+    return { ready: false, overallStatus, blockedStage, stages, artifacts, commands, discovery: discovered };
+  }
+
+  schemesList = iosSchemesList(repository, { workspace: input.workspace ?? discovered.workspace, project: input.project ?? discovered.project });
+  if (schemesList && 'command' in schemesList && Array.isArray(schemesList.command)) commands.push(schemesList.command as string[]);
+  if (!schemesList.ready) {
+    overallStatus = 'failed';
+    blockedStage = 'scheme_selection';
+    const message = 'error' in schemesList && schemesList.error && typeof schemesList.error === 'object' && 'message' in schemesList.error
+      ? String((schemesList.error as { message?: string }).message ?? 'xcodebuild -list failed')
+      : 'xcodebuild -list failed';
+    stages.push(stageFailed('scheme_selection', message, 'Ensure Xcode is installed and the project opens cleanly in Xcode, then re-run list_schemes.', {
+      command: 'command' in schemesList ? schemesList.command as string[] : undefined,
+      evidence: schemesList as unknown as Record<string, unknown>,
+    }));
+    failRemaining(2, 'Skipped because scheme_selection failed.');
+    return { ready: false, overallStatus, blockedStage, stages, artifacts, commands, discovery: discovered, schemes: schemesList };
+  }
+
+  const availableSchemes = (schemesList as { ready: true; schemes: string[] }).schemes;
+  if (!selectedScheme) selectedScheme = availableSchemes[0] ?? '';
+  if (!selectedScheme) {
+    overallStatus = 'failed';
+    blockedStage = 'scheme_selection';
+    stages.push(stageFailed(
+      'scheme_selection',
+      'No schemes were available for the discovered project.',
+      'Create a shared scheme in Xcode or pass scheme explicitly.',
+      { evidence: { schemes: availableSchemes, workspace: discovered.workspace, project: discovered.project } },
+    ));
+    failRemaining(2, 'Skipped because scheme_selection failed.');
+    return { ready: false, overallStatus, blockedStage, stages, artifacts, commands, discovery: discovered, schemes: schemesList };
+  }
+  if (availableSchemes.length > 0 && !availableSchemes.includes(selectedScheme)) {
+    overallStatus = 'failed';
+    blockedStage = 'scheme_selection';
+    stages.push(stageFailed(
+      'scheme_selection',
+      `Requested scheme "${selectedScheme}" is not in the project scheme list.`,
+      `Choose one of: ${availableSchemes.slice(0, 12).join(', ') || '(none)'}.`,
+      { evidence: { requestedScheme: selectedScheme, schemes: availableSchemes } },
+    ));
+    failRemaining(2, 'Skipped because scheme_selection failed.');
+    return { ready: false, overallStatus, blockedStage, stages, artifacts, commands, discovery: discovered, schemes: schemesList };
+  }
+  stages.push(stagePassed('scheme_selection', `Selected scheme ${selectedScheme}.`, {
+    evidence: { scheme: selectedScheme, schemes: availableSchemes },
+    command: 'command' in schemesList ? schemesList.command as string[] : undefined,
+  }));
+
+  // 3. build
+  let appPath = String(input.appPath ?? '').trim();
+  let buildResult: ReturnType<typeof iosAppBuild> | undefined;
+  let udid = '';
+  try {
+    udid = chooseSimulatorUdid(input);
+  } catch (error) {
+    // simulator udid selection deferred to simulator_preparation when prebuilt app is used
+    udid = String(input.udid ?? '').trim();
+  }
+
+  if (input.skipBuild && appPath) {
+    stages.push(stagePassed('build', `Skipped build; using provided app_path ${appPath}.`, {
+      evidence: { appPath, skipped: true },
+    }));
+  } else {
+    buildResult = iosAppBuild(repository, {
+      scheme: selectedScheme,
+      udid: udid || undefined,
+      simulatorName: input.simulatorName,
+      workspace: input.workspace ?? discovered.workspace,
+      project: input.project ?? discovered.project,
+      configuration: input.configuration,
+    });
+    if (buildResult && 'command' in buildResult && Array.isArray(buildResult.command)) commands.push(buildResult.command as string[]);
+    if (!buildResult.ready) {
+      overallStatus = 'failed';
+      blockedStage = 'build';
+      const message = buildResult && 'error' in buildResult && buildResult.error
+        ? String((buildResult.error as { message?: string }).message ?? 'Build failed')
+        : 'Build failed';
+      // Persist build log evidence when present
+      if (buildResult && 'stdout' in buildResult) {
+        const reportDir = safeArtifactDir(repository, 'build-reports', input.artifactRoot);
+        const reportFile = join(reportDir, `${timestamp()}-build.log`);
+        const reportBody = [
+          `command: ${Array.isArray(buildResult.command) ? buildResult.command.join(' ') : ''}`,
+          '',
+          typeof buildResult.stdout === 'object' && buildResult.stdout && 'content' in buildResult.stdout
+            ? String((buildResult.stdout as { content: string }).content)
+            : '',
+          typeof buildResult.stderr === 'object' && buildResult.stderr && 'content' in buildResult.stderr
+            ? String((buildResult.stderr as { content: string }).content)
+            : '',
+        ].join('\n');
+        writeFileSync(reportFile, reportBody, 'utf-8');
+        const rel = artifactRelativePath(repository, reportFile, input.artifactRoot);
+        artifacts.push(rel);
+      }
+      stages.push(stageFailed('build', message, 'Inspect xcodebuild output, fix compile errors, then re-run smoke_review.', {
+        command: 'command' in buildResult ? buildResult.command as string[] : undefined,
+        evidence: {
+          scheme: selectedScheme,
+          derivedDataPath: 'derivedDataPath' in buildResult ? buildResult.derivedDataPath : undefined,
+          stdout: 'stdout' in buildResult ? buildResult.stdout : undefined,
+          stderr: 'stderr' in buildResult ? buildResult.stderr : undefined,
+        },
+        artifacts: artifacts.slice(),
+      }));
+      failRemaining(3, 'Skipped because build failed.');
+      return {
+        ready: false,
+        overallStatus,
+        blockedStage,
+        stages,
+        artifacts,
+        commands,
+        discovery: discovered,
+        schemes: schemesList,
+        scheme: selectedScheme,
+        build: buildResult,
+      };
+    }
+    appPath = String(('appPath' in buildResult ? buildResult.appPath : '') || appPath || '');
+    if (!appPath) {
+      overallStatus = 'failed';
+      blockedStage = 'build';
+      stages.push(stageFailed(
+        'build',
+        'Build completed without producing a .app under .repo-harness/ios/DerivedData.',
+        'Confirm the scheme builds an iOS app target and DerivedData path is writable.',
+        { evidence: buildResult as unknown as Record<string, unknown> },
+      ));
+      failRemaining(3, 'Skipped because build failed.');
+      return {
+        ready: false, overallStatus, blockedStage, stages, artifacts, commands,
+        discovery: discovered, schemes: schemesList, scheme: selectedScheme, build: buildResult,
+      };
+    }
+    stages.push(stagePassed('build', `Built scheme ${selectedScheme} → ${appPath}.`, {
+      command: 'command' in buildResult ? buildResult.command as string[] : undefined,
+      evidence: {
+        scheme: selectedScheme,
+        appPath,
+        derivedDataPath: 'derivedDataPath' in buildResult ? buildResult.derivedDataPath : undefined,
+        builtApps: 'builtApps' in buildResult ? buildResult.builtApps : undefined,
+      },
+    }));
+  }
+
+  // 4. simulator_preparation
+  try {
+    if (!udid) udid = chooseSimulatorUdid(input);
+  } catch (error) {
+    overallStatus = 'failed';
+    blockedStage = 'simulator_preparation';
+    stages.push(stageFailed(
+      'simulator_preparation',
+      error instanceof Error ? error.message : String(error),
+      'Install an iOS Simulator runtime in Xcode, or pass udid/simulator_name explicitly.',
+    ));
+    failRemaining(4, 'Skipped because simulator_preparation failed.');
+    return {
+      ready: false, overallStatus, blockedStage, stages, artifacts, commands,
+      discovery: discovered, schemes: schemesList, scheme: selectedScheme, build: buildResult, udid,
+    };
+  }
+  const boot = iosSimulatorBoot({ udid });
+  if (boot && 'command' in boot && Array.isArray(boot.command)) commands.push(boot.command as string[]);
+  if (!boot.ready) {
+    overallStatus = 'failed';
+    blockedStage = 'simulator_preparation';
+    stages.push(stageFailed(
+      'simulator_preparation',
+      ('error' in boot && boot.error ? String((boot.error as { message?: string }).message) : 'Simulator boot failed'),
+      'Open Simulator.app, boot a device manually, or pick another udid from list_simulators.',
+      { command: 'command' in boot ? boot.command as string[] : undefined, evidence: boot as unknown as Record<string, unknown> },
+    ));
+    failRemaining(4, 'Skipped because simulator_preparation failed.');
+    return {
+      ready: false, overallStatus, blockedStage, stages, artifacts, commands,
+      discovery: discovered, schemes: schemesList, scheme: selectedScheme, build: buildResult, udid, boot,
+    };
+  }
+  stages.push(stagePassed('simulator_preparation', `Simulator ${udid} is booted.`, {
+    command: 'command' in boot ? boot.command as string[] : undefined,
+    evidence: { udid, alreadyBooted: 'alreadyBooted' in boot ? boot.alreadyBooted : undefined },
+  }));
+
+  // 5. install
+  const install = iosAppInstall(repository, { udid, appPath });
+  if (!install.ready) {
+    overallStatus = 'failed';
+    blockedStage = 'install';
+    stages.push(stageFailed(
+      'install',
+      ('error' in install && install.error ? String((install.error as { message?: string }).message) : 'Install failed'),
+      'Confirm the .app path is under .repo-harness/ios/DerivedData and matches the simulator architecture.',
+      { evidence: install as unknown as Record<string, unknown> },
+    ));
+    failRemaining(5, 'Skipped because install failed.');
+    return {
+      ready: false, overallStatus, blockedStage, stages, artifacts, commands,
+      discovery: discovered, schemes: schemesList, scheme: selectedScheme, build: buildResult, udid, boot, install,
+    };
+  }
+  stages.push(stagePassed('install', `Installed ${appPath} on ${udid}.`, {
+    evidence: install as unknown as Record<string, unknown>,
+  }));
+
+  // 6. launch
+  const bundleId = String(input.bundleId ?? readBuiltAppBundleId(repository, appPath) ?? '').trim();
+  if (!bundleId) {
+    overallStatus = 'failed';
+    blockedStage = 'launch';
+    stages.push(stageFailed(
+      'launch',
+      'Could not resolve CFBundleIdentifier for the built app.',
+      'Pass bundle_id explicitly or ensure Info.plist contains CFBundleIdentifier.',
+      { evidence: { appPath } },
+    ));
+    failRemaining(6, 'Skipped because launch failed.');
+    return {
+      ready: false, overallStatus, blockedStage, stages, artifacts, commands,
+      discovery: discovered, schemes: schemesList, scheme: selectedScheme, build: buildResult, udid, boot, install,
+    };
+  }
+  const launch = iosAppLaunch({ udid, bundleId });
+  if (!launch.ready) {
+    overallStatus = 'failed';
+    blockedStage = 'launch';
+    stages.push(stageFailed(
+      'launch',
+      ('error' in launch && launch.error ? String((launch.error as { message?: string }).message) : 'Launch failed'),
+      'Verify the bundle id, reinstall the app, and check Simulator console for crash logs.',
+      { evidence: launch as unknown as Record<string, unknown> },
+    ));
+    failRemaining(6, 'Skipped because launch failed.');
+    return {
+      ready: false, overallStatus, blockedStage, stages, artifacts, commands,
+      discovery: discovered, schemes: schemesList, scheme: selectedScheme, build: buildResult,
+      udid, bundleId, boot, install, launch,
+    };
+  }
+  stages.push(stagePassed('launch', `Launched ${bundleId} on ${udid}.`, {
+    evidence: launch as unknown as Record<string, unknown>,
+  }));
+
+  // 7. screenshot
+  const screenshot = iosSimulatorScreenshot(repository, {
+    udid,
+    label: input.screenshotLabel ?? selectedScheme,
+    artifactRoot: input.artifactRoot,
+  }) as {
+    ready: boolean;
+    screenshot?: string;
+    absolutePath?: string;
+    command?: string[];
+    error?: { message?: string };
+  };
+  if (Array.isArray(screenshot.command)) commands.push(screenshot.command);
+  if (screenshot.ready && screenshot.screenshot) artifacts.push(screenshot.screenshot);
+  if (!screenshot.ready) {
+    overallStatus = 'failed';
+    blockedStage = 'screenshot';
+    stages.push(stageFailed(
+      'screenshot',
+      screenshot.error?.message ?? 'Screenshot failed',
+      'Ensure the simulator is booted and simctl io screenshot works for the selected udid.',
+      { command: screenshot.command, evidence: screenshot as unknown as Record<string, unknown> },
+    ));
+    failRemaining(7, 'Skipped because screenshot failed.');
+    // still attempt logs for diagnosis
+  } else {
+    stages.push(stagePassed('screenshot', `Captured screenshot ${screenshot.screenshot}.`, {
+      command: screenshot.command,
+      evidence: { screenshot: screenshot.screenshot, absolutePath: screenshot.absolutePath },
+      artifacts: screenshot.screenshot ? [screenshot.screenshot] : undefined,
+    }));
+  }
+
+  // 8. logs
+  const logs = iosSimulatorLogTail(repository, {
+    udid,
+    process: selectedScheme,
+    maxBytes: 12_000,
+    artifactRoot: input.artifactRoot,
+  }) as {
+    ready: boolean;
+    path?: string;
+    content?: string;
+    truncated?: boolean;
+    command?: string[];
+    error?: { message?: string };
+  };
+  if (Array.isArray(logs.command)) commands.push(logs.command);
+  if (logs.path) artifacts.push(logs.path);
+  if (!logs.ready) {
+    if (overallStatus === 'passed') {
+      overallStatus = 'failed';
+      blockedStage = 'logs';
+    }
+    stages.push(stageFailed(
+      'logs',
+      logs.error?.message ?? 'Log collection failed',
+      'Simulator may still be booting; retry log_tail after a few seconds.',
+      { command: logs.command, evidence: { path: logs.path, truncated: logs.truncated }, artifacts: logs.path ? [logs.path] : undefined },
+    ));
+  } else {
+    stages.push(stagePassed('logs', `Collected logs at ${logs.path}.`, {
+      command: logs.command,
+      evidence: { path: logs.path, truncated: logs.truncated, preview: logs.content?.slice(0, 500) },
+      artifacts: logs.path ? [logs.path] : undefined,
+    }));
+  }
+
+  const failed = stages.find((stage) => stage.status === 'failed');
+  return {
+    ready: overallStatus === 'passed',
+    overallStatus,
+    blockedStage: failed?.stage,
+    blockedRepairHint: failed?.repairHint,
+    stages,
+    artifacts,
+    commands,
+    discovery: discovered,
+    schemes: schemesList,
+    scheme: selectedScheme,
+    bundleId,
+    udid,
+    build: buildResult,
+    boot,
+    install,
+    launch,
+    screenshot,
+    logs,
+  };
 }
 
 export function iosUiSmokeTest(repository: RepositoryRecord, input: { udid?: string; simulatorName?: string; scheme?: string; bundleId?: string; workspace?: string; project?: string; configuration?: string; appPath?: string; screenshotLabel?: string }) {
-  const udid = chooseSimulatorUdid(input);
-  const build = input.appPath ? undefined : iosAppBuild(repository, { ...input, udid });
-  if (build && !build.ready) return { ready: false, udid, build };
-  const appPath = input.appPath ?? (build && 'appPath' in build ? String(build.appPath ?? '') : '');
-  if (!appPath) throw new Error('IOS_APP_PATH_REQUIRED: build did not produce a .app under .repo-harness/ios/DerivedData');
-  const bundleId = String(input.bundleId ?? readBuiltAppBundleId(repository, appPath) ?? '').trim();
-  if (!bundleId) throw new Error('IOS_BUNDLE_ID_REQUIRED: provide bundle_id or ensure built app Info.plist has CFBundleIdentifier');
-  const scheme = String(input.scheme ?? (build && 'scheme' in build ? build.scheme : '') ?? bundleId).trim();
-  const boot = iosSimulatorBoot({ udid });
-  const install = iosAppInstall(repository, { udid, appPath });
-  const launch = iosAppLaunch({ udid, bundleId });
-  const screenshot = iosSimulatorScreenshot(repository, { udid, label: input.screenshotLabel ?? scheme });
-  const logs = iosSimulatorLogTail(repository, { udid, process: scheme, maxBytes: 12_000 });
-  return { ready: Boolean((build === undefined || build.ready) && boot.ready && install.ready && launch.ready && screenshot.ready), udid, scheme, bundleId, build, install, boot, launch, screenshot, logs };
+  const review = iosSmokeReview(repository, input);
+  return {
+    ready: review.ready,
+    udid: review.udid,
+    scheme: review.scheme,
+    bundleId: review.bundleId,
+    build: review.build,
+    install: review.install,
+    boot: review.boot,
+    launch: review.launch,
+    screenshot: review.screenshot,
+    logs: review.logs,
+    stages: review.stages,
+    overallStatus: review.overallStatus,
+    blockedStage: review.blockedStage,
+    artifacts: review.artifacts,
+  };
 }

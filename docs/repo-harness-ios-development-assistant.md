@@ -64,4 +64,59 @@ ios_xcode_status
 → ChatGPT reviews the screenshot artifact and proposes UI fixes
 ```
 
-Screenshots are intentionally stored under repository-local `.repo-harness/ios/screenshots` so they can be referenced as bounded artifacts without exposing arbitrary local paths.
+## Plugin surface (`ios`)
+
+The same workflow is also exposed as a controller plugin via `list_plugins` /
+`get_plugin` / `plugin_action_execute`:
+
+| Action | Purpose |
+| --- | --- |
+| `discover_project` | Discover workspace/project/Package.swift/Info.plist |
+| `list_schemes` | List schemes for the discovered container |
+| `build` | `xcodebuild` into bounded DerivedData |
+| `launch_simulator` | Boot a simulator |
+| `capture_screenshot` | Capture a screenshot artifact |
+| `smoke_review` | **Composite staged review** (recommended) |
+
+### Staged `smoke_review`
+
+`ios.smoke_review` runs these stages independently and keeps earlier evidence if
+a later stage fails:
+
+1. `project_discovery`
+2. `scheme_selection`
+3. `build`
+4. `simulator_preparation`
+5. `install`
+6. `launch`
+7. `screenshot`
+8. `logs`
+
+Result shape:
+
+- `overallStatus`: `passed` | `failed`
+- `blockedStage` + `blockedRepairHint` when failed
+- `stages[]` with per-stage status, command evidence, artifacts, repair hints
+- `artifacts[]` screenshot/log paths
+
+Plugin screenshots/logs are written under controller runtime artifact storage:
+
+```text
+$CONTROLLER_HOME/repositories/<repoId>/artifacts/ios/{screenshots,logs,build-reports}/
+```
+
+Repository-local MCP tools still use `.repo-harness/ios/**` for backward
+compatibility.
+
+### Troubleshooting
+
+| Stage | Common fix |
+| --- | --- |
+| `project_discovery` | Add `.xcodeproj` / `.xcworkspace` or `Package.swift` |
+| `scheme_selection` | Share a scheme in Xcode or pass `scheme` |
+| `build` | Fix compile errors; inspect stage `stdout`/`stderr` |
+| `simulator_preparation` | Install a simulator runtime; pass `udid` |
+| `install` / `launch` | Confirm bundle id and built `.app` under DerivedData |
+| `screenshot` / `logs` | Ensure simulator is booted and not stuck |
+
+Screenshots are intentionally stored under bounded artifact roots so they can be referenced without exposing arbitrary local paths.

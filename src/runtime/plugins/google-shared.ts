@@ -254,24 +254,50 @@ export function resolveGoogleAuth(service: GoogleService, config: GooglePluginCo
   };
 }
 
+export type GoogleReadinessMode =
+  | 'disabled'
+  | 'missing_token'
+  | 'missing_scopes'
+  | 'mock_provider_ready'
+  | 'live_provider_ready';
+
+export function resolveGoogleReadinessMode(config: GooglePluginConfig, auth: GoogleAuthState): GoogleReadinessMode {
+  if (!config.enabled) return 'disabled';
+  if (config.provider === 'mock' && auth.ready) return 'mock_provider_ready';
+  if (config.provider === 'google-workspace' && auth.ready) return 'live_provider_ready';
+  if (config.provider === 'google-workspace' && !auth.authenticated) return 'missing_token';
+  return 'missing_scopes';
+}
+
 export function pluginStateFromGoogleAuth(config: GooglePluginConfig, auth: GoogleAuthState): {
   lifecycleState: AssistantPluginLifecycleState;
   health: AssistantPluginHealth;
 } {
+  const readinessMode = resolveGoogleReadinessMode(config, auth);
+  // Missing live credentials is a setup state, not a broken plugin, when mock is not selected.
   const lifecycleState: AssistantPluginLifecycleState = !config.enabled
     ? 'disabled'
     : auth.ready
       ? 'enabled'
-      : auth.errors.length > 0
-        ? 'error'
-        : 'degraded';
+      : readinessMode === 'missing_token' || readinessMode === 'missing_scopes'
+        ? 'degraded'
+        : 'error';
   const healthState = !config.enabled
     ? 'disabled'
     : auth.ready
       ? 'ready'
-      : auth.errors.length > 0
-        ? 'error'
-        : 'degraded';
+      : readinessMode === 'missing_token' || readinessMode === 'missing_scopes'
+        ? 'degraded'
+        : 'error';
+  const userFacingStatus = readinessMode === 'disabled'
+    ? 'disabled'
+    : readinessMode === 'mock_provider_ready'
+      ? 'mock ready'
+      : readinessMode === 'live_provider_ready'
+        ? 'ready'
+        : readinessMode === 'missing_token'
+          ? 'live token missing'
+          : 'missing scopes';
   return {
     lifecycleState,
     health: {
@@ -279,13 +305,24 @@ export function pluginStateFromGoogleAuth(config: GooglePluginConfig, auth: Goog
       checkedAt: new Date().toISOString(),
       ready: config.enabled && auth.ready,
       probed: config.enabled ? auth.probed : false,
-      errors: config.enabled ? [...auth.errors] : [],
-      warnings: !config.enabled ? ['Plugin is disabled. Enable it before using Google provider actions.'] : [...auth.warnings],
+      // Keep auth setup messages in warnings when only the token is missing so UIs
+      // classify the plugin as authorization_required instead of generically failed.
+      errors: config.enabled && readinessMode !== 'missing_token' && readinessMode !== 'missing_scopes'
+        ? [...auth.errors]
+        : [],
+      warnings: !config.enabled
+        ? ['Plugin is disabled. Enable it before using Google provider actions.']
+        : [
+            ...auth.warnings,
+            ...(readinessMode === 'missing_token' || readinessMode === 'missing_scopes' ? auth.errors : []),
+          ],
       details: {
         provider: config.provider,
         accountEmail: config.accountEmail,
         credentialSource: auth.credentialSource,
         credentialPersistence: 'credentials are never persisted by repo-harness',
+        readinessMode,
+        userFacingStatus,
       },
     },
   };

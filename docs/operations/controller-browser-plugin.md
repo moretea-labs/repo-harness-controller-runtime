@@ -4,29 +4,23 @@ The `browser` plugin gives the controller a local Playwright-backed browser surf
 
 ## Scope
 
-Supported actions:
+Supported action groups:
 
-- `configure`
-- `open_page`
-- `get_text`
-- `screenshot`
-- `click`
-- `type`
-- `press`
-- `wait_for_selector`
-- `close_page`
+- **Session lifecycle**: `create_session`, `list_sessions`, `close_session`, `clear_session`, `close_page`
+- **Navigation**: `open_page`, `navigate`, `reload`, `go_back`, `wait_for_load_state`
+- **DOM / extraction**: `get_text`, `get_html`, `query_selector`, `query_all`, `get_attribute`, `extract_links`, `extract_tables`, `extract_forms`, `snapshot_interactive`
+- **Screenshots / artifacts**: `screenshot` (page, full-page, or element selector)
+- **Forms / interaction** (authorized): `click`, `double_click`, `hover`, `focus`, `type`, `fill`, `select_option`, `check`, `uncheck`, `press`, `keyboard_shortcut`, `wait_for_selector`
+- **Bounded file transfer** (authorized): `attach_local_file`, `await_file_transfer`
+- **Diagnostics**: `get_console_errors`, `get_failed_requests`
 
-Out of scope by design:
+Still out of scope by design:
 
-- submit flows
-- delete flows
-- publish flows
-- payment flows
-- send flows
-- download flows
-- upload flows
+- free-form submit / delete / publish / payment / send workflows as first-class actions
+- auto-opening downloaded executables
+- leaking cookies, tokens, or raw profile secrets in responses
 
-Those higher-risk actions are intentionally absent from the manifest. The plugin is not a general browser automation escape hatch.
+Interactions that can mutate remote state still require `confirm_authorization=true`. Domain allowlists remain enforced for every navigation and interaction result.
 
 ## Runtime model
 
@@ -36,8 +30,17 @@ Those higher-risk actions are intentionally absent from the manifest. The plugin
 - `profileMode=custom` is explicit-only and uses the configured Chrome/Chromium profile path directly
 - saved sessions live under `.repo-harness/browser/sessions/`
 - screenshots live under `.repo-harness/browser/screenshots/`
+- downloads live under `.repo-harness/browser/downloads/`
 
-Each action launches a visible browser context, restores the target URL, performs one bounded operation, persists the updated session metadata, then closes the context. The plugin is intentionally not a long-lived remote-control session.
+Each action launches a visible browser context, restores the target URL, performs one bounded operation, persists the updated session metadata, then closes the context. Session metadata is reusable across actions via `session_id`. Transient navigation failures can retry with `retries` (1–3).
+
+### Reliability and safety notes
+
+- Domain allowlist is checked before navigation and after interactive URL changes.
+- Selector failures include repair hints (`repairHint`) when possible.
+- Console errors and failed requests are captured per open cycle.
+- Artifacts stay under `.repo-harness/browser/**` (not arbitrary local paths).
+- Health `userFacingStatus` reports `ready`, `domain restricted`, `session active`, or setup states.
 
 ## Configuration
 

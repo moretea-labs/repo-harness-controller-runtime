@@ -127,19 +127,28 @@ describe('browser plugin', () => {
     const actions = Object.fromEntries(manifest.actions.map((action) => [action.actionId, action]));
 
     expect(manifest.pluginId).toBe('browser');
-    expect(Object.keys(actions)).toEqual([
+    expect(Object.keys(actions)).toEqual(expect.arrayContaining([
       'configure',
+      'create_session',
+      'list_sessions',
+      'close_session',
       'open_page',
+      'navigate',
       'get_text',
+      'get_html',
+      'query_selector',
       'screenshot',
+      'extract_links',
       'click',
+      'fill',
       'type',
       'press',
       'wait_for_selector',
       'close_page',
-    ]);
+      'await_file_transfer',
+    ]));
 
-    for (const actionId of ['open_page', 'get_text', 'screenshot', 'close_page']) {
+    for (const actionId of ['open_page', 'get_text', 'screenshot', 'close_page', 'list_sessions', 'extract_links']) {
       expect(actions[actionId]?.readOnly).toBe(true);
       expect(actions[actionId]?.risk).toBe('readonly');
       expect(actions[actionId]?.confirmation).toBe('none');
@@ -149,12 +158,13 @@ describe('browser plugin', () => {
     expect(actions.click?.confirmation).toBe('authorization');
     expect(actions.type?.risk).toBe('remote_write');
     expect(actions.type?.confirmation).toBe('authorization');
+    expect(actions.fill?.risk).toBe('remote_write');
     expect(actions.press?.risk).toBe('remote_write');
     expect(actions.press?.confirmation).toBe('authorization');
     expect(actions.wait_for_selector?.risk).toBe('workspace_write');
     expect(actions.wait_for_selector?.confirmation).toBe('authorization');
 
-    for (const unsupported of ['submit', 'delete', 'publish', 'payment', 'send', 'download', 'upload']) {
+    for (const unsupported of ['submit', 'delete', 'publish', 'payment', 'send']) {
       expect(Object.keys(actions).some((actionId) => actionId.includes(unsupported))).toBe(false);
     }
   });
@@ -440,6 +450,118 @@ describe('browser plugin', () => {
       actionId: 'click',
       requestId: 'browser-click-blocked-domain',
       args: { url: 'https://example.com/', selector: '#cta', post_action_wait_ms: 1 },
+      origin: { surface: 'local-ui', actor: 'test' },
+    })).rejects.toThrow('PLUGIN_POLICY_BLOCKED');
+  });
+
+  test('supports session reuse, fill, selector extraction, and diagnostics capture', async () => {
+    const { repoRoot } = repoFixture();
+    writeBrowserConfig(repoRoot, {
+      schemaVersion: 1,
+      enabled: true,
+      provider: 'playwright',
+      allowedDomains: ['example.com'],
+    });
+
+    setBrowserPluginRuntimeHooksForTest({
+      moduleAvailable: () => true,
+      loadPlaywright: () => mockPlaywright({ title: 'Extracted' }),
+    });
+
+    const opened = await executeBrowserPluginAction({
+      controllerHome: repoRoot,
+      repoId: 'repo',
+      repoRoot,
+      pluginId: 'browser',
+      actionId: 'create_session',
+      requestId: 'browser-session-create',
+      args: { url: 'https://example.com/' },
+      origin: { surface: 'local-ui', actor: 'test' },
+    });
+    const sessionId = String((opened.session as Record<string, unknown>).sessionId);
+
+    const listed = await executeBrowserPluginAction({
+      controllerHome: repoRoot,
+      repoId: 'repo',
+      repoRoot,
+      pluginId: 'browser',
+      actionId: 'list_sessions',
+      requestId: 'browser-session-list',
+      args: {},
+      origin: { surface: 'local-ui', actor: 'test' },
+    });
+    expect((listed.sessions as Array<Record<string, unknown>>).some((entry) => entry.sessionId === sessionId)).toBe(true);
+
+    const filled = await executeBrowserPluginAction({
+      controllerHome: repoRoot,
+      repoId: 'repo',
+      repoRoot,
+      pluginId: 'browser',
+      actionId: 'fill',
+      requestId: 'browser-fill',
+      args: { session_id: sessionId, selector: '#email', text: 'user@example.com', post_action_wait_ms: 1 },
+      origin: { surface: 'local-ui', actor: 'test' },
+    });
+    expect((filled.action as Record<string, unknown>).actionId).toBe('fill');
+    expect(filled.screenshot).toBeDefined();
+
+    const extracted = await executeBrowserPluginAction({
+      controllerHome: repoRoot,
+      repoId: 'repo',
+      repoRoot,
+      pluginId: 'browser',
+      actionId: 'extract_links',
+      requestId: 'browser-extract-links',
+      args: { session_id: sessionId },
+      origin: { surface: 'local-ui', actor: 'test' },
+    });
+    expect(extracted.actionId).toBe('extract_links');
+
+    const consoleErrors = await executeBrowserPluginAction({
+      controllerHome: repoRoot,
+      repoId: 'repo',
+      repoRoot,
+      pluginId: 'browser',
+      actionId: 'get_console_errors',
+      requestId: 'browser-console',
+      args: { session_id: sessionId },
+      origin: { surface: 'local-ui', actor: 'test' },
+    });
+    expect(Array.isArray(consoleErrors.consoleErrors)).toBe(true);
+
+    const closed = await executeBrowserPluginAction({
+      controllerHome: repoRoot,
+      repoId: 'repo',
+      repoRoot,
+      pluginId: 'browser',
+      actionId: 'close_session',
+      requestId: 'browser-session-close',
+      args: { session_id: sessionId },
+      origin: { surface: 'local-ui', actor: 'test' },
+    });
+    expect(closed.closed).toBe(true);
+  });
+
+  test('denies open_page outside allowed domains before launch', async () => {
+    const { repoRoot } = repoFixture();
+    writeBrowserConfig(repoRoot, {
+      schemaVersion: 1,
+      enabled: true,
+      provider: 'playwright',
+      allowedDomains: ['example.com'],
+    });
+    setBrowserPluginRuntimeHooksForTest({
+      moduleAvailable: () => true,
+      loadPlaywright: () => mockPlaywright(),
+    });
+    await expect(executeBrowserPluginAction({
+      controllerHome: repoRoot,
+      repoId: 'repo',
+      repoRoot,
+      pluginId: 'browser',
+      actionId: 'open_page',
+      requestId: 'browser-deny-domain',
+      args: { url: 'https://evil.test/' },
       origin: { surface: 'local-ui', actor: 'test' },
     })).rejects.toThrow('PLUGIN_POLICY_BLOCKED');
   });

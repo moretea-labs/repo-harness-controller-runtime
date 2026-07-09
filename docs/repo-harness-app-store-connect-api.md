@@ -56,16 +56,28 @@ Read-only actions:
 - `auth_status`
 - `list_apps`
 - `list_app_store_versions`
-- `get_app_info`
-- `list_builds`
+- `list_app_store_version_localizations`
+- `get_app_info` / `list_app_infos`
+- `list_builds` / `list_testflight_builds` (includes processing / TestFlight fields)
+- `get_build_detail`
 - `list_beta_groups`
+- `list_beta_testers`
+- `list_review_submissions`
 - `preview_app_info_localization_update`
+- `preview_app_store_version_metadata_update`
 
-Remote-write action:
+Remote-write actions (all support `dry_run: true` where practical):
 
-- `update_app_info_localization`
+- `update_app_info_localization` — authorization
+- `update_app_store_version_metadata` — authorization
+- `create_app_store_version` — strong confirmation `create-app-store-version`
+- `assign_build_to_beta_group` — strong confirmation `assign-testflight-build`
+- `submit_beta_app_review` — strong confirmation `submit-beta-review`
+- `create_review_submission` / `submit_for_review` — strong confirmation `submit-app-review`
 
 `update_app_info_localization` requires normal plugin authorization. Use `dry_run: true` first to return the exact PATCH path and JSON body without sending it.
+
+Production-impacting writes never run without `confirm_authorization=true` plus the matching confirmation text. Mock provider mode can exercise the full path without Apple credentials.
 
 Example dry run:
 

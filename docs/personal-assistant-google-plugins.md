@@ -39,6 +39,23 @@ For local development and contract tests, each plugin also supports
 `provider: "mock"` with deterministic mock responses and no credential
 requirements.
 
+## Readiness diagnostics
+
+Plugin health exposes an explicit `readinessMode` in `health.details`:
+
+| Mode | Meaning |
+| --- | --- |
+| `disabled` | Plugin is not enabled |
+| `mock_provider_ready` | Mock provider is configured and ready (no token needed) |
+| `live_provider_ready` | Live Google Workspace mode has a bearer token |
+| `missing_token` | Live mode selected but no env token is present |
+| `missing_scopes` | Reserved for future scope probes |
+
+Important: missing live credentials are reported as **degraded / needs setup**,
+not as a generic plugin failure. Mock mode remains fully usable for verification
+without tokens. `userFacingStatus` summarizes this as `disabled`, `mock ready`,
+`live token missing`, or `ready`.
+
 ## Permission Model
 
 Scopes are declared separately for read and write operations:
