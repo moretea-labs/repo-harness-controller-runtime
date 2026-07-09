@@ -36,6 +36,13 @@ import {
   retryAgentJob,
   startTaskJob,
 } from "../agent-jobs/job-manager";
+import {
+  classifyGitHubCopilotPreflight,
+  classifyLocalExecutorHealth,
+  executorHealthCode,
+  isExecutorHealthError,
+  type ExecutorHealth,
+} from "../agent-jobs/executor-health";
 import { integrateAgentJob, taskRunDiff } from "../agent-jobs/integration";
 import {
   appendTask,
@@ -359,6 +366,7 @@ function summarizeAgentRun(
         worktreePath: typeof run.worktreePath === "string" ? run.worktreePath : undefined,
       }, 1000).text
       : run.error,
+    executorHealth: run.executorHealth,
     timeoutMs: run.timeoutMs,
     deadlineAt: run.deadlineAt,
     startupDeadlineAt: run.startupDeadlineAt,
@@ -465,6 +473,39 @@ function summarizeRunList(
   return runs.map((run) => summarizeAgentRun(repoRoot, run, { includePaths, includeOutput: false }));
 }
 
+function dispatchExecutorHealthResult(
+  health: ExecutorHealth,
+  options: { requestId?: string; retryable?: boolean } = {},
+): CallToolResult {
+  return dispatchErrorResult(executorHealthCode(health), health.message, {
+    requestId: options.requestId,
+    retryable: options.retryable,
+    details: { executorHealth: health },
+  });
+}
+
+function taskExecutorHealth(
+  ctx: McpToolContext,
+  task: ControllerTask,
+  agent: ControllerAgent,
+  githubRepo?: string,
+): ExecutorHealth | null {
+  if (agent === "github-copilot") {
+    return classifyGitHubCopilotPreflight(
+      getGitHubStatus(ctx.repoRoot, githubRepo),
+      task,
+    );
+  }
+  return classifyLocalExecutorHealth(
+    agent,
+    {
+      agentRunner: ctx.policy.execution.agentRunner,
+      allowedAgents: ctx.policy.execution.allowedAgents,
+    },
+    task,
+  );
+}
+
 function listFilesUnder(
   repoRoot: string,
   root: string,
@@ -565,8 +606,7 @@ function resolveDispatchAgent(
 ): ControllerAgent | null {
   const hasExplicitRequest = requested !== undefined && requested !== null && String(requested).trim() !== "";
   if (hasExplicitRequest) return parseControllerAgent(requested);
-  if (task.recommendedAgent === "github-copilot") return task.recommendedAgent;
-  if (task.recommendedAgent && ctx.policy.execution.allowedAgents.includes(task.recommendedAgent)) return task.recommendedAgent;
+  if (task.recommendedAgent) return task.recommendedAgent;
   const firstLocal = ctx.policy.execution.allowedAgents[0];
   return firstLocal ?? task.recommendedAgent ?? null;
 }
@@ -3883,17 +3923,24 @@ export async function callMcpTool(
         if (!task) return errorResult("TASK_NOT_FOUND", `task not found: ${issueId}/${taskId}`);
         const requested = resolveDispatchAgent(ctx, task, args.agent);
         if (!requested) return errorResult("AGENT_REQUIRED", "No agent is selected or enabled. Pass agent explicitly or enable a local agent in the controller profile.");
-        if (requested !== "github-copilot") {
-          if (!ctx.policy.execution.agentRunner) return errorResult("DEV_RUNNER_DISABLED", "Start the controller profile with --enable-dev-runner to dispatch local Codex or Claude agents.");
-          if (!ctx.policy.execution.allowedAgents.includes(requested)) return errorResult("AGENT_DENIED", `local agent is not enabled: ${requested}`);
-        }
         const requestId = typeof args.request_id === "string" ? args.request_id.trim() || undefined : undefined;
+        const health = taskExecutorHealth(
+          ctx,
+          task,
+          requested,
+          typeof args.github_repo === "string" ? args.github_repo : undefined,
+        );
+        if (health) return dispatchExecutorHealthResult(health, { requestId, retryable: false });
         try {
           const accepted = acceptTaskJob({
             repoRoot: ctx.repoRoot,
             issueId,
             taskId,
             agent: requested,
+            executorPolicy: {
+              agentRunner: ctx.policy.execution.agentRunner,
+              allowedAgents: ctx.policy.execution.allowedAgents,
+            },
             timeoutMs: runnerTimeoutMs(ctx, args.timeout_ms),
             isolate: typeof args.isolate === "boolean" ? args.isolate : undefined,
             githubRepo: typeof args.github_repo === "string" ? args.github_repo : undefined,
@@ -3907,6 +3954,10 @@ export async function callMcpTool(
           audit(ctx, name, "ok", args, accepted.runId);
           return textResult(accepted);
         } catch (error) {
+          if (isExecutorHealthError(error)) {
+            audit(ctx, name, "blocked", args, undefined, error.message);
+            return dispatchExecutorHealthResult(error.executorHealth, { requestId, retryable: false });
+          }
           const message = error instanceof Error ? error.message : String(error);
           audit(ctx, name, "failed", args, undefined, message);
           return dispatchErrorResult("RUN_PERSIST_FAILED", message, { requestId, retryable: true });
@@ -3918,7 +3969,7 @@ export async function callMcpTool(
         const issue = getIssue(ctx.repoRoot, issueId);
         const maxParallel = Math.min(Math.max(typeof args.max_parallel === "number" ? Math.trunc(args.max_parallel) : 2, 1), 4);
         const selected: ControllerTask[] = [];
-        const skipped: Array<{ taskId: string; reason: string; readiness?: unknown }> = [];
+        const skipped: Array<{ taskId: string; reason: string; readiness?: unknown; executorHealth?: ExecutorHealth }> = [];
         for (const task of issue.tasks) {
           const readiness = inspectTaskReadiness(ctx.repoRoot, issueId, task.id, {
             approveDestructive: args.approve_destructive === true,
@@ -3941,8 +3992,14 @@ export async function callMcpTool(
             skipped.push({ taskId: task.id, reason: "no runtime agent selected or enabled" });
             continue;
           }
-          if (agent !== "github-copilot" && (!ctx.policy.execution.agentRunner || !ctx.policy.execution.allowedAgents.includes(agent))) {
-            skipped.push({ taskId: task.id, reason: `local agent is not enabled: ${agent}` });
+          const health = taskExecutorHealth(
+            ctx,
+            task,
+            agent,
+            typeof args.github_repo === "string" ? args.github_repo : undefined,
+          );
+          if (health) {
+            skipped.push({ taskId: task.id, reason: health.message, executorHealth: health });
             continue;
           }
           runs.push(startTaskJob({
@@ -3950,6 +4007,10 @@ export async function callMcpTool(
             issueId,
             taskId: task.id,
             agent,
+            executorPolicy: {
+              agentRunner: ctx.policy.execution.agentRunner,
+              allowedAgents: ctx.policy.execution.allowedAgents,
+            },
             timeoutMs: runnerTimeoutMs(ctx, args.timeout_ms),
             isolate: typeof args.isolate === "boolean" ? args.isolate : undefined,
             githubRepo: typeof args.github_repo === "string" ? args.github_repo : undefined,
@@ -3969,7 +4030,7 @@ export async function callMcpTool(
         const maxParallel = Math.min(Math.max(typeof args.max_parallel === "number" ? Math.trunc(args.max_parallel) : 2, 1), 4);
         const batchRequestId = typeof args.request_id === "string" ? args.request_id.trim() || undefined : undefined;
         const candidates: Array<{ issueId: string; task: ControllerTask }> = [];
-        const skipped: Array<{ issueId: string; taskId: string; reason: string }> = [];
+        const skipped: Array<{ issueId: string; taskId: string; reason: string; executorHealth?: ExecutorHealth }> = [];
         for (const issue of listIssues(ctx.repoRoot)) {
           if (requestedIssue && issue.id !== requestedIssue) continue;
           if (issue.archivedAt || ["done", "cancelled"].includes(issue.status)) continue;
@@ -3997,8 +4058,14 @@ export async function callMcpTool(
             skipped.push({ issueId: candidate.issueId, taskId: candidate.task.id, reason: "no runtime agent selected or enabled" });
             continue;
           }
-          if (agent !== "github-copilot" && (!ctx.policy.execution.agentRunner || !ctx.policy.execution.allowedAgents.includes(agent))) {
-            skipped.push({ issueId: candidate.issueId, taskId: candidate.task.id, reason: `local agent is not enabled: ${agent}` });
+          const health = taskExecutorHealth(
+            ctx,
+            candidate.task,
+            agent,
+            typeof args.github_repo === "string" ? args.github_repo : undefined,
+          );
+          if (health) {
+            skipped.push({ issueId: candidate.issueId, taskId: candidate.task.id, reason: health.message, executorHealth: health });
             continue;
           }
           const requestId = batchRequestId ? `${batchRequestId}:${candidate.issueId}:${candidate.task.id}` : undefined;
@@ -4008,6 +4075,10 @@ export async function callMcpTool(
               issueId: candidate.issueId,
               taskId: candidate.task.id,
               agent,
+              executorPolicy: {
+                agentRunner: ctx.policy.execution.agentRunner,
+                allowedAgents: ctx.policy.execution.allowedAgents,
+              },
               timeoutMs: runnerTimeoutMs(ctx, args.timeout_ms),
               isolate: typeof args.isolate === "boolean" ? args.isolate : undefined,
               githubRepo: typeof args.github_repo === "string" ? args.github_repo : undefined,
@@ -4020,6 +4091,15 @@ export async function callMcpTool(
             dispatchAcceptedTaskJob(ctx.repoRoot, summary.runId);
             accepted.push(summary);
           } catch (error) {
+            if (isExecutorHealthError(error)) {
+              skipped.push({
+                issueId: candidate.issueId,
+                taskId: candidate.task.id,
+                reason: error.executorHealth.message,
+                executorHealth: error.executorHealth,
+              });
+              continue;
+            }
             skipped.push({
               issueId: candidate.issueId,
               taskId: candidate.task.id,
@@ -4195,19 +4275,24 @@ export async function callMcpTool(
             "RUN_NOT_RETRYABLE",
             `run status is ${previous.status}`,
           );
-        if (previous.agent !== "github-copilot") {
-          if (!ctx.policy.execution.agentRunner)
-            return errorResult(
-              "DEV_RUNNER_DISABLED",
-              "Start the controller profile with --enable-dev-runner to retry local agents.",
-            );
-          if (!ctx.policy.execution.allowedAgents.includes(previous.agent))
-            return errorResult(
-              "AGENT_DENIED",
-              `local agent is not enabled: ${previous.agent}`,
-            );
-        }
+        const issue = getIssue(ctx.repoRoot, previous.issueId);
+        const task = issue.tasks.find((entry) => entry.id === previous.taskId);
+        const health = task
+          ? taskExecutorHealth(
+              ctx,
+              task,
+              previous.agent,
+              previous.github
+                ? `${previous.github.owner}/${previous.github.repo}`
+                : undefined,
+            )
+          : null;
+        if (health) return dispatchExecutorHealthResult(health, { retryable: false });
         const run = retryAgentJob(ctx.repoRoot, previous.runId, {
+          executorPolicy: {
+            agentRunner: ctx.policy.execution.agentRunner,
+            allowedAgents: ctx.policy.execution.allowedAgents,
+          },
           timeoutMs:
             args.timeout_ms === undefined
               ? undefined

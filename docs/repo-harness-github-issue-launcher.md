@@ -68,6 +68,33 @@ repo-harness controller github status --repo .
 
 The equivalent MCP tool is `github_status`.
 
+## Executor readiness and fallback
+
+Before retrying a failed Task Run, check which executor was requested and whether it is actually usable:
+
+- Local `codex` or `claude` Runs require the controller dev runner to be enabled and the agent to appear in `allowedAgents`.
+- GitHub Copilot cloud Runs require `gh` to be installed, authenticated, recent enough for agent tasks, and enabled for Copilot Coding Agent / CCA on the account and repository.
+- Small scoped Tasks should prefer direct edit when the executor is unavailable instead of creating repeated doomed Runs.
+
+repo-harness now classifies common executor failures into stable `executorHealth` results:
+
+- `disabled / local_dev_runner_disabled`: local worker launching is turned off.
+- `disabled / local_agent_disabled`: the requested local agent is not enabled.
+- `not_installed / github_cli_unavailable`: `gh` is missing or unusable.
+- `auth_required / github_auth_required`: `gh auth login` is required.
+- `disabled / github_cli_too_old`: upgrade `gh` before using cloud sessions.
+- `cloud_not_enabled / copilot_cca_disabled`: GitHub returned CCA disabled / HTTP 409 style errors.
+- `auth_required / codex_auth_required`: Codex authentication is missing or expired.
+- `quota_or_balance / codex_usage_limit`: Codex usage limit was hit.
+- `quota_or_balance / codex_insufficient_balance`: the configured Codex account has insufficient balance.
+
+When a small Task cannot use its requested executor, prefer direct edit:
+
+- Use `begin_edit_session`, `apply_patch`, and `run_check`.
+- Do not keep retrying unavailable local agents or cloud sessions for narrow one-to-three-path changes.
+
+Cloudflare fixed-domain MCP endpoint work is a separate future task. It is not part of this executor health gate or fallback policy.
+
 ## Publishing an Issue
 
 ChatGPT should first create and refine the local controller Issue. Then call:

@@ -1956,6 +1956,187 @@ echo "slow-start-ok"
     });
   });
 
+  test("fails fast with structured executor health when a local agent is disabled", async () => {
+    await withController(async (repoRoot, baseCtx) => {
+      const ctx = {
+        ...baseCtx,
+        policy: getMcpPolicy("controller", {
+          repoRoot,
+          devAgentRunner: true,
+          allowedAgents: ["codex"],
+        }),
+      };
+      const created = await jsonTool(ctx, "create_issue", {
+        title: "Disabled local agent",
+        tasks: [
+          {
+            title: "Use Claude",
+            objective: "Need a disabled local agent.",
+            allowed_paths: ["src/**"],
+            checks: ["focused"],
+            agent: "claude",
+          },
+        ],
+      });
+      const dispatched = await jsonTool(ctx, "dispatch_task", {
+        issue_id: created.value.id,
+        task_id: "T1",
+      });
+      expect(dispatched.raw.isError).toBe(true);
+      expect(dispatched.value.error.code).toBe("AGENT_DENIED");
+      expect(dispatched.value.error.details.executorHealth.reason).toBe("local_agent_disabled");
+      expect(dispatched.value.error.details.executorHealth.status).toBe("disabled");
+      expect(dispatched.value.error.details.executorHealth.fallback).toBe("use_direct_edit");
+    });
+  });
+
+  test("fails fast with structured executor health when the dev runner is disabled", async () => {
+    await withController(async (repoRoot, baseCtx) => {
+      const ctx = {
+        ...baseCtx,
+        policy: getMcpPolicy("controller", {
+          repoRoot,
+          devAgentRunner: false,
+          allowedAgents: ["codex"],
+        }),
+      };
+      const created = await jsonTool(ctx, "create_issue", {
+        title: "Disabled dev runner",
+        tasks: [
+          {
+            title: "Use Codex",
+            objective: "Need a disabled dev runner.",
+            allowed_paths: ["src/**"],
+            checks: ["focused"],
+            agent: "codex",
+          },
+        ],
+      });
+      const dispatched = await jsonTool(ctx, "dispatch_task", {
+        issue_id: created.value.id,
+        task_id: "T1",
+      });
+      expect(dispatched.raw.isError).toBe(true);
+      expect(dispatched.value.error.code).toBe("DEV_RUNNER_DISABLED");
+      expect(dispatched.value.error.details.executorHealth.reason).toBe("local_dev_runner_disabled");
+      expect(dispatched.value.error.details.executorHealth.message).toContain("begin_edit_session/apply_patch/run_check");
+    });
+  });
+
+  test("launch_issue reports structured skipped executor health for disabled local agents", async () => {
+    await withController(async (repoRoot, baseCtx) => {
+      const ctx = {
+        ...baseCtx,
+        policy: getMcpPolicy("controller", {
+          repoRoot,
+          devAgentRunner: true,
+          allowedAgents: ["codex"],
+        }),
+      };
+      const created = await jsonTool(ctx, "create_issue", {
+        title: "Launch skip classification",
+        tasks: [
+          {
+            title: "Disabled Claude task",
+            objective: "Should be skipped with structured health.",
+            allowed_paths: ["src/a.ts"],
+            checks: ["focused"],
+            agent: "claude",
+          },
+        ],
+      });
+      const launched = await jsonTool(ctx, "launch_issue", {
+        issue_id: created.value.id,
+      });
+      expect(launched.value.dispatched).toBe(0);
+      expect(launched.value.skipped).toHaveLength(1);
+      expect(launched.value.skipped[0].executorHealth.reason).toBe("local_agent_disabled");
+      expect(launched.value.skipped[0].executorHealth.fallback).toBe("use_direct_edit");
+    });
+  });
+
+  test("dispatch_ready_tasks reports structured skipped executor health for disabled local agents", async () => {
+    await withController(async (repoRoot, baseCtx) => {
+      const ctx = {
+        ...baseCtx,
+        policy: getMcpPolicy("controller", {
+          repoRoot,
+          devAgentRunner: true,
+          allowedAgents: ["codex"],
+        }),
+      };
+      const created = await jsonTool(ctx, "create_issue", {
+        title: "Batch skip classification",
+        tasks: [
+          {
+            title: "Disabled Claude task",
+            objective: "Should be skipped with structured health.",
+            allowed_paths: ["src/a.ts"],
+            checks: ["focused"],
+            agent: "claude",
+          },
+        ],
+      });
+      const dispatched = await jsonTool(ctx, "dispatch_ready_tasks", {
+        issue_id: created.value.id,
+      });
+      expect(dispatched.value.dispatched).toBe(0);
+      expect(dispatched.value.skipped).toHaveLength(1);
+      expect(dispatched.value.skipped[0].executorHealth.reason).toBe("local_agent_disabled");
+      expect(dispatched.value.skipped[0].reason).toContain("Local agent is not enabled");
+    });
+  });
+
+  test("classifies GitHub Copilot CCA disabled failures on the recorded run", async () => {
+    await withController(async (repoRoot, ctx) => {
+      const binRoot = mkdtempSync(join(tmpdir(), "repo-harness-gh-cca-bin-"));
+      const originalPath = process.env.PATH;
+      try {
+        const fakeGh = join(binRoot, "gh");
+        writeFileSync(
+          fakeGh,
+          `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === '--version') { console.log('gh version 2.80.0 (fake)'); process.exit(0); }
+if (args[0] === 'auth' && args[1] === 'status') { console.log('authenticated'); process.exit(0); }
+if (args[0] === 'repo' && args[1] === 'view') { console.log(JSON.stringify({ nameWithOwner: 'acme/demo', url: 'https://github.com/acme/demo', defaultBranchRef: { name: 'main' } })); process.exit(0); }
+if (args[0] === 'api') { console.error('gh: user or repo does not have CCA enabled (HTTP 409) Copilot Coding Agent'); process.exit(1); }
+console.error('unsupported fake gh call: ' + args.join(' '));
+process.exit(2);
+`,
+        );
+        chmodSync(fakeGh, 0o755);
+        process.env.PATH = `${binRoot}:${originalPath ?? ""}`;
+
+        const created = await jsonTool(ctx, "create_issue", {
+          title: "CCA disabled classification",
+          tasks: [
+            {
+              title: "Cloud implementation",
+              objective: "Hit the CCA disabled path.",
+              allowed_paths: ["src/**"],
+              checks: ["focused"],
+              agent: "github-copilot",
+            },
+          ],
+        });
+        const dispatched = await jsonTool(ctx, "dispatch_task", {
+          issue_id: created.value.id,
+          task_id: "T1",
+          agent: "github-copilot",
+          github_repo: "acme/demo",
+        });
+        const run = await waitForRun(ctx, dispatched.value.runId, (entry) => entry.status === "failed", 80, 25);
+        expect(run.status).toBe("failed");
+        expect(run.executorHealth.reason).toBe("copilot_cca_disabled");
+        expect(run.executorHealth.status).toBe("cloud_not_enabled");
+      } finally {
+        process.env.PATH = originalPath;
+        rmSync(binRoot, { recursive: true, force: true });
+      }
+    });
+  });
+
   test("reviews and integrates an isolated Task Run before acceptance", async () => {
     const repoRoot = mkdtempSync(
       join(tmpdir(), "repo-harness-controller-git-"),

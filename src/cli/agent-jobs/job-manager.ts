@@ -20,6 +20,7 @@ import {
   getGitHubAgentSessionLog,
   startGitHubAgentSession,
 } from "../github/session";
+import { getGitHubStatus } from "../github/github";
 import { getIssue, inspectTaskReadiness, removeEphemeralIssue, updateTask } from "../controller/issue-store";
 import { readTaskRunEvidence } from "../controller/run-evidence";
 import { resolveEffectiveTaskState } from "../controller/task-status-resolver";
@@ -48,6 +49,14 @@ import type {
   AgentJobStatus,
   AgentJobWorkerConfig,
 } from "./types";
+import {
+  classifyExecutorFailure,
+  classifyGitHubCopilotPreflight,
+  classifyLocalExecutorHealth,
+  ExecutorHealthError,
+  isExecutorHealthError,
+  type LocalExecutorPolicy,
+} from "./executor-health";
 
 const JOB_ROOT = ".ai/harness/jobs";
 const RUN_LAUNCH_LOCK = ".ai/harness/controller/run-launch.lock";
@@ -896,6 +905,7 @@ export interface StartTaskJobOptions {
   requestId?: string;
   approveRisk?: boolean;
   approveDestructive?: boolean;
+  executorPolicy?: LocalExecutorPolicy;
 }
 
 export interface DispatchTaskAcceptance {
@@ -952,6 +962,18 @@ function acceptedSummary(meta: AgentJobMeta, reused = false): DispatchTaskAccept
   };
 }
 
+function executorFailureMessage(meta: Pick<AgentJobMeta, "agent" | "error">, stdoutTail?: string, stderrTail?: string): string {
+  return [meta.error, stderrTail, stdoutTail].filter((value): value is string => typeof value === "string" && value.trim().length > 0).join("\n");
+}
+
+function attachExecutorFailureHealth(meta: AgentJobMeta, stdoutTail?: string, stderrTail?: string): AgentJobMeta {
+  if (meta.executorHealth || meta.status === "succeeded") return meta;
+  const message = executorFailureMessage(meta, stdoutTail, stderrTail);
+  const health = classifyExecutorFailure(meta.agent, message, { allowedPaths: meta.allowedPaths ?? [] });
+  if (health) meta.executorHealth = health;
+  return meta;
+}
+
 function failAcceptedTaskJob(
   repoRoot: string,
   runId: string,
@@ -965,6 +987,7 @@ function failAcceptedTaskJob(
   meta.finishedAt = new Date().toISOString();
   meta.lastHeartbeatAt = meta.finishedAt;
   meta.terminationReason = "spawn_error";
+  attachExecutorFailureHealth(meta);
   writeAgentMeta(repoRoot, metaPath(repoRoot, runId), meta);
   appendAgentJobEvent(repoRoot, runId, {
     type: "run_failed",
@@ -1117,6 +1140,17 @@ export function acceptTaskJob(opts: StartTaskJobOptions): DispatchTaskAcceptance
   const selectedAgent = opts.agent ?? task.recommendedAgent;
   if (!selectedAgent) throw new Error("agent must be selected at dispatch time");
   opts = { ...opts, agent: selectedAgent };
+  if (selectedAgent === "github-copilot") {
+    const health = classifyGitHubCopilotPreflight(
+      getGitHubStatus(opts.repoRoot, opts.githubRepo),
+      task,
+    );
+    if (health) throw new ExecutorHealthError("EXECUTOR_HEALTH", health);
+  }
+  if (selectedAgent !== "github-copilot" && opts.executorPolicy) {
+    const health = classifyLocalExecutorHealth(selectedAgent, opts.executorPolicy, task);
+    if (health) throw new ExecutorHealthError("EXECUTOR_HEALTH", health);
+  }
   const readiness = inspectTaskReadiness(opts.repoRoot, opts.issueId, opts.taskId, {
     approveRisk: opts.approveRisk,
     approveDestructive: opts.approveDestructive,
@@ -1281,10 +1315,12 @@ ${meta.supervisorInstructions}
       return meta;
     } catch (error) {
       meta.status = "failed";
+      if (isExecutorHealthError(error)) meta.executorHealth = error.executorHealth;
       meta.error = error instanceof Error ? error.message : String(error);
       meta.finishedAt = new Date().toISOString();
       meta.terminationReason = "spawn_error";
       writeFileSync(paths.stderrPath, meta.error, "utf-8");
+      attachExecutorFailureHealth(meta);
       writeAgentMeta(repoRoot, absoluteMetaPath, meta);
       appendAgentJobEvent(repoRoot, runId, {
         type: "run_failed",
@@ -1366,6 +1402,7 @@ ${meta.supervisorInstructions}
     meta.error = error instanceof Error ? error.message : String(error);
     meta.finishedAt = new Date().toISOString();
     meta.terminationReason = "spawn_error";
+    attachExecutorFailureHealth(meta);
     writeAgentMeta(repoRoot, absoluteMetaPath, meta);
     appendAgentJobEvent(repoRoot, runId, {
       type: "run_failed",
@@ -1425,6 +1462,7 @@ export function getAgentJob(
   const path = metaPath(repoRoot, runId);
   if (!existsSync(path)) throw new Error(`agent job not found: ${runId}`);
   const meta = normalizeAgentMeta(repoRoot, runId, readJson<AgentJobMeta>(path));
+  let metaMutated = false;
 
   if (
     meta.provider === "github" &&
@@ -1490,6 +1528,9 @@ export function getAgentJob(
       }
     } catch (error) {
       meta.error = error instanceof Error ? error.message : String(error);
+      const beforeReason = meta.executorHealth?.reason;
+      attachExecutorFailureHealth(meta);
+      metaMutated = metaMutated || beforeReason !== meta.executorHealth?.reason;
       writeAgentMeta(repoRoot, path, meta);
     }
   } else if (meta.provider === "local") {
@@ -1522,6 +1563,7 @@ export function getAgentJob(
       } else {
         meta.status = result.ok ? "succeeded" : "failed";
         meta.finishedAt = result.finishedAt;
+        if (!result.ok) attachExecutorFailureHealth(meta);
         writeAgentMeta(repoRoot, path, meta);
         if (previous !== meta.status) {
           appendAgentJobEvent(repoRoot, runId, {
@@ -1546,6 +1588,7 @@ export function getAgentJob(
       meta.status = "unknown";
       meta.error = meta.error ?? "worker did not start before the startup deadline";
       meta.finishedAt = meta.finishedAt ?? new Date().toISOString();
+      attachExecutorFailureHealth(meta);
       writeAgentMeta(repoRoot, path, meta);
       appendAgentJobEvent(repoRoot, runId, { type: "run_failed", message: meta.error });
       reconcileLatestTerminalRun(repoRoot, meta);
@@ -1555,6 +1598,7 @@ export function getAgentJob(
         meta.error ??
         "worker process is no longer running and no result file was produced";
       meta.finishedAt = meta.finishedAt ?? new Date().toISOString();
+      attachExecutorFailureHealth(meta);
       writeAgentMeta(repoRoot, path, meta);
       appendAgentJobEvent(repoRoot, runId, { type: "run_failed", message: meta.error });
       reconcileLatestTerminalRun(repoRoot, meta);
@@ -1579,6 +1623,10 @@ export function getAgentJob(
     Number.isFinite(deadlineMs) && !meta.finishedAt
       ? Math.max(0, deadlineMs - Date.now())
       : null;
+  const beforeReason = meta.executorHealth?.reason;
+  attachExecutorFailureHealth(meta, tail(meta.stdoutPath), tail(meta.stderrPath));
+  if (beforeReason !== meta.executorHealth?.reason) metaMutated = true;
+  if (metaMutated) writeAgentMeta(repoRoot, path, meta);
   return {
     ...meta,
     stdoutTail: tail(meta.stdoutPath),
@@ -1809,7 +1857,7 @@ export function cancelAgentJob(repoRoot: string, runId: string): AgentJobMeta {
 export function retryAgentJob(
   repoRoot: string,
   runId: string,
-  options: { timeoutMs?: number; isolate?: boolean; supervisorInstructions?: string } = {},
+  options: { timeoutMs?: number; isolate?: boolean; supervisorInstructions?: string; executorPolicy?: LocalExecutorPolicy } = {},
 ): AgentJobMeta {
   const previous = getAgentJob(repoRoot, runId);
   if (
@@ -1851,6 +1899,7 @@ export function retryAgentJob(
     supervisorInstructions: options.supervisorInstructions,
     approveRisk: true,
     approveDestructive: previous.status === "cancelled" ? false : undefined,
+    executorPolicy: options.executorPolicy,
     isolate: options.isolate,
     githubRepo: previous.github
       ? `${previous.github.owner}/${previous.github.repo}`

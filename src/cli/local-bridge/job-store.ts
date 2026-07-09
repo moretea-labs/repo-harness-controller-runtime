@@ -38,6 +38,8 @@ import { resolveControllerHome } from "../repositories/controller-home";
 import { ensureRepositoryRuntimeStorage } from "../repositories/runtime-storage";
 import { dispatchLegacyLocalJob } from "../../runtime/execution/jobs/legacy-adapter";
 import { findExecutionJob } from "../../runtime/execution/jobs/store";
+import type { McpAgentRunnerName } from "../mcp/types";
+import type { LocalExecutorPolicy } from "../agent-jobs/executor-health";
 import type {
   LaunchTaskPayload,
   LocalBridgeApproval,
@@ -1204,6 +1206,20 @@ function resolveExecutionAgent(
   throw new Error("no local Agent is configured; select an Agent explicitly or enable one in MCP settings");
 }
 
+function localExecutorPolicy(repoRoot: string): LocalExecutorPolicy {
+  const configured = loadMcpLocalConfig(repoRoot)?.devMode;
+  const allowedAgents = Array.isArray(configured?.allowedAgents)
+    ? configured.allowedAgents.filter(
+        (entry): entry is McpAgentRunnerName =>
+          entry === "codex" || entry === "claude",
+      )
+    : [];
+  return {
+    agentRunner: configured?.agentRunner === true,
+    allowedAgents,
+  };
+}
+
 function resolvedIsolation(payload: {
   executionMode?: "auto" | "workspace" | "worktree";
   isolate?: boolean;
@@ -1224,6 +1240,7 @@ function executeLaunchTask(
     issueId: payload.issueId,
     taskId: payload.taskId,
     agent: resolveExecutionAgent(repoRoot, payload.agent),
+    executorPolicy: localExecutorPolicy(repoRoot),
     timeoutMs: resolvedJobTimeout(repoRoot, payload.timeoutMs),
     isolate: resolvedIsolation(payload),
     githubRepo: payload.githubRepo,
@@ -1298,6 +1315,7 @@ function executeQuickSession(
     issueId: issue.id,
     taskId: task.id,
     agent: resolveExecutionAgent(repoRoot, payload.agent),
+    executorPolicy: localExecutorPolicy(repoRoot),
     timeoutMs: resolvedJobTimeout(repoRoot, payload.timeoutMs),
     isolate: resolvedIsolation(payload),
     requestId: payload.requestId,

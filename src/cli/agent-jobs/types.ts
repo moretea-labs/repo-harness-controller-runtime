@@ -1,5 +1,6 @@
 import type { ControllerAgent } from "../controller/types";
 import type { TaskExecutionClass } from "../controller/execution-policy";
+import type { ExecutorHealth } from "./executor-health";
 
 export type AgentJobStatus =
   | "queued"
@@ -87,6 +88,7 @@ export interface AgentJobMeta {
   agentPid?: number;
   exitCode?: number | null;
   error?: string;
+  executorHealth?: ExecutorHealth;
   timeoutMs?: number;
   deadlineAt?: string;
   startupDeadlineAt?: string;

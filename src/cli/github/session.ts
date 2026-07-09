@@ -1,4 +1,10 @@
 import { runProcess } from '../../effects/process-runner';
+import {
+  ExecutorHealthError,
+  classifyExecutorFailure,
+  classifyGitHubCopilotPreflight,
+  executorHealthCode,
+} from '../agent-jobs/executor-health';
 import { getGitHubStatus, resolveGitHubRepository, type GitHubRepositoryInfo } from './github';
 
 export interface GitHubAgentSession {
@@ -54,12 +60,8 @@ export function startGitHubAgentSession(repoRoot: string, input: {
   createPullRequest?: boolean;
 }): GitHubAgentSession {
   const status = getGitHubStatus(repoRoot, input.repo);
-  if (!status.available || !status.authenticated) {
-    throw new Error(`GitHub CLI is not ready for cloud sessions: ${status.errors.join('; ') || 'authenticate with gh auth login'}`);
-  }
-  if (!status.agentTaskSupported) {
-    throw new Error(`GitHub CLI 2.80.0 or later is required for observable Copilot cloud-session logs (current: ${status.version ?? 'unknown'}).`);
-  }
+  const preflight = classifyGitHubCopilotPreflight(status);
+  if (preflight) throw new ExecutorHealthError(executorHealthCode(preflight), preflight);
   const repository = status.repository ?? resolveGitHubRepository(repoRoot, input.repo);
   const body = JSON.stringify({
     prompt: input.prompt,
@@ -68,7 +70,14 @@ export function startGitHubAgentSession(repoRoot: string, input: {
     create_pull_request: input.createPullRequest !== false,
   });
   const result = ghApi(repoRoot, ['--method', 'POST', `/agents/repos/${repository.owner}/${repository.repo}/tasks`, '--input', '-'], body);
-  if (!result.ok) throw new Error(`failed to start GitHub Copilot cloud session: ${result.error || result.stderr}`);
+  if (!result.ok) {
+    const failure = classifyExecutorFailure(
+      "github-copilot",
+      result.error || result.stderr || result.stdout,
+    );
+    if (failure) throw new ExecutorHealthError(executorHealthCode(failure), failure);
+    throw new Error(`failed to start GitHub Copilot cloud session: ${result.error || result.stderr}`);
+  }
   return normalizeSession(repository, parseJson(result.stdout, 'GitHub agent task API'));
 }
 
