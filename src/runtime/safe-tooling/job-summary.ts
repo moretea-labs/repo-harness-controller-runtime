@@ -53,7 +53,8 @@ function safeScreenshotPreview(value: unknown): Record<string, unknown> | undefi
 }
 
 function safeBrowserResultPreview(actionId: string | undefined, result: unknown): Record<string, unknown> | undefined {
-  const payload = objectValue(result);
+  const outer = objectValue(result);
+  const payload = objectValue(outer?.result) ?? outer;
   if (!payload) return undefined;
   const session = safeSessionPreview(payload.session) ?? { sessionId: safeString(payload.sessionId, 120), url: safeString(payload.url, 500), title: safeString(payload.title, 300) };
   const preview: Record<string, unknown> = { provider: payload.provider === 'playwright' ? 'playwright' : undefined, actionId, session, url: safeString(payload.url, 500), title: safeString(payload.title, 300), text: safeTextPreview(payload.text), screenshot: safeScreenshotPreview(payload.screenshot) };

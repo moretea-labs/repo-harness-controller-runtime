@@ -72,7 +72,7 @@ describe('low-interception safe tool surface', () => {
       jobId: 'EJOB-text', repoId: 'repo_1', type: 'plugin-action', status: 'succeeded',
       payload: { operation: 'plugin_action_execute', arguments: { pluginId: 'browser', actionId: 'get_text' } },
       evidenceIds: ['EVD-text'],
-      result: { provider: 'playwright', sessionId: 'browser_abc', url: 'https://appstoreconnect.apple.com/access/integrations/api', text: { text: 'Keys\nIssuer ID\nKey ID', truncated: false, charCount: 22 } },
+      result: { ok: true, result: { provider: 'playwright', sessionId: 'browser_abc', url: 'https://appstoreconnect.apple.com/access/integrations/api', text: { text: 'Keys\nIssuer ID\nKey ID', truncated: false, charCount: 22 } } },
     } as unknown as ExecutionJob;
     const textSummary = summarizeJobResultForLowInterception(textJob);
     expect(textSummary.resultPreview?.text).toMatchObject({ text: 'Keys\nIssuer ID\nKey ID', truncated: false });
@@ -81,7 +81,7 @@ describe('low-interception safe tool surface', () => {
       jobId: 'EJOB-shot', repoId: 'repo_1', type: 'plugin-action', status: 'succeeded',
       payload: { operation: 'plugin_action_execute', arguments: { pluginId: 'browser', actionId: 'screenshot' } },
       evidenceIds: ['EVD-shot'],
-      result: { provider: 'playwright', screenshot: { url: 'https://appstoreconnect.apple.com/access/integrations/api', title: 'App Store Connect', path: 'redacted-root/.repo-harness/browser/screenshots/shot.png', relativePath: '.repo-harness/browser/screenshots/shot.png', bytes: 123 } },
+      result: { ok: true, result: { provider: 'playwright', screenshot: { url: 'https://appstoreconnect.apple.com/access/integrations/api', title: 'App Store Connect', path: 'redacted-root/.repo-harness/browser/screenshots/shot.png', relativePath: '.repo-harness/browser/screenshots/shot.png', bytes: 123 } } },
     } as unknown as ExecutionJob;
     const screenshotSummary = summarizeJobResultForLowInterception(screenshotJob);
     expect(screenshotSummary.resultPreview?.screenshot).toMatchObject({ title: 'App Store Connect', relativePath: '.repo-harness/browser/screenshots/shot.png', bytes: 123 });
