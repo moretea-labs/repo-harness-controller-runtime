@@ -19,13 +19,25 @@ import {
   runMcpSetupCodex,
 } from "../../src/cli/mcp/setup";
 
+function controllerHomePath(repoRoot: string): string {
+  return join(repoRoot, ".controller-home");
+}
+
+function controllerMcpFile(repoRoot: string, filename: string): string {
+  return join(controllerHomePath(repoRoot), "mcp", filename);
+}
+
 function withTmpRepo<T>(fn: (repoRoot: string) => T): T {
   const repoRoot = mkdtempSync(join(tmpdir(), "repo-harness-mcp-setup-"));
+  const previousControllerHome = process.env.REPO_HARNESS_CONTROLLER_HOME;
+  process.env.REPO_HARNESS_CONTROLLER_HOME = controllerHomePath(repoRoot);
   try {
     mkdirSync(join(repoRoot, ".ai/harness"), { recursive: true });
     writeFileSync(join(repoRoot, ".ai/harness/policy.json"), "{}\n");
     return fn(repoRoot);
   } finally {
+    if (previousControllerHome === undefined) delete process.env.REPO_HARNESS_CONTROLLER_HOME;
+    else process.env.REPO_HARNESS_CONTROLLER_HOME = previousControllerHome;
     rmSync(repoRoot, { recursive: true, force: true });
   }
 }
@@ -35,25 +47,25 @@ describe("mcp setup", () => {
     withTmpRepo((repoRoot) => {
       const result = runMcpSetupChatgpt({ repo: repoRoot });
       expect(result.changed.length).toBeGreaterThan(0);
-      expect(existsSync(join(repoRoot, ".repo-harness/mcp.local.json"))).toBe(
+      expect(existsSync(controllerMcpFile(repoRoot, "mcp.local.json"))).toBe(
         true,
       );
-      expect(existsSync(join(repoRoot, ".repo-harness/mcp.tokens.json"))).toBe(
+      expect(existsSync(controllerMcpFile(repoRoot, "mcp.tokens.json"))).toBe(
         true,
       );
-      expect(existsSync(join(repoRoot, ".repo-harness/mcp.oauth.json"))).toBe(
+      expect(existsSync(controllerMcpFile(repoRoot, "mcp.oauth.json"))).toBe(
         true,
       );
       expect(
         existsSync(join(repoRoot, "docs/repo-harness-chatgpt-mcp-setup.md")),
       ).toBe(true);
       const config = JSON.parse(
-        readFileSync(join(repoRoot, ".repo-harness/mcp.local.json"), "utf-8"),
+        readFileSync(controllerMcpFile(repoRoot, "mcp.local.json"), "utf-8"),
       );
       expect(config.auth).toMatchObject({
         mode: "oauth",
-        oauthFile: ".repo-harness/mcp.oauth.json",
-        tokenFile: ".repo-harness/mcp.tokens.json",
+        oauthFile: "mcp/mcp.oauth.json",
+        tokenFile: "mcp/mcp.tokens.json",
       });
       expect(config.chatgpt.serverName).toBe("repo-harness-controller-v8");
       expect(config.profile).toBe("controller");
@@ -71,12 +83,12 @@ describe("mcp setup", () => {
         maxTimeoutMs: 43_200_000,
       });
       const token = JSON.parse(
-        readFileSync(join(repoRoot, ".repo-harness/mcp.tokens.json"), "utf-8"),
+        readFileSync(controllerMcpFile(repoRoot, "mcp.tokens.json"), "utf-8"),
       ).bearerToken;
       expect(typeof token).toBe("string");
       expect(token.length).toBeGreaterThan(30);
       const passphrase = JSON.parse(
-        readFileSync(join(repoRoot, ".repo-harness/mcp.oauth.json"), "utf-8"),
+        readFileSync(controllerMcpFile(repoRoot, "mcp.oauth.json"), "utf-8"),
       ).passphrase;
       expect(typeof passphrase).toBe("string");
       expect(passphrase.length).toBeGreaterThan(20);
@@ -127,7 +139,7 @@ describe("mcp setup", () => {
 
       runMcpSetupChatgpt({ repo: repoRoot });
       const config = JSON.parse(
-        readFileSync(join(repoRoot, ".repo-harness/mcp.local.json"), "utf-8"),
+        readFileSync(controllerMcpFile(repoRoot, "mcp.local.json"), "utf-8"),
       );
       expect(config.chatgpt.serverName).toBe("repo-harness-controller-v8");
       expect(config.devMode.timeoutMs).toBe(3_600_000);
@@ -146,7 +158,7 @@ describe("mcp setup", () => {
       );
 
       let config = JSON.parse(
-        readFileSync(join(repoRoot, ".repo-harness/mcp.local.json"), "utf-8"),
+        readFileSync(controllerMcpFile(repoRoot, "mcp.local.json"), "utf-8"),
       );
       expect(config.chatgpt.serverName).toBe("team-review-mcp");
 
@@ -155,7 +167,7 @@ describe("mcp setup", () => {
         endpoint: "https://repo-harness-mcp.example.com/mcp",
       });
       config = JSON.parse(
-        readFileSync(join(repoRoot, ".repo-harness/mcp.local.json"), "utf-8"),
+        readFileSync(controllerMcpFile(repoRoot, "mcp.local.json"), "utf-8"),
       );
       expect(config.chatgpt.serverName).toBe("team-review-mcp");
       expect(config.chatgpt.endpoint).toBe(
@@ -164,7 +176,7 @@ describe("mcp setup", () => {
 
       runMcpSetupChatgpt({ repo: repoRoot });
       config = JSON.parse(
-        readFileSync(join(repoRoot, ".repo-harness/mcp.local.json"), "utf-8"),
+        readFileSync(controllerMcpFile(repoRoot, "mcp.local.json"), "utf-8"),
       );
       expect(config.chatgpt.serverName).toBe("team-review-mcp");
       expect(config.chatgpt.endpoint).toBe(
@@ -248,7 +260,7 @@ describe("mcp setup", () => {
 
       runMcpSetupChatgpt({ repo: repoRoot, serverName: "team-review-mcp" });
       const config = JSON.parse(
-        readFileSync(join(repoRoot, ".repo-harness/mcp.local.json"), "utf-8"),
+        readFileSync(controllerMcpFile(repoRoot, "mcp.local.json"), "utf-8"),
       );
       expect(config.server).toMatchObject({
         host: "0.0.0.0",
@@ -280,7 +292,7 @@ describe("mcp setup", () => {
       });
 
       const config = JSON.parse(
-        readFileSync(join(repoRoot, ".repo-harness/mcp.local.json"), "utf-8"),
+        readFileSync(controllerMcpFile(repoRoot, "mcp.local.json"), "utf-8"),
       );
       expect(config.chatgpt.endpoint).toBe(
         "https://repo-harness-mcp.example.com/mcp",
@@ -421,7 +433,7 @@ describe("mcp setup", () => {
   test("ChatGPT guide uses OAuth for ChatGPT and documents bearer fallback", () => {
     const guide = chatgptGuideMarkdown("https://example.test/mcp");
     expect(guide).toContain("Configure Connector authentication as OAuth");
-    expect(guide).toContain(".repo-harness/mcp.oauth.json");
+    expect(guide).toContain("controllerHome/mcp/mcp.oauth.json");
     expect(guide).toContain("~/DevProjects/repo-harness");
     expect(guide).toContain(".repo-harness/mcp.policy.json");
     expect(guide).toContain("oauth-protected-resource");

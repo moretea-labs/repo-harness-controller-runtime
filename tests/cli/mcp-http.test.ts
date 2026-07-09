@@ -4,6 +4,7 @@ import { createServer } from 'net';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { mcpControllerHomeOAuthPath, mcpControllerHomeTokenPath } from '../../src/cli/mcp/auth';
 import { runMcpSetupChatgpt } from '../../src/cli/mcp/setup';
 
 function freePort(): Promise<number> {
@@ -47,103 +48,122 @@ function initializeBody(): string {
   });
 }
 
+async function withTestControllerHome<T>(repoRoot: string, fn: (controllerHome: string) => Promise<T>): Promise<T> {
+  const previous = process.env.REPO_HARNESS_CONTROLLER_HOME;
+  const controllerHome = join(repoRoot, '.controller-home');
+  process.env.REPO_HARNESS_CONTROLLER_HOME = controllerHome;
+  try {
+    return await fn(controllerHome);
+  } finally {
+    if (previous === undefined) delete process.env.REPO_HARNESS_CONTROLLER_HOME;
+    else process.env.REPO_HARNESS_CONTROLLER_HOME = previous;
+  }
+}
+
+async function stopMcpServerProcess(proc: Bun.Subprocess<'ignore', 'ignore', 'pipe'> | null): Promise<void> {
+  if (!proc) return;
+  proc.kill();
+  await proc.exited.catch(() => undefined);
+}
+
 describe('mcp http transport', () => {
   test('requires bearer auth and accepts authenticated initialize requests', async () => {
     const repoRoot = mkdtempSync(join(tmpdir(), 'repo-harness-mcp-http-'));
     const port = await freePort();
     let proc: Bun.Subprocess<'ignore', 'ignore', 'pipe'> | null = null;
     try {
-      mkdirSync(join(repoRoot, '.ai/harness'), { recursive: true });
-      writeFileSync(join(repoRoot, '.ai/harness/policy.json'), '{}\n');
-      runMcpSetupChatgpt({ repo: repoRoot, port: String(port) });
-      const token = (await Bun.file(join(repoRoot, '.repo-harness/mcp.tokens.json')).json()).bearerToken;
+      await withTestControllerHome(repoRoot, async (controllerHome) => {
+        mkdirSync(join(repoRoot, '.ai/harness'), { recursive: true });
+        writeFileSync(join(repoRoot, '.ai/harness/policy.json'), '{}\n');
+        runMcpSetupChatgpt({ repo: repoRoot, port: String(port) });
+        const token = (await Bun.file(mcpControllerHomeTokenPath(controllerHome)).json()).bearerToken;
 
-      proc = Bun.spawn(
-        [
-          'bun',
-          'src/cli/index.ts',
-          'mcp',
-          'serve',
-          '--repo',
-          repoRoot,
-          '--transport',
-          'http',
-          '--host',
-          '127.0.0.1',
-          '--port',
-          String(port),
-          '--profile',
-          'planner',
-          '--auth',
-          'bearer',
-        ],
-        { cwd: process.cwd(), stdout: 'ignore', stderr: 'pipe' },
-      );
-      await waitForHealth(port);
+        proc = Bun.spawn(
+          [
+            'bun',
+            'src/cli/index.ts',
+            'mcp',
+            'serve',
+            '--repo',
+            repoRoot,
+            '--transport',
+            'http',
+            '--host',
+            '127.0.0.1',
+            '--port',
+            String(port),
+            '--profile',
+            'planner',
+            '--auth',
+            'bearer',
+          ],
+          { cwd: process.cwd(), stdout: 'ignore', stderr: 'pipe', env: { ...process.env, REPO_HARNESS_CONTROLLER_HOME: controllerHome } },
+        );
+        await waitForHealth(port);
 
-      const health = await fetch(`http://127.0.0.1:${port}/health`);
-      expect(await health.json()).toMatchObject({
-        status: 'ok',
-        auth: 'required',
-        sessions: {
-          active: 0,
-          maximum: 64,
-          activePosts: 0,
-          activeStreams: 0,
-          maximumActivePosts: 32,
-        },
+        const health = await fetch(`http://127.0.0.1:${port}/health`);
+        expect(await health.json()).toMatchObject({
+          status: 'ok',
+          auth: 'required',
+          sessions: {
+            active: 0,
+            maximum: 64,
+            activePosts: 0,
+            activeStreams: 0,
+            maximumActivePosts: 32,
+          },
+        });
+
+        const noAuth = await fetch(`http://127.0.0.1:${port}/mcp`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: initializeBody(),
+        });
+        expect(noAuth.status).toBe(401);
+
+        const badJson = await fetch(`http://127.0.0.1:${port}/mcp`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+          body: '{bad',
+        });
+        expect(badJson.status).toBe(400);
+
+        const initialized = await fetch(`http://127.0.0.1:${port}/mcp`, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${token}`,
+            'content-type': 'application/json',
+            accept: 'application/json, text/event-stream',
+          },
+          body: initializeBody(),
+        });
+        expect(initialized.status).toBe(200);
+        const sessionId = initialized.headers.get('mcp-session-id');
+        expect(sessionId).toBeTruthy();
+        expect(await initialized.text()).toContain('repo-harness-mcp');
+
+        const streamController = new AbortController();
+        const stream = await fetch(`http://127.0.0.1:${port}/mcp`, {
+          headers: {
+            authorization: `Bearer ${token}`,
+            'mcp-session-id': sessionId!,
+            accept: 'text/event-stream',
+          },
+          signal: streamController.signal,
+        });
+        expect(stream.status).toBe(200);
+        await Bun.sleep(25);
+        const streamingHealth = await fetch(`http://127.0.0.1:${port}/health`).then((response) => response.json());
+        expect(streamingHealth.sessions.active).toBe(1);
+        expect(streamingHealth.sessions.activeStreams).toBe(1);
+        streamController.abort();
+        await stream.body?.cancel().catch(() => undefined);
+        await Bun.sleep(100);
+        const closedStreamHealth = await fetch(`http://127.0.0.1:${port}/health`).then((response) => response.json());
+        expect(closedStreamHealth.sessions.activeStreams).toBe(0);
       });
-
-      const noAuth = await fetch(`http://127.0.0.1:${port}/mcp`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: initializeBody(),
-      });
-      expect(noAuth.status).toBe(401);
-
-      const badJson = await fetch(`http://127.0.0.1:${port}/mcp`, {
-        method: 'POST',
-        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-        body: '{bad',
-      });
-      expect(badJson.status).toBe(400);
-
-      const initialized = await fetch(`http://127.0.0.1:${port}/mcp`, {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${token}`,
-          'content-type': 'application/json',
-          accept: 'application/json, text/event-stream',
-        },
-        body: initializeBody(),
-      });
-      expect(initialized.status).toBe(200);
-      const sessionId = initialized.headers.get('mcp-session-id');
-      expect(sessionId).toBeTruthy();
-      expect(await initialized.text()).toContain('repo-harness-mcp');
-
-      const streamController = new AbortController();
-      const stream = await fetch(`http://127.0.0.1:${port}/mcp`, {
-        headers: {
-          authorization: `Bearer ${token}`,
-          'mcp-session-id': sessionId!,
-          accept: 'text/event-stream',
-        },
-        signal: streamController.signal,
-      });
-      expect(stream.status).toBe(200);
-      await Bun.sleep(25);
-      const streamingHealth = await fetch(`http://127.0.0.1:${port}/health`).then((response) => response.json());
-      expect(streamingHealth.sessions.active).toBe(1);
-      expect(streamingHealth.sessions.activeStreams).toBe(1);
-      streamController.abort();
-      await stream.body?.cancel().catch(() => undefined);
-      await Bun.sleep(100);
-      const closedStreamHealth = await fetch(`http://127.0.0.1:${port}/health`).then((response) => response.json());
-      expect(closedStreamHealth.sessions.activeStreams).toBe(0);
     } finally {
-      proc?.kill();
-      await proc?.exited.catch(() => undefined);
+      await stopMcpServerProcess(proc);
       rmSync(repoRoot, { recursive: true, force: true });
     }
   });
@@ -153,134 +173,135 @@ describe('mcp http transport', () => {
     const port = await freePort();
     let proc: Bun.Subprocess<'ignore', 'ignore', 'pipe'> | null = null;
     try {
-      mkdirSync(join(repoRoot, '.ai/harness'), { recursive: true });
-      writeFileSync(join(repoRoot, '.ai/harness/policy.json'), '{}\n');
-      runMcpSetupChatgpt({ repo: repoRoot, port: String(port) });
-      const passphrase = (await Bun.file(join(repoRoot, '.repo-harness/mcp.oauth.json')).json()).passphrase;
-      const staticBearerToken = 'repo-harness-grok-test-token';
-      writeFileSync(
-        join(repoRoot, '.repo-harness/mcp.tokens.json'),
-        `${JSON.stringify({ version: 1, bearerToken: staticBearerToken }, null, 2)}\n`,
-      );
+      await withTestControllerHome(repoRoot, async (controllerHome) => {
+        mkdirSync(join(repoRoot, '.ai/harness'), { recursive: true });
+        writeFileSync(join(repoRoot, '.ai/harness/policy.json'), '{}\n');
+        runMcpSetupChatgpt({ repo: repoRoot, port: String(port) });
+        const passphrase = (await Bun.file(mcpControllerHomeOAuthPath(controllerHome)).json()).passphrase;
+        const staticBearerToken = 'static-bearer-token';
+        writeFileSync(
+          mcpControllerHomeTokenPath(controllerHome),
+          `${JSON.stringify({ version: 1, bearerToken: staticBearerToken }, null, 2)}\n`,
+        );
 
-      proc = Bun.spawn(
-        [
-          'bun',
-          'src/cli/index.ts',
-          'mcp',
-          'serve',
-          '--repo',
-          repoRoot,
-          '--transport',
-          'http',
-          '--host',
-          '127.0.0.1',
-          '--port',
-          String(port),
-          '--profile',
-          'planner',
-        ],
-        { cwd: process.cwd(), stdout: 'ignore', stderr: 'pipe' },
-      );
-      await waitForHealth(port);
+        proc = Bun.spawn(
+          [
+            'bun',
+            'src/cli/index.ts',
+            'mcp',
+            'serve',
+            '--repo',
+            repoRoot,
+            '--transport',
+            'http',
+            '--host',
+            '127.0.0.1',
+            '--port',
+            String(port),
+            '--profile',
+            'planner',
+          ],
+          { cwd: process.cwd(), stdout: 'ignore', stderr: 'pipe', env: { ...process.env, REPO_HARNESS_CONTROLLER_HOME: controllerHome } },
+        );
+        await waitForHealth(port);
 
-      const health = await fetch(`http://127.0.0.1:${port}/health`);
-      expect(await health.json()).toMatchObject({ status: 'ok', auth: 'oauth' });
+        const health = await fetch(`http://127.0.0.1:${port}/health`);
+        expect(await health.json()).toMatchObject({ status: 'ok', auth: 'oauth' });
 
-      const metadata = await fetch(`http://127.0.0.1:${port}/.well-known/oauth-protected-resource/mcp`, {
-        headers: { 'x-forwarded-proto': 'https', 'x-forwarded-host': 'example.test' },
-      });
-      expect(await metadata.json()).toMatchObject({
-        resource: 'https://example.test/mcp',
-        authorization_servers: ['https://example.test'],
-      });
+        const metadata = await fetch(`http://127.0.0.1:${port}/.well-known/oauth-protected-resource/mcp`, {
+          headers: { 'x-forwarded-proto': 'https', 'x-forwarded-host': 'example.test' },
+        });
+        expect(await metadata.json()).toMatchObject({
+          resource: 'https://example.test/mcp',
+          authorization_servers: ['https://example.test'],
+        });
 
-      const registered = await fetch(`http://127.0.0.1:${port}/register`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          redirect_uris: ['http://localhost/callback'],
-          token_endpoint_auth_method: 'none',
-          grant_types: ['authorization_code', 'refresh_token'],
-          response_types: ['code'],
-          client_name: 'repo-harness-test',
-        }),
-      });
-      expect(registered.status).toBe(201);
-      const client = await registered.json() as { client_id: string };
-      expect(typeof client.client_id).toBe('string');
+        const registered = await fetch(`http://127.0.0.1:${port}/register`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            redirect_uris: ['http://localhost/callback'],
+            token_endpoint_auth_method: 'none',
+            grant_types: ['authorization_code', 'refresh_token'],
+            response_types: ['code'],
+            client_name: 'repo-harness-test',
+          }),
+        });
+        expect(registered.status).toBe(201);
+        const client = await registered.json() as { client_id: string };
+        expect(typeof client.client_id).toBe('string');
 
-      const verifier = randomBytes(32).toString('base64url');
-      const challenge = createHash('sha256').update(verifier).digest('base64url');
-      const authorizeBody = new URLSearchParams({
-        passphrase,
-        client_id: client.client_id,
-        redirect_uri: 'http://localhost/callback',
-        response_type: 'code',
-        code_challenge: challenge,
-        code_challenge_method: 'S256',
-        state: 'state-1',
-      });
-      const authorized = await fetch(`http://127.0.0.1:${port}/authorize`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/x-www-form-urlencoded' },
-        body: authorizeBody,
-        redirect: 'manual',
-      });
-      expect(authorized.status).toBe(302);
-      const redirect = new URL(authorized.headers.get('location') ?? '');
-      const code = redirect.searchParams.get('code');
-      expect(code).toBeTruthy();
-
-      const token = await fetch(`http://127.0.0.1:${port}/token`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          grant_type: 'authorization_code',
+        const verifier = randomBytes(32).toString('base64url');
+        const challenge = createHash('sha256').update(verifier).digest('base64url');
+        const authorizeBody = new URLSearchParams({
+          passphrase,
           client_id: client.client_id,
-          code: code ?? '',
-          code_verifier: verifier,
           redirect_uri: 'http://localhost/callback',
-        }),
-      });
-      expect(token.status).toBe(200);
-      const tokenJson = await token.json() as { access_token: string; token_type: string };
-      expect(tokenJson.token_type).toBe('Bearer');
+          response_type: 'code',
+          code_challenge: challenge,
+          code_challenge_method: 'S256',
+          state: 'state-1',
+        });
+        const authorized = await fetch(`http://127.0.0.1:${port}/authorize`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/x-www-form-urlencoded' },
+          body: authorizeBody,
+          redirect: 'manual',
+        });
+        expect(authorized.status).toBe(302);
+        const redirect = new URL(authorized.headers.get('location') ?? '');
+        const code = redirect.searchParams.get('code');
+        expect(code).toBeTruthy();
 
-      const noAuth = await fetch(`http://127.0.0.1:${port}/mcp`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: initializeBody(),
-      });
-      expect(noAuth.status).toBe(401);
-      expect(noAuth.headers.get('www-authenticate')).toContain('/.well-known/oauth-protected-resource/mcp');
+        const token = await fetch(`http://127.0.0.1:${port}/token`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            grant_type: 'authorization_code',
+            client_id: client.client_id,
+            code: code ?? '',
+            code_verifier: verifier,
+            redirect_uri: 'http://localhost/callback',
+          }),
+        });
+        expect(token.status).toBe(200);
+        const tokenJson = await token.json() as { access_token: string; token_type: string };
+        expect(tokenJson.token_type).toBe('Bearer');
 
-      const initializedWithStaticBearer = await fetch(`http://127.0.0.1:${port}/mcp`, {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${staticBearerToken}`,
-          'content-type': 'application/json',
-          accept: 'application/json, text/event-stream',
-        },
-        body: initializeBody(),
-      });
-      expect(initializedWithStaticBearer.status).toBe(200);
-      expect(await initializedWithStaticBearer.text()).toContain('repo-harness-mcp');
+        const noAuth = await fetch(`http://127.0.0.1:${port}/mcp`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: initializeBody(),
+        });
+        expect(noAuth.status).toBe(401);
+        expect(noAuth.headers.get('www-authenticate')).toContain('/.well-known/oauth-protected-resource/mcp');
 
-      const initialized = await fetch(`http://127.0.0.1:${port}/mcp`, {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${tokenJson.access_token}`,
-          'content-type': 'application/json',
-          accept: 'application/json, text/event-stream',
-        },
-        body: initializeBody(),
+        const initializedWithStaticBearer = await fetch(`http://127.0.0.1:${port}/mcp`, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${staticBearerToken}`,
+            'content-type': 'application/json',
+            accept: 'application/json, text/event-stream',
+          },
+          body: initializeBody(),
+        });
+        expect(initializedWithStaticBearer.status).toBe(200);
+        expect(await initializedWithStaticBearer.text()).toContain('repo-harness-mcp');
+
+        const initialized = await fetch(`http://127.0.0.1:${port}/mcp`, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${tokenJson.access_token}`,
+            'content-type': 'application/json',
+            accept: 'application/json, text/event-stream',
+          },
+          body: initializeBody(),
+        });
+        expect(initialized.status).toBe(200);
+        expect(await initialized.text()).toContain('repo-harness-mcp');
       });
-      expect(initialized.status).toBe(200);
-      expect(await initialized.text()).toContain('repo-harness-mcp');
     } finally {
-      proc?.kill();
-      await proc?.exited.catch(() => undefined);
+      await stopMcpServerProcess(proc);
       rmSync(repoRoot, { recursive: true, force: true });
     }
   });
