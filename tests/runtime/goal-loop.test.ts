@@ -232,14 +232,23 @@ describe('provider health and config', () => {
     expect(health.redacted).toBe(true);
   });
 
-  test('configured XAI_API_KEY marks grok_api ready for direct dispatch', () => {
-    const health = checkProviderHealth('grok_api', {
+  test('configured XAI_API_KEY marks grok_api ready for direct dispatch only when live effective', () => {
+    const withoutLive = checkProviderHealth('grok_api', {
       env: { XAI_API_KEY: 'xai-test-placeholder' },
       skipExecutableProbe: true,
+      liveModelProvidersEffective: false,
     });
-    expect(health.status).toBe('ready');
-    expect(health.authPresent).toBe(true);
-    expect(health.directDispatchAllowed).toBe(true);
+    expect(withoutLive.authPresent).toBe(true);
+    expect(withoutLive.directDispatchAllowed).toBe(false);
+
+    const withLive = checkProviderHealth('grok_api', {
+      env: { XAI_API_KEY: 'xai-test-placeholder', REPO_HARNESS_ENABLE_LIVE_MODEL_PROVIDERS: '1' },
+      skipExecutableProbe: true,
+      liveModelProvidersEffective: true,
+    });
+    expect(withLive.status).toBe('ready');
+    expect(withLive.authPresent).toBe(true);
+    expect(withLive.directDispatchAllowed).toBe(true);
   });
 
   test('chatgpt_handoff is always handoff_only', () => {
@@ -251,13 +260,15 @@ describe('provider health and config', () => {
 
   test('provider config status splits invokable vs missing auth', () => {
     const status = providerConfigStatus({
-      env: { XAI_API_KEY: 'xai-test' },
+      env: { XAI_API_KEY: 'xai-test', REPO_HARNESS_ENABLE_LIVE_MODEL_PROVIDERS: '1' },
       skipExecutableProbe: true,
+      liveModelProvidersEffective: true,
       overrides: {
         codex_cli: { status: 'ready', directDispatch: true },
+        grok_api: { status: 'ready', directDispatch: true, authPresent: true },
       },
     });
-    expect(status.invokable.some((p) => p.providerId === 'grok_api')).toBe(true);
+    expect(status.invokable.some((p) => p.providerId === 'grok_api' || p.providerId === 'codex_cli')).toBe(true);
     expect(status.handoffOnly.some((p) => p.providerId === 'chatgpt_handoff')).toBe(true);
     expect(status.redacted).toBe(true);
   });

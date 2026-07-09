@@ -10,6 +10,16 @@ import type {
   ProviderStatus,
 } from './types';
 
+import {
+  isLiveModelProvidersEffective,
+  isLocalToolEnabledInConfig,
+  isProviderEnabledInConfig,
+  readLocalToolConfig,
+  readProviderConfig,
+  sortProvidersByPriority,
+  type GoalLoopConfigLocation,
+} from './config-store';
+
 export interface ProviderRegistryEnv {
   env?: NodeJS.ProcessEnv;
   /** Injected availability overrides for tests (never used to store secrets). */
@@ -18,6 +28,13 @@ export interface ProviderRegistryEnv {
   skipExecutableProbe?: boolean;
   /** Optional mock health map for tests. */
   mockHealth?: Partial<Record<string, Partial<ProviderHealthReport>>>;
+  /** Load enable/disable + priority + live preference from controllerHome/global. */
+  configLocation?: GoalLoopConfigLocation;
+  /**
+   * When set, overrides computed live-effective flag for remote APIs.
+   * Prefer using configLocation + env in production.
+   */
+  liveModelProvidersEffective?: boolean;
 }
 
 const DEFAULT_LIMITS: ProviderLimits = {
@@ -82,13 +99,37 @@ function baseProvider(
   };
 }
 
+function remoteDirectAllowed(
+  authPresent: boolean,
+  liveEffective: boolean,
+): { status: ProviderStatus; directDispatch: boolean; lastErrorCode?: string; summarySuffix: string } {
+  if (!authPresent) {
+    return { status: 'missing_auth', directDispatch: false, lastErrorCode: undefined, summarySuffix: '' };
+  }
+  if (!liveEffective) {
+    return {
+      status: 'ready',
+      directDispatch: false,
+      lastErrorCode: 'LIVE_CALLS_DISABLED',
+      summarySuffix: ' Credential present; live model API calls are disabled (env + preference both required).',
+    };
+  }
+  return { status: 'ready', directDispatch: true, summarySuffix: ' Direct dispatch allowed.' };
+}
+
 /**
  * Build the model/code executor registry.
  * ChatGPT current conversation is always handoff_only (never direct-invokable).
+ * User config (enable/disable/priority/live preference) is applied when configLocation is set.
  */
 export function listProviders(options: ProviderRegistryEnv = {}): ProviderDescriptor[] {
   const env = options.env ?? process.env;
   const skipProbe = options.skipExecutableProbe === true;
+  const providerConfig = options.configLocation ? readProviderConfig(options.configLocation) : undefined;
+  const toolConfig = options.configLocation ? readLocalToolConfig(options.configLocation) : undefined;
+  const liveEffective = options.liveModelProvidersEffective
+    ?? (providerConfig ? isLiveModelProvidersEffective(providerConfig, env) : false);
+
   const codexReady = commandExists('codex', skipProbe);
   const claudeReady = commandExists('claude', skipProbe);
   const ghReady = commandExists('gh', skipProbe);
@@ -97,16 +138,26 @@ export function listProviders(options: ProviderRegistryEnv = {}): ProviderDescri
   const deepseekAuth = hasAnyKey(env, ['DEEPSEEK_API_KEY', 'REPO_HARNESS_DEEPSEEK_API_KEY']);
   const openaiAuth = hasAnyKey(env, ['OPENAI_API_KEY', 'REPO_HARNESS_OPENAI_API_KEY']);
 
+  const grokRemote = remoteDirectAllowed(grokAuth, liveEffective);
+  const deepseekRemote = remoteDirectAllowed(deepseekAuth, liveEffective);
+  const openaiRemote = remoteDirectAllowed(openaiAuth, liveEffective);
+
+  const directEditEnabled = toolConfig ? isLocalToolEnabledInConfig(toolConfig, 'direct_edit') : true;
+  const codexToolEnabled = toolConfig ? isLocalToolEnabledInConfig(toolConfig, 'codex_cli') : true;
+  const claudeToolEnabled = toolConfig ? isLocalToolEnabledInConfig(toolConfig, 'claude_cli') : true;
+
   const providers: ProviderDescriptor[] = [
     baseProvider(
       'direct_edit',
       'direct_edit',
       'none',
-      'ready',
+      directEditEnabled ? 'ready' : 'disabled',
       ['code_patch', 'local_file_mutation'],
-      'Bounded direct edit applied by repo-harness for deterministic small source changes.',
+      directEditEnabled
+        ? 'Bounded direct edit applied by repo-harness for deterministic small source changes.'
+        : 'Direct edit disabled in local tool configuration.',
       {
-        directDispatch: true,
+        directDispatch: directEditEnabled,
         configured: true,
         authPresent: true,
         safety: {
@@ -116,36 +167,43 @@ export function listProviders(options: ProviderRegistryEnv = {}): ProviderDescri
           requiresApprovalForExternalEffects: true,
         },
         limits: { ...DEFAULT_LIMITS, maxPatchFiles: 3, maxChangedLines: 200 },
+        lastErrorCode: directEditEnabled ? undefined : 'TOOL_DISABLED',
       },
     ),
     baseProvider(
       'codex_cli',
       'local_cli',
       'codex',
-      codexReady ? 'ready' : 'unavailable',
+      !codexToolEnabled ? 'disabled' : codexReady ? 'ready' : 'unavailable',
       ['code_patch', 'code_review', 'test_failure_repair', 'structured_output', 'tool_calling'],
-      codexReady
-        ? 'Local Codex CLI executor; patches applied and verified by repo-harness.'
-        : 'Codex CLI not found on PATH.',
+      !codexToolEnabled
+        ? 'Codex CLI disabled in local tool configuration.'
+        : codexReady
+          ? 'Local Codex CLI executor; patches applied and verified by repo-harness.'
+          : 'Codex CLI not found on PATH.',
       {
         configured: codexReady,
         authPresent: codexReady,
-        lastErrorCode: codexReady ? undefined : 'CODEX_CLI_UNAVAILABLE',
+        directDispatch: codexToolEnabled && codexReady,
+        lastErrorCode: !codexToolEnabled ? 'TOOL_DISABLED' : codexReady ? undefined : 'CODEX_CLI_UNAVAILABLE',
       },
     ),
     baseProvider(
       'claude_cli',
       'local_cli',
       'claude',
-      claudeReady ? 'ready' : 'unavailable',
+      !claudeToolEnabled ? 'disabled' : claudeReady ? 'ready' : 'unavailable',
       ['code_patch', 'code_review', 'test_failure_repair', 'long_context', 'structured_output', 'tool_calling'],
-      claudeReady
-        ? 'Local Claude CLI executor when configured.'
-        : 'Claude CLI not found on PATH.',
+      !claudeToolEnabled
+        ? 'Claude CLI disabled in local tool configuration.'
+        : claudeReady
+          ? 'Local Claude CLI executor when configured.'
+          : 'Claude CLI not found on PATH.',
       {
         configured: claudeReady,
         authPresent: claudeReady,
-        lastErrorCode: claudeReady ? undefined : 'CLAUDE_CLI_UNAVAILABLE',
+        directDispatch: claudeToolEnabled && claudeReady,
+        lastErrorCode: !claudeToolEnabled ? 'TOOL_DISABLED' : claudeReady ? undefined : 'CLAUDE_CLI_UNAVAILABLE',
       },
     ),
     baseProvider(
@@ -167,48 +225,51 @@ export function listProviders(options: ProviderRegistryEnv = {}): ProviderDescri
       'grok_api',
       'remote_api',
       'grok',
-      grokAuth ? 'ready' : 'missing_auth',
+      grokRemote.status,
       ['code_patch', 'code_review', 'architecture_planning', 'test_failure_repair', 'structured_output', 'long_context'],
-      grokAuth
-        ? 'Grok/xAI API configured; direct dispatch allowed for bounded structured patch proposals.'
-        : 'Grok/xAI API missing auth (set XAI_API_KEY or REPO_HARNESS_XAI_API_KEY).',
+      (grokAuth
+        ? 'Grok/xAI API credential present.'
+        : 'Grok/xAI API missing auth (set XAI_API_KEY or REPO_HARNESS_XAI_API_KEY).')
+        + grokRemote.summarySuffix,
       {
         configured: grokAuth,
         authPresent: grokAuth,
-        directDispatch: grokAuth,
-        lastErrorCode: grokAuth ? undefined : 'MISSING_XAI_API_KEY',
+        directDispatch: grokRemote.directDispatch,
+        lastErrorCode: grokAuth ? grokRemote.lastErrorCode : 'MISSING_XAI_API_KEY',
       },
     ),
     baseProvider(
       'deepseek_api',
       'remote_api',
       'deepseek',
-      deepseekAuth ? 'ready' : 'missing_auth',
+      deepseekRemote.status,
       ['code_patch', 'code_review', 'architecture_planning', 'structured_output', 'tool_calling'],
-      deepseekAuth
-        ? 'DeepSeek API configured as invokable remote provider (policy-bound).'
-        : 'DeepSeek API missing auth (set DEEPSEEK_API_KEY or REPO_HARNESS_DEEPSEEK_API_KEY).',
+      (deepseekAuth
+        ? 'DeepSeek API credential present.'
+        : 'DeepSeek API missing auth (set DEEPSEEK_API_KEY or REPO_HARNESS_DEEPSEEK_API_KEY).')
+        + deepseekRemote.summarySuffix,
       {
         configured: deepseekAuth,
         authPresent: deepseekAuth,
-        directDispatch: deepseekAuth,
-        lastErrorCode: deepseekAuth ? undefined : 'MISSING_DEEPSEEK_API_KEY',
+        directDispatch: deepseekRemote.directDispatch,
+        lastErrorCode: deepseekAuth ? deepseekRemote.lastErrorCode : 'MISSING_DEEPSEEK_API_KEY',
       },
     ),
     baseProvider(
       'openai_api',
       'remote_api',
       'openai',
-      openaiAuth ? 'ready' : 'missing_auth',
+      openaiRemote.status,
       ['code_patch', 'code_review', 'architecture_planning', 'structured_output', 'long_context'],
-      openaiAuth
-        ? 'OpenAI API configured as invokable remote provider (policy-bound).'
-        : 'OpenAI API missing auth (set OPENAI_API_KEY or REPO_HARNESS_OPENAI_API_KEY).',
+      (openaiAuth
+        ? 'OpenAI API credential present.'
+        : 'OpenAI API missing auth (set OPENAI_API_KEY or REPO_HARNESS_OPENAI_API_KEY).')
+        + openaiRemote.summarySuffix,
       {
         configured: openaiAuth,
         authPresent: openaiAuth,
-        directDispatch: openaiAuth,
-        lastErrorCode: openaiAuth ? undefined : 'MISSING_OPENAI_API_KEY',
+        directDispatch: openaiRemote.directDispatch,
+        lastErrorCode: openaiAuth ? openaiRemote.lastErrorCode : 'MISSING_OPENAI_API_KEY',
       },
     ),
     baseProvider(
@@ -217,7 +278,7 @@ export function listProviders(options: ProviderRegistryEnv = {}): ProviderDescri
       'chatgpt_handoff',
       'handoff_only',
       ['architecture_planning', 'code_review', 'long_context', 'browser_planning'],
-      'Current ChatGPT conversation is handoff-only; not directly invokable via local CLI/API.',
+      'Current ChatGPT conversation is handoff-only; not directly invokable via local CLI/API. repo-harness can create continuation packets, but cannot automatically invoke this ChatGPT session.',
       {
         directDispatch: false,
         configured: true,
@@ -227,6 +288,22 @@ export function listProviders(options: ProviderRegistryEnv = {}): ProviderDescri
     ),
   ];
 
+  // Apply user provider enable/disable from config.
+  if (providerConfig) {
+    for (const provider of providers) {
+      if (provider.providerId === 'chatgpt_handoff') {
+        provider.directDispatch = false;
+        continue;
+      }
+      if (!isProviderEnabledInConfig(providerConfig, provider.providerId)) {
+        provider.status = 'disabled';
+        provider.directDispatch = false;
+        provider.lastErrorCode = 'PROVIDER_DISABLED';
+        provider.summary = `${provider.providerId} disabled in provider configuration.`;
+      }
+    }
+  }
+
   if (options.overrides) {
     for (const provider of providers) {
       const override = options.overrides[provider.providerId];
@@ -234,7 +311,7 @@ export function listProviders(options: ProviderRegistryEnv = {}): ProviderDescri
       Object.assign(provider, override);
       const kind = provider.kind;
       const status = provider.status;
-      if (status === 'handoff_only' || kind === 'handoff_only') {
+      if (status === 'handoff_only' || kind === 'handoff_only' || provider.providerId === 'chatgpt_handoff') {
         provider.directDispatch = false;
       } else if (override.directDispatch !== undefined) {
         provider.directDispatch = override.directDispatch;
@@ -244,7 +321,15 @@ export function listProviders(options: ProviderRegistryEnv = {}): ProviderDescri
     }
   }
 
-  return providers;
+  // Always force ChatGPT handoff-only after all overrides.
+  const chat = providers.find((p) => p.providerId === 'chatgpt_handoff');
+  if (chat) {
+    chat.kind = 'handoff_only';
+    chat.status = 'handoff_only';
+    chat.directDispatch = false;
+  }
+
+  return providerConfig ? sortProvidersByPriority(providers, providerConfig) : providers;
 }
 
 export function getProvider(

@@ -7,3 +7,7 @@ export * from './failure-taxonomy';
 export * from './handoff-packet';
 export * from './provider-dispatch';
 export * from './goal-loop-engine';
+export * from './config-types';
+export * from './config-store';
+export * from './local-tools';
+export * from './config-facade';

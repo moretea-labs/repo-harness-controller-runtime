@@ -232,6 +232,9 @@ export interface GoalLoopStatusViewModel {
     nextSafeAction?: string;
     handoffPacketAvailable: boolean;
     approvalRequired: boolean;
+    whyThisProvider?: string;
+    whatHappensNext?: string;
+    whatIsBlocked?: string;
   }>;
   invokableProviders: string[];
   handoffOnlyProviders: string[];
@@ -242,6 +245,11 @@ export interface GoalLoopStatusViewModel {
     handoffOnly: boolean;
     summary: string;
   }>;
+  /** Plain-language automation overview snippet. */
+  automationSummary?: string;
+  liveModelProvidersEffective?: boolean;
+  settingsPathHint?: string;
+  nextTickHint?: string;
 }
 
 export interface CommandCenterViewModel {

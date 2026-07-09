@@ -327,6 +327,19 @@ export interface ExecutorRouteInput {
   policyBlocked?: boolean;
   requiresApproval?: boolean;
   externalWrite?: boolean;
+  /**
+   * Optional user routing preferences from controllerHome/global/executor-routing.json.
+   * When absent, built-in default order is used.
+   */
+  routingConfig?: {
+    orders?: Partial<Record<string, string[]>>;
+    defaultImplementationProvider?: string;
+    defaultRepairProvider?: string;
+    defaultPlanningProvider?: string;
+    defaultReviewProvider?: string;
+    defaultBrowserPlanningProvider?: string;
+    defaultIosAnalysisProvider?: string;
+  };
 }
 
 export interface ExecutorRouteDecision {

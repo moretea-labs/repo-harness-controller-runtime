@@ -82,7 +82,27 @@ import {
   buildCommandCenter,
   buildPluginSummary,
   buildSystemReadiness,
+  consoleGoalLoopPolicyGet,
+  consoleGoalLoopPolicyUpdate,
+  consoleLocalToolConfigGet,
+  consoleLocalToolConfigUpdate,
+  consoleLocalToolDisable,
+  consoleLocalToolEnable,
+  consoleLocalToolHealth,
+  consoleLocalToolList,
+  consoleProviderConfigGet,
+  consoleProviderConfigUpdate,
+  consoleProviderCredentials,
+  consoleProviderDisable,
+  consoleProviderEnable,
+  consoleProviderHealth,
+  consoleProviderPriority,
+  consoleProviderReset,
+  consoleRoutePreview,
+  consoleRoutingGet,
+  consoleRoutingUpdate,
   evaluateConsoleConnectorFreshness,
+  getAutomationSettings,
   getConsolePlugin,
   listConsolePlugins,
   toConsoleOperationFeedback,
@@ -1098,6 +1118,182 @@ export async function startLocalBridgeServer(
   app.get("/api/console/readiness", async (request, response) => {
     try {
       response.json(await buildSystemReadiness(consoleCtx(request)));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  /** Automation / Model & Tool Providers configuration center. */
+  app.get("/api/console/automation-settings", (request, response) => {
+    try {
+      response.json(getAutomationSettings(consoleCtx(request)));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.get("/api/console/provider-config", (request, response) => {
+    try {
+      response.json({ config: consoleProviderConfigGet(consoleCtx(request)), redacted: true });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/console/provider-config", (request, response) => {
+    try {
+      const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
+        ? request.body as Record<string, unknown>
+        : {};
+      response.json({ config: consoleProviderConfigUpdate(consoleCtx(request), body), redacted: true });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/console/providers/:providerId/enable", (request, response) => {
+    try {
+      response.json({ config: consoleProviderEnable(consoleCtx(request), String(request.params.providerId ?? "")), redacted: true });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/console/providers/:providerId/disable", (request, response) => {
+    try {
+      response.json({ config: consoleProviderDisable(consoleCtx(request), String(request.params.providerId ?? "")), redacted: true });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/console/providers/:providerId/priority", (request, response) => {
+    try {
+      const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
+        ? request.body as Record<string, unknown>
+        : {};
+      const direction = body.direction === "up" || body.direction === "down"
+        ? body.direction
+        : typeof body.priority === "number"
+          ? body.priority
+          : "up";
+      response.json({
+        config: consoleProviderPriority(consoleCtx(request), String(request.params.providerId ?? ""), direction as "up" | "down" | number),
+        redacted: true,
+      });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/console/providers/health", (request, response) => {
+    try {
+      const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
+        ? request.body as Record<string, unknown>
+        : {};
+      const providerId = typeof body.providerId === "string" ? body.providerId : typeof body.provider_id === "string" ? body.provider_id : undefined;
+      response.json(consoleProviderHealth(consoleCtx(request), providerId));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.get("/api/console/providers/credentials", (request, response) => {
+    try {
+      response.json({ credentials: consoleProviderCredentials(consoleCtx(request)), redacted: true });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/console/providers/reset", (request, response) => {
+    try {
+      response.json({ config: consoleProviderReset(consoleCtx(request)), redacted: true });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.get("/api/console/local-tools", (request, response) => {
+    try {
+      response.json({ tools: consoleLocalToolList(consoleCtx(request)), redacted: true });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/console/local-tools/:toolId/enable", (request, response) => {
+    try {
+      response.json({ config: consoleLocalToolEnable(consoleCtx(request), String(request.params.toolId ?? "")), redacted: true });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/console/local-tools/:toolId/disable", (request, response) => {
+    try {
+      response.json({ config: consoleLocalToolDisable(consoleCtx(request), String(request.params.toolId ?? "")), redacted: true });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/console/local-tools/health", (request, response) => {
+    try {
+      const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
+        ? request.body as Record<string, unknown>
+        : {};
+      const toolId = typeof body.toolId === "string" ? body.toolId : typeof body.tool_id === "string" ? body.tool_id : undefined;
+      response.json(consoleLocalToolHealth(consoleCtx(request), toolId));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.get("/api/console/local-tool-config", (request, response) => {
+    try {
+      response.json({ config: consoleLocalToolConfigGet(consoleCtx(request)), redacted: true });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/console/local-tool-config", (request, response) => {
+    try {
+      const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
+        ? request.body as Record<string, unknown>
+        : {};
+      response.json({ config: consoleLocalToolConfigUpdate(consoleCtx(request), body), redacted: true });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.get("/api/console/executor-routing", (request, response) => {
+    try {
+      response.json({ config: consoleRoutingGet(consoleCtx(request)), redacted: true });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/console/executor-routing", (request, response) => {
+    try {
+      const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
+        ? request.body as Record<string, unknown>
+        : {};
+      response.json({ ...consoleRoutingUpdate(consoleCtx(request), body), redacted: true });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/console/executor-route-preview", (request, response) => {
+    try {
+      const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
+        ? request.body as Record<string, unknown>
+        : {};
+      response.json(consoleRoutePreview(consoleCtx(request), body));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.get("/api/console/goal-loop-policy", (request, response) => {
+    try {
+      response.json({ policy: consoleGoalLoopPolicyGet(consoleCtx(request)), redacted: true });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/console/goal-loop-policy", (request, response) => {
+    try {
+      const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
+        ? request.body as Record<string, unknown>
+        : {};
+      response.json({ policy: consoleGoalLoopPolicyUpdate(consoleCtx(request), body), redacted: true });
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }

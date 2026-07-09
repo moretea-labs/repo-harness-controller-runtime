@@ -90,6 +90,7 @@ details.advanced{margin-top:12px;border-top:1px dashed var(--line);padding-top:1
         <button data-view="inbox">△ 待决定 <span class="count" id="sideHandoffs">0</span></button>
         <button data-view="work">▷ 当前任务</button>
         <button data-view="capabilities">◇ 能力 / 插件 <span class="count" id="sidePlugins" style="display:none">0</span></button>
+        <button data-view="automation">⚙ 模型与工具</button>
         <button data-view="readiness">◎ 系统状态</button>
         <button data-view="repositories">□ 仓库</button>
         <button data-view="advanced">⌁ 高级诊断</button>
@@ -100,6 +101,7 @@ details.advanced{margin-top:12px;border-top:1px dashed var(--line);padding-top:1
       <section class="view" id="view-inbox"></section>
       <section class="view" id="view-work"></section>
       <section class="view" id="view-capabilities"></section>
+      <section class="view" id="view-automation"></section>
       <section class="view" id="view-readiness"></section>
       <section class="view" id="view-repositories"></section>
       <section class="view" id="view-advanced"></section>
@@ -121,6 +123,7 @@ function setDot(id,tone){document.getElementById(id).className='dot '+(tone&&ton
 
 var selectedRepoId=queryRepoId()||safeGet('repoHarnessSelectedRepoId')||'';
 var commandCenter=null;
+var automationSettings=null;
 var selectedWorkId=safeGet('repoHarnessSelectedWorkId')||'';
 var selectedHandoffId='';
 var selectedPluginId=safeGet('repoHarnessSelectedPluginId')||'';
@@ -324,9 +327,10 @@ function renderHome(){
         '<p class="faint">'+esc(ready.description||'')+'</p>'+
         '<div style="margin-top:10px">'+pill(ready.connectorTone||'gray', ready.connectorLabel||'连接')+' '+
           pill(arr(cc.handoffs).length?'amber':'green', (arr(cc.handoffs).length||0)+' 项待决定')+'</div>'+
-        '<div class="actions">'+btn('系统状态','data-nav="readiness"')+btn('待决定','data-nav="inbox"')+btn('切换仓库','data-nav="repositories"')+'</div>'+
+        '<div class="actions">'+btn('系统状态','data-nav="readiness"')+btn('待决定','data-nav="inbox"')+btn('模型与工具','data-nav="automation"')+btn('切换仓库','data-nav="repositories"')+'</div>'+
       '</div>'+
     '</div>'+
+    renderGoalLoopPanel(cc.goalLoop)+
     '<div class="grid two" style="margin-top:14px">'+
       renderWorkCard(work, '当前任务')+
       '<div class="panel"><div class="section-title"><h2>待我决定</h2>'+btn('全部','data-nav="inbox"','ghost')+'</div>'+
@@ -335,6 +339,34 @@ function renderHome(){
     '</div>';
   bindNav(el);
   renderOpBar();
+}
+
+function renderGoalLoopPanel(gl){
+  gl=obj(gl);
+  var goals=arr(gl.goals);
+  var inv=arr(gl.invokableProviders);
+  var handoff=arr(gl.handoffOnlyProviders);
+  return '<div class="panel" style="margin-top:14px">'+
+    '<div class="section-title"><h2>目标循环 · Goal Loop</h2>'+btn('打开配置','data-nav="automation"','primary')+'</div>'+
+    (gl.automationSummary?'<p class="muted">'+esc(gl.automationSummary)+'</p>':'')+
+    '<div class="grid stats" style="margin-top:10px">'+
+      '<div class="stat"><span>活跃目标</span><strong>'+esc(String(gl.activeCount||goals.length||0))+'</strong></div>'+
+      '<div class="stat"><span>可直接调用</span><strong>'+esc(String(inv.length))+'</strong></div>'+
+      '<div class="stat"><span>仅 Handoff</span><strong>'+esc(String(handoff.length))+'</strong></div>'+
+      '<div class="stat"><span>Live API</span><strong>'+(gl.liveModelProvidersEffective?'开':'关')+'</strong></div>'+
+    '</div>'+
+    (goals.length?goals.slice(0,3).map(function(g){
+      return '<div class="card-row" style="margin-top:10px"><div>'+
+        '<h3>'+esc(g.title||'目标')+'</h3>'+
+        '<p class="muted">阶段：'+esc(g.stage)+' · 提供方：'+esc(g.providerSelected||'—')+'</p>'+
+        (g.whatIsBlocked?'<p class="muted">阻塞：'+esc(g.whatIsBlocked)+'</p>':'')+
+        (g.whatHappensNext?'<p class="faint">下一步：'+esc(g.whatHappensNext)+'</p>':'')+
+        (g.whyThisProvider?'<p class="faint">'+esc(g.whyThisProvider)+'</p>':'')+
+      '</div>'+pill(g.approvalRequired?'amber':g.handoffPacketAvailable?'blue':'green', g.handoffPacketAvailable?'有 Handoff 包':g.stage)+
+      '</div>';
+    }).join(''):'<div class="empty" style="margin-top:10px">暂无活跃 GoalContract。可在「模型与工具」配置提供方优先级。</div>')+
+    (gl.nextTickHint?'<p class="faint" style="margin-top:8px">'+esc(gl.nextTickHint)+'</p>':'')+
+  '</div>';
 }
 
 function mergeWorkExtras(work){
@@ -615,6 +647,196 @@ function renderAdvanced(){
   bindNav(root);
 }
 
+function renderAutomation(){
+  var root=document.getElementById('view-automation');
+  if(!root)return;
+  var s=obj(automationSettings);
+  if(!s.schemaVersion){
+    root.innerHTML='<div class="page-head"><div><h1>模型与工具提供方</h1><p>配置 LLM、本地工具与路由偏好。</p></div>'+
+      '<button class="btn primary" onclick="loadAutomationSettings()">加载配置</button></div>'+
+      '<div class="empty">正在读取 Automation Settings…</div>';
+    loadAutomationSettings();
+    return;
+  }
+  var ov=obj(s.overview);
+  var providers=arr(s.providers);
+  var tools=arr(s.localTools);
+  var creds=arr(s.credentials);
+  var routing=obj(s.routing);
+  var policy=obj(s.policy);
+  var warnings=arr(s.warnings).map(function(w){return '<div class="warn">'+esc(w)+'</div>'}).join('');
+  root.innerHTML=
+    '<div class="page-head"><div><h1>模型与工具提供方</h1><p>控制 goal loop 可用哪些 LLM / 本地工具、优先级与安全策略。密钥只读状态，永不展示值。</p></div>'+
+      '<div class="actions"><button class="btn" onclick="loadAutomationSettings()">刷新</button>'+
+      '<button class="btn" onclick="previewRoute()">预览路由</button>'+
+      '<button class="btn danger" onclick="resetProviders()">恢复默认</button></div></div>'+
+    warnings+
+    '<div class="panel" style="margin-bottom:14px"><h2>总览</h2>'+
+      '<p class="muted">'+esc(ov.plainLanguageSummary||'')+'</p>'+
+      '<div class="grid stats" style="margin-top:10px">'+
+        '<div class="stat"><span>Goal loop</span><strong>'+(ov.goalLoopEnabled?'开':'关')+'</strong></div>'+
+        '<div class="stat"><span>Live API（有效）</span><strong>'+(ov.liveModelProvidersEffective?'开':'关')+'</strong></div>'+
+        '<div class="stat"><span>直接可用</span><strong>'+esc(String(ov.directProvidersReady||0))+'</strong></div>'+
+        '<div class="stat"><span>需配置</span><strong>'+esc(String(ov.providersNeedingConfig||0))+'</strong></div>'+
+      '</div>'+
+      '<p class="faint" style="margin-top:10px">环境 Live 标志：'+(ov.liveModelProvidersEnv?'已设置':'未设置')+' · GUI 偏好：'+(ov.liveModelProvidersPreference?'已开启':'未开启')+' · 两者同时满足才允许远程 API 直接调度。</p>'+
+      '<div class="actions" style="margin-top:10px">'+
+        '<button class="btn" onclick="toggleLivePref('+(ov.liveModelProvidersPreference?'false':'true')+')">'+(ov.liveModelProvidersPreference?'关闭 GUI Live 偏好':'开启 GUI Live 偏好')+'</button>'+
+        '<button class="btn" onclick="toggleGoalLoop('+(ov.goalLoopEnabled?'false':'true')+')">'+(ov.goalLoopEnabled?'暂停 Goal Loop':'启用 Goal Loop')+'</button>'+
+      '</div>'+
+      '<p class="muted" style="margin-top:10px">默认路由：小改动 <strong>'+esc(obj(ov.defaultRoutes).small_edit||'—')+'</strong> · 实现 <strong>'+esc(obj(ov.defaultRoutes).normal_code_task||'—')+'</strong> · 修复 <strong>'+esc(obj(ov.defaultRoutes).repair||'—')+'</strong> · 规划 <strong>'+esc(obj(ov.defaultRoutes).planning||'—')+'</strong></p>'+
+    '</div>'+
+    '<div class="panel" style="margin-bottom:14px"><div class="section-title"><h2>LLM 提供方</h2></div><div class="list">'+
+      providers.map(function(p){return providerCardHtml(p)}).join('')+
+    '</div></div>'+
+    '<div class="panel" style="margin-bottom:14px"><div class="section-title"><h2>API 凭证状态</h2><span class="muted">仅环境变量引用 · 永不显示值</span></div>'+
+      (creds.length?creds.map(function(c){
+        return '<div class="card-row" style="margin-bottom:8px"><div>'+
+          '<h3>'+esc(c.displayName)+'</h3>'+
+          '<p class="muted">需要：'+esc(arr(c.requiredEnvVars).join(', '))+'</p>'+
+          '<p class="muted">已存在：'+(arr(c.presentEnvVars).length?esc(arr(c.presentEnvVars).join(', ')):'（无）')+'</p>'+
+          '<p class="faint">模式：'+esc(c.storageMode)+'</p>'+
+          '<details class="advanced"><summary>Shell 示例</summary><pre class="mono" style="white-space:pre-wrap;font-size:12px;color:var(--muted)">'+esc(c.setupExample||'')+'</pre></details>'+
+        '</div>'+pill(c.authPresent?'green':'amber', c.authPresent?'已配置':'缺失')+'</div>';
+      }).join(''):'<div class="empty">无 API 凭证条目</div>')+
+    '</div>'+
+    '<div class="panel" style="margin-bottom:14px"><div class="section-title"><h2>本地执行工具</h2></div><div class="list">'+
+      tools.map(function(t){
+        return '<div class="card-row" style="margin-bottom:8px"><div>'+
+          '<h3>'+esc(t.displayName)+'</h3>'+
+          '<p class="muted">'+esc(t.summary||'')+'</p>'+
+          (t.executablePath?'<p class="faint mono">'+esc(t.executablePath)+(t.version?(' · '+esc(t.version)):'')+'</p>':'')+
+          '<div class="evidence">'+(arr(t.usedByWorkflows).map(function(w){return '<span>'+esc(w)+'</span>'}).join(''))+'</div>'+
+        '</div><div class="actions" style="flex-direction:column">'+
+          pill(t.status==='detected'?'green':t.status==='disabled'?'gray':'amber', t.status)+
+          (t.enabled
+            ? '<button class="btn" onclick="setToolEnabled(\\''+esc(t.toolId)+'\\',false)">禁用</button>'
+            : '<button class="btn primary" onclick="setToolEnabled(\\''+esc(t.toolId)+'\\',true)">启用</button>')+
+          '<button class="btn ghost" onclick="healthTool(\\''+esc(t.toolId)+'\\')">健康检查</button>'+
+        '</div></div>';
+      }).join('')+
+    '</div></div>'+
+    '<div class="panel" style="margin-bottom:14px"><div class="section-title"><h2>路由偏好</h2></div>'+
+      '<p class="muted">Handoff-only（ChatGPT）只能出现在 handoff 回退位置，不能作为直接调度开关。</p>'+
+      ['implementation','repair','planning','review','browser_planning','ios_analysis'].map(function(key){
+        var order=arr(obj(routing.orders)[key]);
+        return '<div style="margin:10px 0;padding:10px;border:1px solid var(--line);border-radius:12px">'+
+          '<strong>'+esc(key)+'</strong><div class="muted mono" style="margin-top:6px">'+esc(order.join(' → ')||'—')+'</div></div>';
+      }).join('')+
+      '<p class="faint">若无可直接调用提供方：repo-harness 会创建 continuation packet，而不是假装调用 ChatGPT 会话。</p>'+
+    '</div>'+
+    '<div class="panel"><div class="section-title"><h2>策略与审批</h2></div>'+
+      '<div class="list">'+
+        policyToggleRow('外部写入需审批','requireApprovalForExternalWrites',policy.requireApprovalForExternalWrites!==false)+
+        policyToggleRow('破坏性变更需审批','requireApprovalForDestructiveChanges',policy.requireApprovalForDestructiveChanges!==false)+
+        policyToggleRow('大规模重构需审批','requireApprovalForBroadRefactors',policy.requireApprovalForBroadRefactors!==false)+
+        policyToggleRow('浏览器表单提交需审批','requireApprovalForBrowserFormSubmit',policy.requireApprovalForBrowserFormSubmit!==false)+
+        policyToggleRow('Gmail 发送/删除需审批','requireApprovalForGmailSendOrTrash',policy.requireApprovalForGmailSendOrTrash!==false)+
+        policyToggleRow('App Store Connect 写入需审批','requireApprovalForAppStoreConnectWrites',policy.requireApprovalForAppStoreConnectWrites!==false)+
+        policyToggleRow('最终合并前需审批','requireApprovalBeforeFinalMerge',policy.requireApprovalBeforeFinalMerge!==false)+
+      '</div>'+
+      '<p class="muted" style="margin-top:10px">阈值文件阈值：'+esc(String(policy.maxChangedFilesWithoutConfirmation||40))+' · 行数：'+esc(String(policy.maxChangedLinesWithoutConfirmation||2000))+' · 重试预算：'+esc(String(policy.defaultRetryBudget||5))+'</p>'+
+      '<p class="faint">没有“一键关闭全部安全”的开关。</p>'+
+    '</div>';
+  bindNav(root);
+}
+
+function policyToggleRow(label,key,on){
+  return '<div class="action-row"><div><strong>'+esc(label)+'</strong></div>'+
+    '<button class="btn" onclick="setPolicyFlag(\\''+esc(key)+'\\','+(on?'false':'true')+')">'+(on?'已要求审批 · 点击放宽':'已放宽 · 点击要求审批')+'</button></div>';
+}
+
+function providerCardHtml(p){
+  p=obj(p);
+  var id=esc(p.providerId);
+  var handoff=!!p.handoffOnly;
+  return '<div class="card-row" style="margin-bottom:10px"><div>'+
+    '<div class="section-title" style="margin:0"><h3 style="margin:0">'+esc(p.displayName)+'</h3>'+pill(p.directDispatch?'green':handoff?'blue':p.status==='disabled'?'gray':'amber', p.statusLabel)+'</div>'+
+    '<p class="muted">'+esc(p.kindLabel)+' · 优先级 '+esc(String(p.priority))+'</p>'+
+    '<p class="muted">'+esc(p.explanation||p.summary||'')+'</p>'+
+    '<div class="evidence">'+(arr(p.capabilities).slice(0,8).map(function(c){return '<span>'+esc(c)+'</span>'}).join(''))+'</div>'+
+    '<p class="faint" style="margin-top:6px">文件直接改动：'+(p.safety&&p.safety.canMutateFilesDirectly?'是':'否')+
+      ' · harness apply：'+(p.safety&&p.safety.requiresRepoHarnessApply?'是':'是')+
+      ' · 外部副作用：'+esc((p.safety&&p.safety.externalSideEffects)||'approval_required')+'</p>'+
+    (p.lastErrorSummary?'<p class="faint">最近错误码：'+esc(p.lastErrorSummary)+'</p>':'')+
+    (handoff?'<div class="setup" style="margin-top:8px"><strong>Direct dispatch：不支持</strong><p class="muted" style="margin:6px 0 0">'+esc(p.explanation||'')+'</p></div>':'')+
+  '</div><div class="actions" style="flex-direction:column">'+
+    (!handoff?(p.enabled
+      ? '<button class="btn" onclick="setProviderEnabled(\\''+id+'\\',false)">禁用</button>'
+      : '<button class="btn primary" onclick="setProviderEnabled(\\''+id+'\\',true)">启用</button>'):'<span class="pill blue">Handoff-only</span>')+
+    (!handoff?'<button class="btn ghost" onclick="moveProvider(\\''+id+'\\',\\'up\\')">优先级↑</button><button class="btn ghost" onclick="moveProvider(\\''+id+'\\',\\'down\\')">优先级↓</button>':'')+
+    '<button class="btn ghost" onclick="healthProvider(\\''+id+'\\')">健康检查</button>'+
+  '</div></div>';
+}
+
+function loadAutomationSettings(){
+  return api('/api/console/automation-settings'+repoQuery()).then(function(res){
+    automationSettings=res;
+    renderAutomation();
+  }).catch(function(e){toast(e.message||'加载配置失败')});
+}
+function setProviderEnabled(id,on){
+  setBusy(true,on?'启用提供方':'禁用提供方');
+  api('/api/console/providers/'+encodeURIComponent(id)+'/'+(on?'enable':'disable')+repoQuery(),{method:'POST',body:'{}'}).then(function(){
+    toast(on?'已启用':'已禁用');return loadAutomationSettings();
+  }).catch(function(e){toast(e.message)}).finally(function(){setBusy(false)});
+}
+function moveProvider(id,dir){
+  setBusy(true,'调整优先级');
+  api('/api/console/providers/'+encodeURIComponent(id)+'/priority'+repoQuery(),{method:'POST',body:JSON.stringify({direction:dir})}).then(function(){
+    toast('优先级已更新');return loadAutomationSettings();
+  }).catch(function(e){toast(e.message)}).finally(function(){setBusy(false)});
+}
+function healthProvider(id){
+  api('/api/console/providers/health'+repoQuery(),{method:'POST',body:JSON.stringify({providerId:id})}).then(function(res){
+    toast((res.health&&res.health.summary)||'健康检查完成');
+    advancedRaw=res; 
+  }).catch(function(e){toast(e.message)});
+}
+function setToolEnabled(id,on){
+  setBusy(true,on?'启用工具':'禁用工具');
+  api('/api/console/local-tools/'+encodeURIComponent(id)+'/'+(on?'enable':'disable')+repoQuery(),{method:'POST',body:'{}'}).then(function(){
+    toast(on?'工具已启用':'工具已禁用');return loadAutomationSettings();
+  }).catch(function(e){toast(e.message)}).finally(function(){setBusy(false)});
+}
+function healthTool(id){
+  api('/api/console/local-tools/health'+repoQuery(),{method:'POST',body:JSON.stringify({toolId:id})}).then(function(res){
+    toast((res.tool&&res.tool.summary)||'工具检查完成');
+  }).catch(function(e){toast(e.message)});
+}
+function toggleLivePref(on){
+  setBusy(true,'更新 Live 偏好');
+  api('/api/console/provider-config'+repoQuery(),{method:'POST',body:JSON.stringify({preferLiveModelProviders:!!on})}).then(function(){
+    toast(on?'已开启 GUI Live 偏好（仍需环境变量）':'已关闭 GUI Live 偏好');return loadAutomationSettings();
+  }).catch(function(e){toast(e.message)}).finally(function(){setBusy(false)});
+}
+function toggleGoalLoop(on){
+  setBusy(true,'更新 Goal Loop');
+  api('/api/console/provider-config'+repoQuery(),{method:'POST',body:JSON.stringify({goalLoopEnabled:!!on})}).then(function(){
+    toast(on?'Goal Loop 已启用':'Goal Loop 已暂停');return loadAutomationSettings();
+  }).catch(function(e){toast(e.message)}).finally(function(){setBusy(false)});
+}
+function setPolicyFlag(key,value){
+  var body={};body[key]=value===true||value==='true';
+  setBusy(true,'更新策略');
+  api('/api/console/goal-loop-policy'+repoQuery(),{method:'POST',body:JSON.stringify(body)}).then(function(){
+    toast('策略已更新');return loadAutomationSettings();
+  }).catch(function(e){toast(e.message)}).finally(function(){setBusy(false)});
+}
+function previewRoute(){
+  api('/api/console/executor-route-preview'+repoQuery(),{method:'POST',body:JSON.stringify({task_intent:'code_implementation'})}).then(function(res){
+    toast(res.explanation||res.whyThisProvider||'路由预览完成');
+    advancedRaw=res;
+  }).catch(function(e){toast(e.message)});
+}
+function resetProviders(){
+  if(!confirm('恢复提供方默认配置？（不会删除环境变量）'))return;
+  setBusy(true,'恢复默认');
+  api('/api/console/providers/reset'+repoQuery(),{method:'POST',body:'{}'}).then(function(){
+    toast('已恢复默认');return loadAutomationSettings();
+  }).catch(function(e){toast(e.message)}).finally(function(){setBusy(false)});
+}
+
 function bindNav(root){
   if(!root)return;
   root.querySelectorAll('[data-nav]').forEach(function(el){
@@ -665,6 +887,7 @@ function renderAll(){
     renderInbox();
     renderWork();
     renderCapabilities();
+    renderAutomation();
     renderReadiness();
     renderRepositories();
     renderAdvanced();
@@ -906,14 +1129,18 @@ function refreshAll(opts){
     if(!selectedWorkId&&res.currentWork&&res.currentWork.id)rememberWork(res.currentWork.id);
     // Merge extras into current work for card display after silent polls.
     if(res.currentWork&&res.currentWork.id)res.currentWork=mergeWorkExtras(res.currentWork);
-    if(!opts.silent)renderAll();
-    else {
-      renderChrome();
-      renderOpBar();
-      // Keep active views fresh without full re-render thrash when possible.
-      try{renderHome();renderWork();renderInbox()}catch(_e){renderAll()}
-    }
-    ensurePoll();
+    var loadSettings=(!opts.silent||!automationSettings)
+      ? api('/api/console/automation-settings'+repoQuery()).then(function(s){automationSettings=s}).catch(function(){/* optional */})
+      : Promise.resolve();
+    return loadSettings.then(function(){
+      if(!opts.silent)renderAll();
+      else {
+        renderChrome();
+        renderOpBar();
+        try{renderHome();renderWork();renderInbox()}catch(_e){renderAll()}
+      }
+      ensurePoll();
+    });
   }).catch(function(e){
     if(opts.silent){
       lastOperation={phase:'failed',statusLabel:'重连中',summary:e.message||'控制台暂时不可用，正在重试…',at:new Date().toISOString()};

@@ -27,6 +27,7 @@ import {
   type ProviderRegistryEnv,
 } from './provider-registry';
 import { dispatchProvider } from './provider-dispatch';
+import { readProviderConfig, readRoutingConfig, type GoalLoopConfigLocation } from './config-store';
 import type {
   FailureClass,
   GoalContract,
@@ -44,7 +45,35 @@ export interface GoalLoopContext {
   packetStore: HandoffPacketStoreOptions;
   repoId: string;
   providerEnv?: ProviderRegistryEnv;
+  /** When set, ExecutorRouter and provider registry load user GUI config. */
+  configLocation?: GoalLoopConfigLocation;
   now?: () => string;
+}
+
+function resolvedProviderEnv(ctx: GoalLoopContext): ProviderRegistryEnv {
+  const base = ctx.providerEnv ?? {};
+  const configLocation = ctx.configLocation ?? base.configLocation;
+  return { ...base, configLocation };
+}
+
+function routingFromConfig(ctx: GoalLoopContext) {
+  const loc = ctx.configLocation ?? ctx.providerEnv?.configLocation;
+  if (!loc) return undefined;
+  try {
+    return readRoutingConfig(loc);
+  } catch {
+    return undefined;
+  }
+}
+
+function goalLoopEnabled(ctx: GoalLoopContext): boolean {
+  const loc = ctx.configLocation ?? ctx.providerEnv?.configLocation;
+  if (!loc) return true;
+  try {
+    return readProviderConfig(loc).goalLoopEnabled !== false;
+  } catch {
+    return true;
+  }
 }
 
 function nowIso(ctx: GoalLoopContext): string {
@@ -105,7 +134,7 @@ export function goalGet(ctx: GoalLoopContext, goalId: string): GoalContract | un
 }
 
 export function goalStatus(ctx: GoalLoopContext, goalId?: string): Record<string, unknown> {
-  const providers = listProviderHealth(ctx.providerEnv);
+  const providers = listProviderHealth(resolvedProviderEnv(ctx));
   if (goalId) {
     const goal = goalGet(ctx, goalId);
     if (!goal) return { found: false, goalId, providers: compactProviderHealth(providers) };
@@ -297,8 +326,19 @@ export function goalTickOnce(ctx: GoalLoopContext, goalId: string, options: Goal
       reason: `Goal is terminal (${goal.status}); no tick transition.`,
     };
   }
+  if (!goalLoopEnabled(ctx)) {
+    return {
+      goalId,
+      from: goal.status,
+      to: goal.status,
+      transitioned: false,
+      reason: 'Goal loop disabled in Automation Settings.',
+      nextSafeAction: 'Enable goal loop in Model & Tool Providers settings',
+    };
+  }
 
-  const providers = listProviders(ctx.providerEnv);
+  const providers = listProviders(resolvedProviderEnv(ctx));
+  const routingConfig = routingFromConfig(ctx);
   const from = goal.status;
 
   // Policy / external write gate
@@ -348,6 +388,7 @@ export function goalTickOnce(ctx: GoalLoopContext, goalId: string, options: Goal
         taskIntent: options.taskIntent ?? inferTaskIntent(goal),
         risk: options.risk ?? 'workspace_write',
         providers,
+        routingConfig,
         externalWrite: options.externalWrite,
       });
       if (route.waitForUser) {
@@ -385,6 +426,7 @@ export function goalTickOnce(ctx: GoalLoopContext, goalId: string, options: Goal
         taskIntent: options.taskIntent ?? inferTaskIntent(goal),
         risk: options.risk ?? 'workspace_write',
         providers,
+        routingConfig,
       });
       if (route.waitForUser) {
         const updated = transitionGoalStatus(storeOpts(ctx), goalId, 'waiting_for_user', route.reason, {
@@ -558,6 +600,7 @@ export function goalTickOnce(ctx: GoalLoopContext, goalId: string, options: Goal
         taskIntent: 'code_repair',
         risk: options.risk ?? 'workspace_write',
         providers,
+        routingConfig,
       });
       if (route.handoffOnly || !route.directDispatch || !route.selectedProviderId) {
         const packet = attachHandoff(ctx, goal, route.reason, 'chatgpt_handoff');
@@ -812,7 +855,8 @@ export function tickGoalLoopsForController(
       goalStore: { controllerHome, repoId },
       packetStore: { controllerHome, repoId },
       repoId,
-      providerEnv: options,
+      providerEnv: { ...options, configLocation: options.configLocation ?? { controllerHome } },
+      configLocation: options.configLocation ?? { controllerHome },
     };
     return { repoId, results: tickActiveGoals(ctx) };
   });
@@ -876,7 +920,8 @@ export function executorRoutePreview(
     goal,
     taskIntent: input.taskIntent ?? 'code_implementation',
     risk: input.risk ?? 'workspace_write',
-    providers: listProviders(ctx.providerEnv),
+    providers: listProviders(resolvedProviderEnv(ctx)),
+    routingConfig: routingFromConfig(ctx),
   });
 }
 
@@ -912,12 +957,13 @@ export function executorDispatch(
     };
   }
 
-  const providers = listProviders(ctx.providerEnv);
+  const providers = listProviders(resolvedProviderEnv(ctx));
   const route = routeExecutor({
     goal,
     taskIntent: input.taskIntent ?? inferTaskIntent(goal),
     risk: input.risk ?? 'workspace_write',
     providers,
+    routingConfig: routingFromConfig(ctx),
     userConstraints: input.providerId ? { preferProvider: input.providerId } : undefined,
     externalWrite: input.externalWrite,
   });
@@ -992,7 +1038,8 @@ export function repairPlan(ctx: GoalLoopContext, goalId: string): Record<string,
     goal: { ...goal, lastFailureClass: classified.failureClass },
     taskIntent: 'code_repair',
     risk: 'workspace_write',
-    providers: listProviders(ctx.providerEnv),
+    providers: listProviders(resolvedProviderEnv(ctx)),
+    routingConfig: routingFromConfig(ctx),
   });
   return {
     goalId: goal.goalId,
@@ -1022,7 +1069,7 @@ export function repairContinue(ctx: GoalLoopContext, goalId: string, options: Go
 }
 
 export function providerListAction(ctx: GoalLoopContext) {
-  return listProviders(ctx.providerEnv).map((p) => ({
+  return listProviders(resolvedProviderEnv(ctx)).map((p) => ({
     providerId: p.providerId,
     kind: p.kind,
     modelFamily: p.modelFamily,
@@ -1035,12 +1082,12 @@ export function providerListAction(ctx: GoalLoopContext) {
 }
 
 export function providerHealthAction(ctx: GoalLoopContext, providerId?: string) {
-  if (providerId) return checkProviderHealth(providerId, ctx.providerEnv);
-  return listProviderHealth(ctx.providerEnv);
+  if (providerId) return checkProviderHealth(providerId, resolvedProviderEnv(ctx));
+  return listProviderHealth(resolvedProviderEnv(ctx));
 }
 
 export function providerConfigStatusAction(ctx: GoalLoopContext) {
-  return providerConfigStatus(ctx.providerEnv);
+  return providerConfigStatus(resolvedProviderEnv(ctx));
 }
 
 export { summarizeGoalContract };

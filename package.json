@@ -33,6 +33,7 @@
     "docs/repo-harness-local-execution-bridge.md",
     "docs/repo-harness-runtime-self-healing-loop.md",
     "docs/repo-harness-autonomous-goal-loop.md",
+    "docs/repo-harness-provider-configuration.md",
     "README.zh-CN.md",
     "install.sh",
     "install.ps1",

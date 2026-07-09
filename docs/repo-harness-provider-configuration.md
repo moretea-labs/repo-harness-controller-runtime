@@ -1,0 +1,138 @@
+# Provider & Executor Configuration
+
+## Purpose
+
+The **Model & Tool Providers** (Automation Settings) GUI lets users control:
+
+- which LLM / API providers are enabled
+- which local execution tools are enabled
+- provider priority and fallback order
+- whether live remote model API calls are preferred
+- policy / approval thresholds
+
+repo-harness remains the owner of apply, verify, policy, and finalization. Models only propose.
+
+## ChatGPT handoff vs direct-invokable providers
+
+| Kind | Examples | Direct dispatch? |
+| --- | --- | --- |
+| Direct / local CLI / remote API / cloud agent | `direct_edit`, `codex_cli`, `grok_api`, … | Yes when ready + enabled + (for remote APIs) live mode |
+| Handoff-only | `chatgpt_handoff` | **Never** |
+
+ChatGPT current conversation always shows:
+
+- Type: Handoff-only  
+- Direct dispatch: Not supported  
+- Explanation: repo-harness can create continuation packets, but cannot automatically invoke this ChatGPT session.
+
+There is no “enable direct dispatch” toggle for ChatGPT.
+
+## Where config is stored
+
+Under **controllerHome** (not the git repo):
+
+```
+<controllerHome>/global/provider-config.json
+<controllerHome>/global/local-tool-config.json
+<controllerHome>/global/executor-routing.json
+<controllerHome>/global/goal-loop-policy.json
+```
+
+Persisted fields only:
+
+- enabled / disabled
+- priority
+- capability preferences (non-secret)
+- credential **env var names** (references)
+- policy thresholds
+- live preference + goal-loop enable flag
+
+**Never stored:** API keys, tokens, cookies, private keys, raw env values.
+
+## Grok API setup
+
+```bash
+export XAI_API_KEY=...   # or REPO_HARNESS_XAI_API_KEY
+export REPO_HARNESS_ENABLE_LIVE_MODEL_PROVIDERS=1
+```
+
+Then in GUI:
+
+1. Open **模型与工具**
+2. Enable GUI “Live” preference
+3. Confirm Grok card shows ready for direct dispatch
+
+Direct dispatch requires **both**:
+
+1. Credential present in process environment  
+2. Live mode effective (env flag **and** GUI `preferLiveModelProviders`)
+
+GUI cannot rewrite process env; it shows the next shell step when env is missing.
+
+## OpenAI / DeepSeek setup
+
+Same pattern:
+
+```bash
+export OPENAI_API_KEY=...
+export DEEPSEEK_API_KEY=...
+export REPO_HARNESS_ENABLE_LIVE_MODEL_PROVIDERS=1
+```
+
+Credential status UI lists required env var names and present/missing only — never values.
+
+## Live provider global flag
+
+- Env: `REPO_HARNESS_ENABLE_LIVE_MODEL_PROVIDERS=1`
+- GUI preference: `preferLiveModelProviders` in `provider-config.json`
+- Effective live = env **AND** preference
+
+Offline / test structured proposals still work without live network when using mocks; production remote HTTP remains gated.
+
+## Local tool enable/disable
+
+Tools: `direct_edit`, `codex_cli`, `claude_cli`, `git`, `gh`, `bun`, `npm`, `xcodebuild`, `xcrun`, `simctl`, `playwright`, plugin-linked tools.
+
+Disabled tools:
+
+- show as disabled in GUI
+- are not selected by ExecutorRouter (`direct_edit` / CLI providers map to disabled)
+
+## Routing preferences
+
+`executor-routing.json` orders intents:
+
+- implementation, repair, planning, review, browser_planning, ios_analysis, deterministic_edit, fallback
+
+Rules:
+
+- Handoff-only may appear in fallback / planning lists
+- Handoff-only is never treated as direct dispatch
+- When no direct provider is ready: continuation packet instead of dispatch
+
+## Safety policy settings
+
+`goal-loop-policy.json` exposes approval requirements for external writes, destructive changes, broad refactors, browser form submit, Gmail send/trash, App Store Connect writes, final merge, and size thresholds.
+
+There is **no** one-click “disable all safety”.
+
+## Console APIs
+
+| Endpoint | Role |
+| --- | --- |
+| `GET /api/console/automation-settings` | Full settings view model |
+| `GET/POST /api/console/provider-config` | Provider prefs |
+| `POST /api/console/providers/:id/enable|disable` | Toggle |
+| `POST /api/console/providers/:id/priority` | Priority |
+| `POST /api/console/providers/health` | Redacted health |
+| `GET /api/console/providers/credentials` | Env presence only |
+| `GET/POST local-tools` / `local-tool-config` | Local tools |
+| `GET/POST /api/console/executor-routing` | Routing |
+| `POST /api/console/executor-route-preview` | Preview |
+| `GET/POST /api/console/goal-loop-policy` | Policy |
+
+All responses are bounded and redacted.
+
+## Related
+
+- `docs/repo-harness-autonomous-goal-loop.md` — GoalContract loop design  
