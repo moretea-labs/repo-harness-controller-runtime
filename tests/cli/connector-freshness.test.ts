@@ -186,10 +186,10 @@ describe('connector freshness diagnostics', () => {
     expect(report.summary).not.toContain('可能缺少新 facade');
   });
 
-  test('console readiness uses info/unconfirmed instead of vague reconnect warning', () => {
+  test('console readiness uses info/unconfirmed instead of vague reconnect warning', async () => {
     const { ctx, repository } = fixture();
-    const readiness = buildSystemReadiness(ctx);
-    const center = buildCommandCenter(ctx, [mapRepositoryCard(repository, true)]);
+    const readiness = await buildSystemReadiness(ctx);
+    const center = await buildCommandCenter(ctx, [mapRepositoryCard(repository, true)]);
     expect(readiness.connectorFreshness).toBeTruthy();
     expect(['unable_to_verify_chatgpt_snapshot', 'stale_fingerprint', 'local_mcp_updated', 'local_mcp_missing_facade'])
       .toContain(readiness.connectorFreshness!.status);
@@ -203,18 +203,40 @@ describe('connector freshness diagnostics', () => {
     }
   });
 
-  test('console connector check with supplied names detects missing snapshot accurately', () => {
+  test('console connector check with supplied names detects missing snapshot accurately', async () => {
     const { ctx } = fixture();
-    const missing = evaluateConsoleConnectorFreshness(ctx, {
+    const missing = await evaluateConsoleConnectorFreshness(ctx, {
       connectorToolNames: ['controller_capabilities'],
     });
     expect(missing.status).toBe('chatgpt_snapshot_missing_facade');
     expect(missing.missingConnectorTools).toEqual([...EXPECTED_FACADE_TOOLS]);
 
-    const ok = evaluateConsoleConnectorFreshness(ctx, {
+    const ok = await evaluateConsoleConnectorFreshness(ctx, {
       connectorToolNames: [...EXPECTED_FACADE_TOOLS],
     });
     expect(ok.status).toBe('local_mcp_updated');
     expect(ok.severity).toBe('ok');
+  });
+
+  test('dead runtime file is ignored and does not report stale_fingerprint', () => {
+    // healthy=false snapshots lag behind controller:restart; must not alarm as fingerprint mismatch.
+    const report = evaluateConnectorFreshness({
+      localToolNames: [...EXPECTED_FACADE_TOOLS],
+      toolSurface: CONTROLLER_TOOL_SURFACE,
+      schemaVersion: CONTROLLER_SCHEMA_VERSION,
+      toolSurfaceVersion: CONTROLLER_TOOL_SURFACE_VERSION,
+      toolSurfaceFingerprint: controllerToolSurfaceFingerprint([...EXPECTED_FACADE_TOOLS]),
+      runtime: {
+        healthy: false,
+        toolSurface: CONTROLLER_TOOL_SURFACE,
+        schemaVersion: CONTROLLER_SCHEMA_VERSION,
+        toolSurfaceVersion: CONTROLLER_TOOL_SURFACE_VERSION,
+        toolSurfaceFingerprint: 'deadbeefdeadbeef',
+        source: 'runtime_file',
+      },
+    });
+    expect(report.status).toBe('unable_to_verify_chatgpt_snapshot');
+    expect(report.fingerprintMatches).toBeNull();
+    expect(report.severity).toBe('info');
   });
 });

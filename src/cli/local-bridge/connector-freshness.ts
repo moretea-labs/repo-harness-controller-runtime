@@ -6,6 +6,7 @@
  * - ChatGPT connector tool snapshot (only when connector_tool_names is supplied)
  *
  * Never treat "unable to observe ChatGPT tools" as "missing facade tools".
+ * Prefer live MCP /health over a stale mcp.runtime.json snapshot.
  */
 
 import {
@@ -14,6 +15,7 @@ import {
   CONTROLLER_TOOL_SURFACE_VERSION,
   controllerToolSurfaceFingerprint,
 } from '../controller/runtime-config';
+import { loadMcpLocalConfig, loadMcpRuntimeState, writeMcpRuntimeState } from '../mcp/auth';
 import { PREFERRED_FACADE_TOOL_NAMES, CORE_CONTROLLER_TOOL_NAMES } from '../mcp/toolset';
 import type { PlainStatusTone } from './console-view-models';
 
@@ -47,6 +49,8 @@ export interface ConnectorRuntimeObservation {
   toolSurfaceVersion?: number;
   toolSurfaceFingerprint?: string;
   toolCount?: number;
+  /** Where this observation came from. Live health is preferred over runtime file. */
+  source?: 'live_health' | 'runtime_file';
 }
 
 export interface EvaluateConnectorFreshnessInput {
@@ -127,20 +131,138 @@ function runtimeFingerprintMatches(
   },
 ): boolean | null {
   if (!runtime) return null;
-  const hasAny =
-    runtime.healthy !== undefined
-    || runtime.toolSurface !== undefined
-    || runtime.schemaVersion !== undefined
-    || runtime.toolSurfaceVersion !== undefined
-    || runtime.toolSurfaceFingerprint !== undefined;
-  if (!hasAny) return null;
+  // Dead/stale runtime snapshots (healthy=false) must not be treated as "fingerprint mismatch".
+  // Only a healthy observation can confirm tool-surface freshness.
+  if (runtime.healthy !== true) return null;
+  if (
+    runtime.toolSurface === undefined
+    && runtime.schemaVersion === undefined
+    && runtime.toolSurfaceVersion === undefined
+    && runtime.toolSurfaceFingerprint === undefined
+  ) {
+    return null;
+  }
   return (
-    runtime.healthy === true
-    && runtime.toolSurface === expected.toolSurface
+    runtime.toolSurface === expected.toolSurface
     && runtime.schemaVersion === expected.schemaVersion
     && runtime.toolSurfaceVersion === expected.toolSurfaceVersion
     && runtime.toolSurfaceFingerprint === expected.toolSurfaceFingerprint
   );
+}
+
+const LIVE_HEALTH_TIMEOUT_MS = 800;
+
+function localMcpHealthUrl(repoRoot: string): string | null {
+  const config = loadMcpLocalConfig(repoRoot);
+  const host = (config?.server?.host ?? '127.0.0.1').trim() || '127.0.0.1';
+  const port = typeof config?.server?.port === 'number' && config.server.port > 0
+    ? config.server.port
+    : 8765;
+  const normalized = host === '::1' ? '[::1]' : host;
+  return `http://${normalized}:${port}/health`;
+}
+
+async function fetchJsonHealth(url: string): Promise<Record<string, unknown> | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), LIVE_HEALTH_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: { accept: 'application/json' },
+    });
+    if (!response.ok) return null;
+    return await response.json() as Record<string, unknown>;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Prefer live MCP /health. Fall back to mcp.runtime.json only when it claims healthy.
+ * Stale stopped snapshots are ignored so GUI does not cry "fingerprint mismatch" after restart.
+ */
+export async function observeLocalMcpRuntime(
+  repoRoot: string,
+  opts: { refreshRuntimeFile?: boolean } = {},
+): Promise<ConnectorRuntimeObservation | null> {
+  const healthUrl = localMcpHealthUrl(repoRoot);
+  if (healthUrl) {
+    const live = await fetchJsonHealth(healthUrl);
+    if (live && live.status === 'ok') {
+      const observation: ConnectorRuntimeObservation = {
+        healthy: true,
+        toolSurface: typeof live.toolSurface === 'string' ? live.toolSurface : undefined,
+        schemaVersion: typeof live.schemaVersion === 'number' ? live.schemaVersion : undefined,
+        toolSurfaceVersion: typeof live.toolSurfaceVersion === 'number' ? live.toolSurfaceVersion : undefined,
+        toolSurfaceFingerprint: typeof live.toolSurfaceFingerprint === 'string' ? live.toolSurfaceFingerprint : undefined,
+        toolCount: typeof live.toolCount === 'number' ? live.toolCount : undefined,
+        source: 'live_health',
+      };
+      if (opts.refreshRuntimeFile !== false) {
+        try {
+          refreshRuntimeFileFromLive(repoRoot, live, observation);
+        } catch {
+          // Best-effort only; diagnostics must not fail on file write races.
+        }
+      }
+      return observation;
+    }
+  }
+
+  const file = loadMcpRuntimeState(repoRoot);
+  if (!file?.server) return null;
+  // Ignore dead snapshots — they commonly lag behind controller:restart.
+  if (file.server.healthy !== true) return null;
+  return {
+    healthy: true,
+    toolSurface: file.server.toolSurface,
+    schemaVersion: file.server.schemaVersion,
+    toolSurfaceVersion: file.server.toolSurfaceVersion,
+    toolSurfaceFingerprint: file.server.toolSurfaceFingerprint,
+    toolCount: file.server.toolCount,
+    source: 'runtime_file',
+  };
+}
+
+function refreshRuntimeFileFromLive(
+  repoRoot: string,
+  live: Record<string, unknown>,
+  observation: ConnectorRuntimeObservation,
+): void {
+  const existing = loadMcpRuntimeState(repoRoot);
+  if (!existing) return;
+  const now = new Date().toISOString();
+  const next = {
+    ...existing,
+    updatedAt: now,
+    status: 'running' as const,
+    server: {
+      ...existing.server,
+      running: true,
+      healthy: true,
+      lastHealthyAt: now,
+      profile: typeof live.profile === 'string' ? live.profile : existing.server.profile,
+      toolSurface: observation.toolSurface ?? existing.server.toolSurface,
+      schemaVersion: observation.schemaVersion ?? existing.server.schemaVersion,
+      toolSurfaceVersion: observation.toolSurfaceVersion ?? existing.server.toolSurfaceVersion,
+      toolSurfaceFingerprint: observation.toolSurfaceFingerprint ?? existing.server.toolSurfaceFingerprint,
+      runtimeToolSurfaceFingerprint:
+        typeof live.runtimeToolSurfaceFingerprint === 'string'
+          ? live.runtimeToolSurfaceFingerprint
+          : existing.server.runtimeToolSurfaceFingerprint,
+      toolset: live.toolset === 'core' || live.toolset === 'full' ? live.toolset : existing.server.toolset,
+      toolCount: observation.toolCount ?? existing.server.toolCount,
+      healthMismatch: undefined,
+    },
+  };
+  // Only rewrite when the snapshot is clearly stale.
+  const stale =
+    existing.status === 'stopped'
+    || existing.server.healthy !== true
+    || existing.server.toolSurfaceFingerprint !== observation.toolSurfaceFingerprint;
+  if (stale) writeMcpRuntimeState(repoRoot, next);
 }
 
 export function evaluateConnectorFreshness(input: EvaluateConnectorFreshnessInput): ConnectorFreshnessReport {
@@ -381,5 +503,24 @@ export function buildLocalConnectorStatus(input: {
     toolSurfaceVersion: CONTROLLER_TOOL_SURFACE_VERSION,
     toolSurfaceFingerprint: fingerprint,
     runtime: input.runtime,
+  });
+}
+
+/**
+ * Repo-aware status: probes live MCP /health, then falls back to healthy runtime file only.
+ */
+export async function buildLocalConnectorStatusForRepo(input: {
+  repoRoot: string;
+  expectedTools: readonly string[];
+  connectorToolNames?: readonly string[] | null;
+  refreshRuntimeFile?: boolean;
+}): Promise<ConnectorFreshnessReport> {
+  const runtime = await observeLocalMcpRuntime(input.repoRoot, {
+    refreshRuntimeFile: input.refreshRuntimeFile,
+  });
+  return buildLocalConnectorStatus({
+    expectedTools: input.expectedTools,
+    connectorToolNames: input.connectorToolNames,
+    runtime,
   });
 }

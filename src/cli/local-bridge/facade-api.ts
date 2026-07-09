@@ -1,6 +1,5 @@
 import type { RepositoryRecord } from '../repositories/types';
 import { listControllerChecks, runControllerCheck } from '../controller/check-runner';
-import { loadMcpRuntimeState } from '../mcp/auth';
 import { controllerExpectedToolNames } from '../mcp/tools';
 import { runtimePolicy } from '../mcp/multi-repository';
 import { readControllerDaemonStatus } from '../../runtime/control-plane/daemon-client';
@@ -37,7 +36,7 @@ import { buildRuntimeMaintenanceStatus } from '../../runtime/recovery';
 import { applySafePatch } from '../repositories/safe-patch';
 import { withControllerLock } from '../repositories/locks';
 import {
-  buildLocalConnectorStatus,
+  buildLocalConnectorStatusForRepo,
   EXPECTED_FACADE_TOOLS,
   type ConnectorFreshnessReport,
 } from './connector-freshness';
@@ -301,38 +300,29 @@ function mapConnectorFreshnessView(report: ConnectorFreshnessReport): ConnectorF
 
 /**
  * Evaluate local MCP tool-surface freshness for the console.
- * Does not assume ChatGPT connector tool names unless explicitly supplied.
+ * Probes live MCP /health; does not invent ChatGPT connector tool names.
  */
-export function evaluateConsoleConnectorFreshness(
+export async function evaluateConsoleConnectorFreshness(
   ctx: ConsoleFacadeContext,
-  opts: { connectorToolNames?: readonly string[] | null } = {},
-): ConnectorFreshnessReport {
+  opts: { connectorToolNames?: readonly string[] | null; refreshRuntimeFile?: boolean } = {},
+): Promise<ConnectorFreshnessReport> {
   const expected = controllerExpectedToolNames(
     runtimePolicy(ctx.repository.canonicalRoot, { profile: 'controller' }),
   );
-  const mcpRuntime = loadMcpRuntimeState(ctx.repository.canonicalRoot);
-  return buildLocalConnectorStatus({
+  return buildLocalConnectorStatusForRepo({
+    repoRoot: ctx.repository.canonicalRoot,
     expectedTools: expected,
     connectorToolNames: opts.connectorToolNames,
-    runtime: mcpRuntime?.server
-      ? {
-        healthy: mcpRuntime.server.healthy,
-        toolSurface: mcpRuntime.server.toolSurface,
-        schemaVersion: mcpRuntime.server.schemaVersion,
-        toolSurfaceVersion: mcpRuntime.server.toolSurfaceVersion,
-        toolSurfaceFingerprint: mcpRuntime.server.toolSurfaceFingerprint,
-        toolCount: mcpRuntime.server.toolCount,
-      }
-      : null,
+    refreshRuntimeFile: opts.refreshRuntimeFile,
   });
 }
 
-export function buildSystemReadiness(
+export async function buildSystemReadiness(
   ctx: ConsoleFacadeContext,
   opts: { connectorToolNames?: readonly string[] | null } = {},
-): SystemReadinessViewModel {
+): Promise<SystemReadinessViewModel> {
   const daemon = readControllerDaemonStatus(ctx.controllerHome);
-  const freshness = evaluateConsoleConnectorFreshness(ctx, opts);
+  const freshness = await evaluateConsoleConnectorFreshness(ctx, opts);
   const pendingHandoffs = listHandoffItems({ ...store(ctx), status: 'pending', limit: 50 });
   const checks = listControllerChecks(ctx.repository.canonicalRoot);
   const sections: SystemReadinessViewModel['sections'] = [
@@ -399,11 +389,11 @@ export function buildSystemReadiness(
   };
 }
 
-export function buildCommandCenter(
+export async function buildCommandCenter(
   ctx: ConsoleFacadeContext,
   repositories: RepositoryCardViewModel[],
-): CommandCenterViewModel {
-  const readiness = buildSystemReadiness(ctx);
+): Promise<CommandCenterViewModel> {
+  const readiness = await buildSystemReadiness(ctx);
   const currentRepository = repositories.find((entry) => entry.current) ?? mapRepositoryCard(ctx.repository, true);
   const activeWork = listWorkContracts({ ...store(ctx), status: 'active', limit: 20 }).map(mapWorkSummary);
   const allRecent = listWorkContracts({ ...store(ctx), status: 'all', limit: 12 }).map(mapWorkSummary);
@@ -753,9 +743,9 @@ export function applyConsoleSafePatch(
 }
 
 /** Keep advanced/debug payload separate from primary console models. */
-export function buildAdvancedDiagnosticsEnvelope(rawSnapshot: unknown, ctx: ConsoleFacadeContext) {
-  const readiness = buildSystemReadiness(ctx);
-  const connector = evaluateConsoleConnectorFreshness(ctx);
+export async function buildAdvancedDiagnosticsEnvelope(rawSnapshot: unknown, ctx: ConsoleFacadeContext) {
+  const readiness = await buildSystemReadiness(ctx);
+  const connector = await evaluateConsoleConnectorFreshness(ctx);
   return {
     schemaVersion: 1,
     note: '高级诊断仅供排错。日常任务请使用控制台主流程。',

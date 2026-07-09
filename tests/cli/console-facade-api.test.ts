@@ -43,9 +43,9 @@ function fixture() {
 }
 
 describe('console facade api', () => {
-  test('command center uses plain language readiness and no default internal ids in primary fields', () => {
+  test('command center uses plain language readiness and no default internal ids in primary fields', async () => {
     const { ctx, repository } = fixture();
-    const center = buildCommandCenter(ctx, [mapRepositoryCard(repository, true)]);
+    const center = await buildCommandCenter(ctx, [mapRepositoryCard(repository, true)]);
     expect(center.readiness.label).toMatch(/就绪|需要设置|暂不可用|读取失败|未知|可用|系统/);
     expect(center.currentRepository?.name).toBe('Console Fixture');
     expect(center.modePreviewDefault.label).toBeTruthy();
@@ -70,7 +70,7 @@ describe('console facade api', () => {
     }).mode).toBe('handoff_only');
   });
 
-  test('start work creates work or handoff through facade and maps user-facing state', () => {
+  test('start work creates work or handoff through facade and maps user-facing state', async () => {
     const { ctx } = fixture();
     const small = startConsoleWork(ctx, {
       objective: 'Fix a small typo',
@@ -90,7 +90,7 @@ describe('console facade api', () => {
       checkIds: ['typecheck'],
     });
     expect((complex.data as { workContractCreated?: boolean }).workContractCreated).toBe(true);
-    const center = buildCommandCenter(ctx, [mapRepositoryCard(ctx.repository, true)]);
+    const center = await buildCommandCenter(ctx, [mapRepositoryCard(ctx.repository, true)]);
     expect(center.currentWork || center.recentWork.length).toBeTruthy();
     if (center.currentWork) {
       expect(center.currentWork.title).toContain('Refactor console');

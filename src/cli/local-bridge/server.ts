@@ -1067,7 +1067,7 @@ export async function startLocalBridgeServer(
     return { controllerHome, repository };
   };
 
-  app.get("/api/console/command-center", (request, response) => {
+  app.get("/api/console/command-center", async (request, response) => {
     try {
       const ctx = consoleCtx(request);
       const repositories = userFacingRepositories(ctx.repository.canonicalRoot, controllerHome, ctx.repository.repoId)
@@ -1085,24 +1085,24 @@ export async function startLocalBridgeServer(
           }
           return mapRepositoryCard(record, entry.current);
         });
-      response.json(buildCommandCenter(ctx, repositories));
+      response.json(await buildCommandCenter(ctx, repositories));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
   });
 
-  app.get("/api/console/readiness", (request, response) => {
+  app.get("/api/console/readiness", async (request, response) => {
     try {
-      response.json(buildSystemReadiness(consoleCtx(request)));
+      response.json(await buildSystemReadiness(consoleCtx(request)));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
   });
 
   /** Local MCP tool-surface self-test. Does not invent ChatGPT connector tool names. */
-  app.get("/api/console/connector/status", (request, response) => {
+  app.get("/api/console/connector/status", async (request, response) => {
     try {
-      const report = evaluateConsoleConnectorFreshness(consoleCtx(request));
+      const report = await evaluateConsoleConnectorFreshness(consoleCtx(request));
       response.json({
         responseSchemaVersion: 1,
         generatedAt: new Date().toISOString(),
@@ -1117,7 +1117,7 @@ export async function startLocalBridgeServer(
    * Optional precise check when ChatGPT connector tool names are known.
    * Body: { connector_tool_names?: string[] }
    */
-  app.post("/api/console/connector/check", (request, response) => {
+  app.post("/api/console/connector/check", async (request, response) => {
     try {
       const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
         ? request.body as Record<string, unknown>
@@ -1127,7 +1127,7 @@ export async function startLocalBridgeServer(
         : Array.isArray(body.connectorToolNames)
           ? body.connectorToolNames.map(String)
           : undefined;
-      const report = evaluateConsoleConnectorFreshness(consoleCtx(request), {
+      const report = await evaluateConsoleConnectorFreshness(consoleCtx(request), {
         connectorToolNames,
       });
       response.json({
@@ -1408,11 +1408,11 @@ export async function startLocalBridgeServer(
     }
   });
 
-  app.get("/api/console/advanced", (request, response) => {
+  app.get("/api/console/advanced", async (request, response) => {
     try {
       const ctx = consoleCtx(request);
       const raw = cachedLocalControllerSnapshot(ctx.repository.canonicalRoot);
-      response.json(buildAdvancedDiagnosticsEnvelope(raw, ctx));
+      response.json(await buildAdvancedDiagnosticsEnvelope(raw, ctx));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }

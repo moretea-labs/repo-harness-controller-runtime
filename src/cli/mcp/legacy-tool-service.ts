@@ -96,7 +96,7 @@ import {
   normalizeAgentTimeoutMs,
 } from "../controller/runtime-config";
 import { PREFERRED_FACADE_TOOL_NAMES } from "./toolset";
-import { buildLocalConnectorStatus } from "../local-bridge/connector-freshness";
+import { buildLocalConnectorStatusForRepo } from "../local-bridge/connector-freshness";
 import type {
   ControllerAgent,
   ControllerTask,
@@ -2981,20 +2981,10 @@ export async function callMcpTool(
           : Array.isArray(args.connectorToolNames)
             ? args.connectorToolNames.map(String)
             : undefined;
-        const runtime = loadMcpRuntimeState(ctx.repoRoot);
-        const connectorFreshness = buildLocalConnectorStatus({
+        const connectorFreshness = await buildLocalConnectorStatusForRepo({
+          repoRoot: ctx.repoRoot,
           expectedTools,
           connectorToolNames: connectorSnapshot,
-          runtime: runtime?.server
-            ? {
-              healthy: runtime.server.healthy,
-              toolSurface: runtime.server.toolSurface,
-              schemaVersion: runtime.server.schemaVersion,
-              toolSurfaceVersion: runtime.server.toolSurfaceVersion,
-              toolSurfaceFingerprint: runtime.server.toolSurfaceFingerprint,
-              toolCount: runtime.server.toolCount,
-            }
-            : null,
         });
         // staleConnector only when ChatGPT snapshot is supplied and missing rh_*.
         const missingFacadeTools = connectorFreshness.missingConnectorTools;
