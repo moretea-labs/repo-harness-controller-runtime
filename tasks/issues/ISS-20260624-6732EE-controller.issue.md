@@ -2,7 +2,7 @@
 id: "ISS-20260624-6732EE"
 kind: "bug"
 status: "in_progress"
-updated_at: "2026-06-29T10:41:00.000Z"
+updated_at: "2026-07-09T01:30:54.563Z"
 source: "repo-harness-controller-v8"
 ---
 
@@ -142,7 +142,6 @@ source: "repo-harness-controller-v8"
 - Allowed paths: `src/cli/agent-jobs/integration.ts`, `src/cli/agent-jobs/job-manager.ts`, `src/cli/agent-jobs/job-worker.ts`, `tests/cli/local-bridge.test.ts`, `tests/cli/mcp-controller.test.ts`
 - Checks: `package:check:type`, `package:check:controller-v8`
 - Execution hint: selected at runtime
-- Notes: 已补上恢复分支：worktree Run 在 `result.ok` 后、自动集成完成前若 worker 异常退出，会回收到 `waiting_for_user + autoIntegrationError`，不再显示为假成功；新增中途退出回归测试，并复验正常自动集成路径与类型检查。
 
 ### T12 — 收敛检查进程树与证据 Revision
 
@@ -152,7 +151,6 @@ source: "repo-harness-controller-v8"
 - Allowed paths: `src/cli/controller/check-runner.ts`, `src/cli/local-bridge/job-store.ts`, `tests/cli/local-bridge.test.ts`, `tests/cli/mcp-controller.test.ts`
 - Checks: `package:check:type`, `package:check:controller-v8`
 - Execution hint: selected at runtime
-- Notes: 已将检查命令终态收口改为等待完整进程树退出；若主命令退出后仍残留子进程，则先回收再 fail-closed，避免把泄漏子进程记成成功检查。新增残留子进程回归测试，并复验 `check:controller-v8` 与类型检查。
 
 ### T13 — 修复共享检查订阅与取消语义
 
@@ -246,7 +244,7 @@ source: "repo-harness-controller-v8"
 
 ### T23 — 压缩 Issue 与 Task 默认读取响应以消除 502
 
-- Status: `ready`
+- Status: `done`
 - Objective: 为 get_issue 和 get_task_progress_detail 建立 summary/full 两级读取契约；默认只返回有界 Task、Run 与 Timeline 摘要，完整证据通过 detail_level=full 显式读取，避免大 Issue 或长时间线导致 Connector 502。
 - Depends on: none
 - Allowed paths: `src/cli/mcp/legacy-tool-service.ts`, `tests/cli/mcp-controller.test.ts`
