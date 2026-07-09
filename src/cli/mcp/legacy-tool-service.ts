@@ -95,6 +95,8 @@ import {
   formatDurationMs,
   normalizeAgentTimeoutMs,
 } from "../controller/runtime-config";
+import { PREFERRED_FACADE_TOOL_NAMES } from "./toolset";
+import { buildLocalConnectorStatus } from "../local-bridge/connector-freshness";
 import type {
   ControllerAgent,
   ControllerTask,
@@ -2884,7 +2886,7 @@ export function controllerExpectedToolNames(
   if (policy.profile !== "controller") return names;
   // Preferred ChatGPT facade first, then repository tools, then compatibility/legacy tools.
   // Facade tools live in runtimeToolDefinitions and must appear in expectedTools for connector freshness checks.
-  const facadeTools = ["rh_status", "rh_inbox", "rh_context", "rh_work"];
+  const facadeTools = [...PREFERRED_FACADE_TOOL_NAMES];
   return [...new Set([...facadeTools, ...repositoryToolNames, ...names])];
 }
 
@@ -2973,16 +2975,30 @@ export async function callMcpTool(
         const expectedTools = controllerExpectedToolNames(ctx.policy, {
           enableChatgptBrowser: ctx.enableChatgptBrowser === true,
         });
-        const preferredTools = ["rh_status", "rh_inbox", "rh_context", "rh_work"];
+        const preferredTools: string[] = [...PREFERRED_FACADE_TOOL_NAMES];
         const connectorSnapshot = Array.isArray(args.connector_tool_names)
           ? args.connector_tool_names.map(String)
           : Array.isArray(args.connectorToolNames)
             ? args.connectorToolNames.map(String)
             : undefined;
-        const missingFacadeTools = connectorSnapshot
-          ? preferredTools.filter((tool) => !connectorSnapshot.includes(tool))
-          : [];
-        const staleConnector = missingFacadeTools.length > 0;
+        const runtime = loadMcpRuntimeState(ctx.repoRoot);
+        const connectorFreshness = buildLocalConnectorStatus({
+          expectedTools,
+          connectorToolNames: connectorSnapshot,
+          runtime: runtime?.server
+            ? {
+              healthy: runtime.server.healthy,
+              toolSurface: runtime.server.toolSurface,
+              schemaVersion: runtime.server.schemaVersion,
+              toolSurfaceVersion: runtime.server.toolSurfaceVersion,
+              toolSurfaceFingerprint: runtime.server.toolSurfaceFingerprint,
+              toolCount: runtime.server.toolCount,
+            }
+            : null,
+        });
+        // staleConnector only when ChatGPT snapshot is supplied and missing rh_*.
+        const missingFacadeTools = connectorFreshness.missingConnectorTools;
+        const staleConnector = connectorFreshness.status === "chatgpt_snapshot_missing_facade";
         const payload = {
           schemaVersion: CONTROLLER_SCHEMA_VERSION,
           toolSurface: CONTROLLER_TOOL_SURFACE,
@@ -3069,9 +3085,20 @@ export async function callMcpTool(
             compatibilityRetained: true,
           },
           expectedTools,
-          facadeToolsPresentInExpectedTools: preferredTools.every((tool) => expectedTools.includes(tool)),
+          facadeToolsPresentInExpectedTools: preferredTools.every((tool: string) => expectedTools.includes(tool)),
           staleConnector,
           missingFacadeTools,
+          connectorFreshness: {
+            status: connectorFreshness.status,
+            severity: connectorFreshness.severity,
+            summary: connectorFreshness.summary,
+            missingLocalTools: connectorFreshness.missingLocalTools,
+            missingConnectorTools: connectorFreshness.missingConnectorTools,
+            expectedFacadeTools: connectorFreshness.expectedFacadeTools,
+            restartRecommended: connectorFreshness.restartRecommended,
+            reconnectRecommended: connectorFreshness.reconnectRecommended,
+            suggestedActions: connectorFreshness.suggestedActions,
+          },
           docs: [
             "docs/repo-harness-chatgpt-controller.md",
             "docs/repo-harness-github-issue-launcher.md",
@@ -3085,7 +3112,13 @@ export async function callMcpTool(
           ],
           staleConnectorHint: staleConnector
             ? `Stale ChatGPT connector tool snapshot is missing facade tools: ${missingFacadeTools.join(", ")}. Refresh/reconnect MCP so tools/list reloads rh_status, rh_inbox, rh_context, and rh_work.`
-            : `Connector clients must match ${CONTROLLER_TOOL_SURFACE} schema ${CONTROLLER_SCHEMA_VERSION}. Prefer rh_status/rh_inbox/rh_context/rh_work. If those tools are missing from ChatGPT tools/list, refresh or recreate the Connector. Refresh also when toolSurfaceVersion or fingerprint differs.`,
+            : connectorFreshness.status === "unable_to_verify_chatgpt_snapshot"
+              ? `Local MCP tool surface includes preferred facade tools. ChatGPT connector snapshot was not supplied, so freshness cannot be verified from this call. If ChatGPT tools/list is missing rh_status/rh_inbox/rh_context/rh_work, reconnect MCP. Pass connector_tool_names for an exact check.`
+              : connectorFreshness.status === "stale_fingerprint"
+                ? `Local MCP process fingerprint/version may be stale. Restart controller/MCP, then reconnect ChatGPT if rh_* are still missing.`
+                : connectorFreshness.status === "local_mcp_missing_facade"
+                  ? `Local MCP tool surface is missing facade tools: ${connectorFreshness.missingLocalTools.join(", ")}. Restart controller/MCP.`
+                  : `Connector clients must match ${CONTROLLER_TOOL_SURFACE} schema ${CONTROLLER_SCHEMA_VERSION}. Prefer rh_status/rh_inbox/rh_context/rh_work. Pass connector_tool_names to detect a stale ChatGPT tool snapshot precisely.`,
         };
         audit(ctx, name, "ok", args);
         return textResult(payload);

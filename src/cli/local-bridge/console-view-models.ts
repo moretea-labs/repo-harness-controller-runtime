@@ -73,6 +73,25 @@ export interface WorkSummaryViewModel {
   };
 }
 
+export interface ConnectorFreshnessViewModel {
+  status:
+    | 'local_mcp_updated'
+    | 'local_mcp_missing_facade'
+    | 'chatgpt_snapshot_missing_facade'
+    | 'unable_to_verify_chatgpt_snapshot'
+    | 'stale_fingerprint'
+    | 'unknown';
+  severity: 'ok' | 'info' | 'warning' | 'error';
+  summary: string;
+  expectedFacadeTools: string[];
+  missingLocalTools: string[];
+  missingConnectorTools: string[];
+  restartRecommended: boolean;
+  reconnectRecommended: boolean;
+  howToFix: string[];
+  suggestedActions: string[];
+}
+
 export interface SystemReadinessViewModel {
   state: 'ready' | 'needs_setup' | 'blocked';
   label: string;
@@ -81,6 +100,8 @@ export interface SystemReadinessViewModel {
   connectorLabel: string;
   connectorTone: PlainStatusTone;
   pendingHandoffCount: number;
+  /** Normalized connector freshness; distinguishes local MCP vs ChatGPT snapshot. */
+  connectorFreshness?: ConnectorFreshnessViewModel;
   sections: Array<{
     id: string;
     title: string;

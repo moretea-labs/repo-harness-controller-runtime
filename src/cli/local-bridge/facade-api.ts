@@ -3,12 +3,6 @@ import { listControllerChecks, runControllerCheck } from '../controller/check-ru
 import { loadMcpRuntimeState } from '../mcp/auth';
 import { controllerExpectedToolNames } from '../mcp/tools';
 import { runtimePolicy } from '../mcp/multi-repository';
-import {
-  CONTROLLER_SCHEMA_VERSION,
-  CONTROLLER_TOOL_SURFACE,
-  CONTROLLER_TOOL_SURFACE_VERSION,
-  controllerToolSurfaceFingerprint,
-} from '../controller/runtime-config';
 import { readControllerDaemonStatus } from '../../runtime/control-plane/daemon-client';
 import {
   acknowledgeHandoffItem,
@@ -42,8 +36,14 @@ import {
 import { buildRuntimeMaintenanceStatus } from '../../runtime/recovery';
 import { applySafePatch } from '../repositories/safe-patch';
 import { withControllerLock } from '../repositories/locks';
+import {
+  buildLocalConnectorStatus,
+  EXPECTED_FACADE_TOOLS,
+  type ConnectorFreshnessReport,
+} from './connector-freshness';
 import type {
   CommandCenterViewModel,
+  ConnectorFreshnessViewModel,
   HandoffCardViewModel,
   ModePreviewViewModel,
   PlainStatusTone,
@@ -284,19 +284,55 @@ export function mapRepositoryCard(
   };
 }
 
-export function buildSystemReadiness(ctx: ConsoleFacadeContext): SystemReadinessViewModel {
-  const daemon = readControllerDaemonStatus(ctx.controllerHome);
+function mapConnectorFreshnessView(report: ConnectorFreshnessReport): ConnectorFreshnessViewModel {
+  return {
+    status: report.status,
+    severity: report.severity,
+    summary: report.summary,
+    expectedFacadeTools: report.expectedFacadeTools,
+    missingLocalTools: report.missingLocalTools,
+    missingConnectorTools: report.missingConnectorTools,
+    restartRecommended: report.restartRecommended,
+    reconnectRecommended: report.reconnectRecommended,
+    howToFix: report.howToFix,
+    suggestedActions: report.suggestedActions,
+  };
+}
+
+/**
+ * Evaluate local MCP tool-surface freshness for the console.
+ * Does not assume ChatGPT connector tool names unless explicitly supplied.
+ */
+export function evaluateConsoleConnectorFreshness(
+  ctx: ConsoleFacadeContext,
+  opts: { connectorToolNames?: readonly string[] | null } = {},
+): ConnectorFreshnessReport {
+  const expected = controllerExpectedToolNames(
+    runtimePolicy(ctx.repository.canonicalRoot, { profile: 'controller' }),
+  );
   const mcpRuntime = loadMcpRuntimeState(ctx.repository.canonicalRoot);
-  const expected = controllerExpectedToolNames(runtimePolicy(ctx.repository.canonicalRoot, { profile: 'controller' }));
-  const expectedFingerprint = controllerToolSurfaceFingerprint(expected);
-  const runtimeFingerprint = mcpRuntime?.server?.toolSurfaceFingerprint;
-  const connectorOk =
-    mcpRuntime?.server?.healthy === true
-    && mcpRuntime.server.toolSurface === CONTROLLER_TOOL_SURFACE
-    && mcpRuntime.server.schemaVersion === CONTROLLER_SCHEMA_VERSION
-    && mcpRuntime.server.toolSurfaceVersion === CONTROLLER_TOOL_SURFACE_VERSION
-    && runtimeFingerprint === expectedFingerprint
-    && expected.includes('rh_status');
+  return buildLocalConnectorStatus({
+    expectedTools: expected,
+    connectorToolNames: opts.connectorToolNames,
+    runtime: mcpRuntime?.server
+      ? {
+        healthy: mcpRuntime.server.healthy,
+        toolSurface: mcpRuntime.server.toolSurface,
+        schemaVersion: mcpRuntime.server.schemaVersion,
+        toolSurfaceVersion: mcpRuntime.server.toolSurfaceVersion,
+        toolSurfaceFingerprint: mcpRuntime.server.toolSurfaceFingerprint,
+        toolCount: mcpRuntime.server.toolCount,
+      }
+      : null,
+  });
+}
+
+export function buildSystemReadiness(
+  ctx: ConsoleFacadeContext,
+  opts: { connectorToolNames?: readonly string[] | null } = {},
+): SystemReadinessViewModel {
+  const daemon = readControllerDaemonStatus(ctx.controllerHome);
+  const freshness = evaluateConsoleConnectorFreshness(ctx, opts);
   const pendingHandoffs = listHandoffItems({ ...store(ctx), status: 'pending', limit: 50 });
   const checks = listControllerChecks(ctx.repository.canonicalRoot);
   const sections: SystemReadinessViewModel['sections'] = [
@@ -310,11 +346,9 @@ export function buildSystemReadiness(ctx: ConsoleFacadeContext): SystemReadiness
     {
       id: 'connector',
       title: 'ChatGPT 连接',
-      statusLabel: connectorOk ? '正常' : '需要重连',
-      tone: connectorOk ? 'green' : 'amber',
-      detail: connectorOk
-        ? 'MCP 工具面包含新控制台 facade。'
-        : '连接器可能过期；请刷新/重连 MCP，确保能看到 rh_status 等工具。',
+      statusLabel: freshness.sectionStatusLabel,
+      tone: freshness.connectorTone,
+      detail: freshness.sectionDetail,
     },
     {
       id: 'bridge',
@@ -357,8 +391,9 @@ export function buildSystemReadiness(ctx: ConsoleFacadeContext): SystemReadiness
       : state === 'needs_setup'
         ? '请先选择或注册一个可用仓库。'
         : '请先查看系统状态并尝试诊断/修复。',
-    connectorLabel: connectorOk ? '连接正常' : '需要重连 MCP',
-    connectorTone: connectorOk ? 'green' : 'amber',
+    connectorLabel: freshness.connectorLabel,
+    connectorTone: freshness.connectorTone,
+    connectorFreshness: mapConnectorFreshnessView(freshness),
     pendingHandoffCount: pendingHandoffs.length,
     sections,
   };
@@ -373,6 +408,9 @@ export function buildCommandCenter(
   const activeWork = listWorkContracts({ ...store(ctx), status: 'active', limit: 20 }).map(mapWorkSummary);
   const allRecent = listWorkContracts({ ...store(ctx), status: 'all', limit: 12 }).map(mapWorkSummary);
   const handoffs = listHandoffItems({ ...store(ctx), status: 'pending', limit: 20 }).map(mapHandoffCard);
+  const banner = readiness.connectorFreshness?.severity === 'warning' || readiness.connectorFreshness?.severity === 'error'
+    ? readiness.connectorFreshness.summary
+    : undefined;
   return {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
@@ -383,9 +421,8 @@ export function buildCommandCenter(
     recentWork: allRecent,
     handoffs,
     modePreviewDefault: plainMode('direct_control'),
-    warnings: readiness.connectorTone === 'amber'
-      ? ['ChatGPT 连接器可能缺少新 facade 工具，请重连 MCP。']
-      : [],
+    // Only surface confirmed warnings — never "maybe missing" when ChatGPT snapshot is unobserved.
+    warnings: banner ? [banner] : [],
   };
 }
 
@@ -718,11 +755,13 @@ export function applyConsoleSafePatch(
 /** Keep advanced/debug payload separate from primary console models. */
 export function buildAdvancedDiagnosticsEnvelope(rawSnapshot: unknown, ctx: ConsoleFacadeContext) {
   const readiness = buildSystemReadiness(ctx);
+  const connector = evaluateConsoleConnectorFreshness(ctx);
   return {
     schemaVersion: 1,
     note: '高级诊断仅供排错。日常任务请使用控制台主流程。',
     readinessSummary: readiness,
-    preferredTools: ['rh_status', 'rh_inbox', 'rh_context', 'rh_work'],
+    preferredTools: [...EXPECTED_FACADE_TOOLS],
+    connectorFreshness: connector,
     raw: rawSnapshot,
   };
 }

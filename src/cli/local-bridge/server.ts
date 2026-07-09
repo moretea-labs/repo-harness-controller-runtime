@@ -81,6 +81,7 @@ import {
   buildAdvancedDiagnosticsEnvelope,
   buildCommandCenter,
   buildSystemReadiness,
+  evaluateConsoleConnectorFreshness,
   continueConsoleWork,
   delegateConsoleWork,
   dismissConsoleHandoff,
@@ -1093,6 +1094,48 @@ export async function startLocalBridgeServer(
   app.get("/api/console/readiness", (request, response) => {
     try {
       response.json(buildSystemReadiness(consoleCtx(request)));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  /** Local MCP tool-surface self-test. Does not invent ChatGPT connector tool names. */
+  app.get("/api/console/connector/status", (request, response) => {
+    try {
+      const report = evaluateConsoleConnectorFreshness(consoleCtx(request));
+      response.json({
+        responseSchemaVersion: 1,
+        generatedAt: new Date().toISOString(),
+        ...report,
+      });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  /**
+   * Optional precise check when ChatGPT connector tool names are known.
+   * Body: { connector_tool_names?: string[] }
+   */
+  app.post("/api/console/connector/check", (request, response) => {
+    try {
+      const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
+        ? request.body as Record<string, unknown>
+        : {};
+      const connectorToolNames = Array.isArray(body.connector_tool_names)
+        ? body.connector_tool_names.map(String)
+        : Array.isArray(body.connectorToolNames)
+          ? body.connectorToolNames.map(String)
+          : undefined;
+      const report = evaluateConsoleConnectorFreshness(consoleCtx(request), {
+        connectorToolNames,
+      });
+      response.json({
+        responseSchemaVersion: 1,
+        generatedAt: new Date().toISOString(),
+        connectorToolNamesProvided: connectorToolNames !== undefined,
+        ...report,
+      });
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }

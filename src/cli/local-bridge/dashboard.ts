@@ -303,15 +303,38 @@ function renderWork(){
   bindActions(root);
 }
 
+function renderConnectorHowToFix(fresh){
+  fresh=obj(fresh);
+  var steps=arr(fresh.howToFix);
+  if(!steps.length && !fresh.summary) return '';
+  var actions=arr(fresh.suggestedActions);
+  return '<div class="panel" style="margin-top:14px">'+
+    '<div class="section-title"><h2 style="margin:0">连接器诊断</h2>'+pill(fresh.severity==='error'?'red':fresh.severity==='warning'?'amber':fresh.severity==='ok'?'green':'blue', fresh.severity||'info')+'</div>'+
+    '<p class="muted">'+esc(fresh.summary||'')+'</p>'+
+    (arr(fresh.expectedFacadeTools).length?'<p class="faint">期望 facade：'+esc(arr(fresh.expectedFacadeTools).join(' · '))+'</p>':'')+
+    (arr(fresh.missingLocalTools).length?'<p class="muted">本地缺失：'+esc(arr(fresh.missingLocalTools).join(', '))+'</p>':'')+
+    (arr(fresh.missingConnectorTools).length?'<p class="muted">连接器快照缺失：'+esc(arr(fresh.missingConnectorTools).join(', '))+'</p>':'')+
+    (steps.length
+      ? '<details class="advanced" style="margin-top:10px"><summary>如何修复</summary><ol style="margin:10px 0 0 18px;color:var(--muted);font-size:13px;line-height:1.55">'+
+        steps.map(function(s){return '<li>'+esc(s)+'</li>';}).join('')+
+        '</ol>'+
+        (actions.length?'<p class="faint" style="margin-top:10px">建议：'+esc(actions.join(' · '))+'</p>':'')+
+        '</details>'
+      : '')+
+  '</div>';
+}
+
 function renderReadiness(){
   var ready=obj(obj(commandCenter).readiness);
+  var fresh=obj(ready.connectorFreshness);
   document.getElementById('view-readiness').innerHTML=
     '<div class="page-head"><div><h1>系统状态</h1><p>用白话告诉你 repo-harness 是否可用。</p></div>'+
       '<div class="actions"><button class="btn primary" onclick="diagnoseFirst()">诊断</button><button class="btn" onclick="repairDryRun()">预览修复</button></div></div>'+
     '<div class="panel" style="margin-bottom:14px"><h2>'+esc(ready.headline||'')+'</h2><p class="muted">'+esc(ready.description||'')+'</p></div>'+
     '<div class="grid cards">'+arr(ready.sections).map(function(s){
       return '<div class="panel"><div class="section-title"><h3 style="margin:0">'+esc(s.title)+'</h3>'+pill(s.tone,s.statusLabel)+'</div><p class="muted">'+esc(s.detail)+'</p></div>';
-    }).join('')+'</div>';
+    }).join('')+'</div>'+
+    renderConnectorHowToFix(fresh);
 }
 
 function renderRepositories(){
