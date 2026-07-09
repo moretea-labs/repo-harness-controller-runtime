@@ -186,6 +186,41 @@ function isRegisteredExternalHttpsRedirectUri(redirectUri: string, client: { red
   }
 }
 
+function isSafeOAuthFallbackRedirectUri(redirectUri: string): boolean {
+  try {
+    const url = new URL(redirectUri);
+    if (url.username || url.password) return false;
+    if (url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) return true;
+    return url.protocol === 'https:';
+  } catch (_error) {
+    return false;
+  }
+}
+
+async function getOrRegisterPublicOAuthClient(
+  provider: ReturnType<typeof createMcpOAuthProvider>,
+  clientId: string,
+  redirectUri: string | undefined,
+  req: Request,
+): Promise<OAuthClientInformationFull | undefined> {
+  const existing = await provider.clientsStore.getClient(clientId);
+  if (existing) return existing as OAuthClientInformationFull;
+  if (!redirectUri || !isSafeOAuthFallbackRedirectUri(redirectUri) || !provider.clientsStore.registerClient) return undefined;
+  oauthTrace(req, 'authorize:auto_register_public_client', {
+    redirectScheme: new URL(redirectUri).protocol,
+    redirectHost: new URL(redirectUri).hostname,
+  });
+  return provider.clientsStore.registerClient({
+    client_id: clientId,
+    client_id_issued_at: Math.floor(Date.now() / 1000),
+    client_name: 'repo-harness OAuth fallback client',
+    redirect_uris: [redirectUri],
+    token_endpoint_auth_method: 'none',
+    grant_types: ['authorization_code', 'refresh_token'],
+    response_types: ['code'],
+  } as unknown as Omit<OAuthClientInformationFull, 'client_id' | 'client_id_issued_at'>) as OAuthClientInformationFull;
+}
+
 function escapeHtmlAttribute(value: string): string {
   return value
     .replace(/&/g, '&amp;')
@@ -378,7 +413,7 @@ function oauthAuthorizationHandler(provider: ReturnType<typeof createMcpOAuthPro
       return;
     }
 
-    const client = await provider.clientsStore.getClient(clientId);
+    const client = await getOrRegisterPublicOAuthClient(provider, clientId, redirectUri, req);
     if (!client) {
       res.status(400).json({ error: 'invalid_client', error_description: 'Unknown client_id' });
       return;

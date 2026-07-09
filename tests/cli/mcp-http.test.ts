@@ -371,6 +371,60 @@ describe('mcp http transport', () => {
         expect(initializedGrokWithOAuth.status).toBe(200);
         expect(await initializedGrokWithOAuth.text()).toContain('repo-harness-mcp');
 
+        const fallbackVerifier = randomBytes(32).toString('base64url');
+        const fallbackChallenge = createHash('sha256').update(fallbackVerifier).digest('base64url');
+        const fallbackClientId = `grok-client-${randomBytes(4).toString('hex')}`;
+        const fallbackRedirectUri = 'https://grok.com/oauth/callback';
+        const fallbackAuthorized = await fetch(`http://127.0.0.1:${port}/authorize`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            passphrase,
+            client_id: fallbackClientId,
+            redirect_uri: fallbackRedirectUri,
+            response_type: 'code',
+            code_challenge: fallbackChallenge,
+            code_challenge_method: 'S256',
+            state: 'grok-state-1',
+            resource: `http://127.0.0.1:${port}/mcp-grok`,
+          }),
+          redirect: 'manual',
+        });
+        expect(fallbackAuthorized.status).toBe(302);
+        const fallbackRedirect = new URL(fallbackAuthorized.headers.get('location') ?? '');
+        expect(fallbackRedirect.origin).toBe('https://grok.com');
+        expect(fallbackRedirect.searchParams.get('state')).toBe('grok-state-1');
+        const fallbackCode = fallbackRedirect.searchParams.get('code');
+        expect(fallbackCode).toBeTruthy();
+
+        const fallbackToken = await fetch(`http://127.0.0.1:${port}/token`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            grant_type: 'authorization_code',
+            client_id: fallbackClientId,
+            code: fallbackCode ?? '',
+            code_verifier: fallbackVerifier,
+            redirect_uri: fallbackRedirectUri,
+            resource: `http://127.0.0.1:${port}/mcp-grok`,
+          }),
+        });
+        expect(fallbackToken.status).toBe(200);
+        const fallbackTokenJson = await fallbackToken.json() as { access_token: string; token_type: string };
+        expect(fallbackTokenJson.token_type).toBe('Bearer');
+
+        const fallbackInitializedGrok = await fetch(`http://127.0.0.1:${port}/mcp-grok`, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${fallbackTokenJson.access_token}`,
+            'content-type': 'application/json',
+            accept: 'application/json, text/event-stream',
+          },
+          body: initializeBody(),
+        });
+        expect(fallbackInitializedGrok.status).toBe(200);
+        expect(await fallbackInitializedGrok.text()).toContain('repo-harness-mcp');
+
         const initializedWithStaticBearer = await fetch(`http://127.0.0.1:${port}/mcp`, {
           method: 'POST',
           headers: {
