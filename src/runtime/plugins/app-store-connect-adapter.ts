@@ -25,6 +25,7 @@ interface AppStoreConnectPluginConfig {
   provider: AppStoreConnectProviderKind;
   issuerId?: string;
   keyId?: string;
+  privateKeyPath?: string;
   teamId?: string;
   defaultAppId?: string;
   defaultLocale?: string;
@@ -71,6 +72,7 @@ function normalizeConfig(raw: Partial<AppStoreConnectPluginConfig>): AppStoreCon
     provider: raw.provider === 'app-store-connect-api' ? 'app-store-connect-api' : 'mock',
     issuerId: stringValue(raw.issuerId),
     keyId: stringValue(raw.keyId),
+    privateKeyPath: stringValue(raw.privateKeyPath),
     teamId: stringValue(raw.teamId),
     defaultAppId: stringValue(raw.defaultAppId),
     defaultLocale: stringValue(raw.defaultLocale) ?? 'en-US',
@@ -100,11 +102,20 @@ function envValue(name: string): string | undefined {
   return stringValue(process.env[name]);
 }
 
-function privateKeyMaterial(): { key?: string; source?: string } {
+function privateKeyMaterial(config: AppStoreConnectPluginConfig): { key?: string; source?: string; warning?: string } {
   const inline = envValue('REPO_HARNESS_ASC_PRIVATE_KEY');
   if (inline) return { key: inline.replace(/\\n/g, '\n'), source: 'env:REPO_HARNESS_ASC_PRIVATE_KEY' };
-  const keyPath = envValue('REPO_HARNESS_ASC_PRIVATE_KEY_PATH');
-  if (keyPath && existsSync(keyPath)) return { key: readFileSync(keyPath, 'utf-8'), source: 'env:REPO_HARNESS_ASC_PRIVATE_KEY_PATH' };
+  const envKeyPath = envValue('REPO_HARNESS_ASC_PRIVATE_KEY_PATH');
+  if (envKeyPath) {
+    return existsSync(envKeyPath)
+      ? { key: readFileSync(envKeyPath, 'utf-8'), source: 'env:REPO_HARNESS_ASC_PRIVATE_KEY_PATH' }
+      : { source: 'env:REPO_HARNESS_ASC_PRIVATE_KEY_PATH', warning: 'Configured App Store Connect private key path does not exist.' };
+  }
+  if (config.privateKeyPath) {
+    return existsSync(config.privateKeyPath)
+      ? { key: readFileSync(config.privateKeyPath, 'utf-8'), source: 'config:privateKeyPath' }
+      : { source: 'config:privateKeyPath', warning: 'Configured App Store Connect private key path does not exist.' };
+  }
   return {};
 }
 
@@ -125,11 +136,12 @@ function resolveAuth(config: AppStoreConnectPluginConfig): AppStoreConnectAuthSt
 
   const issuerId = envValue('REPO_HARNESS_ASC_ISSUER_ID') ?? config.issuerId;
   const keyId = envValue('REPO_HARNESS_ASC_KEY_ID') ?? config.keyId;
-  const key = privateKeyMaterial();
+  const key = privateKeyMaterial(config);
   const errors: string[] = [];
+  const warnings: string[] = key.warning ? [key.warning] : [];
   if (!issuerId) errors.push('Set REPO_HARNESS_ASC_ISSUER_ID or configure issuer_id.');
   if (!keyId) errors.push('Set REPO_HARNESS_ASC_KEY_ID or configure key_id.');
-  if (!key.key) errors.push('Set REPO_HARNESS_ASC_PRIVATE_KEY or REPO_HARNESS_ASC_PRIVATE_KEY_PATH.');
+  if (!key.key) errors.push('Set REPO_HARNESS_ASC_PRIVATE_KEY, REPO_HARNESS_ASC_PRIVATE_KEY_PATH, or configure private_key_path.');
 
   return {
     provider: 'app-store-connect-api',
@@ -140,7 +152,7 @@ function resolveAuth(config: AppStoreConnectPluginConfig): AppStoreConnectAuthSt
     issuerId,
     keyId,
     errors,
-    warnings: [],
+    warnings,
   };
 }
 
@@ -177,7 +189,7 @@ function derSignatureToJose(signature: Buffer): string {
 function createJwt(config: AppStoreConnectPluginConfig): string {
   const issuerId = envValue('REPO_HARNESS_ASC_ISSUER_ID') ?? config.issuerId;
   const keyId = envValue('REPO_HARNESS_ASC_KEY_ID') ?? config.keyId;
-  const key = privateKeyMaterial().key;
+  const key = privateKeyMaterial(config).key;
   if (!issuerId || !keyId || !key) throw new AssistantPluginError('PLUGIN_AUTH_REQUIRED', 'App Store Connect API credentials are incomplete.', { retryable: false });
 
   const issuedAt = Math.floor(Date.now() / 1000);
@@ -286,7 +298,7 @@ function actions(): AssistantPluginActionDescriptor[] {
     {
       actionId: 'configure', title: 'Configure App Store Connect plugin', description: 'Enable official App Store Connect API access and save non-secret defaults.', readOnly: false, risk: 'workspace_write', confirmation: 'authorization', defaultTimeoutMs: 30_000, cancellable: true, idempotent: true,
       scopes: ['appstoreconnect.apps.read', 'appstoreconnect.metadata.write'], resourceClaims: [{ resource: 'repo-state', mode: 'write' }],
-      argumentsSchema: { type: 'object', properties: { enabled: { type: 'boolean' }, provider: { type: 'string', enum: ['mock', 'app-store-connect-api'] }, issuer_id: { type: 'string' }, key_id: { type: 'string' }, clear_api_identity: { type: 'boolean' }, team_id: { type: 'string' }, clear_team_id: { type: 'boolean' }, default_app_id: { type: 'string' }, clear_default_app_id: { type: 'boolean' }, default_locale: { type: 'string' }, default_timeout_ms: { type: 'number' } }, additionalProperties: false },
+      argumentsSchema: { type: 'object', properties: { enabled: { type: 'boolean' }, provider: { type: 'string', enum: ['mock', 'app-store-connect-api'] }, issuer_id: { type: 'string' }, key_id: { type: 'string' }, private_key_path: { type: 'string' }, clear_private_key_path: { type: 'boolean' }, clear_api_identity: { type: 'boolean' }, team_id: { type: 'string' }, clear_team_id: { type: 'boolean' }, default_app_id: { type: 'string' }, clear_default_app_id: { type: 'boolean' }, default_locale: { type: 'string' }, default_timeout_ms: { type: 'number' } }, additionalProperties: false },
     },
     { actionId: 'auth_status', title: 'Check App Store Connect auth', description: 'Report API readiness without returning secrets.', readOnly: true, risk: 'readonly', confirmation: 'none', defaultTimeoutMs: 10_000, cancellable: true, idempotent: true, scopes: ['appstoreconnect.apps.read'], resourceClaims: [], argumentsSchema: { type: 'object', properties: {}, additionalProperties: false } },
     { actionId: 'list_apps', title: 'List apps', description: 'List App Store Connect apps, optionally filtered by bundle ID or name.', readOnly: true, risk: 'readonly', confirmation: 'none', defaultTimeoutMs: 45_000, cancellable: true, idempotent: true, scopes: ['appstoreconnect.apps.read'], resourceClaims: readRemote, argumentsSchema: { type: 'object', properties: { bundle_id: { type: 'string' }, name: { type: 'string' }, limit: { type: 'number' } }, additionalProperties: false } },
@@ -372,6 +384,7 @@ export async function executeAppStoreConnectPluginAction(input: AssistantPluginA
       provider: args.provider === 'app-store-connect-api' ? 'app-store-connect-api' : args.provider === 'mock' ? 'mock' : undefined,
       issuerId: args.clear_api_identity === true ? '' : stringValue(args.issuer_id),
       keyId: args.clear_api_identity === true ? '' : stringValue(args.key_id),
+      privateKeyPath: args.clear_private_key_path === true ? '' : stringValue(args.private_key_path),
       teamId: args.clear_team_id === true ? '' : stringValue(args.team_id),
       defaultAppId: args.clear_default_app_id === true ? '' : stringValue(args.default_app_id),
       defaultLocale: stringValue(args.default_locale),

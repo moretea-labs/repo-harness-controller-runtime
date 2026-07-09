@@ -34,19 +34,20 @@ Example action arguments for `configure`:
   "provider": "app-store-connect-api",
   "issuer_id": "00000000-0000-0000-0000-000000000000",
   "key_id": "ABC123DEFG",
+  "private_key_path": "/Users/example/.secrets/appstoreconnect/AuthKey_ABC123DEFG.p8",
   "default_app_id": "1234567890",
   "default_locale": "zh-Hans"
 }
 ```
 
-The API private key is never persisted by repo-harness. Provide it at runtime using one of:
+The API private key content is never persisted by repo-harness. The recommended persistent setup is to store only the local `.p8` file path with `private_key_path`; the file content remains on disk and is read only at runtime. You can also override credentials with environment variables:
 
 ```bash
 export REPO_HARNESS_ASC_PRIVATE_KEY='-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----'
 export REPO_HARNESS_ASC_PRIVATE_KEY_PATH="$HOME/.config/repo-harness/AuthKey_ABC123DEFG.p8"
 ```
 
-`REPO_HARNESS_ASC_ISSUER_ID` and `REPO_HARNESS_ASC_KEY_ID` can also override configured non-secret identity fields.
+`REPO_HARNESS_ASC_ISSUER_ID`, `REPO_HARNESS_ASC_KEY_ID`, and `REPO_HARNESS_ASC_PRIVATE_KEY_PATH` can override configured identity/path fields. Do not commit `.p8` files or inline private key content.
 
 ## Actions
 
