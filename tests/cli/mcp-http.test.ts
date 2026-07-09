@@ -105,6 +105,8 @@ describe('mcp http transport', () => {
         expect(await health.json()).toMatchObject({
           status: 'ok',
           auth: 'required',
+          mcpEndpoint: `http://127.0.0.1:${port}/mcp`,
+          bearerEndpoint: `http://127.0.0.1:${port}/mcp-bearer`,
           sessions: {
             active: 0,
             maximum: 64,
@@ -206,7 +208,12 @@ describe('mcp http transport', () => {
         await waitForHealth(port);
 
         const health = await fetch(`http://127.0.0.1:${port}/health`);
-        expect(await health.json()).toMatchObject({ status: 'ok', auth: 'oauth' });
+        expect(await health.json()).toMatchObject({
+          status: 'ok',
+          auth: 'oauth',
+          mcpEndpoint: `http://127.0.0.1:${port}/mcp`,
+          bearerEndpoint: `http://127.0.0.1:${port}/mcp-bearer`,
+        });
 
         const metadata = await fetch(`http://127.0.0.1:${port}/.well-known/oauth-protected-resource/mcp`, {
           headers: { 'x-forwarded-proto': 'https', 'x-forwarded-host': 'example.test' },
@@ -274,7 +281,61 @@ describe('mcp http transport', () => {
           body: initializeBody(),
         });
         expect(noAuth.status).toBe(401);
+        expect(noAuth.headers.get('www-authenticate')).toContain('resource_metadata');
         expect(noAuth.headers.get('www-authenticate')).toContain('/.well-known/oauth-protected-resource/mcp');
+
+        // Bearer-only endpoint must not advertise OAuth resource_metadata.
+        const bearerNoAuth = await fetch(`http://127.0.0.1:${port}/mcp-bearer`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: initializeBody(),
+        });
+        expect(bearerNoAuth.status).toBe(401);
+        const bearerWwwAuth = bearerNoAuth.headers.get('www-authenticate') ?? '';
+        expect(bearerWwwAuth).toContain('Bearer realm="repo-harness-mcp"');
+        expect(bearerWwwAuth).not.toContain('resource_metadata');
+        expect(await bearerNoAuth.json()).toMatchObject({ error: 'unauthorized' });
+
+        const bearerAuthed = await fetch(`http://127.0.0.1:${port}/mcp-bearer`, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${staticBearerToken}`,
+            'content-type': 'application/json',
+            accept: 'application/json, text/event-stream',
+          },
+          body: initializeBody(),
+        });
+        expect(bearerAuthed.status).toBe(200);
+        expect(await bearerAuthed.text()).toContain('repo-harness-mcp');
+
+        // Incomplete OAuth authorize must not render the passphrase form.
+        const incompleteAuthorize = await fetch(`http://127.0.0.1:${port}/authorize`);
+        expect(incompleteAuthorize.status).toBe(400);
+        expect(incompleteAuthorize.headers.get('content-type') ?? '').toContain('application/json');
+        const incompleteText = await incompleteAuthorize.text();
+        expect(incompleteText).not.toContain('type="password"');
+        expect(incompleteText).not.toContain('name="passphrase"');
+        const incompleteBody = JSON.parse(incompleteText) as { message?: string; error?: string };
+        expect(incompleteBody.error).toBe('invalid_request');
+        expect(incompleteBody.message ?? '').toContain('/mcp-bearer');
+
+        // Valid authorize request still shows passphrase page before submission.
+        const authorizeForm = await fetch(
+          `http://127.0.0.1:${port}/authorize?${new URLSearchParams({
+            client_id: client.client_id,
+            redirect_uri: 'http://localhost/callback',
+            response_type: 'code',
+            code_challenge: challenge,
+            code_challenge_method: 'S256',
+            state: 'state-form',
+          }).toString()}`,
+        );
+        expect(authorizeForm.status).toBe(200);
+        expect(authorizeForm.headers.get('content-type') ?? '').toContain('text/html');
+        const formHtml = await authorizeForm.text();
+        expect(formHtml).toContain('type="password"');
+        expect(formHtml).toContain('name="passphrase"');
+        expect(formHtml).toContain('Authorize repo-harness');
 
         const initializedWithStaticBearer = await fetch(`http://127.0.0.1:${port}/mcp`, {
           method: 'POST',

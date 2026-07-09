@@ -223,6 +223,58 @@ ${hiddenFields}
 </main></body></html>`;
 }
 
+/** Collect OAuth authorize params from query (GET) or body (POST form). */
+function oauthAuthorizeParamSource(req: Request): Record<string, unknown> {
+  if (req.method === 'POST' && req.body && typeof req.body === 'object' && !Buffer.isBuffer(req.body)) {
+    return req.body as Record<string, unknown>;
+  }
+  return req.query as Record<string, unknown>;
+}
+
+function readOAuthAuthorizeString(source: Record<string, unknown>, key: string): string {
+  const value = source[key];
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+/**
+ * True when the request lacks the OAuth parameters needed for a real authorization.
+ * Incomplete requests must not render the passphrase form (incompatible clients loop there).
+ */
+export function isIncompleteOAuthAuthorizeRequest(source: Record<string, unknown>): boolean {
+  const clientId = readOAuthAuthorizeString(source, 'client_id');
+  const responseType = readOAuthAuthorizeString(source, 'response_type');
+  const codeChallenge = readOAuthAuthorizeString(source, 'code_challenge');
+  const redirectUri = readOAuthAuthorizeString(source, 'redirect_uri');
+  // redirect_uri may be omitted when the client has a single registered URI; client_id is the usable redirect context.
+  const hasRedirectContext = Boolean(redirectUri) || Boolean(clientId);
+  return !clientId || !responseType || !codeChallenge || !hasRedirectContext;
+}
+
+function incompleteOAuthAuthorizeResponseBody(): {
+  error: 'invalid_request';
+  error_description: string;
+  message: string;
+  hint: string;
+} {
+  return {
+    error: 'invalid_request',
+    error_description:
+      'OAuth authorization request is incomplete. Required: client_id, response_type, code_challenge, and a usable redirect context (redirect_uri or a registered client).',
+    message:
+      'This endpoint expects a complete OAuth authorization request (PKCE). Non-OAuth MCP clients should use /mcp-bearer with Authorization: Bearer <token> instead of /authorize.',
+    hint: 'Use POST/GET /mcp-bearer with a repo-harness bearer token for clients that cannot complete OAuth dynamic registration and PKCE.',
+  };
+}
+
+function rejectIncompleteOAuthAuthorize(req: Request, res: Response, next: NextFunction): void {
+  const source = oauthAuthorizeParamSource(req);
+  if (isIncompleteOAuthAuthorizeRequest(source)) {
+    res.status(400).json(incompleteOAuthAuthorizeResponseBody());
+    return;
+  }
+  next();
+}
+
 function requirePassphrase(passphrase: string): (req: Request, res: Response, next: NextFunction) => void {
   return (req, res, next) => {
     const provided = typeof req.body?.passphrase === 'string' ? req.body.passphrase : undefined;
@@ -234,7 +286,19 @@ function requirePassphrase(passphrase: string): (req: Request, res: Response, ne
         return;
       }
     }
-    const params = new URLSearchParams(req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '');
+    // Prefer body hidden fields on POST (failed passphrase re-render), else query string on GET.
+    const source = oauthAuthorizeParamSource(req);
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(source)) {
+      if (key === 'passphrase') continue;
+      if (typeof value === 'string') params.set(key, value);
+    }
+    if ([...params.keys()].length === 0 && req.url.includes('?')) {
+      const fromUrl = new URLSearchParams(req.url.slice(req.url.indexOf('?')));
+      for (const [key, value] of fromUrl.entries()) {
+        if (key !== 'passphrase') params.set(key, value);
+      }
+    }
     res.type('html').send(renderPassphrasePage(params));
   };
 }
@@ -531,7 +595,9 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   tokenStore?.load();
   const oauthProvider = tokenStore ? createMcpOAuthProvider(tokenStore) : null;
   const configuredPublicOrigin = getConfiguredPublicOrigin(serviceConfig);
+  // Separate transport maps so OAuth (/mcp) and bearer (/mcp-bearer) clients do not share session IDs.
   const transports = new Map<string, ManagedTransport>();
+  const bearerTransports = new Map<string, ManagedTransport>();
   const runtimeStats: McpRuntimeStats = { initializing: 0, activePosts: 0, rejectedOverload: 0 };
   const toolContext = createMcpToolContext({ ...opts, repo: repoRoot, controllerHome, profile });
   const runtimeControllerHome = 'controllerHome' in toolContext ? toolContext.controllerHome : undefined;
@@ -555,6 +621,8 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
     : undefined;
   const repoId = toolContext.policy.profile === 'controller' ? undefined : repositoryIdentity(repoRoot);
   const startedAt = new Date().toISOString();
+  const localOrigin = `http://${host === '::' || host === '0.0.0.0' ? '127.0.0.1' : host}:${port}`;
+  const advertisedOrigin = configuredPublicOrigin ?? localOrigin;
   const app = express();
   app.set('trust proxy', 1);
 
@@ -565,6 +633,9 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
     if ('controllerHome' in toolContext) res.setHeader('x-repo-harness-toolset', toolContext.toolset);
     if (runtimeToolSurfaceFingerprint) res.setHeader('x-repo-harness-runtime-tool-surface-fingerprint', runtimeToolSurfaceFingerprint);
     if (toolSurfaceFingerprint) res.setHeader('x-repo-harness-tool-surface-fingerprint', toolSurfaceFingerprint);
+    const activeStreams =
+      [...transports.values()].reduce((count, entry) => count + entry.inFlightGets, 0)
+      + [...bearerTransports.values()].reduce((count, entry) => count + entry.inFlightGets, 0);
     res.json({
       status: 'ok',
       server: 'repo-harness-mcp',
@@ -586,12 +657,14 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
         maxTimeoutMs: toolContext.policy.execution.runnerMaxTimeoutMs,
       },
       auth: authMode === 'oauth' ? (oauthPassphrase ? 'oauth' : 'missing') : (authToken ? 'required' : 'missing'),
+      mcpEndpoint: `${advertisedOrigin}/mcp`,
+      bearerEndpoint: `${advertisedOrigin}/mcp-bearer`,
       sessions: {
-        active: transports.size,
+        active: transports.size + bearerTransports.size,
         maximum: MAX_MCP_SESSIONS,
         initializing: runtimeStats.initializing,
         activePosts: runtimeStats.activePosts,
-        activeStreams: [...transports.values()].reduce((count, entry) => count + entry.inFlightGets, 0),
+        activeStreams,
         maximumActivePosts: MAX_ACTIVE_POSTS,
         rejectedOverload: runtimeStats.rejectedOverload,
       },
@@ -628,6 +701,8 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
 
   if (authMode === 'oauth' && oauthProvider) {
     app.use('/authorize', express.urlencoded({ extended: false, limit: '10kb' }));
+    // Reject incomplete OAuth requests before rendering the passphrase form.
+    app.use('/authorize', rejectIncompleteOAuthAuthorize);
     app.use('/authorize', requirePassphrase(oauthPassphrase ?? ''));
     app.use('/authorize', oauthAuthorizationHandler(oauthProvider));
     app.use('/token', tokenHandler({ provider: oauthProvider, rateLimit: false }));
@@ -682,6 +757,8 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
     if (toolSurfaceFingerprint) res.setHeader('x-repo-harness-tool-surface-fingerprint', toolSurfaceFingerprint);
     next();
   };
+
+  // Primary MCP path: OAuth (or bearer when --auth bearer). Unchanged for ChatGPT.
   app.use('/mcp', setMcpResponseHeaders);
   app.post('/mcp', requireMcpHttpAuth(authMode, authToken, oauthProvider, configuredPublicOrigin), express.raw({ type: '*/*', limit: '1mb' }), (req, res) => {
     handleMcpPost(req, res, toolContext, transports, runtimeStats).catch((error: unknown) => {
@@ -693,9 +770,26 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
       if (!res.headersSent) sendMcpRequestError(res, error);
     });
   });
+
+  // Bearer-only MCP path for non-OAuth clients (e.g. Grok). Never advertises OAuth resource_metadata.
+  app.use('/mcp-bearer', setMcpResponseHeaders);
+  app.post('/mcp-bearer', requireMcpHttpAuth('bearer', authToken, null, configuredPublicOrigin), express.raw({ type: '*/*', limit: '1mb' }), (req, res) => {
+    handleMcpPost(req, res, toolContext, bearerTransports, runtimeStats).catch((error: unknown) => {
+      if (!res.headersSent) sendMcpRequestError(res, error);
+    });
+  });
+  app.get('/mcp-bearer', requireMcpHttpAuth('bearer', authToken, null, configuredPublicOrigin), (req, res) => {
+    handleMcpGet(req, res, bearerTransports).catch((error: unknown) => {
+      if (!res.headersSent) sendMcpRequestError(res, error);
+    });
+  });
+
   app.use((_req, res) => res.status(404).json({ error: 'not_found' }));
 
-  const cleanupTimer = setInterval(() => { void pruneTransports(transports); }, 60_000);
+  const cleanupTimer = setInterval(() => {
+    void pruneTransports(transports);
+    void pruneTransports(bearerTransports);
+  }, 60_000);
   cleanupTimer.unref();
 
   const httpServer = app.listen(port, host);
@@ -706,17 +800,24 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   httpServer.on('close', () => {
     clearInterval(cleanupTimer);
     for (const entry of transports.values()) void closeManagedTransport(entry);
+    for (const entry of bearerTransports.values()) void closeManagedTransport(entry);
     transports.clear();
+    bearerTransports.clear();
   });
 
   await new Promise<void>((resolve) => {
     httpServer.once('listening', resolve);
   });
   const authLabel = authMode === 'oauth' ? (oauthPassphrase ? 'oauth' : 'oauth-missing') : (authToken ? 'bearer' : 'missing');
-  console.error(`repo-harness mcp http listening on http://${host}:${port}/mcp (auth: ${authLabel})`);
+  console.error(
+    `repo-harness mcp http listening on http://${host}:${port}/mcp (auth: ${authLabel}) and http://${host}:${port}/mcp-bearer (auth: bearer)`,
+  );
 
   const shutdown = () => {
     for (const entry of transports.values()) {
+      void closeManagedTransport(entry);
+    }
+    for (const entry of bearerTransports.values()) {
       void closeManagedTransport(entry);
     }
     tokenStore?.flush();

@@ -437,7 +437,9 @@ describe("mcp setup", () => {
     expect(guide).toContain("~/DevProjects/repo-harness");
     expect(guide).toContain(".repo-harness/mcp.policy.json");
     expect(guide).toContain("oauth-protected-resource");
-    expect(guide).toContain("--auth bearer");
+    expect(guide).toContain("/mcp-bearer");
+    expect(guide).toContain("controllerHome/mcp/mcp.tokens.json");
+    expect(guide).toContain("Non-OAuth MCP clients");
     expect(guide).toContain("mcp keepalive");
     expect(guide).toContain("## Dev Mode Agent Runner");
     expect(guide).toContain("--enable-dev-runner");

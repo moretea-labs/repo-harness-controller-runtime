@@ -266,10 +266,20 @@ The real endpoint stays in ignored local config; the tracked guide stays placeho
 1. Open ChatGPT Settings and enable Developer Mode.
 2. Create a custom Connector using the server name from \`controllerHome/mcp/mcp.local.json\` under \`chatgpt.serverName\`.
 3. Paste the public HTTPS URL ending in \`/mcp\`.
-4. Configure Connector authentication as OAuth. A bearer token remains available only as a local fallback for non-ChatGPT clients; start such a client with \`--auth bearer\` when required.
+4. Configure Connector authentication as OAuth. ChatGPT must use the \`/mcp\` OAuth URL; do not point ChatGPT at \`/mcp-bearer\`.
 5. Scan tools and authorize with the passphrase from \`controllerHome/mcp/mcp.oauth.json\`.
 6. Keep write confirmations enabled.
 7. Re-scan tools after updating repo-harness tool schemas.
+
+### Non-OAuth MCP clients (Grok and similar)
+
+Clients that cannot complete OAuth dynamic client registration + PKCE should use the dedicated bearer endpoint instead of \`/mcp\` or \`/authorize\`:
+
+\`\`\`text
+<https-tunnel-url>/mcp-bearer
+\`\`\`
+
+Authenticate with \`Authorization: Bearer <token>\` using the token stored under \`controllerHome/mcp/mcp.tokens.json\` (or \`REPO_HARNESS_MCP_TOKEN\`). Do not paste the raw token into chat or docs. \`/health\` advertises both \`mcpEndpoint\` and \`bearerEndpoint\`. Incomplete OAuth hits on \`/authorize\` return HTTP 400 and point clients to \`/mcp-bearer\`.
 
 ## Verify the loaded tool surface
 
@@ -395,6 +405,7 @@ The executor profile remains read-oriented. Controller-dispatched Codex work is 
 ## Troubleshooting
 
 - ChatGPT cannot connect: verify the HTTPS tunnel ends in \`/mcp\` and local \`/health\` responds.
+- Grok or other non-OAuth clients loop on \`/authorize\`: use \`…/mcp-bearer\` with a bearer token from \`controllerHome/mcp/mcp.tokens.json\`; do not use OAuth \`/mcp\` for those clients.
 - ChatGPT auth loops: retry authorization and inspect \`controllerHome/mcp/mcp.oauth.json\` first, then legacy \`.repo-harness/mcp.oauth.json\` only when using fallback; do not paste the passphrase into chat.
 - Tool scan misses tools: run \`repo-harness mcp restart --repo .\`, then rescan or recreate the versioned Connector and verify \`controller_capabilities.expectedTools\` includes \`repository_latest_source_diagnose\` and \`repository_bootstrap_local_project\`.
 - Codex cannot see the MCP server: rerun \`repo-harness mcp setup codex --repo . --scope project\`.
