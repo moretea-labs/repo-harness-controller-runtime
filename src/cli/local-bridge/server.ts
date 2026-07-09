@@ -77,6 +77,7 @@ import { localBridgeDashboardHtml } from "./dashboard";
 import type { LocalBridgeJobRequest } from "./types";
 import {
   ackConsoleHandoff,
+  applyConsoleSafePatch,
   buildAdvancedDiagnosticsEnvelope,
   buildCommandCenter,
   buildSystemReadiness,
@@ -1323,9 +1324,44 @@ export async function startLocalBridgeServer(
         processKillOrRestart: body.processKillOrRestart === true,
         workId: queryString(body.workId),
       });
-      response.status(result.status === "approval_required" || result.status === "blocked" ? 409 : 200).json(result);
+      response.status(result.status === "approval_required" || result.status === "blocked" ? 409 : 200).json({
+        ...result,
+        phase: result.status === "ok" ? "succeeded" : result.status === "approval_required" ? "needs_attention" : "failed",
+        statusLabel: result.status === "ok" ? "已完成" : result.status === "approval_required" ? "需要确认" : "需要处理",
+        terminal: true,
+      });
     } catch (error) {
-      response.status(400).json({ error: errorMessage(error) });
+      response.status(400).json({
+        error: errorMessage(error),
+        errorClass: "unknown_failure",
+        summary: errorMessage(error) || "操作失败，但未提供详细错误。",
+        phase: "failed",
+        statusLabel: "失败",
+      });
+    }
+  });
+
+  app.post("/api/console/edit/apply", (request, response) => {
+    try {
+      const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
+        ? request.body as Record<string, unknown>
+        : {};
+      const applied = applyConsoleSafePatch(consoleCtx(request), {
+        operations: body.operations,
+        purpose: queryString(body.purpose),
+        allowedPaths: Array.isArray(body.allowedPaths) ? body.allowedPaths.map(String) : undefined,
+        sessionId: queryString(body.sessionId),
+      });
+      response.status(applied.phase === "failed" ? 409 : 200).json(applied);
+    } catch (error) {
+      response.status(400).json({
+        error: errorMessage(error),
+        errorClass: "unknown_failure",
+        summary: errorMessage(error) || "同步修改失败。",
+        phase: "failed",
+        statusLabel: "失败",
+        terminal: true,
+      });
     }
   });
 

@@ -70,8 +70,8 @@ try {
   const health = await waitJson(`http://127.0.0.1:${port}/health`, 20_000);
   if (health.status !== 200 || health.body.status !== 'ok') throw new Error(`HEALTH_FAILED: ${JSON.stringify(health)} ${stderr}`);
   if (health.body.toolset !== 'core') throw new Error(`TOOLSET_CHANGED: ${String(health.body.toolset)}`);
-  // Core toolset now includes preferred ChatGPT facade tools: rh_status/rh_inbox/rh_context/rh_work.
-  if (health.body.toolCount !== 59) throw new Error(`TOOL_COUNT_CHANGED: ${String(health.body.toolCount)}`);
+  // Core toolset includes preferred rh_* facade tools plus interactive development tools (safe patch/git/work_wait).
+  if (health.body.toolCount !== 70) throw new Error(`TOOL_COUNT_CHANGED: ${String(health.body.toolCount)}`);
   if (health.body.compatibilityToolCount !== 86) throw new Error(`LEGACY_MCP_TOOL_COUNT_CHANGED: ${String(health.body.compatibilityToolCount)}`);
   if (health.body.toolSurfaceFingerprint !== '7966e1035c4bad51') throw new Error(`FINGERPRINT_CHANGED: ${String(health.body.toolSurfaceFingerprint)}`);
 

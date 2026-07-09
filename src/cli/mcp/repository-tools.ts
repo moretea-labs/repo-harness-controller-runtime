@@ -17,6 +17,7 @@ import {
 import { buildControllerWorkbench } from '../repositories/workbench';
 import { buildLocalBridgeJobHandoff, executeLocalBridgeJob, getLocalBridgeJobSnapshot, submitLocalBridgeJob } from '../local-bridge/job-store';
 import { applySafePatch, buildSafePatchPlan } from '../repositories/safe-patch';
+import { buildSyncOperationDigest, classifyUserFacingError } from '../../runtime/control-plane/facade/operation-digest';
 import { diagnoseRepositoryStuckState, listRepositoryGoalRuns, readRepositoryGoalRegistry, runRepositoryGoal, upsertRepositoryGoal } from '../repositories/goal-registry';
 import {
   repositoryGitCommit,
@@ -193,18 +194,19 @@ export const repositoryToolDefinitions: McpToolDefinition[] = [
     operations: { type: 'array', items: { type: 'object' }, description: 'Edit operations using the same shape as apply_patch.' },
     chunk_size: { type: 'number', description: 'Maximum operations per deterministic chunk. Capped at 100.' },
   }, ['operations'], true),
-  definition('repository_safe_patch_apply', 'Apply a deterministic chunked repository patch through edit sessions, refreshing missing file fingerprints before each chunk.', {
+  definition('repository_safe_patch_apply', 'Apply a deterministic chunked repository patch through edit sessions, refreshing missing file fingerprints before each chunk. Defaults to synchronous interactive apply.', {
     repo_id: repoId,
     checkout_id: { type: 'string', description: 'Optional checkout identity for repositories with multiple local clones.' },
     session_id: { type: 'string', description: 'Existing edit session id. Omit to create one.' },
     purpose: { type: 'string', description: 'Purpose for a newly created edit session.' },
-    operations: { type: 'array', items: { type: 'object' }, description: 'Edit operations using the same shape as apply_patch.' },
+    operations: { type: 'array', items: { type: 'object' }, description: 'Edit operations using the same shape as apply_patch. create/write create parent dirs as needed.' },
     chunk_size: { type: 'number', description: 'Maximum operations per deterministic chunk. Capped at 100.' },
     expected_revision: { type: 'number', description: 'Expected starting edit-session revision.' },
     allowed_paths: { type: 'array', items: { type: 'string' }, description: 'Optional allowed path globs for a newly created session.' },
     continue_on_error: { type: 'boolean', description: 'Continue applying later independent chunks after a failed chunk. Defaults to false.' },
     refresh_fingerprints: { type: 'boolean', description: 'Refresh file fingerprints before every chunk. Defaults to true.' },
     recover_stale_session: { type: 'boolean', description: 'For new sessions, recover stale edit-session fingerprints into a fresh session. Defaults to true.' },
+    apply_mode: { type: 'string', enum: ['sync', 'async'], description: 'Defaults to sync for interactive development. Set async to queue a durable Job.' },
   }, ['operations']),
   definition('repository_command_preview', 'Preview one repository-scoped local command with classification, approval token, and Git snapshots.', {
     repo_id: repoId,
@@ -428,7 +430,42 @@ export async function callRepositoryTool(
           }),
           60_000,
         );
-        return result({ repoId: repository.repoId, checkoutId: repository.activeCheckoutId, ...applied as unknown as Record<string, unknown> });
+        const changedFiles = [
+          ...new Set(
+            (applied.appliedChunks ?? []).flatMap((chunk) => chunk.paths ?? []),
+          ),
+        ];
+        const ok = applied.status === 'applied';
+        const firstFailure = applied.failures?.[0];
+        const digest = buildSyncOperationDigest({
+          ok,
+          operation: 'repository_safe_patch_apply',
+          summary: ok
+            ? `补丁已同步应用，涉及 ${changedFiles.length} 个文件。`
+            : applied.status === 'partial'
+              ? `补丁部分应用：${changedFiles.length} 个文件成功，存在失败 chunk。`
+              : `补丁应用失败：${firstFailure?.message || '请检查 failures 摘要'}`,
+          changedFiles,
+          errorClass: ok ? undefined : classifyUserFacingError({
+            code: firstFailure?.code,
+            message: firstFailure?.message,
+            infrastructure: firstFailure?.code === 'APPLY_FAILED',
+          }),
+          errorMessage: firstFailure?.message,
+        });
+        const payload = {
+          repoId: repository.repoId,
+          checkoutId: repository.activeCheckoutId,
+          ...applied as unknown as Record<string, unknown>,
+          phase: digest.phase,
+          statusLabel: digest.statusLabel,
+          summary: digest.summary,
+          terminal: true,
+          applyMode: 'sync',
+          digest,
+          suggestedNextActions: digest.suggestedNextActions,
+        };
+        return ok ? result(payload) : { ...result(payload), isError: true };
       }
       case 'repository_command_preview': {
         const repository = resolveRepositorySelection({

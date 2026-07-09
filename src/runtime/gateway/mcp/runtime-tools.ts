@@ -6,7 +6,9 @@ import type { MultiRepositoryMcpToolContext } from '../../../cli/mcp/multi-repos
 import { listRepositories, repositorySummary, resolveRepositorySelection } from '../../../cli/repositories/registry';
 import { repositoryControllerRoot } from '../../../cli/repositories/controller-home';
 import { cancelExecutionJob, createExecutionJob, findExecutionJob, getExecutionJob, getExecutionJobByRequestId, listExecutionJobs } from '../../execution/jobs/store';
+import { waitForExecutionJob } from '../../execution/jobs/wait';
 import type { ExecutionJob } from '../../execution/jobs/types';
+import { buildJobOperationDigest } from '../../control-plane/facade/operation-digest';
 import { readJobEvents } from '../../evidence/event-ledger';
 import { readExecutionArtifact } from '../../evidence/artifact-store';
 import { ensureControllerDaemon, readControllerDaemonStatus } from '../../control-plane/daemon-client';
@@ -224,6 +226,8 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
     work_id: { type: 'string' },
     request_id: { type: 'string' },
     include_events: { type: 'boolean' },
+    wait: { type: 'boolean', description: 'When true, wait for terminal status before returning digest.' },
+    wait_ms: { type: 'number' },
   }),
   definition('work_list', 'List recent resumable Work for one repository.', {
     repo_id: repoId,
@@ -235,6 +239,12 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
     request_id: { type: 'string' },
     reason: { type: 'string' },
   }, [], false),
+  definition('work_wait', 'Wait for one Work/ExecutionJob to reach a terminal status and return a bounded operation digest.', {
+    repo_id: repoId,
+    work_id: { type: 'string' },
+    request_id: { type: 'string' },
+    wait_ms: { type: 'number', description: 'Max wait in ms. Default 15000, max 120000.' },
+  }),
   definition('git_diff_paths', 'Return a bounded Git diff and status for explicit repository-relative paths only.', {
     repo_id: repoId,
     paths: { type: 'array', items: { type: 'string' } },
@@ -259,6 +269,8 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
     repo_id: repoId,
     include_events: { type: 'boolean' },
     detail_level: { type: 'string', enum: ['summary', 'full'] },
+    wait: { type: 'boolean', description: 'When true, wait for terminal status before returning digest.' },
+    wait_ms: { type: 'number' },
   }, ['job_id']),
   definition('get_artifact', 'Read one bounded Evidence Plane artifact by id. Large content remains bounded.', { artifact_id: { type: 'string' }, repo_id: repoId, max_bytes: { type: 'number' } }, ['artifact_id', 'repo_id']),
   definition('list_jobs', 'List durable Execution Jobs for one repository. Summary is the default.', {
@@ -1578,12 +1590,61 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
       }
       case 'work_get': {
         const repository = selected(ctx, args);
-        const job = resolveWorkJob(ctx, repository.repoId, args);
-        if (!job) return result({ error: { code: 'WORK_NOT_FOUND', message: 'No Work matched this repository and identifier.' } }, true);
+        let job = resolveWorkJob(ctx, repository.repoId, args);
+        if (!job) return result({ error: { code: 'WORK_NOT_FOUND', message: 'No Work matched this repository and identifier.', errorClass: 'not_found', summary: '未找到对应任务。' } }, true);
+        let timedOut = false;
+        let waitedMs = 0;
+        if (args.wait === true || typeof args.wait_ms === 'number') {
+          const waited = await waitForExecutionJob({
+            controllerHome: ctx.controllerHome,
+            repoId: repository.repoId,
+            jobId: job.jobId,
+            timeoutMs: typeof args.wait_ms === 'number' ? args.wait_ms : 15_000,
+          });
+          job = waited.job;
+          timedOut = waited.timedOut;
+          waitedMs = waited.waitedMs;
+        }
+        const digest = buildJobOperationDigest(job, { waited: args.wait === true || typeof args.wait_ms === 'number', stillRunning: timedOut });
         return result({
           work: summarizeWork(job, repository.canonicalRoot),
+          digest,
+          summary: digest.summary,
+          phase: digest.phase,
+          statusLabel: digest.statusLabel,
+          errorClass: digest.errorClass,
+          errorMessage: digest.errorMessage,
+          waited: args.wait === true || typeof args.wait_ms === 'number',
+          timedOut,
+          waitedMs,
           ...(args.include_events === true ? { events: summarizeJobEvents(ctx.controllerHome, job.repoId, job.jobId) } : {}),
+        }, digest.phase === 'failed' || digest.phase === 'timed_out');
+      }
+      case 'work_wait': {
+        const repository = selected(ctx, args);
+        const job = resolveWorkJob(ctx, repository.repoId, args);
+        if (!job) return result({ error: { code: 'WORK_NOT_FOUND', message: 'No Work matched this repository and identifier.', errorClass: 'not_found', summary: '未找到对应任务。' } }, true);
+        const waited = await waitForExecutionJob({
+          controllerHome: ctx.controllerHome,
+          repoId: repository.repoId,
+          jobId: job.jobId,
+          timeoutMs: typeof args.wait_ms === 'number' ? args.wait_ms : 15_000,
         });
+        const digest = buildJobOperationDigest(waited.job, { waited: true, stillRunning: waited.timedOut });
+        return result({
+          work: summarizeWork(waited.job, repository.canonicalRoot),
+          digest,
+          summary: digest.summary,
+          phase: digest.phase,
+          statusLabel: digest.statusLabel,
+          errorClass: digest.errorClass,
+          errorMessage: digest.errorMessage,
+          changedFiles: digest.changedFiles,
+          suggestedNextActions: digest.suggestedNextActions,
+          waited: true,
+          timedOut: waited.timedOut,
+          waitedMs: waited.waitedMs,
+        }, digest.phase === 'failed' || digest.phase === 'timed_out');
       }
       case 'work_list': {
         const repository = selected(ctx, args);
@@ -1593,14 +1654,15 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
       case 'work_cancel': {
         const repository = selected(ctx, args);
         const job = resolveWorkJob(ctx, repository.repoId, args);
-        if (!job) return result({ error: { code: 'WORK_NOT_FOUND', message: 'No Work matched this repository and identifier.' } }, true);
+        if (!job) return result({ error: { code: 'WORK_NOT_FOUND', message: 'No Work matched this repository and identifier.', errorClass: 'not_found', summary: '未找到对应任务。' } }, true);
         const cancelled = await cancelExecutionJob(
           ctx.controllerHome,
           repository.repoId,
           job.jobId,
           typeof args.reason === 'string' ? args.reason : undefined,
         );
-        return result({ work: summarizeWork(cancelled, repository.canonicalRoot) });
+        const digest = buildJobOperationDigest(cancelled);
+        return result({ work: summarizeWork(cancelled, repository.canonicalRoot), digest, summary: digest.summary, phase: digest.phase });
       }
       case 'git_diff_paths': {
         const repository = selected(ctx, args);
@@ -1883,19 +1945,49 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
       }
       case 'get_job': {
         const jobId = String(args.job_id ?? '').trim();
-        const job = typeof args.repo_id === 'string' ? getExecutionJob(ctx.controllerHome, args.repo_id, jobId) : findExecutionJob(ctx.controllerHome, jobId);
-        if (!job) return result({ error: { code: 'JOB_NOT_FOUND', message: jobId } }, true);
+        let job = typeof args.repo_id === 'string' ? getExecutionJob(ctx.controllerHome, args.repo_id, jobId) : findExecutionJob(ctx.controllerHome, jobId);
+        if (!job) return result({ error: { code: 'JOB_NOT_FOUND', message: jobId || 'missing job_id', errorClass: 'not_found', summary: '未找到对应 Job。' } }, true);
+        let timedOut = false;
+        let waitedMs = 0;
+        if (args.wait === true || typeof args.wait_ms === 'number') {
+          const waited = await waitForExecutionJob({
+            controllerHome: ctx.controllerHome,
+            repoId: job.repoId,
+            jobId: job.jobId,
+            timeoutMs: typeof args.wait_ms === 'number' ? args.wait_ms : 15_000,
+          });
+          job = waited.job;
+          timedOut = waited.timedOut;
+          waitedMs = waited.waitedMs;
+        }
         const full = args.detail_level === 'full';
         const repoRoot = repositoryRootForRepoId(ctx.controllerHome, job.repoId);
+        const digest = buildJobOperationDigest(job, {
+          waited: args.wait === true || typeof args.wait_ms === 'number',
+          stillRunning: timedOut,
+        });
         return result({
           detailLevel: 'summary',
           requestedDetailLevel: full ? 'full' : 'summary',
           job: summarizeExecutionJob(job, repoRoot),
+          digest,
+          summary: digest.summary,
+          phase: digest.phase,
+          statusLabel: digest.statusLabel,
+          errorClass: digest.errorClass,
+          errorMessage: digest.errorMessage,
+          changedFiles: digest.changedFiles,
+          suggestedNextActions: digest.suggestedNextActions,
+          waited: args.wait === true || typeof args.wait_ms === 'number',
+          timedOut,
+          waitedMs,
           ...(args.include_events === true
             ? { events: summarizeJobEvents(ctx.controllerHome, job.repoId, job.jobId) }
             : {}),
-          next: 'Raw job state is intentionally not returned through MCP; use get_artifact for bounded evidence content.',
-        });
+          next: digest.terminal
+            ? digest.summary
+            : 'Job is still active. Call get_job with wait=true for a terminal digest, or use get_artifact for bounded evidence.',
+        }, digest.phase === 'failed' || digest.phase === 'timed_out');
       }
       case 'get_artifact': {
         const artifactId = String(args.artifact_id ?? '').trim();

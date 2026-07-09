@@ -50,6 +50,12 @@ details.advanced{margin-top:12px;border-top:1px dashed var(--line);padding-top:1
 .empty{padding:22px;border:1px dashed var(--line);border-radius:14px;color:var(--muted);text-align:center}
 .section-title{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
 .warn{padding:10px 12px;border-radius:12px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.25);color:#fde68a;margin-bottom:12px}
+.opbar{margin-bottom:12px;padding:10px 12px;border-radius:12px;border:1px solid var(--line);background:rgba(255,255,255,.03);display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.opbar.running{border-color:rgba(96,165,250,.35);background:rgba(96,165,250,.08)}
+.opbar.ok{border-color:rgba(52,211,153,.35);background:rgba(52,211,153,.08)}
+.opbar.err{border-color:rgba(248,113,113,.35);background:rgba(248,113,113,.08)}
+.btn:disabled{opacity:.55;cursor:not-allowed}
+.busy-banner{font-size:12px;color:var(--muted)}
 @media(max-width:980px){.body{grid-template-columns:1fr}.side{display:none}.grid.two,.grid.cards{grid-template-columns:1fr}.top{flex-wrap:wrap;height:auto;padding:10px 12px}}
 </style>
 </head>
@@ -107,11 +113,18 @@ var selectedHandoffId='';
 var modePreview=null;
 var advancedRaw=null;
 var lastFacade=null;
+var lastOperation=null; // {phase,statusLabel,summary,errorMessage,at}
+var busy=false;
+var pollTimer=null;
 
 function repoQuery(){return selectedRepoId?'?repoId='+encodeURIComponent(selectedRepoId):''}
 function rememberRepo(id){selectedRepoId=id||'';safeSet('repoHarnessSelectedRepoId',selectedRepoId);setQueryRepoId(selectedRepoId)}
 function rememberWork(id){selectedWorkId=id||'';safeSet('repoHarnessSelectedWorkId',selectedWorkId)}
-function api(path,opts){opts=opts||{};var headers=Object.assign({'content-type':'application/json'},opts.headers||{});return fetch(path,Object.assign({},opts,{credentials:'same-origin',headers:headers})).then(function(r){return r.json().catch(function(){return{}}).then(function(body){if(!r.ok)throw new Error(body.error||body.message||body.summary||String(r.status));return body})})}
+function api(path,opts){opts=opts||{};var headers=Object.assign({'content-type':'application/json'},opts.headers||{});return fetch(path,Object.assign({},opts,{credentials:'same-origin',headers:headers})).then(function(r){return r.json().catch(function(){return{}}).then(function(body){if(!r.ok){var msg=body.summary||body.errorMessage||body.error||body.message||('请求失败 '+r.status);var err=new Error(msg);err.payload=body;err.status=r.status;throw err}return body})})}
+function setBusy(on,label){busy=!!on;document.querySelectorAll('.btn.primary, .btn.danger').forEach(function(b){if(on)b.setAttribute('disabled','disabled');else b.removeAttribute('disabled')});if(on){lastOperation={phase:'running',statusLabel:label||'执行中',summary:label||'正在处理…',at:new Date().toISOString()};renderOpBar()}}
+function setLastOp(res,fallback){var phase=res&&res.phase||(res&&res.status==='ok'?'succeeded':res&&(res.status==='failed'||res.status==='blocked')?'failed':'succeeded');lastOperation={phase:phase,statusLabel:(res&&(res.statusLabel||res.digest&&res.digest.statusLabel))||fallback||'已更新',summary:(res&&(res.summary||res.digest&&res.digest.summary))||fallback||'操作已完成',errorMessage:res&&(res.errorMessage||res.errorClass||(res.digest&&res.digest.errorMessage))||'',next:res&&(res.next||(res.suggestedNextActions&&res.suggestedNextActions[0]&&res.suggestedNextActions[0].label))||'',at:new Date().toISOString()};lastFacade=res;renderOpBar()}
+function renderOpBar(){var nodes=document.querySelectorAll('#opBar');if(!nodes.length)return;var html='';if(lastOperation){var cls=lastOperation.phase==='running'||lastOperation.phase==='queued'||lastOperation.phase==='waiting'?'running':(lastOperation.phase==='failed'||lastOperation.phase==='timed_out'||lastOperation.phase==='blocked')?'err':'ok';html='<div class="opbar '+cls+'"><span class="pill '+(cls==='ok'?'green':cls==='err'?'red':'blue')+'">'+esc(lastOperation.statusLabel)+'</span><span>'+esc(lastOperation.summary)+'</span>'+(lastOperation.errorMessage?'<span class="muted">'+esc(lastOperation.errorMessage)+'</span>':'')+(lastOperation.next?'<span class="muted">下一步：'+esc(lastOperation.next)+'</span>':'')+(busy?'<span class="busy-banner">请稍候…</span>':'')+'</div>'}nodes.forEach(function(n){n.innerHTML=html})}
+function ensurePoll(){if(pollTimer)return;pollTimer=setInterval(function(){var work=obj(commandCenter&&commandCenter.currentWork);if(!work||!work.id)return;if(work.tone==='blue'||work.statusLabel==='进行中'||work.statusLabel==='待开始'){refreshAll({silent:true})}},4000)}
 
 function switchView(name){
   document.querySelectorAll('.nav button').forEach(function(b){b.classList.toggle('active',b.dataset.view===name)});
@@ -155,6 +168,7 @@ function renderHome(){
   var mode=obj(modePreview||cc.modePreviewDefault);
   var el=document.getElementById('view-home');
   el.innerHTML=
+    '<div id="opBar"></div>'+
     warnings+
     '<div class="page-head"><div><h1>指挥中心</h1><p>输入目标，系统会建议直接执行、可恢复的后台任务，或需要你先决定。</p></div></div>'+
     '<div class="grid two">'+
@@ -188,6 +202,7 @@ function renderHome(){
       '</div>'+
     '</div>';
   bindNav(el);
+  renderOpBar();
 }
 
 function renderWorkCard(work, title){
@@ -407,43 +422,61 @@ function previewMode(){
 }
 
 function startTask(){
+  if(busy){toast('上一步仍在处理，请稍候');return}
   var body=taskPayload();
   if(!body.objective){toast('请先输入任务目标');return}
+  setBusy(true,'正在启动任务…');
   api('/api/console/work/start'+repoQuery(),{method:'POST',body:JSON.stringify(body)}).then(function(res){
-    lastFacade=res;
+    setLastOp(res,'任务已提交');
     var data=obj(res.data);
     if(data.work&&data.work.workId){rememberWork(data.work.workId)}
     else if(data.work&&data.work.id){rememberWork(data.work.id)}
     toast(res.summary||'任务已提交');
     return refreshAll();
-  }).then(function(){if(selectedWorkId)switchView('work')}).catch(function(e){toast(e.message)});
+  }).then(function(){if(selectedWorkId)switchView('work')}).catch(function(e){setLastOp(e.payload||{phase:'failed',summary:e.message},e.message);toast(e.message)}).finally(function(){setBusy(false)});
 }
 
 function diagnoseFirst(){
+  if(busy){toast('上一步仍在处理，请稍候');return}
+  setBusy(true,'正在诊断…');
   api('/api/console/repair'+repoQuery(),{method:'POST',body:JSON.stringify({operation:'diagnose',dryRun:true})}).then(function(res){
-    lastFacade=res;toast(res.summary||'诊断完成');switchView('readiness');
-  }).catch(function(e){toast(e.message)});
+    setLastOp(res,'诊断完成');toast(res.summary||'诊断完成');switchView('readiness');
+  }).catch(function(e){setLastOp(e.payload||{phase:'failed',summary:e.message},e.message);toast(e.message)}).finally(function(){setBusy(false)});
 }
 function repairDryRun(){
+  if(busy){toast('上一步仍在处理，请稍候');return}
+  setBusy(true,'正在预览修复…');
   api('/api/console/repair'+repoQuery(),{method:'POST',body:JSON.stringify({operation:'repair',dryRun:true})}).then(function(res){
-    lastFacade=res;advancedRaw=res;toast(res.summary||'已生成修复预览');switchView('advanced');
-  }).catch(function(e){toast(e.message)});
+    setLastOp(res,'已生成修复预览');advancedRaw=res;toast(res.summary||'已生成修复预览');switchView('advanced');
+  }).catch(function(e){setLastOp(e.payload||{phase:'failed',summary:e.message},e.message);toast(e.message)}).finally(function(){setBusy(false)});
 }
 
 function workAction(kind,workId){
+  if(busy){toast('上一步仍在处理，请稍候');return}
   rememberWork(workId);
-  if(kind==='continue')return postWork('/api/console/work/continue',{workId:workId});
-  if(kind==='verify')return postWork('/api/console/work/verify',{workId:workId});
-  if(kind==='finalize')return postWork('/api/console/work/finalize',{workId:workId});
-  if(kind==='stop')return postWork('/api/console/work/stop',{workId:workId,reason:'stopped from console'});
-  if(kind==='repair')return api('/api/console/repair'+repoQuery(),{method:'POST',body:JSON.stringify({operation:'diagnose',dryRun:true,workId:workId})}).then(function(res){lastFacade=res;toast(res.summary||'诊断完成')}).catch(function(e){toast(e.message)});
-  if(kind==='delegate-codex')return postWork('/api/console/work/delegate',{workId:workId,target:'codex',available:true});
-  if(kind==='delegate-grok')return postWork('/api/console/work/delegate',{workId:workId,target:'grok'});
+  if(kind==='continue')return postWork('/api/console/work/continue',{workId:workId},'继续任务');
+  if(kind==='verify')return postWork('/api/console/work/verify',{workId:workId},'运行验证');
+  if(kind==='finalize')return postWork('/api/console/work/finalize',{workId:workId},'收尾任务');
+  if(kind==='stop')return postWork('/api/console/work/stop',{workId:workId,reason:'stopped from console'},'停止任务');
+  if(kind==='repair'){
+    setBusy(true,'正在诊断…');
+    return api('/api/console/repair'+repoQuery(),{method:'POST',body:JSON.stringify({operation:'diagnose',dryRun:true,workId:workId})}).then(function(res){setLastOp(res,'诊断完成');toast(res.summary||'诊断完成')}).catch(function(e){setLastOp(e.payload||{phase:'failed',summary:e.message},e.message);toast(e.message)}).finally(function(){setBusy(false)});
+  }
+  if(kind==='delegate-codex')return postWork('/api/console/work/delegate',{workId:workId,target:'codex',available:true},'委派 Codex');
+  if(kind==='delegate-grok')return postWork('/api/console/work/delegate',{workId:workId,target:'grok'},'准备 Grok 审阅包');
 }
-function postWork(path,body){
+function postWork(path,body,label){
+  setBusy(true,label||'处理中…');
   return api(path+repoQuery(),{method:'POST',body:JSON.stringify(body)}).then(function(res){
-    lastFacade=res;toast(res.summary||'已更新');return refreshAll();
-  }).catch(function(e){toast(e.message)});
+    setLastOp(res,label||'已更新');
+    // Clarify handoff-only / request-packet outcomes for small-brain delegation.
+    if(res&&res.data&&res.data.directExecutionAvailable===false){
+      toast((res.summary||'已准备外部审阅请求')+'（非自动执行）');
+    } else {
+      toast(res.summary||'已更新');
+    }
+    return refreshAll();
+  }).catch(function(e){setLastOp(e.payload||{phase:'failed',summary:e.message},e.message);toast(e.message)}).finally(function(){setBusy(false)});
 }
 function refreshWorkDetail(id){
   api('/api/console/work/'+encodeURIComponent(id)+repoQuery()).then(function(res){
@@ -457,6 +490,7 @@ function refreshWorkDetail(id){
 }
 
 function handoffAction(kind,id){
+  if(busy){toast('上一步仍在处理，请稍候');return}
   var body={};
   if(kind==='resolve'){
     var decision=prompt('记录你的决定','继续执行');
@@ -466,11 +500,13 @@ function handoffAction(kind,id){
   if(kind==='dismiss'){
     body={decision:'dismissed',resolver:'user'};
   }
-  api('/api/console/inbox/'+encodeURIComponent(id)+'/'+kind+repoQuery(),{method:'POST',body:JSON.stringify(body)}).then(function(){
+  setBusy(true,'更新待决定事项…');
+  api('/api/console/inbox/'+encodeURIComponent(id)+'/'+kind+repoQuery(),{method:'POST',body:JSON.stringify(body)}).then(function(res){
+    setLastOp({phase:'succeeded',statusLabel:kind==='resolve'?'已解决':kind==='dismiss'?'已忽略':'已确认',summary:kind==='resolve'?'已记录你的决定':kind==='dismiss'?'已忽略该事项':'已确认已知晓'}, '已更新');
     toast(kind==='resolve'?'已解决':kind==='dismiss'?'已忽略':'已确认');
     selectedHandoffId='';
     return refreshAll();
-  }).catch(function(e){toast(e.message)});
+  }).catch(function(e){setLastOp(e.payload||{phase:'failed',summary:e.message},e.message);toast(e.message)}).finally(function(){setBusy(false)});
 }
 
 function selectRepo(id){
@@ -491,18 +527,23 @@ function loadAdvanced(){
   api('/api/console/advanced'+repoQuery()).then(function(res){advancedRaw=res;renderAdvanced();toast('原始快照已刷新')}).catch(function(e){toast(e.message)});
 }
 
-function refreshAll(){
+function refreshAll(opts){
+  opts=opts||{};
   return api('/api/console/command-center'+repoQuery()).then(function(res){
     commandCenter=res;
     var repo=obj(res.currentRepository);
     if(repo.id)rememberRepo(repo.id);
     if(!selectedWorkId&&res.currentWork&&res.currentWork.id)rememberWork(res.currentWork.id);
-    renderAll();
+    if(!opts.silent)renderAll();
+    else {renderChrome();renderOpBar()}
+    ensurePoll();
   }).catch(function(e){
+    if(opts.silent)return;
     commandCenter={
       readiness:{state:'blocked',label:'读取失败',headline:'控制台不可用',description:e.message||'本地 API 暂时不可用',connectorLabel:'未知',connectorTone:'red',pendingHandoffCount:0,sections:[]},
       handoffs:[],recentWork:[],repositories:[],warnings:[e.message||'读取失败'],modePreviewDefault:{label:'—',explanation:''}
     };
+    setLastOp({phase:'failed',statusLabel:'读取失败',summary:e.message||'本地 API 暂时不可用',errorMessage:e.message},e.message);
     renderAll();
     toast(e.message||'读取失败');
   });

@@ -6,6 +6,7 @@ import { join } from 'path';
 import { ensureControllerHome } from '../../src/cli/repositories/controller-home';
 import { registerRepository } from '../../src/cli/repositories/registry';
 import {
+  applyConsoleSafePatch,
   buildCommandCenter,
   mapRepositoryCard,
   previewExecutionMode,
@@ -108,5 +109,23 @@ describe('console facade api', () => {
     });
     expect((result.data as { mode?: { mode?: string } }).mode?.mode).toBe('handoff_only');
     expect(listConsoleHandoffs(ctx).length).toBeGreaterThan(0);
+  });
+
+  test('console safe patch applies synchronously with readable digest', () => {
+    const { ctx } = fixture();
+    const result = applyConsoleSafePatch(ctx, {
+      purpose: 'create notes file',
+      operations: [
+        { type: 'create', path: 'notes/hello.md', content: '# hello\\n' },
+      ],
+    });
+    expect(result.terminal).toBe(true);
+    expect(result.applyMode).toBe('sync');
+    expect(result.phase === 'succeeded' || result.phase === 'failed').toBe(true);
+    expect(String(result.summary || '')).toBeTruthy();
+    if (result.phase === 'succeeded') {
+      expect(Array.isArray(result.changedFiles)).toBe(true);
+      expect((result.changedFiles as string[]).some((path) => path.includes('hello.md'))).toBe(true);
+    }
   });
 });

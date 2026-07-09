@@ -8,17 +8,53 @@ import {
 import { repositoryToolDefinitions } from '../../../cli/mcp/repository-tools';
 import { resolveRepositorySelection } from '../../../cli/repositories/registry';
 import { ensureRepositoryRuntimeStorage } from '../../../cli/repositories/runtime-storage';
-import { createExecutionJob } from '../../execution/jobs/store';
+import { createExecutionJob, getExecutionJob } from '../../execution/jobs/store';
 import type { ExecutionJobPriority, ExecutionJobType } from '../../execution/jobs/types';
+import { waitForExecutionJob } from '../../execution/jobs/wait';
 import { ensureControllerDaemon } from '../../control-plane/daemon-client';
+import { buildAcceptedQueuedDigest, buildJobOperationDigest } from '../../control-plane/facade/operation-digest';
 import { claimsForMcpOperation } from './resource-policy';
 
 const DIRECT_REPOSITORY_TOOLS = new Set(['repository_list', 'repository_get', 'repository_workbench', 'repository_command_preview']);
 const DIRECT_HOT_READ_TOOLS = new Set([
   'get_task_run', 'get_task_run_events', 'get_task_run_log',
 ]);
+/** Small interactive development writes: run synchronously by default so ChatGPT/GUI get immediate results. */
+const INTERACTIVE_SYNC_WRITE_TOOLS = new Set([
+  'repository_safe_patch_apply',
+  'repository_git_create_branch',
+  'repository_git_switch_branch',
+  'repository_git_commit',
+  'begin_edit_session',
+  'apply_patch',
+  'apply_edit_operations',
+  'create_edit_savepoint',
+  'git_stage_paths',
+  'git_commit_paths',
+]);
 const P0_TOOLS = new Set(['run_check', 'verify_edit_session', 'repository_command_execute']);
 const P2_TOOLS = new Set(['write_prd', 'write_sprint', 'write_plan', 'publish_issue_to_github']);
+
+function wantsAsyncExecution(args: Record<string, unknown>): boolean {
+  return args.apply_mode === 'async' || args.mode === 'async' || args.async === true;
+}
+
+function wantsWaitForResult(args: Record<string, unknown>): boolean {
+  return args.wait === true
+    || args.await_result === true
+    || args.wait_for_result === true
+    || typeof args.wait_ms === 'number';
+}
+
+function waitTimeoutMs(args: Record<string, unknown>): number {
+  if (typeof args.wait_ms === 'number' && Number.isFinite(args.wait_ms)) {
+    return Math.max(200, Math.min(Math.trunc(args.wait_ms), 120_000));
+  }
+  if (typeof args.timeout_ms === 'number' && Number.isFinite(args.timeout_ms) && wantsWaitForResult(args)) {
+    return Math.max(200, Math.min(Math.trunc(args.timeout_ms), 120_000));
+  }
+  return 15_000;
+}
 
 function result(value: Record<string, unknown>): CallToolResult {
   return { content: [{ type: 'text', text: JSON.stringify(value, null, 2) }], structuredContent: value };
@@ -28,12 +64,19 @@ function toolDefinition(ctx: MultiRepositoryMcpToolContext, name: string): McpTo
   return [...repositoryToolDefinitions, ...buildMultiRepositoryToolDefinitions(ctx)].find((tool) => tool.name === name);
 }
 
-function shouldCreateDurableJob(ctx: MultiRepositoryMcpToolContext, name: string): boolean {
+function shouldCreateDurableJob(
+  ctx: MultiRepositoryMcpToolContext,
+  name: string,
+  args: Record<string, unknown> = {},
+): boolean {
   const definition = toolDefinition(ctx, name);
   if (!definition) return false;
   if (name.startsWith('repository_') && DIRECT_REPOSITORY_TOOLS.has(name)) return false;
   if (definition.annotations?.readOnlyHint === true) return false;
-  return !DIRECT_HOT_READ_TOOLS.has(name);
+  if (DIRECT_HOT_READ_TOOLS.has(name)) return false;
+  // Interactive development path: sync by default unless caller opts into async queueing.
+  if (INTERACTIVE_SYNC_WRITE_TOOLS.has(name) && !wantsAsyncExecution(args)) return false;
+  return true;
 }
 
 function jobType(name: string): ExecutionJobType {
@@ -85,6 +128,19 @@ export function injectDurableCommandFields(tool: McpToolDefinition): McpToolDefi
           type: 'string',
           description: 'Idempotency key. Retries with the same request_id return the original durable Job.',
         },
+        apply_mode: {
+          type: 'string',
+          enum: ['sync', 'async'],
+          description: 'Interactive development tools default to sync. Set async to queue a durable Job instead.',
+        },
+        wait: {
+          type: 'boolean',
+          description: 'When true for durable operations, wait up to wait_ms for a terminal result digest.',
+        },
+        wait_ms: {
+          type: 'number',
+          description: 'Max wait for terminal job result when wait=true. Default 15000, max 120000.',
+        },
       },
     },
   };
@@ -95,7 +151,7 @@ export async function routeDurableMcpCall(
   name: string,
   args: Record<string, unknown>,
 ): Promise<CallToolResult | undefined> {
-  if (!shouldCreateDurableJob(ctx, name)) return undefined;
+  if (!shouldCreateDurableJob(ctx, name, args)) return undefined;
 
   const restoringDisabledRepository = name === 'repository_update'
     && typeof args.repo_id === 'string'
@@ -153,6 +209,51 @@ export async function routeDurableMcpCall(
     maxAttempts: 2,
   });
   const daemon = ensureControllerDaemon(ctx.controllerHome);
+  if (wantsWaitForResult(args)) {
+    const waited = await waitForExecutionJob({
+      controllerHome: ctx.controllerHome,
+      repoId,
+      jobId: created.job.jobId,
+      timeoutMs: waitTimeoutMs(args),
+    });
+    const digest = buildJobOperationDigest(waited.job, {
+      waited: true,
+      stillRunning: waited.timedOut,
+    });
+    return result({
+      accepted: true,
+      waited: true,
+      timedOut: waited.timedOut,
+      waitedMs: waited.waitedMs,
+      jobId: waited.job.jobId,
+      repoId,
+      checkoutId,
+      status: waited.job.status,
+      requestId: waited.job.requestId,
+      deduplicated: created.deduplicated,
+      daemon: { status: daemon.status, pid: daemon.pid },
+      digest,
+      summary: digest.summary,
+      phase: digest.phase,
+      statusLabel: digest.statusLabel,
+      errorClass: digest.errorClass,
+      errorMessage: digest.errorMessage,
+      changedFiles: digest.changedFiles,
+      suggestedNextActions: digest.suggestedNextActions,
+      next: waited.timedOut
+        ? `Still ${waited.job.status}. Call get_job/work_get with wait=true again, or inspect job_id ${waited.job.jobId}.`
+        : digest.summary,
+    });
+  }
+
+  const queued = getExecutionJob(ctx.controllerHome, repoId, created.job.jobId);
+  const digest = buildAcceptedQueuedDigest({
+    jobId: queued.jobId,
+    requestId: queued.requestId,
+    operation: name,
+    status: queued.status,
+    deduplicated: created.deduplicated,
+  });
   return result({
     accepted: true,
     jobId: created.job.jobId,
@@ -162,6 +263,11 @@ export async function routeDurableMcpCall(
     requestId: created.job.requestId,
     deduplicated: created.deduplicated,
     daemon: { status: daemon.status, pid: daemon.pid },
-    next: `Call get_job with job_id ${created.job.jobId}.`,
+    digest,
+    summary: digest.summary,
+    phase: digest.phase,
+    statusLabel: digest.statusLabel,
+    suggestedNextActions: digest.suggestedNextActions,
+    next: `Call get_job with job_id ${created.job.jobId} and wait=true for a terminal result digest.`,
   });
 }

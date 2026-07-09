@@ -9,3 +9,4 @@ export * from './check-normalization';
 export * from './goal-workloop';
 export * from './codex-delegation';
 export * from './self-healing-loop';
+export * from './operation-digest';

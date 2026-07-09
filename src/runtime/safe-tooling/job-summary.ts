@@ -1,5 +1,6 @@
 import { redactMcpText } from '../../cli/mcp/redaction';
 import type { ExecutionJob } from '../execution/jobs/types';
+import { buildJobOperationDigest } from '../control-plane/facade/operation-digest';
 import type { SafeJobResultSummary } from './types';
 
 type SafeErrorClass = NonNullable<SafeJobResultSummary['safeError']>['class'];
@@ -133,12 +134,22 @@ export function summarizeExecutionJobForMcp(job: ExecutionJob, repoRoot?: string
   const artifactRefs = collectArtifactRefs(job.result, job.error?.details);
   const evidenceIds = job.evidenceIds.slice(-20);
   const errorDetailsAvailable = job.error?.details !== undefined;
+  const digest = buildJobOperationDigest(job);
   return {
     jobId: job.jobId,
     repoId: job.repoId,
     checkoutId: job.checkoutId,
     type: job.type,
     status: job.status,
+    phase: digest.phase,
+    statusLabel: digest.statusLabel,
+    summary: digest.summary,
+    terminal: digest.terminal,
+    errorClass: digest.errorClass,
+    errorMessage: digest.errorMessage ?? (job.error?.message ? sanitizeMessage(job.error.message, replacements) : undefined),
+    changedFiles: digest.changedFiles,
+    suggestedNextActions: digest.suggestedNextActions,
+    digest,
     priority: job.priority,
     requestId: job.requestId,
     semanticKey: job.semanticKey,
@@ -191,11 +202,14 @@ export function summarizeExecutionJobForMcp(job: ExecutionJob, repoRoot?: string
         next: artifactRefs.length ? 'Call get_artifact with a listed artifactId for bounded content.' : 'Result is returned only as a bounded preview in job summaries.',
       }
       : undefined,
-    error: job.error
+    error: job.error || digest.errorMessage
       ? {
-        code: job.error.code,
-        message: sanitizeMessage(job.error.message, replacements),
-        retryable: job.error.retryable,
+        code: job.error?.code || digest.errorClass || 'UNKNOWN_FAILURE',
+        message: job.error?.message
+          ? sanitizeMessage(job.error.message, replacements)
+          : (digest.errorMessage || '任务失败，但未提供详细错误信息。'),
+        class: digest.errorClass || classifyError(job.error?.message || digest.errorMessage || ''),
+        retryable: job.error?.retryable ?? false,
         detailsAvailable: errorDetailsAvailable,
         detailsSuppressed: errorDetailsAvailable && artifactRefs.length === 0,
         ...(artifactRefs.length ? { artifactRefs } : {}),

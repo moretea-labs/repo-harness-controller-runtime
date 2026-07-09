@@ -13,6 +13,8 @@ import { readControllerDaemonStatus } from '../../runtime/control-plane/daemon-c
 import {
   acknowledgeHandoffItem,
   buildFacadeResult,
+  buildSyncOperationDigest,
+  classifyUserFacingError,
   classifyVerificationOutcome,
   continueGoalWorkloop,
   delegateToCodexCerebellum,
@@ -38,6 +40,8 @@ import {
   type WorkContract,
 } from '../../runtime/control-plane/facade';
 import { buildRuntimeMaintenanceStatus } from '../../runtime/recovery';
+import { applySafePatch } from '../repositories/safe-patch';
+import { withControllerLock } from '../repositories/locks';
 import type {
   CommandCenterViewModel,
   HandoffCardViewModel,
@@ -652,6 +656,63 @@ export function buildConsoleContext(ctx: ConsoleFacadeContext, workId?: string) 
 
 export function normalizeRequestedChecks(ctx: ConsoleFacadeContext, requested: string[]) {
   return normalizeCheckIds(requested, listControllerChecks(ctx.repository.canonicalRoot));
+}
+
+/**
+ * Interactive safe patch for console/GUI: always sync, returns readable digest.
+ */
+export function applyConsoleSafePatch(
+  ctx: ConsoleFacadeContext,
+  input: {
+    operations: unknown;
+    purpose?: string;
+    allowedPaths?: string[];
+    sessionId?: string;
+  },
+): Record<string, unknown> {
+  const applied = withControllerLock(
+    ctx.controllerHome,
+    { scope: 'repository', repoId: ctx.repository.repoId },
+    'console:safe_patch_apply',
+    () => applySafePatch(ctx.repository, {
+      sessionId: input.sessionId,
+      purpose: input.purpose ?? 'Console interactive edit',
+      operations: input.operations,
+      allowedPaths: input.allowedPaths,
+      refreshFingerprints: true,
+      recoverStaleSession: true,
+    }),
+    60_000,
+  );
+  const changedFiles = [...new Set((applied.appliedChunks ?? []).flatMap((chunk) => chunk.paths ?? []))];
+  const ok = applied.status === 'applied';
+  const firstFailure = applied.failures?.[0];
+  const digest = buildSyncOperationDigest({
+    ok,
+    operation: 'safe_patch_apply',
+    summary: ok
+      ? `已保存修改（${changedFiles.length} 个文件）。`
+      : `修改失败：${firstFailure?.message || '请检查路径或内容后重试'}`,
+    changedFiles,
+    errorClass: ok ? undefined : classifyUserFacingError({
+      code: firstFailure?.code,
+      message: firstFailure?.message,
+    }),
+    errorMessage: firstFailure?.message,
+  });
+  return {
+    ...applied,
+    digest,
+    summary: digest.summary,
+    phase: digest.phase,
+    statusLabel: digest.statusLabel,
+    terminal: true,
+    applyMode: 'sync',
+    changedFiles,
+    errorClass: digest.errorClass,
+    errorMessage: digest.errorMessage,
+    suggestedNextActions: digest.suggestedNextActions,
+  };
 }
 
 /** Keep advanced/debug payload separate from primary console models. */
