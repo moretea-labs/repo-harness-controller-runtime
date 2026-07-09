@@ -4,6 +4,7 @@ import { join } from 'path';
 import { ensureControllerHome, ensureRepositoryControllerLayout, repositoryControllerRoot } from '../../../cli/repositories/controller-home';
 import { withControllerLock } from '../../../cli/repositories/locks';
 import { appendJobEvent } from '../../evidence/event-ledger';
+import { writeExecutionArtifact } from '../../evidence/artifact-store';
 import { markRepositoryProjectionDirty } from '../../projections/invalidation';
 import { touchSchedulerWakeSignal } from '../../control-plane/global-scheduler/wake-signal';
 import { readJsonFile, removeFile, sanitizeFileComponent, writeJsonAtomic } from '../../shared/json-files';
@@ -79,6 +80,88 @@ function readRecentIndex(controllerHome: string): RecentJobIndex {
   });
 }
 
+const MAX_INLINE_JOB_RESULT_BYTES = 64 * 1024;
+const MAX_INLINE_ERROR_MESSAGE_CHARS = 2_000;
+
+function jsonByteLength(value: unknown): number | undefined {
+  try {
+    return Buffer.byteLength(JSON.stringify(value));
+  } catch {
+    return undefined;
+  }
+}
+
+function scrubErrorMessage(message: string): string {
+  const scrubbed = message
+    .replace(/\/Users\/[^\s"']+/g, '<abs-path>')
+    .replace(/\/(?:private\/)?var\/folders\/[^\s"']+/g, '<abs-path>')
+    .replace(/\/(?:private\/)?tmp\/[^\s"']+/g, '<abs-path>')
+    .replace(/[A-Za-z]:\\[^\s"']+/g, '<abs-path>');
+  if (scrubbed.length <= MAX_INLINE_ERROR_MESSAGE_CHARS) return scrubbed;
+  return `${scrubbed.slice(0, MAX_INLINE_ERROR_MESSAGE_CHARS)}...`;
+}
+
+function isArtifactPointer(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.artifactId === 'string' && typeof record.artifactKind === 'string';
+}
+
+function artifactPointerFor(job: ExecutionJob, artifact: ReturnType<typeof writeExecutionArtifact>, byteLength: number): Record<string, unknown> {
+  return {
+    externalized: true,
+    byteLength,
+    artifactId: artifact.artifactId,
+    artifactKind: artifact.kind,
+    detailPointer: {
+      tool: 'get_artifact',
+      repoId: job.repoId,
+      artifactId: artifact.artifactId,
+      maxBytes: 512 * 1024,
+    },
+    next: `Call get_artifact with repo_id=${job.repoId} and artifact_id=${artifact.artifactId}.`,
+  };
+}
+
+function externalizeJobValue(
+  controllerHome: string,
+  job: ExecutionJob,
+  kind: 'job-result' | 'job-error',
+  value: Record<string, unknown>,
+): Record<string, unknown> {
+  if (isArtifactPointer(value)) return value;
+  const byteLength = jsonByteLength(value) ?? 0;
+  const artifact = writeExecutionArtifact(controllerHome, job, kind, value);
+  return artifactPointerFor(job, artifact, byteLength);
+}
+
+function sanitizeJobForPersistence(controllerHome: string, job: ExecutionJob): ExecutionJob {
+  const next: ExecutionJob = { ...job };
+  if (next.error) {
+    const error = { ...next.error, message: scrubErrorMessage(next.error.message) };
+    if (error.details && !isArtifactPointer(error.details)) {
+      error.details = externalizeJobValue(controllerHome, next, 'job-error', error.details);
+    }
+    next.error = error;
+  }
+  if (next.outcome?.infrastructureError?.message) {
+    next.outcome = {
+      ...next.outcome,
+      infrastructureError: {
+        ...next.outcome.infrastructureError,
+        message: scrubErrorMessage(next.outcome.infrastructureError.message),
+      },
+    };
+  }
+  if (next.result && !isArtifactPointer(next.result)) {
+    const resultBytes = jsonByteLength(next.result);
+    if (resultBytes !== undefined && resultBytes > MAX_INLINE_JOB_RESULT_BYTES) {
+      next.result = externalizeJobValue(controllerHome, next, 'job-result', next.result);
+    }
+  }
+  return next;
+}
+
 function writeActiveIndex(controllerHome: string, index: ActiveJobIndex): void {
   const deduped = new Map(index.jobs.map((entry) => [entry.jobId, entry]));
   writeJsonAtomic(activeIndexPath(controllerHome), {
@@ -126,15 +209,16 @@ function upsertIndexes(controllerHome: string, job: ExecutionJob): void {
 }
 
 function persistJobRecord(controllerHome: string, job: ExecutionJob): ExecutionJob {
-  writeJsonAtomic(jobPath(controllerHome, job.repoId, job.jobId), job);
-  return job;
+  const sanitized = sanitizeJobForPersistence(controllerHome, job);
+  writeJsonAtomic(jobPath(controllerHome, sanitized.repoId, sanitized.jobId), sanitized);
+  return sanitized;
 }
 
 function persistJob(controllerHome: string, job: ExecutionJob): ExecutionJob {
-  persistJobRecord(controllerHome, job);
-  upsertIndexes(controllerHome, job);
-  markRepositoryProjectionDirty(controllerHome, job.repoId, `job:${job.jobId}:${job.status}`);
-  return job;
+  const persisted = persistJobRecord(controllerHome, job);
+  upsertIndexes(controllerHome, persisted);
+  markRepositoryProjectionDirty(controllerHome, persisted.repoId, `job:${persisted.jobId}:${persisted.status}`);
+  return persisted;
 }
 
 export function getExecutionJob(controllerHome: string, repoId: string, jobId: string): ExecutionJob {

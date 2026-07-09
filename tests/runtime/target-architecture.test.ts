@@ -456,6 +456,52 @@ describe('target architecture runtime', () => {
     expect(current.status).toBe('succeeded');
   });
 
+  test('enforces bounded ExecutionJob persistence for raw result and error details', () => {
+    const controllerHome = home();
+    const job = createExecutionJob(controllerHome, {
+      repoId: 'repo-a',
+      type: 'repository-command',
+      requestId: 'raw-large-job-persistence',
+      semanticKey: 'raw-large-job-persistence',
+      origin: { surface: 'mcp', actor: 'test' },
+      payload: { operation: 'repository_command_execute', target: 'repository-tool' },
+      resourceClaims: [],
+    }).job;
+
+    updateExecutionJob(controllerHome, 'repo-a', job.jobId, (current) => ({
+      ...current,
+      status: 'failed',
+      result: {
+        stdout: 'stdout-payload'.repeat(8_000),
+        repository: { localRoot: '/Users/greyson/private/repo' },
+      },
+      error: {
+        code: 'RAW_FAILURE',
+        message: `/Users/greyson/private/repo failed ${'x'.repeat(4_000)}`,
+        retryable: false,
+        details: {
+          repository: { localRoot: '/Users/greyson/private/repo' },
+          runtimeStorage: { controllerRoot: '/Users/greyson/private/repo/_ops/controller-home' },
+          stdout: 'stdout-payload'.repeat(8_000),
+        },
+      },
+    }));
+
+    const persisted = getExecutionJob(controllerHome, 'repo-a', job.jobId);
+    const serialized = JSON.stringify(persisted);
+    expect(serialized).not.toContain('stdout-payload');
+    expect(serialized).not.toContain('runtimeStorage');
+    expect(serialized).not.toContain('/Users/greyson/private/repo');
+    expect(persisted.error?.message.length).toBeLessThanOrEqual(2_003);
+    expect(persisted.result?.artifactId).toBeTruthy();
+    expect(persisted.error?.details?.artifactId).toBeTruthy();
+
+    const resultArtifact = readExecutionArtifact(controllerHome, 'repo-a', String(persisted.result?.artifactId), 512 * 1024);
+    const errorArtifact = readExecutionArtifact(controllerHome, 'repo-a', String(persisted.error?.details?.artifactId), 512 * 1024);
+    expect(JSON.stringify(resultArtifact.content)).toContain('stdout-payload');
+    expect(JSON.stringify(errorArtifact.content)).toContain('runtimeStorage');
+  });
+
   test('moves oversized job results into the Evidence Plane', () => {
     const controllerHome = home();
     const job = createExecutionJob(controllerHome, {
