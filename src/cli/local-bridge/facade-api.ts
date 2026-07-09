@@ -84,6 +84,8 @@ import {
   localToolList,
   localToolConfigGet,
   localToolConfigUpdate,
+  providerApiSettingsGet,
+  providerApiSettingsUpdate,
   providerConfigGet,
   providerConfigUpdate,
   providerCredentialsStatus,
@@ -890,6 +892,27 @@ export function consoleProviderCredentials(ctx: ConsoleFacadeContext) {
 
 export function consoleProviderReset(ctx: ConsoleFacadeContext) {
   return providerResetDefaults(configCtx(ctx));
+}
+
+export function consoleProviderApiSettingsGet(ctx: ConsoleFacadeContext, providerId: string) {
+  return providerApiSettingsGet(configCtx(ctx), providerId);
+}
+
+export function consoleProviderApiSettingsUpdate(
+  ctx: ConsoleFacadeContext,
+  providerId: string,
+  body: Record<string, unknown>,
+) {
+  return providerApiSettingsUpdate(configCtx(ctx), providerId, {
+    baseUrl: typeof body.baseUrl === 'string' ? body.baseUrl : typeof body.base_url === 'string' ? body.base_url : undefined,
+    model: typeof body.model === 'string' ? body.model : undefined,
+    apiKey: typeof body.apiKey === 'string'
+      ? body.apiKey
+      : typeof body.api_key === 'string'
+        ? body.api_key
+        : undefined,
+    clearApiKey: body.clearApiKey === true || body.clear_api_key === true,
+  });
 }
 
 export function consoleLocalToolList(ctx: ConsoleFacadeContext) {

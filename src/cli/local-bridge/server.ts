@@ -90,6 +90,8 @@ import {
   consoleLocalToolEnable,
   consoleLocalToolHealth,
   consoleLocalToolList,
+  consoleProviderApiSettingsGet,
+  consoleProviderApiSettingsUpdate,
   consoleProviderConfigGet,
   consoleProviderConfigUpdate,
   consoleProviderCredentials,
@@ -1201,6 +1203,27 @@ export async function startLocalBridgeServer(
   app.post("/api/console/providers/reset", (request, response) => {
     try {
       response.json({ config: consoleProviderReset(consoleCtx(request)), redacted: true });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.get("/api/console/providers/:providerId/api-settings", (request, response) => {
+    try {
+      response.json(consoleProviderApiSettingsGet(consoleCtx(request), String(request.params.providerId ?? "")));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/console/providers/:providerId/api-settings", (request, response) => {
+    try {
+      const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
+        ? request.body as Record<string, unknown>
+        : {};
+      response.json(consoleProviderApiSettingsUpdate(
+        consoleCtx(request),
+        String(request.params.providerId ?? ""),
+        body,
+      ));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }

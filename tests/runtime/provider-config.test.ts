@@ -11,12 +11,16 @@ import {
   localToolDisable,
   localToolEnable,
   localToolList,
+  providerApiSettingsGet,
+  providerApiSettingsUpdate,
   providerConfigGet,
   providerConfigUpdate,
   providerCredentialsStatus,
   providerDisable,
   providerEnable,
   providerPriorityUpdate,
+  readProviderConfig,
+  readProviderSecrets,
   routeExecutor,
   type ConfigFacadeContext,
 } from '../../src/runtime/control-plane/goal-loop';
@@ -291,6 +295,46 @@ describe('credentials and live mode', () => {
     const grok = creds.find((c) => c.providerId === 'grok_api');
     expect(grok?.authPresent).toBe(true);
     expect(grok?.presentEnvVars).toContain('XAI_API_KEY');
+  });
+
+  test('GUI can configure baseUrl, model, and stored apiKey without leaking secrets', () => {
+    const { ctx, root } = fixture({});
+    const secret = 'xai-page-configured-secret-key-9999';
+    const saved = providerApiSettingsUpdate(ctx, 'grok_api', {
+      baseUrl: 'https://api.x.ai/v1',
+      model: 'grok-3-mini',
+      apiKey: secret,
+    });
+    expect(saved.ok).toBe(true);
+    expect(saved.model).toBe('grok-3-mini');
+    expect(saved.baseUrl).toBe('https://api.x.ai/v1');
+    expect(saved.storedAuthPresent).toBe(true);
+    expect(saved.storedKeyHint).toBe('…9999');
+    expect(JSON.stringify(saved)).not.toContain(secret);
+
+    const pref = readProviderConfig({ root }).providers.find((p) => p.providerId === 'grok_api');
+    expect(pref?.model).toBe('grok-3-mini');
+    expect(JSON.stringify(pref)).not.toContain(secret);
+
+    const secrets = readProviderSecrets({ root });
+    expect(secrets.providers.grok_api?.apiKey).toBe(secret);
+
+    const get = providerApiSettingsGet(ctx, 'grok_api');
+    expect(get.hasStoredApiKey).toBe(true);
+    expect(JSON.stringify(get)).not.toContain(secret);
+
+    const providers = listProviders({
+      env: {},
+      skipExecutableProbe: true,
+      configLocation: { root },
+      liveModelProvidersEffective: true,
+    });
+    const grok = providers.find((p) => p.providerId === 'grok_api');
+    expect(grok?.authPresent).toBe(true);
+    expect(grok?.directDispatch).toBe(true);
+
+    providerApiSettingsUpdate(ctx, 'grok_api', { clearApiKey: true });
+    expect(providerApiSettingsGet(ctx, 'grok_api').hasStoredApiKey).toBe(false);
   });
 });
 

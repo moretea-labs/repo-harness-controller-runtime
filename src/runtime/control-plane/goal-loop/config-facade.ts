@@ -3,12 +3,20 @@ import {
   defaultLocalToolConfig,
   defaultProviderConfig,
   defaultRoutingConfig,
+  getStoredProviderApiKey,
+  hasStoredProviderApiKey,
   isLiveModelProvidersEffective,
   liveModelProvidersEnvEnabled,
+  maskApiKeyHint,
   readGoalLoopPolicyConfig,
   readLocalToolConfig,
   readProviderConfig,
   readRoutingConfig,
+  REMOTE_API_DEFAULTS,
+  REMOTE_API_PROVIDER_IDS,
+  resolveProviderAuthPresent,
+  setStoredProviderApiKey,
+  updateProviderApiPreference,
   writeGoalLoopPolicyConfig,
   writeLocalToolConfig,
   writeProviderConfig,
@@ -53,11 +61,9 @@ const KIND_LABELS: Record<string, string> = {
   handoff_only: 'Handoff-only',
 };
 
-const CREDENTIAL_ENV: Record<string, string[]> = {
-  grok_api: ['XAI_API_KEY', 'REPO_HARNESS_XAI_API_KEY'],
-  openai_api: ['OPENAI_API_KEY', 'REPO_HARNESS_OPENAI_API_KEY'],
-  deepseek_api: ['DEEPSEEK_API_KEY', 'REPO_HARNESS_DEEPSEEK_API_KEY'],
-};
+const CREDENTIAL_ENV: Record<string, string[]> = Object.fromEntries(
+  Object.entries(REMOTE_API_DEFAULTS).map(([id, meta]) => [id, meta.envVars]),
+);
 
 export interface ConfigFacadeContext {
   controllerHome: string;
@@ -88,26 +94,41 @@ function presentEnvVars(names: string[], env: NodeJS.ProcessEnv): string[] {
 function setupExample(envVars: string[]): string {
   const primary = envVars[0] ?? 'API_KEY';
   return [
-    `# Do not commit secrets. Set in your shell or OS secret manager.`,
+    `# Option A — environment variable (not committed to git)`,
     `export ${primary}=...`,
-    `# Optional: allow live remote model API calls (required for direct Grok/OpenAI/DeepSeek dispatch)`,
+    `# Option B — configure URL / API key / model in GUI: 模型与工具 → provider card`,
+    `# Stored keys live only under controllerHome/global/provider-secrets.json`,
     `export REPO_HARNESS_ENABLE_LIVE_MODEL_PROVIDERS=1`,
   ].join('\n');
 }
 
 export function providerCredentialsStatus(ctx: ConfigFacadeContext): CredentialStatusEntry[] {
   const env = ctx.env ?? process.env;
+  const loc = location(ctx);
+  const config = readProviderConfig(loc);
+  const prefById = new Map(config.providers.map((p) => [p.providerId, p]));
   return Object.entries(CREDENTIAL_ENV).map(([providerId, requiredEnvVars]) => {
     const present = presentEnvVars(requiredEnvVars, env);
+    const auth = resolveProviderAuthPresent(loc, providerId, env, requiredEnvVars);
+    const defaults = REMOTE_API_DEFAULTS[providerId];
+    const pref = prefById.get(providerId);
+    const storedKey = auth.storedAuth ? getStoredProviderApiKey(loc, providerId) : undefined;
     return {
       providerId,
       displayName: DISPLAY_NAMES[providerId] ?? providerId,
       requiredEnvVars,
       presentEnvVars: present,
       missingEnvVars: requiredEnvVars.filter((name) => !present.includes(name)),
-      authPresent: present.length > 0,
+      authPresent: auth.authPresent,
+      envAuthPresent: auth.envAuth,
+      storedAuthPresent: auth.storedAuth,
+      storedKeyHint: maskApiKeyHint(storedKey),
+      baseUrl: pref?.baseUrl ?? defaults?.baseUrl,
+      model: pref?.model ?? defaults?.model,
+      defaultBaseUrl: defaults?.baseUrl,
+      defaultModel: defaults?.model,
       setupExample: setupExample(requiredEnvVars),
-      storageMode: 'environment_variable_only',
+      storageMode: 'environment_or_controller_home',
       redacted: true,
     };
   });
@@ -133,8 +154,11 @@ function toProviderCard(
   livePref: boolean,
   liveEffective: boolean,
   healthAt: string,
+  cred?: CredentialStatusEntry,
 ): ProviderConfigCard {
   const handoffOnly = provider.providerId === 'chatgpt_handoff' || provider.kind === 'handoff_only';
+  const defaults = REMOTE_API_DEFAULTS[provider.providerId];
+  const configurable = REMOTE_API_PROVIDER_IDS.includes(provider.providerId);
   return {
     providerId: provider.providerId,
     displayName: DISPLAY_NAMES[provider.providerId] ?? provider.providerId,
@@ -153,10 +177,24 @@ function toProviderCard(
       externalSideEffects: provider.safety.requiresApprovalForExternalEffects ? 'approval_required' : 'never',
     },
     credential: {
-      authPresent: provider.authPresent === true,
+      authPresent: provider.authPresent === true || cred?.authPresent === true,
       requiredEnvVars: CREDENTIAL_ENV[provider.providerId] ?? [],
-      presentEnvVars: [],
+      presentEnvVars: cred?.presentEnvVars ?? [],
+      envAuthPresent: cred?.envAuthPresent,
+      storedAuthPresent: cred?.storedAuthPresent,
+      storedKeyHint: cred?.storedKeyHint,
     },
+    apiSettings: configurable
+      ? {
+          configurable: true,
+          baseUrl: pref?.baseUrl ?? defaults?.baseUrl ?? '',
+          model: pref?.model ?? defaults?.model ?? '',
+          defaultBaseUrl: defaults?.baseUrl ?? '',
+          defaultModel: defaults?.model ?? '',
+          hasStoredApiKey: cred?.storedAuthPresent === true,
+          storedKeyHint: cred?.storedKeyHint,
+        }
+      : undefined,
     liveModelCalls: {
       envEnabled: liveEnv,
       preferenceEnabled: livePref,
@@ -189,16 +227,16 @@ export function buildAutomationSettingsView(ctx: ConfigFacadeContext): Automatio
   const credById = new Map(creds.map((c) => [c.providerId, c]));
 
   const cards = providers.map((provider) => {
-    const card = toProviderCard(provider, prefById.get(provider.providerId), liveEnv, livePref, liveEffective, at);
     const cred = credById.get(provider.providerId);
-    if (cred) {
-      card.credential = {
-        authPresent: cred.authPresent,
-        requiredEnvVars: cred.requiredEnvVars,
-        presentEnvVars: cred.presentEnvVars,
-      };
-    }
-    return card;
+    return toProviderCard(
+      provider,
+      prefById.get(provider.providerId),
+      liveEnv,
+      livePref,
+      liveEffective,
+      at,
+      cred,
+    );
   });
 
   const localTools = listLocalTools({
@@ -393,6 +431,92 @@ export function providerHealthCheck(ctx: ConfigFacadeContext, providerId?: strin
 
 export function providerResetDefaults(ctx: ConfigFacadeContext): ProviderConfigFile {
   return writeProviderConfig(location(ctx), defaultProviderConfig());
+}
+
+/**
+ * Save GUI-configured remote API settings: baseUrl, model, optional apiKey.
+ * API key is stored only in controllerHome provider-secrets.json (never in provider-config.json or git repo).
+ * Responses never echo the raw key.
+ */
+export function providerApiSettingsUpdate(
+  ctx: ConfigFacadeContext,
+  providerId: string,
+  input: {
+    baseUrl?: string;
+    model?: string;
+    /** When set to non-empty string, replaces stored key. Empty/omitted leaves existing key. */
+    apiKey?: string;
+    /** When true, clears stored API key (env vars still work). */
+    clearApiKey?: boolean;
+  },
+): {
+  ok: true;
+  providerId: string;
+  baseUrl: string;
+  model: string;
+  authPresent: boolean;
+  envAuthPresent: boolean;
+  storedAuthPresent: boolean;
+  storedKeyHint?: string;
+  redacted: true;
+} {
+  if (!REMOTE_API_PROVIDER_IDS.includes(providerId)) {
+    throw new Error(`PROVIDER_NOT_REMOTE_API: ${providerId} does not support URL/API key/model configuration`);
+  }
+  const loc = location(ctx);
+  const defaults = REMOTE_API_DEFAULTS[providerId]!;
+
+  if (input.clearApiKey === true) {
+    setStoredProviderApiKey(loc, providerId, null);
+  } else if (typeof input.apiKey === 'string' && input.apiKey.trim()) {
+    setStoredProviderApiKey(loc, providerId, input.apiKey.trim());
+  }
+
+  const config = updateProviderApiPreference(loc, providerId, {
+    baseUrl: input.baseUrl,
+    model: input.model,
+  });
+  const pref = config.providers.find((p) => p.providerId === providerId);
+  const auth = resolveProviderAuthPresent(loc, providerId, ctx.env ?? process.env, defaults.envVars);
+  const storedKey = auth.storedAuth ? getStoredProviderApiKey(loc, providerId) : undefined;
+
+  return {
+    ok: true,
+    providerId,
+    baseUrl: pref?.baseUrl ?? defaults.baseUrl,
+    model: pref?.model ?? defaults.model,
+    authPresent: auth.authPresent,
+    envAuthPresent: auth.envAuth,
+    storedAuthPresent: auth.storedAuth,
+    storedKeyHint: maskApiKeyHint(storedKey),
+    redacted: true,
+  };
+}
+
+export function providerApiSettingsGet(ctx: ConfigFacadeContext, providerId: string) {
+  if (!REMOTE_API_PROVIDER_IDS.includes(providerId)) {
+    throw new Error(`PROVIDER_NOT_REMOTE_API: ${providerId}`);
+  }
+  const loc = location(ctx);
+  const defaults = REMOTE_API_DEFAULTS[providerId]!;
+  const pref = readProviderConfig(loc).providers.find((p) => p.providerId === providerId);
+  const auth = resolveProviderAuthPresent(loc, providerId, ctx.env ?? process.env, defaults.envVars);
+  const storedKey = auth.storedAuth ? getStoredProviderApiKey(loc, providerId) : undefined;
+  return {
+    providerId,
+    baseUrl: pref?.baseUrl ?? defaults.baseUrl,
+    model: pref?.model ?? defaults.model,
+    defaultBaseUrl: defaults.baseUrl,
+    defaultModel: defaults.model,
+    requiredEnvVars: defaults.envVars,
+    authPresent: auth.authPresent,
+    envAuthPresent: auth.envAuth,
+    storedAuthPresent: auth.storedAuth,
+    storedKeyHint: maskApiKeyHint(storedKey),
+    hasStoredApiKey: hasStoredProviderApiKey(loc, providerId),
+    // Never return apiKey
+    redacted: true as const,
+  };
 }
 
 export function localToolList(ctx: ConfigFacadeContext) {

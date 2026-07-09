@@ -689,12 +689,13 @@ function renderAutomation(){
     '<div class="panel" style="margin-bottom:14px"><div class="section-title"><h2>LLM 提供方</h2></div><div class="list">'+
       providers.map(function(p){return providerCardHtml(p)}).join('')+
     '</div></div>'+
-    '<div class="panel" style="margin-bottom:14px"><div class="section-title"><h2>API 凭证状态</h2><span class="muted">仅环境变量引用 · 永不显示值</span></div>'+
+    '<div class="panel" style="margin-bottom:14px"><div class="section-title"><h2>API 凭证状态</h2><span class="muted">env 或页面存储 · 永不显示明文</span></div>'+
       (creds.length?creds.map(function(c){
         return '<div class="card-row" style="margin-bottom:8px"><div>'+
           '<h3>'+esc(c.displayName)+'</h3>'+
-          '<p class="muted">需要：'+esc(arr(c.requiredEnvVars).join(', '))+'</p>'+
-          '<p class="muted">已存在：'+(arr(c.presentEnvVars).length?esc(arr(c.presentEnvVars).join(', ')):'（无）')+'</p>'+
+          '<p class="muted">URL：'+esc(c.baseUrl||'—')+' · model：'+esc(c.model||'—')+'</p>'+
+          '<p class="muted">env：'+(arr(c.presentEnvVars).length?esc(arr(c.presentEnvVars).join(', ')):'未设置')+
+            ' · 页面密钥：'+(c.storedAuthPresent?esc(c.storedKeyHint||'已保存'):'未保存')+'</p>'+
           '<p class="faint">模式：'+esc(c.storageMode)+'</p>'+
           '<details class="advanced"><summary>Shell 示例</summary><pre class="mono" style="white-space:pre-wrap;font-size:12px;color:var(--muted)">'+esc(c.setupExample||'')+'</pre></details>'+
         '</div>'+pill(c.authPresent?'green':'amber', c.authPresent?'已配置':'缺失')+'</div>';
@@ -750,22 +751,51 @@ function providerCardHtml(p){
   p=obj(p);
   var id=esc(p.providerId);
   var handoff=!!p.handoffOnly;
-  return '<div class="card-row" style="margin-bottom:10px"><div>'+
-    '<div class="section-title" style="margin:0"><h3 style="margin:0">'+esc(p.displayName)+'</h3>'+pill(p.directDispatch?'green':handoff?'blue':p.status==='disabled'?'gray':'amber', p.statusLabel)+'</div>'+
-    '<p class="muted">'+esc(p.kindLabel)+' · 优先级 '+esc(String(p.priority))+'</p>'+
-    '<p class="muted">'+esc(p.explanation||p.summary||'')+'</p>'+
-    '<div class="evidence">'+(arr(p.capabilities).slice(0,8).map(function(c){return '<span>'+esc(c)+'</span>'}).join(''))+'</div>'+
-    '<p class="faint" style="margin-top:6px">文件直接改动：'+(p.safety&&p.safety.canMutateFilesDirectly?'是':'否')+
-      ' · harness apply：'+(p.safety&&p.safety.requiresRepoHarnessApply?'是':'是')+
-      ' · 外部副作用：'+esc((p.safety&&p.safety.externalSideEffects)||'approval_required')+'</p>'+
-    (p.lastErrorSummary?'<p class="faint">最近错误码：'+esc(p.lastErrorSummary)+'</p>':'')+
-    (handoff?'<div class="setup" style="margin-top:8px"><strong>Direct dispatch：不支持</strong><p class="muted" style="margin:6px 0 0">'+esc(p.explanation||'')+'</p></div>':'')+
-  '</div><div class="actions" style="flex-direction:column">'+
-    (!handoff?(p.enabled
-      ? '<button class="btn" onclick="setProviderEnabled(\\''+id+'\\',false)">禁用</button>'
-      : '<button class="btn primary" onclick="setProviderEnabled(\\''+id+'\\',true)">启用</button>'):'<span class="pill blue">Handoff-only</span>')+
-    (!handoff?'<button class="btn ghost" onclick="moveProvider(\\''+id+'\\',\\'up\\')">优先级↑</button><button class="btn ghost" onclick="moveProvider(\\''+id+'\\',\\'down\\')">优先级↓</button>':'')+
-    '<button class="btn ghost" onclick="healthProvider(\\''+id+'\\')">健康检查</button>'+
+  var api=obj(p.apiSettings);
+  var apiForm='';
+  if(api.configurable){
+    var keyHint=api.hasStoredApiKey?('已保存密钥 '+(api.storedKeyHint||'••••')):(p.credential&&p.credential.envAuthPresent?'使用环境变量':'未配置密钥');
+    apiForm=
+      '<div class="setup" style="margin-top:10px">'+
+        '<strong>API 配置</strong>'+
+        '<p class="faint" style="margin:4px 0 8px">密钥仅存 controllerHome，不进 git；列表接口永不回显明文。</p>'+
+        '<label class="faint">Base URL</label>'+
+        '<input class="input" id="api-url-'+id+'" value="'+esc(api.baseUrl||api.defaultBaseUrl||'')+'" placeholder="'+esc(api.defaultBaseUrl||'https://…')+'">'+
+        '<label class="faint" style="display:block;margin-top:8px">Model</label>'+
+        '<input class="input" id="api-model-'+id+'" value="'+esc(api.model||api.defaultModel||'')+'" placeholder="'+esc(api.defaultModel||'model-id')+'">'+
+        '<label class="faint" style="display:block;margin-top:8px">API Key（留空则保留原密钥）</label>'+
+        '<input class="input" id="api-key-'+id+'" type="password" autocomplete="off" placeholder="'+esc(keyHint)+'">'+
+        '<div class="actions" style="margin-top:8px">'+
+          '<button class="btn primary" onclick="saveProviderApi(\\''+id+'\\')">保存 API 配置</button>'+
+          (api.hasStoredApiKey?'<button class="btn danger" onclick="clearProviderApiKey(\\''+id+'\\')">清除已存密钥</button>':'')+
+        '</div>'+
+        '<p class="faint" style="margin-top:6px">状态：'+esc(keyHint)+
+          (p.credential&&p.credential.envAuthPresent?' · 环境变量已就绪':'')+
+        '</p>'+
+      '</div>';
+  }
+  return '<div class="card-row" style="margin-bottom:10px;grid-template-columns:1fr"><div>'+
+    '<div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:start">'+
+      '<div>'+
+        '<div class="section-title" style="margin:0"><h3 style="margin:0">'+esc(p.displayName)+'</h3>'+pill(p.directDispatch?'green':handoff?'blue':p.status==='disabled'?'gray':'amber', p.statusLabel)+'</div>'+
+        '<p class="muted">'+esc(p.kindLabel)+' · 优先级 '+esc(String(p.priority))+'</p>'+
+        '<p class="muted">'+esc(p.explanation||p.summary||'')+'</p>'+
+        '<div class="evidence">'+(arr(p.capabilities).slice(0,8).map(function(c){return '<span>'+esc(c)+'</span>'}).join(''))+'</div>'+
+        '<p class="faint" style="margin-top:6px">文件直接改动：'+(p.safety&&p.safety.canMutateFilesDirectly?'是':'否')+
+          ' · harness apply：'+(p.safety&&p.safety.requiresRepoHarnessApply?'是':'是')+
+          ' · 外部副作用：'+esc((p.safety&&p.safety.externalSideEffects)||'approval_required')+'</p>'+
+        (p.lastErrorSummary?'<p class="faint">最近错误码：'+esc(p.lastErrorSummary)+'</p>':'')+
+        (handoff?'<div class="setup" style="margin-top:8px"><strong>Direct dispatch：不支持</strong><p class="muted" style="margin:6px 0 0">'+esc(p.explanation||'')+'</p></div>':'')+
+        apiForm+
+      '</div>'+
+      '<div class="actions" style="flex-direction:column">'+
+        (!handoff?(p.enabled
+          ? '<button class="btn" onclick="setProviderEnabled(\\''+id+'\\',false)">禁用</button>'
+          : '<button class="btn primary" onclick="setProviderEnabled(\\''+id+'\\',true)">启用</button>'):'<span class="pill blue">Handoff-only</span>')+
+        (!handoff?'<button class="btn ghost" onclick="moveProvider(\\''+id+'\\',\\'up\\')">优先级↑</button><button class="btn ghost" onclick="moveProvider(\\''+id+'\\',\\'down\\')">优先级↓</button>':'')+
+        '<button class="btn ghost" onclick="healthProvider(\\''+id+'\\')">健康检查</button>'+
+      '</div>'+
+    '</div>'+
   '</div></div>';
 }
 
@@ -792,6 +822,29 @@ function healthProvider(id){
     toast((res.health&&res.health.summary)||'健康检查完成');
     advancedRaw=res; 
   }).catch(function(e){toast(e.message)});
+}
+function saveProviderApi(id){
+  var urlEl=document.getElementById('api-url-'+id);
+  var modelEl=document.getElementById('api-model-'+id);
+  var keyEl=document.getElementById('api-key-'+id);
+  var body={
+    baseUrl:urlEl?String(urlEl.value||'').trim():undefined,
+    model:modelEl?String(modelEl.value||'').trim():undefined
+  };
+  if(keyEl&&String(keyEl.value||'').trim())body.apiKey=String(keyEl.value).trim();
+  setBusy(true,'保存 API 配置');
+  api('/api/console/providers/'+encodeURIComponent(id)+'/api-settings'+repoQuery(),{method:'POST',body:JSON.stringify(body)}).then(function(res){
+    toast('已保存 '+id+(res.storedKeyHint?(' · 密钥 '+res.storedKeyHint):''));
+    if(keyEl)keyEl.value='';
+    return loadAutomationSettings();
+  }).catch(function(e){toast(e.message)}).finally(function(){setBusy(false)});
+}
+function clearProviderApiKey(id){
+  if(!confirm('清除页面保存的 API Key？（环境变量密钥不受影响）'))return;
+  setBusy(true,'清除密钥');
+  api('/api/console/providers/'+encodeURIComponent(id)+'/api-settings'+repoQuery(),{method:'POST',body:JSON.stringify({clearApiKey:true})}).then(function(){
+    toast('已清除存储密钥');return loadAutomationSettings();
+  }).catch(function(e){toast(e.message)}).finally(function(){setBusy(false)});
 }
 function setToolEnabled(id,on){
   setBusy(true,on?'启用工具':'禁用工具');

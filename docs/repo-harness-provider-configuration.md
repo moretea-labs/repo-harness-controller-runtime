@@ -70,25 +70,38 @@ Then in GUI **模型与工具**:
 - repo-harness still owns apply/verify of any proposed changes
 - Distinct from `grok_api` (remote xAI HTTP API)
 
-## Grok API setup (`grok_api`)
+## Remote API setup (Grok / OpenAI / DeepSeek)
+
+### GUI configuration (recommended)
+
+In **模型与工具**, each remote API card supports:
+
+| Field | Storage | Notes |
+| --- | --- | --- |
+| **Base URL** | `controllerHome/global/provider-config.json` | Non-secret, e.g. `https://api.x.ai/v1` |
+| **Model** | same | Non-secret, e.g. `grok-3` |
+| **API Key** | `controllerHome/global/provider-secrets.json` | **Never** in git repo; list APIs only return mask like `…abc1` |
+
+API:
+
+- `GET /api/console/providers/:id/api-settings`
+- `POST /api/console/providers/:id/api-settings` body: `{ baseUrl, model, apiKey?, clearApiKey? }`
+
+### Environment variable (still supported)
 
 ```bash
 export XAI_API_KEY=...   # or REPO_HARNESS_XAI_API_KEY
+export OPENAI_API_KEY=...
+export DEEPSEEK_API_KEY=...
 export REPO_HARNESS_ENABLE_LIVE_MODEL_PROVIDERS=1
 ```
 
-Then in GUI:
+Auth resolution order: **env key first**, then stored GUI key.
 
-1. Open **模型与工具**
-2. Enable GUI “Live” preference
-3. Confirm **Grok (xAI) API** card shows ready for direct dispatch
+Direct dispatch still requires:
 
-Direct dispatch requires **both**:
-
-1. Credential present in process environment  
+1. Credential present (env **or** stored)  
 2. Live mode effective (env flag **and** GUI `preferLiveModelProviders`)
-
-GUI cannot rewrite process env; it shows the next shell step when env is missing.
 
 ## OpenAI / DeepSeek setup
 

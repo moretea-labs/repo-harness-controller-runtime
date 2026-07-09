@@ -18,6 +18,8 @@ import {
   isProviderEnabledInConfig,
   readLocalToolConfig,
   readProviderConfig,
+  REMOTE_API_DEFAULTS,
+  resolveProviderAuthPresent,
   sortProvidersByPriority,
   type GoalLoopConfigLocation,
 } from './config-store';
@@ -141,9 +143,29 @@ export function listProviders(options: ProviderRegistryEnv = {}): ProviderDescri
   const grokCliReady = commandExists('grok', skipProbe);
   const ghReady = commandExists('gh', skipProbe);
 
-  const grokAuth = hasAnyKey(env, ['XAI_API_KEY', 'REPO_HARNESS_XAI_API_KEY', 'GROK_API_KEY']);
-  const deepseekAuth = hasAnyKey(env, ['DEEPSEEK_API_KEY', 'REPO_HARNESS_DEEPSEEK_API_KEY']);
-  const openaiAuth = hasAnyKey(env, ['OPENAI_API_KEY', 'REPO_HARNESS_OPENAI_API_KEY']);
+  const configLoc = options.configLocation;
+  const grokAuthInfo = resolveProviderAuthPresent(
+    configLoc,
+    'grok_api',
+    env,
+    REMOTE_API_DEFAULTS.grok_api!.envVars,
+  );
+  const deepseekAuthInfo = resolveProviderAuthPresent(
+    configLoc,
+    'deepseek_api',
+    env,
+    REMOTE_API_DEFAULTS.deepseek_api!.envVars,
+  );
+  const openaiAuthInfo = resolveProviderAuthPresent(
+    configLoc,
+    'openai_api',
+    env,
+    REMOTE_API_DEFAULTS.openai_api!.envVars,
+  );
+  // Fall back to env-only when no configLocation (unit tests without secrets store).
+  const grokAuth = grokAuthInfo.authPresent || (!configLoc && hasAnyKey(env, REMOTE_API_DEFAULTS.grok_api!.envVars));
+  const deepseekAuth = deepseekAuthInfo.authPresent || (!configLoc && hasAnyKey(env, REMOTE_API_DEFAULTS.deepseek_api!.envVars));
+  const openaiAuth = openaiAuthInfo.authPresent || (!configLoc && hasAnyKey(env, REMOTE_API_DEFAULTS.openai_api!.envVars));
 
   const grokRemote = remoteDirectAllowed(grokAuth, liveEffective);
   const deepseekRemote = remoteDirectAllowed(deepseekAuth, liveEffective);

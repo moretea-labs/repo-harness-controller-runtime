@@ -10,8 +10,31 @@ export interface ProviderPreference {
   enabledCapabilities?: ProviderCapability[];
   /** Env var name references only — never values. */
   credentialEnvVars?: string[];
+  /**
+   * Remote API base URL (e.g. https://api.x.ai/v1). Never a secret.
+   * Only used for kind=remote_api providers.
+   */
+  baseUrl?: string;
+  /** Default model id for remote API providers (non-secret). */
+  model?: string;
   notes?: string;
   updatedAt?: string;
+}
+
+/**
+ * Secrets for remote API providers — stored under controllerHome/global/provider-secrets.json
+ * (never in the git repo). Values must never appear in facade list/status responses.
+ */
+export interface ProviderSecretEntry {
+  /** Raw API key / bearer token. */
+  apiKey?: string;
+  updatedAt?: string;
+}
+
+export interface ProviderSecretsFile {
+  schemaVersion: 1;
+  updatedAt: string;
+  providers: Record<string, ProviderSecretEntry>;
 }
 
 export interface ProviderConfigFile {
@@ -86,8 +109,18 @@ export interface CredentialStatusEntry {
   presentEnvVars: string[];
   missingEnvVars: string[];
   authPresent: boolean;
+  /** Auth from process env. */
+  envAuthPresent: boolean;
+  /** Auth from controllerHome stored secret (GUI-configured). */
+  storedAuthPresent: boolean;
+  /** Masked hint only, e.g. …abc1 — never full key. */
+  storedKeyHint?: string;
+  baseUrl?: string;
+  model?: string;
+  defaultBaseUrl?: string;
+  defaultModel?: string;
   setupExample: string;
-  storageMode: 'environment_variable_only';
+  storageMode: 'environment_or_controller_home';
   /** Never includes values. */
   redacted: true;
 }
@@ -128,6 +161,19 @@ export interface ProviderConfigCard {
     authPresent: boolean;
     requiredEnvVars: string[];
     presentEnvVars: string[];
+    envAuthPresent?: boolean;
+    storedAuthPresent?: boolean;
+    storedKeyHint?: string;
+  };
+  /** Remote API settings shown/edited in GUI (non-secret fields). */
+  apiSettings?: {
+    configurable: boolean;
+    baseUrl: string;
+    model: string;
+    defaultBaseUrl: string;
+    defaultModel: string;
+    hasStoredApiKey: boolean;
+    storedKeyHint?: string;
   };
   liveModelCalls: {
     envEnabled: boolean;

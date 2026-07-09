@@ -9,9 +9,31 @@ import type {
   LocalToolPreference,
   ProviderConfigFile,
   ProviderPreference,
+  ProviderSecretEntry,
+  ProviderSecretsFile,
   RoutingIntentKey,
 } from './config-types';
 
+/** Default remote API endpoints / models (non-secret). */
+export const REMOTE_API_DEFAULTS: Record<string, { baseUrl: string; model: string; envVars: string[] }> = {
+  grok_api: {
+    baseUrl: 'https://api.x.ai/v1',
+    model: 'grok-3',
+    envVars: ['XAI_API_KEY', 'REPO_HARNESS_XAI_API_KEY', 'GROK_API_KEY'],
+  },
+  openai_api: {
+    baseUrl: 'https://api.openai.com/v1',
+    model: 'gpt-4o',
+    envVars: ['OPENAI_API_KEY', 'REPO_HARNESS_OPENAI_API_KEY'],
+  },
+  deepseek_api: {
+    baseUrl: 'https://api.deepseek.com',
+    model: 'deepseek-chat',
+    envVars: ['DEEPSEEK_API_KEY', 'REPO_HARNESS_DEEPSEEK_API_KEY'],
+  },
+};
+
+export const REMOTE_API_PROVIDER_IDS = Object.keys(REMOTE_API_DEFAULTS);
 export interface GoalLoopConfigLocation {
   controllerHome?: string;
   root?: string;
@@ -40,9 +62,30 @@ export function defaultProviderConfig(updatedAt = nowIso()): ProviderConfigFile 
     { providerId: 'codex_cli', enabled: true, priority: 20 },
     { providerId: 'grok_cli', enabled: true, priority: 25 },
     { providerId: 'claude_cli', enabled: true, priority: 30 },
-    { providerId: 'grok_api', enabled: true, priority: 40, credentialEnvVars: ['XAI_API_KEY', 'REPO_HARNESS_XAI_API_KEY'] },
-    { providerId: 'openai_api', enabled: true, priority: 50, credentialEnvVars: ['OPENAI_API_KEY', 'REPO_HARNESS_OPENAI_API_KEY'] },
-    { providerId: 'deepseek_api', enabled: true, priority: 60, credentialEnvVars: ['DEEPSEEK_API_KEY', 'REPO_HARNESS_DEEPSEEK_API_KEY'] },
+    {
+      providerId: 'grok_api',
+      enabled: true,
+      priority: 40,
+      credentialEnvVars: REMOTE_API_DEFAULTS.grok_api!.envVars,
+      baseUrl: REMOTE_API_DEFAULTS.grok_api!.baseUrl,
+      model: REMOTE_API_DEFAULTS.grok_api!.model,
+    },
+    {
+      providerId: 'openai_api',
+      enabled: true,
+      priority: 50,
+      credentialEnvVars: REMOTE_API_DEFAULTS.openai_api!.envVars,
+      baseUrl: REMOTE_API_DEFAULTS.openai_api!.baseUrl,
+      model: REMOTE_API_DEFAULTS.openai_api!.model,
+    },
+    {
+      providerId: 'deepseek_api',
+      enabled: true,
+      priority: 60,
+      credentialEnvVars: REMOTE_API_DEFAULTS.deepseek_api!.envVars,
+      baseUrl: REMOTE_API_DEFAULTS.deepseek_api!.baseUrl,
+      model: REMOTE_API_DEFAULTS.deepseek_api!.model,
+    },
     { providerId: 'github_copilot_cloud', enabled: true, priority: 70 },
     {
       providerId: 'chatgpt_handoff',
@@ -129,6 +172,9 @@ export function defaultGoalLoopPolicy(updatedAt = nowIso()): GoalLoopPolicyConfi
 function providerConfigPath(location: GoalLoopConfigLocation): string {
   return join(globalConfigRoot(location), 'provider-config.json');
 }
+function providerSecretsPath(location: GoalLoopConfigLocation): string {
+  return join(globalConfigRoot(location), 'provider-secrets.json');
+}
 function localToolConfigPath(location: GoalLoopConfigLocation): string {
   return join(globalConfigRoot(location), 'local-tool-config.json');
 }
@@ -139,6 +185,33 @@ function policyConfigPath(location: GoalLoopConfigLocation): string {
   return join(globalConfigRoot(location), 'goal-loop-policy.json');
 }
 
+function sanitizeBaseUrl(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim().replace(/\/+$/, '');
+  if (!trimmed) return undefined;
+  if (!/^https?:\/\//i.test(trimmed)) return undefined;
+  if (trimmed.length > 500) return undefined;
+  return trimmed;
+}
+
+function sanitizeModel(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 200) return undefined;
+  if (!/^[a-zA-Z0-9._:/-]+$/.test(trimmed)) return undefined;
+  return trimmed;
+}
+
+function stripSecretFields(pref: ProviderPreference): ProviderPreference {
+  const clone = { ...pref } as ProviderPreference & Record<string, unknown>;
+  for (const key of Object.keys(clone)) {
+    if (/api[_-]?key|token|secret|password|authorization|bearer/i.test(key)) {
+      delete clone[key];
+    }
+  }
+  return clone;
+}
+
 function mergeProviderDefaults(stored: ProviderConfigFile | undefined): ProviderConfigFile {
   const base = defaultProviderConfig(stored?.updatedAt ?? nowIso());
   if (!stored) return base;
@@ -146,14 +219,18 @@ function mergeProviderDefaults(stored: ProviderConfigFile | undefined): Provider
   const providers = base.providers.map((def) => {
     const existing = byId.get(def.providerId);
     if (!existing) return def;
-    return {
+    const defaults = REMOTE_API_DEFAULTS[def.providerId];
+    return stripSecretFields({
       ...def,
       ...existing,
       providerId: def.providerId,
       // ChatGPT can never be "disabled" from handoff role; enabled only controls whether packets are preferred.
       enabled: def.providerId === 'chatgpt_handoff' ? true : existing.enabled !== false,
       priority: typeof existing.priority === 'number' ? existing.priority : def.priority,
-    };
+      baseUrl: sanitizeBaseUrl(existing.baseUrl) ?? def.baseUrl ?? defaults?.baseUrl,
+      model: sanitizeModel(existing.model) ?? def.model ?? defaults?.model,
+      credentialEnvVars: existing.credentialEnvVars ?? def.credentialEnvVars ?? defaults?.envVars,
+    });
   });
   // Keep any unknown custom provider prefs (forward-compat).
   for (const entry of stored.providers) {
@@ -239,15 +316,152 @@ export function writeProviderConfig(location: GoalLoopConfigLocation, config: Pr
   const next: ProviderConfigFile = {
     ...mergeProviderDefaults(config),
     updatedAt: at,
-    providers: config.providers.map((p) => ({
-      ...p,
-      // Never persist secret-like fields if a buggy client sent them.
-      credentialEnvVars: (p.credentialEnvVars ?? []).filter((name) => !/value|token|secret|password/i.test(name)),
-      updatedAt: at,
-    })),
+    providers: config.providers.map((p) => {
+      const cleaned = stripSecretFields(p);
+      const defaults = REMOTE_API_DEFAULTS[cleaned.providerId];
+      return {
+        ...cleaned,
+        // Never persist secret-like fields if a buggy client sent them.
+        credentialEnvVars: (cleaned.credentialEnvVars ?? defaults?.envVars ?? [])
+          .filter((name) => !/value|token|secret|password/i.test(name)),
+        baseUrl: sanitizeBaseUrl(cleaned.baseUrl) ?? defaults?.baseUrl,
+        model: sanitizeModel(cleaned.model) ?? defaults?.model,
+        updatedAt: at,
+      };
+    }),
   };
   writeJsonAtomic(providerConfigPath(location), next);
   return next;
+}
+
+export function emptyProviderSecrets(updatedAt = nowIso()): ProviderSecretsFile {
+  return { schemaVersion: 1, updatedAt, providers: {} };
+}
+
+export function readProviderSecrets(location: GoalLoopConfigLocation): ProviderSecretsFile {
+  const raw = readJsonFile<ProviderSecretsFile | undefined>(providerSecretsPath(location), undefined);
+  if (!raw || typeof raw !== 'object') return emptyProviderSecrets();
+  const providers: Record<string, ProviderSecretEntry> = {};
+  if (raw.providers && typeof raw.providers === 'object') {
+    for (const [id, entry] of Object.entries(raw.providers)) {
+      if (!entry || typeof entry !== 'object') continue;
+      const apiKey = typeof entry.apiKey === 'string' ? entry.apiKey.trim() : undefined;
+      if (apiKey) providers[id] = { apiKey, updatedAt: entry.updatedAt };
+    }
+  }
+  return { schemaVersion: 1, updatedAt: raw.updatedAt ?? nowIso(), providers };
+}
+
+export function writeProviderSecrets(location: GoalLoopConfigLocation, secrets: ProviderSecretsFile): ProviderSecretsFile {
+  const at = nowIso();
+  const next: ProviderSecretsFile = {
+    schemaVersion: 1,
+    updatedAt: at,
+    providers: {},
+  };
+  for (const [id, entry] of Object.entries(secrets.providers ?? {})) {
+    if (!REMOTE_API_PROVIDER_IDS.includes(id)) continue;
+    const apiKey = typeof entry?.apiKey === 'string' ? entry.apiKey.trim() : '';
+    if (!apiKey) continue;
+    if (apiKey.length > 8_000) continue;
+    next.providers[id] = { apiKey, updatedAt: at };
+  }
+  writeJsonAtomic(providerSecretsPath(location), next);
+  return next;
+}
+
+export function getStoredProviderApiKey(location: GoalLoopConfigLocation, providerId: string): string | undefined {
+  const secrets = readProviderSecrets(location);
+  const key = secrets.providers[providerId]?.apiKey?.trim();
+  return key || undefined;
+}
+
+export function hasStoredProviderApiKey(location: GoalLoopConfigLocation, providerId: string): boolean {
+  return Boolean(getStoredProviderApiKey(location, providerId));
+}
+
+/** Last 4 chars only — safe for GUI status. */
+export function maskApiKeyHint(apiKey: string | undefined): string | undefined {
+  if (!apiKey || apiKey.length < 4) return apiKey ? '••••' : undefined;
+  return `…${apiKey.slice(-4)}`;
+}
+
+export function setStoredProviderApiKey(
+  location: GoalLoopConfigLocation,
+  providerId: string,
+  apiKey: string | null | undefined,
+): ProviderSecretsFile {
+  if (!REMOTE_API_PROVIDER_IDS.includes(providerId)) {
+    throw new Error(`PROVIDER_NOT_REMOTE_API: ${providerId} does not support stored API keys`);
+  }
+  const secrets = readProviderSecrets(location);
+  if (apiKey === null || apiKey === undefined || String(apiKey).trim() === '') {
+    delete secrets.providers[providerId];
+  } else {
+    secrets.providers[providerId] = { apiKey: String(apiKey).trim(), updatedAt: nowIso() };
+  }
+  return writeProviderSecrets(location, secrets);
+}
+
+/**
+ * Update non-secret API settings (baseUrl, model) on a remote provider preference.
+ */
+export function updateProviderApiPreference(
+  location: GoalLoopConfigLocation,
+  providerId: string,
+  patch: { baseUrl?: string; model?: string },
+): ProviderConfigFile {
+  if (!REMOTE_API_PROVIDER_IDS.includes(providerId)) {
+    throw new Error(`PROVIDER_NOT_REMOTE_API: ${providerId}`);
+  }
+  const config = readProviderConfig(location);
+  const defaults = REMOTE_API_DEFAULTS[providerId]!;
+  const providers = config.providers.map((p) => {
+    if (p.providerId !== providerId) return p;
+    return {
+      ...p,
+      baseUrl: patch.baseUrl !== undefined
+        ? (sanitizeBaseUrl(patch.baseUrl) ?? defaults.baseUrl)
+        : (p.baseUrl ?? defaults.baseUrl),
+      model: patch.model !== undefined
+        ? (sanitizeModel(patch.model) ?? defaults.model)
+        : (p.model ?? defaults.model),
+      updatedAt: nowIso(),
+    };
+  });
+  if (!providers.some((p) => p.providerId === providerId)) {
+    providers.push({
+      providerId,
+      enabled: true,
+      priority: 50,
+      baseUrl: sanitizeBaseUrl(patch.baseUrl) ?? defaults.baseUrl,
+      model: sanitizeModel(patch.model) ?? defaults.model,
+      credentialEnvVars: defaults.envVars,
+      updatedAt: nowIso(),
+    });
+  }
+  return writeProviderConfig(location, { ...config, providers });
+}
+
+export function resolveProviderAuthPresent(
+  location: GoalLoopConfigLocation | undefined,
+  providerId: string,
+  env: NodeJS.ProcessEnv,
+  envVarNames: string[],
+): { envAuth: boolean; storedAuth: boolean; authPresent: boolean; apiKey?: string } {
+  const envAuth = envVarNames.some((name) => Boolean(env[name]?.trim()));
+  let storedKey: string | undefined;
+  if (location) {
+    try {
+      storedKey = getStoredProviderApiKey(location, providerId);
+    } catch {
+      storedKey = undefined;
+    }
+  }
+  const storedAuth = Boolean(storedKey);
+  // Prefer env key when both present (ops convention).
+  const apiKey = envVarNames.map((n) => env[n]?.trim()).find(Boolean) || storedKey;
+  return { envAuth, storedAuth, authPresent: envAuth || storedAuth, apiKey };
 }
 
 export function readLocalToolConfig(location: GoalLoopConfigLocation): LocalToolConfigFile {
