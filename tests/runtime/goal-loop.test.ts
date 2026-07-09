@@ -162,8 +162,37 @@ describe('ExecutorRouter', () => {
     expect(decision.selectedProviderId).toBe('codex_cli');
   });
 
-  test('chooses grok_api when configured and codex failed', () => {
+  test('chooses grok_cli when ready after codex failed', () => {
     const providers = providersFor({
+      grok_cli: { status: 'ready', directDispatch: true, configured: true, authPresent: true },
+      grok_api: { status: 'missing_auth', directDispatch: false },
+    });
+    const decision = routeExecutor({
+      goal: {
+        goalId: 'g1',
+        repoId: 'r1',
+        mode: 'autonomous',
+        status: 'repairing',
+        objective: 'repair after codex',
+        constraints: {},
+        allowedExecutors: [],
+        forbiddenExecutors: [],
+        lastProviderId: 'codex_cli',
+        lastFailureClass: 'source_defect',
+        repairAttempts: 1,
+        retryBudget: 5,
+      },
+      taskIntent: 'code_repair',
+      risk: 'workspace_write',
+      providers,
+    });
+    expect(decision.selectedProviderId).toBe('grok_cli');
+    expect(decision.directDispatch).toBe(true);
+  });
+
+  test('chooses grok_api when configured and codex/grok_cli unavailable', () => {
+    const providers = providersFor({
+      grok_cli: { status: 'unavailable', directDispatch: false },
       grok_api: { status: 'ready', directDispatch: true, configured: true, authPresent: true },
     }, { XAI_API_KEY: 'test-not-a-real-key' });
     const decision = routeExecutor({
@@ -512,7 +541,8 @@ describe('repair and finalization', () => {
   test('repair_continue re-dispatches after source failure', () => {
     const { ctx } = fixture({ XAI_API_KEY: 'xai-test' }, {
       overrides: {
-        grok_api: { status: 'ready', directDispatch: true, configured: true, authPresent: true },
+        grok_cli: { status: 'ready', directDispatch: true, configured: true, authPresent: true },
+        grok_api: { status: 'missing_auth', directDispatch: false },
         codex_cli: { status: 'unavailable', directDispatch: false },
       },
     });
@@ -528,7 +558,7 @@ describe('repair and finalization', () => {
     });
     const tick = repairContinue(ctx, goal.goalId);
     expect(tick.to).toBe('dispatching');
-    expect(tick.providerId).toBe('grok_api');
+    expect(tick.providerId).toBe('grok_cli');
   });
 });
 

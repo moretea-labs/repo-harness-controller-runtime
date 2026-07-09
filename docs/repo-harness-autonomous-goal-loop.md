@@ -35,9 +35,10 @@ Each daemon tick performs **at most one** bounded transition per active goal.
 | --- | --- | --- |
 | `direct_edit` | direct_edit | Deterministic small edits applied by harness |
 | `codex_cli` | local_cli | Prefer for normal implementation when ready |
+| `grok_cli` | local_cli | Local Grok Build TUI (`grok` on PATH); no live-API flag required |
 | `claude_cli` | local_cli | When Claude CLI is on PATH |
 | `github_copilot_cloud` | cloud_agent | When `gh` / cloud agent available |
-| `grok_api` | remote_api | When `XAI_API_KEY` or `REPO_HARNESS_XAI_API_KEY` is set |
+| `grok_api` | remote_api | When `XAI_API_KEY` or `REPO_HARNESS_XAI_API_KEY` is set + live mode |
 | `deepseek_api` | remote_api | When DeepSeek key configured |
 | `openai_api` | remote_api | When `OPENAI_API_KEY` configured |
 

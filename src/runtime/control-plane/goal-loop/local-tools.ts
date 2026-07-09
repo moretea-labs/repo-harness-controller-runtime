@@ -1,5 +1,7 @@
 import { existsSync } from 'fs';
 import { execFileSync } from 'child_process';
+import { homedir } from 'os';
+import { join } from 'path';
 import {
   isLocalToolEnabledInConfig,
   readLocalToolConfig,
@@ -39,6 +41,13 @@ const TOOL_META: Record<string, {
     command: 'claude',
     capabilityTags: ['code_patch', 'code_review', 'long_context'],
     usedByWorkflows: ['source edit', 'repair', 'planning'],
+    versionArgs: ['--version'],
+  },
+  grok_cli: {
+    displayName: 'Grok CLI',
+    command: 'grok',
+    capabilityTags: ['code_patch', 'code_review', 'tool_calling', 'long_context'],
+    usedByWorkflows: ['source edit', 'tests', 'repair', 'planning'],
     versionArgs: ['--version'],
   },
   git: {
@@ -117,8 +126,13 @@ function which(command: string, skip?: boolean): string | undefined {
     const out = execFileSync('which', [command], { encoding: 'utf8', timeout: 2_000 }).trim();
     return out || undefined;
   } catch {
-    for (const prefix of ['/usr/local/bin', '/opt/homebrew/bin', '/usr/bin']) {
-      const candidate = `${prefix}/${command}`;
+    for (const prefix of [
+      '/usr/local/bin',
+      '/opt/homebrew/bin',
+      '/usr/bin',
+      join(homedir(), '.local', 'bin'),
+    ]) {
+      const candidate = join(prefix, command);
       if (existsSync(candidate)) return candidate;
     }
     return undefined;

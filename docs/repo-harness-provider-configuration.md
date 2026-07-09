@@ -16,7 +16,7 @@ repo-harness remains the owner of apply, verify, policy, and finalization. Model
 
 | Kind | Examples | Direct dispatch? |
 | --- | --- | --- |
-| Direct / local CLI / remote API / cloud agent | `direct_edit`, `codex_cli`, `grok_api`, … | Yes when ready + enabled + (for remote APIs) live mode |
+| Direct / local CLI / remote API / cloud agent | `direct_edit`, `codex_cli`, `grok_cli`, `grok_api`, … | Yes when ready + enabled; remote APIs also need live mode |
 | Handoff-only | `chatgpt_handoff` | **Never** |
 
 ChatGPT current conversation always shows:
@@ -49,7 +49,28 @@ Persisted fields only:
 
 **Never stored:** API keys, tokens, cookies, private keys, raw env values.
 
-## Grok API setup
+## Grok CLI setup (`grok_cli`)
+
+Local **Grok Build TUI** binary on PATH (typically `~/.local/bin/grok`):
+
+```bash
+# Ensure the grok CLI is installed and on PATH
+which grok
+grok --version
+```
+
+Then in GUI **模型与工具**:
+
+1. Confirm **Grok CLI** card is Ready (or enable the local tool if disabled)
+2. Prefer it in repair/implementation order if desired
+
+`grok_cli` is a **local CLI** provider:
+
+- Direct dispatch does **not** require `REPO_HARNESS_ENABLE_LIVE_MODEL_PROVIDERS`
+- repo-harness still owns apply/verify of any proposed changes
+- Distinct from `grok_api` (remote xAI HTTP API)
+
+## Grok API setup (`grok_api`)
 
 ```bash
 export XAI_API_KEY=...   # or REPO_HARNESS_XAI_API_KEY
@@ -60,7 +81,7 @@ Then in GUI:
 
 1. Open **模型与工具**
 2. Enable GUI “Live” preference
-3. Confirm Grok card shows ready for direct dispatch
+3. Confirm **Grok (xAI) API** card shows ready for direct dispatch
 
 Direct dispatch requires **both**:
 

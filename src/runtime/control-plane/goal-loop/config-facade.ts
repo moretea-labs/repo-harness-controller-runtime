@@ -36,6 +36,7 @@ import type { ProviderDescriptor, TaskIntent } from './types';
 const DISPLAY_NAMES: Record<string, string> = {
   direct_edit: 'Direct Edit',
   codex_cli: 'Codex CLI',
+  grok_cli: 'Grok CLI',
   claude_cli: 'Claude CLI',
   github_copilot_cloud: 'GitHub Copilot Cloud',
   grok_api: 'Grok (xAI) API',
@@ -252,6 +253,10 @@ function buildOverview(
         ? `Autonomous mode can currently use ${directReady.map((c) => c.displayName).slice(0, 4).join(' and ')}.`
         : 'Autonomous mode has no direct-invokable providers ready.',
     );
+  }
+  const grokCli = cards.find((c) => c.providerId === 'grok_cli');
+  if (grokCli?.directDispatch) {
+    parts.push('Grok CLI is ready for local direct dispatch.');
   }
   const grok = cards.find((c) => c.providerId === 'grok_api');
   if (grok?.credential.authPresent && !liveEffective) {

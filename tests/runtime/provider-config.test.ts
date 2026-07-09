@@ -235,6 +235,21 @@ describe('routing respects config', () => {
 });
 
 describe('credentials and live mode', () => {
+  test('grok_cli is registered as local_cli and does not require live API flag', () => {
+    const providers = listProviders({
+      env: {},
+      skipExecutableProbe: true,
+      overrides: {
+        grok_cli: { status: 'ready', directDispatch: true, configured: true, authPresent: true },
+      },
+    });
+    const grokCli = providers.find((p) => p.providerId === 'grok_cli');
+    expect(grokCli?.kind).toBe('local_cli');
+    expect(grokCli?.modelFamily).toBe('grok');
+    expect(grokCli?.directDispatch).toBe(true);
+    expect(grokCli?.status).toBe('ready');
+  });
+
   test('Grok missing auth shown as missing_auth', () => {
     const providers = listProviders({ env: {}, skipExecutableProbe: true });
     const grok = providers.find((p) => p.providerId === 'grok_api');

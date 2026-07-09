@@ -1,5 +1,7 @@
 import { existsSync } from 'fs';
 import { execFileSync } from 'child_process';
+import { homedir } from 'os';
+import { join } from 'path';
 import type {
   ProviderCapability,
   ProviderDescriptor,
@@ -65,8 +67,12 @@ function commandExists(command: string, skip?: boolean): boolean {
     }
     return true;
   } catch {
-    // Fallback: common absolute paths are not required; treat as missing.
-    return existsSync(`/usr/local/bin/${command}`) || existsSync(`/opt/homebrew/bin/${command}`);
+    // Fallback: common install prefixes (incl. user-local grok/codex-style bins).
+    return (
+      existsSync(`/usr/local/bin/${command}`)
+      || existsSync(`/opt/homebrew/bin/${command}`)
+      || existsSync(join(homedir(), '.local', 'bin', command))
+    );
   }
 }
 
@@ -132,6 +138,7 @@ export function listProviders(options: ProviderRegistryEnv = {}): ProviderDescri
 
   const codexReady = commandExists('codex', skipProbe);
   const claudeReady = commandExists('claude', skipProbe);
+  const grokCliReady = commandExists('grok', skipProbe);
   const ghReady = commandExists('gh', skipProbe);
 
   const grokAuth = hasAnyKey(env, ['XAI_API_KEY', 'REPO_HARNESS_XAI_API_KEY', 'GROK_API_KEY']);
@@ -145,6 +152,7 @@ export function listProviders(options: ProviderRegistryEnv = {}): ProviderDescri
   const directEditEnabled = toolConfig ? isLocalToolEnabledInConfig(toolConfig, 'direct_edit') : true;
   const codexToolEnabled = toolConfig ? isLocalToolEnabledInConfig(toolConfig, 'codex_cli') : true;
   const claudeToolEnabled = toolConfig ? isLocalToolEnabledInConfig(toolConfig, 'claude_cli') : true;
+  const grokCliToolEnabled = toolConfig ? isLocalToolEnabledInConfig(toolConfig, 'grok_cli') : true;
 
   const providers: ProviderDescriptor[] = [
     baseProvider(
@@ -204,6 +212,24 @@ export function listProviders(options: ProviderRegistryEnv = {}): ProviderDescri
         authPresent: claudeReady,
         directDispatch: claudeToolEnabled && claudeReady,
         lastErrorCode: !claudeToolEnabled ? 'TOOL_DISABLED' : claudeReady ? undefined : 'CLAUDE_CLI_UNAVAILABLE',
+      },
+    ),
+    baseProvider(
+      'grok_cli',
+      'local_cli',
+      'grok',
+      !grokCliToolEnabled ? 'disabled' : grokCliReady ? 'ready' : 'unavailable',
+      ['code_patch', 'code_review', 'test_failure_repair', 'architecture_planning', 'structured_output', 'tool_calling', 'long_context'],
+      !grokCliToolEnabled
+        ? 'Grok CLI disabled in local tool configuration.'
+        : grokCliReady
+          ? 'Local Grok CLI (grok) executor; patches applied and verified by repo-harness. Does not require live remote API flag.'
+          : 'Grok CLI not found on PATH (install Grok Build TUI `grok` binary).',
+      {
+        configured: grokCliReady,
+        authPresent: grokCliReady,
+        directDispatch: grokCliToolEnabled && grokCliReady,
+        lastErrorCode: !grokCliToolEnabled ? 'TOOL_DISABLED' : grokCliReady ? undefined : 'GROK_CLI_UNAVAILABLE',
       },
     ),
     baseProvider(

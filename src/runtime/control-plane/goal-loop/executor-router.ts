@@ -83,14 +83,14 @@ function decision(
 }
 
 const BUILTIN_ORDERS: Record<RoutingIntentKey, string[]> = {
-  deterministic_edit: ['direct_edit', 'codex_cli', 'chatgpt_handoff'],
-  implementation: ['codex_cli', 'grok_api', 'claude_cli', 'openai_api', 'deepseek_api', 'github_copilot_cloud', 'chatgpt_handoff'],
-  repair: ['grok_api', 'claude_cli', 'codex_cli', 'deepseek_api', 'openai_api', 'chatgpt_handoff'],
-  planning: ['chatgpt_handoff', 'grok_api', 'openai_api', 'deepseek_api', 'claude_cli'],
-  review: ['codex_cli', 'claude_cli', 'grok_api', 'openai_api', 'chatgpt_handoff'],
-  browser_planning: ['codex_cli', 'claude_cli', 'grok_api', 'openai_api', 'chatgpt_handoff'],
-  ios_analysis: ['codex_cli', 'claude_cli', 'grok_api', 'openai_api', 'chatgpt_handoff'],
-  fallback: ['direct_edit', 'codex_cli', 'claude_cli', 'grok_api', 'openai_api', 'deepseek_api', 'github_copilot_cloud', 'chatgpt_handoff'],
+  deterministic_edit: ['direct_edit', 'codex_cli', 'grok_cli', 'chatgpt_handoff'],
+  implementation: ['codex_cli', 'grok_cli', 'claude_cli', 'grok_api', 'openai_api', 'deepseek_api', 'github_copilot_cloud', 'chatgpt_handoff'],
+  repair: ['grok_cli', 'grok_api', 'claude_cli', 'codex_cli', 'deepseek_api', 'openai_api', 'chatgpt_handoff'],
+  planning: ['chatgpt_handoff', 'grok_cli', 'grok_api', 'openai_api', 'deepseek_api', 'claude_cli'],
+  review: ['codex_cli', 'grok_cli', 'claude_cli', 'grok_api', 'openai_api', 'chatgpt_handoff'],
+  browser_planning: ['codex_cli', 'grok_cli', 'claude_cli', 'grok_api', 'openai_api', 'chatgpt_handoff'],
+  ios_analysis: ['codex_cli', 'grok_cli', 'claude_cli', 'grok_api', 'openai_api', 'chatgpt_handoff'],
+  fallback: ['direct_edit', 'codex_cli', 'grok_cli', 'claude_cli', 'grok_api', 'openai_api', 'deepseek_api', 'github_copilot_cloud', 'chatgpt_handoff'],
 };
 
 export function intentToRoutingKey(intent: TaskIntent): RoutingIntentKey {

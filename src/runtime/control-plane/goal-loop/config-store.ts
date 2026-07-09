@@ -38,6 +38,7 @@ export function defaultProviderConfig(updatedAt = nowIso()): ProviderConfigFile 
   const defaults: Array<Omit<ProviderPreference, 'updatedAt'>> = [
     { providerId: 'direct_edit', enabled: true, priority: 10 },
     { providerId: 'codex_cli', enabled: true, priority: 20 },
+    { providerId: 'grok_cli', enabled: true, priority: 25 },
     { providerId: 'claude_cli', enabled: true, priority: 30 },
     { providerId: 'grok_api', enabled: true, priority: 40, credentialEnvVars: ['XAI_API_KEY', 'REPO_HARNESS_XAI_API_KEY'] },
     { providerId: 'openai_api', enabled: true, priority: 50, credentialEnvVars: ['OPENAI_API_KEY', 'REPO_HARNESS_OPENAI_API_KEY'] },
@@ -63,6 +64,7 @@ export function defaultLocalToolConfig(updatedAt = nowIso()): LocalToolConfigFil
   const ids = [
     'direct_edit',
     'codex_cli',
+    'grok_cli',
     'claude_cli',
     'git',
     'gh',
@@ -84,21 +86,21 @@ export function defaultLocalToolConfig(updatedAt = nowIso()): LocalToolConfigFil
 
 export function defaultRoutingConfig(updatedAt = nowIso()): ExecutorRoutingConfigFile {
   const orders: Record<RoutingIntentKey, string[]> = {
-    deterministic_edit: ['direct_edit', 'codex_cli', 'chatgpt_handoff'],
-    implementation: ['codex_cli', 'grok_api', 'claude_cli', 'openai_api', 'deepseek_api', 'github_copilot_cloud', 'chatgpt_handoff'],
-    repair: ['grok_api', 'claude_cli', 'codex_cli', 'deepseek_api', 'openai_api', 'chatgpt_handoff'],
-    planning: ['chatgpt_handoff', 'grok_api', 'openai_api', 'deepseek_api', 'claude_cli'],
-    review: ['codex_cli', 'claude_cli', 'grok_api', 'openai_api', 'chatgpt_handoff'],
-    browser_planning: ['codex_cli', 'claude_cli', 'grok_api', 'openai_api', 'chatgpt_handoff'],
-    ios_analysis: ['codex_cli', 'claude_cli', 'grok_api', 'openai_api', 'chatgpt_handoff'],
-    fallback: ['direct_edit', 'codex_cli', 'claude_cli', 'grok_api', 'openai_api', 'deepseek_api', 'github_copilot_cloud', 'chatgpt_handoff'],
+    deterministic_edit: ['direct_edit', 'codex_cli', 'grok_cli', 'chatgpt_handoff'],
+    implementation: ['codex_cli', 'grok_cli', 'claude_cli', 'grok_api', 'openai_api', 'deepseek_api', 'github_copilot_cloud', 'chatgpt_handoff'],
+    repair: ['grok_cli', 'grok_api', 'claude_cli', 'codex_cli', 'deepseek_api', 'openai_api', 'chatgpt_handoff'],
+    planning: ['chatgpt_handoff', 'grok_cli', 'grok_api', 'openai_api', 'deepseek_api', 'claude_cli'],
+    review: ['codex_cli', 'grok_cli', 'claude_cli', 'grok_api', 'openai_api', 'chatgpt_handoff'],
+    browser_planning: ['codex_cli', 'grok_cli', 'claude_cli', 'grok_api', 'openai_api', 'chatgpt_handoff'],
+    ios_analysis: ['codex_cli', 'grok_cli', 'claude_cli', 'grok_api', 'openai_api', 'chatgpt_handoff'],
+    fallback: ['direct_edit', 'codex_cli', 'grok_cli', 'claude_cli', 'grok_api', 'openai_api', 'deepseek_api', 'github_copilot_cloud', 'chatgpt_handoff'],
   };
   return {
     schemaVersion: 1,
     updatedAt,
     orders,
     defaultImplementationProvider: 'codex_cli',
-    defaultRepairProvider: 'grok_api',
+    defaultRepairProvider: 'grok_cli',
     defaultPlanningProvider: 'chatgpt_handoff',
     defaultReviewProvider: 'codex_cli',
     defaultBrowserPlanningProvider: 'codex_cli',
