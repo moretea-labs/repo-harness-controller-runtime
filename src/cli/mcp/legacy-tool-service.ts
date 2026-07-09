@@ -473,6 +473,73 @@ function summarizeRunList(
   return runs.map((run) => summarizeAgentRun(repoRoot, run, { includePaths, includeOutput: false }));
 }
 
+function compactDispatchRun(run: Record<string, unknown>): Record<string, unknown> {
+  const runId = typeof run.runId === "string" ? run.runId : String(run.runId ?? "");
+  const detail: Record<string, unknown> = runId
+    ? {
+      get_task_run: { run_id: runId },
+      get_task_run_log: { run_id: runId },
+      get_task_run_events: { run_id: runId },
+      get_task_diff: { run_id: runId },
+    }
+    : {};
+  return {
+    runId: run.runId,
+    issueId: run.issueId,
+    taskId: run.taskId,
+    status: run.status,
+    agent: run.agent,
+    provider: run.provider,
+    executionMode: run.executionMode,
+    executionClass: run.executionClass,
+    timeoutMs: run.timeoutMs,
+    startedAt: run.startedAt,
+    deadlineAt: run.deadlineAt,
+    finishedAt: run.finishedAt,
+    integratedSessionId: run.integratedSessionId,
+    autoIntegrationError: run.autoIntegrationError,
+    worktreeCleanedAt: run.worktreeCleanedAt,
+    accepted: run.accepted,
+    reused: run.reused,
+    github: run.github,
+    error: run.error,
+    detail,
+  };
+}
+
+function compactTaskView(task: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: task.id,
+    title: task.title,
+    status: task.status,
+    effectiveStatus: task.effectiveStatus,
+    declaredStatus: task.declaredStatus,
+    latestRunId: task.latestRunId,
+    latestRunStatus: task.latestRunStatus,
+    activeRunId: task.activeRunId,
+    activeRunStatus: task.activeRunStatus,
+    verificationStatus: task.verificationStatus,
+    dispatchable: task.dispatchable,
+    retryable: task.retryable,
+    requiresExplicitRetry: task.requiresExplicitRetry,
+  };
+}
+
+function compactIssueView(issue: Record<string, unknown>): Record<string, unknown> {
+  const id = typeof issue.id === "string" ? issue.id : String(issue.id ?? "");
+  const tasks = Array.isArray(issue.tasks) ? issue.tasks as Array<Record<string, unknown>> : [];
+  return {
+    id: issue.id,
+    title: issue.title,
+    status: issue.status,
+    lifecycleStatus: issue.lifecycleStatus,
+    github: issue.github,
+    taskCount: tasks.length,
+    tasks: tasks.map((task) => compactTaskView(task)),
+    detail: id ? { get_issue: { issue_id: id } } : {},
+  };
+}
+
 function dispatchExecutorHealthResult(
   health: ExecutorHealth,
   options: { requestId?: string; retryable?: boolean } = {},
@@ -3952,7 +4019,7 @@ export async function callMcpTool(
           });
           dispatchAcceptedTaskJob(ctx.repoRoot, accepted.runId);
           audit(ctx, name, "ok", args, accepted.runId);
-          return textResult(accepted);
+          return textResult(compactDispatchRun(accepted as unknown as Record<string, unknown>));
         } catch (error) {
           if (isExecutorHealthError(error)) {
             audit(ctx, name, "blocked", args, undefined, error.message);
@@ -4022,7 +4089,12 @@ export async function callMcpTool(
         }
         const readiness = inspectIssueReadiness(ctx.repoRoot, issueId);
         audit(ctx, name, runs.length > 0 ? "ok" : "failed", args, `tasks/issues/${issue.id}`);
-        return textResult({ readiness, dispatched: runs.length, runs, skipped });
+        return textResult({
+          readiness,
+          dispatched: runs.length,
+          runs: runs.map((run) => compactDispatchRun(run as unknown as Record<string, unknown>)),
+          skipped,
+        });
       }
       case "dispatch_ready_tasks": {
         if (ctx.policy.profile !== "controller") return errorResult("TOOL_DISABLED", "dispatch_ready_tasks requires the controller profile");
@@ -4112,7 +4184,7 @@ export async function callMcpTool(
           requestedIssue,
           dispatched: accepted.length,
           runIds: accepted.map((entry) => entry.runId),
-          accepted,
+          accepted: accepted.map((entry) => compactDispatchRun(entry as unknown as Record<string, unknown>)),
           skipped,
           currentFocus: loadControllerProjectState(ctx.repoRoot).currentIssueId,
           focusIsInformational: true,
@@ -4428,9 +4500,17 @@ export async function callMcpTool(
           verifiedAt: new Date().toISOString(),
         };
         const issue = recordTaskVerification(ctx.repoRoot, issueId, taskId, verification);
-        const verifiedTask = issue.tasks.find((entry) => entry.id === taskId);
+        const issueView = projectIssueEffectiveView(ctx.repoRoot, issue);
+        const verifiedTask = issueView.tasks.find((entry) => entry.id === taskId);
         audit(ctx, name, ["verified", "done"].includes(verifiedTask?.status ?? "") ? "ok" : "failed", args, `tasks/issues/${issue.id}`);
-        return textResult(Object.assign(projectIssueEffectiveView(ctx.repoRoot, issue), { policy, issue: projectIssueEffectiveView(ctx.repoRoot, issue) }));
+        return textResult({
+          issueId,
+          taskId,
+          policy,
+          task: verifiedTask ? compactTaskView(verifiedTask as unknown as Record<string, unknown>) : undefined,
+          tasks: issueView.tasks.map((entry) => compactTaskView(entry as unknown as Record<string, unknown>)),
+          issue: compactIssueView(issueView as unknown as Record<string, unknown>),
+        });
       }
       case "accept_task": {
         if (ctx.policy.profile !== "controller") return errorResult("TOOL_DISABLED", "accept_task requires the controller profile");

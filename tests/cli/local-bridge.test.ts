@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "fs";
@@ -19,7 +20,7 @@ import {
   runControllerCheckAsync,
 } from "../../src/cli/controller/check-runner";
 import { CONTROLLER_TOOL_SURFACE } from "../../src/cli/controller/runtime-config";
-import { createIssue, updateTask } from "../../src/cli/controller/issue-store";
+import { createIssue, getIssue, updateTask } from "../../src/cli/controller/issue-store";
 import { beginEditSession, applyEditOperations } from "../../src/cli/editing/edit-session";
 import { getMcpPolicy } from "../../src/cli/mcp/policy";
 import {
@@ -74,6 +75,15 @@ function repo(): string {
   mkdirSync(join(root, "src"), { recursive: true });
   mkdirSync(join(root, "tasks"), { recursive: true });
   mkdirSync(join(root, ".ai/harness"), { recursive: true });
+  mkdirSync(join(root, ".repo-harness"), { recursive: true });
+  writeFileSync(join(root, ".repo-harness/mcp.local.json"), `${JSON.stringify({
+    version: 1,
+    devMode: {
+      agentRunner: true,
+      allowedAgents: ["codex"],
+      timeoutMs: 10_000,
+    },
+  }, null, 2)}\n`);
   writeFileSync(join(root, "src/example.ts"), "export const value = 1;\n");
   writeFileSync(join(root, "tasks/current.md"), "# Current\n");
   expect(spawnSync("git", ["init", "-b", "main"], { cwd: root }).status).toBe(0);
@@ -971,7 +981,7 @@ printf '%s\n' '{"type":"turn.completed"}'
     const now = new Date().toISOString();
     for (const name of ["stdout.log", "stderr.log", "events.jsonl"]) writeFileSync(join(runDir, name), "");
     writeFileSync(join(runDir, "meta.json"), JSON.stringify({
-      schemaVersion: 2, runId, issueId: issue.id, taskId: "T1", agent: "codex", provider: "local", executionMode: "workspace", status: "succeeded", repoRoot: root, worktree: root, branch: null, baseRevision: null, promptPath: `.ai/harness/jobs/${runId}/prompt.md`, stdoutPath: `.ai/harness/jobs/${runId}/stdout.log`, stderrPath: `.ai/harness/jobs/${runId}/stderr.log`, resultPath: `.ai/harness/jobs/${runId}/result.json`, eventsPath: `.ai/harness/jobs/${runId}/events.jsonl`, timeoutMs: 10_000, createdAt: now, startedAt: now, finishedAt: now, progress: { phase: "completed", percent: 100, currentActivity: "complete", lastActivityAt: now, activityCount: 1 },
+      schemaVersion: 2, runId, issueId: issue.id, taskId: "T1", agent: "codex", provider: "local", executionMode: "workspace", status: "succeeded", repoRoot: realpathSync(root), worktree: realpathSync(root), branch: null, baseRevision: null, promptPath: `.ai/harness/jobs/${runId}/prompt.md`, stdoutPath: `.ai/harness/jobs/${runId}/stdout.log`, stderrPath: `.ai/harness/jobs/${runId}/stderr.log`, resultPath: `.ai/harness/jobs/${runId}/result.json`, eventsPath: `.ai/harness/jobs/${runId}/events.jsonl`, timeoutMs: 10_000, createdAt: now, startedAt: now, finishedAt: now, integratedSessionId: "EDIT-v5-api-fixture", progress: { phase: "completed", percent: 100, currentActivity: "complete", lastActivityAt: now, activityCount: 1 },
     }, null, 2));
     updateTask(root, issue.id, "T1", { status: "review", runId, note: "Ready for verification." });
     const handle = await startLocalBridgeServer({ repoRoot: root, port: 0, openBrowser: false });
@@ -996,7 +1006,8 @@ printf '%s\n' '{"type":"turn.completed"}'
       headers: { ...headers, "content-type": "application/json" },
       body: JSON.stringify({ confirmAcceptance: true, reviewer: "test-human" }),
     }).then((response) => response.json());
-    expect(verified.tasks[0].status).toBe("done");
+    expect(verified.error).toBeUndefined();
+    expect(getIssue(root, issue.id).tasks[0]?.status).toBe("done");
     expect(existsSync(join(root, ".ai/harness/checks/controller/latest-focused.json"))).toBe(true);
     const accepted = await fetch(new URL(`/api/issues/${issue.id}/tasks/T1/accept`, handle.url), {
       method: "POST",
@@ -1340,11 +1351,11 @@ printf '%s\n' '{"type":"turn.completed"}'
     const snapshot = await fetch(new URL("/api/snapshot", handle.url), {
       headers: { "x-repo-harness-local-token": handle.token },
     }).then((response) => response.json());
-    expect(snapshot.repoRoot).toBe(root);
+    expect(snapshot.repoRoot).toBe(realpathSync(root));
     expect(snapshot.board).toBeDefined();
     expect(snapshot.toolSurface).toBe(CONTROLLER_TOOL_SURFACE);
     expect(snapshot.timeoutPolicy).toEqual({
-      defaultTimeoutMs: 3_600_000,
+      defaultTimeoutMs: 10_000,
       maxTimeoutMs: 43_200_000,
     });
 
@@ -1363,13 +1374,13 @@ printf '%s\n' '{"type":"turn.completed"}'
     const cookieSnapshot = await fetch(new URL("/api/snapshot", handle.url), {
       headers: { cookie: cookie as string },
     }).then((response) => response.json());
-    expect(cookieSnapshot.repoRoot).toBe(root);
+    expect(cookieSnapshot.repoRoot).toBe(realpathSync(root));
 
     const dashboard = await dashboardResponse.text();
     expect(dashboard).not.toContain(handle.token);
     expect(dashboard).not.toContain("?token=");
-    expect(dashboard).toContain("repo-harness V8");
-    expect(dashboard).toContain("ChatGPT execution bridge");
-    expect(dashboard).toContain("执行安全状态修复");
+    expect(dashboard).toContain("repo-harness · 控制台");
+    expect(dashboard).toContain("执行任务");
+    expect(dashboard).toContain("正在读取控制台状态");
   });
 });

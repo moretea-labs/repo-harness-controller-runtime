@@ -41,6 +41,10 @@ async function jsonTool(
   return { raw: result, value: JSON.parse(result.content[0].text) };
 }
 
+function responseSize(result: { raw: { content: Array<{ text: string }> } }): number {
+  return result.raw.content[0]?.text.length ?? 0;
+}
+
 async function waitForRun(
   ctx: McpToolContext,
   runId: string,
@@ -93,6 +97,78 @@ async function withController<T>(
     rmSync(controllerHome, { recursive: true, force: true });
   }
 }
+
+test("returns compact default dispatch and verification payloads", async () => {
+  await withController(async (repoRoot, baseCtx) => {
+    const binRoot = mkdtempSync(join(tmpdir(), "repo-harness-controller-compact-bin-"));
+    const originalPath = process.env.PATH;
+    try {
+      const fakeCodex = join(binRoot, "codex");
+      writeFileSync(fakeCodex, '#!/usr/bin/env bash\necho "compact-run-ok"\nexit 0\n');
+      chmodSync(fakeCodex, 0o755);
+      process.env.PATH = `${binRoot}:${originalPath ?? ""}`;
+      const ctx = {
+        ...baseCtx,
+        policy: getMcpPolicy("controller", {
+          repoRoot,
+          devAgentRunner: true,
+          allowedAgents: ["codex"],
+          runnerTimeoutMs: 10_000,
+        }),
+      };
+      const created = await jsonTool(ctx, "create_issue", {
+        title: "Compact MCP payloads",
+        summary: "Keep default controller responses small.",
+        tasks: [{
+          title: "Execute",
+          objective: "Run and verify one compact Task.",
+          allowed_paths: ["src/**"],
+          checks: ["focused"],
+          acceptance_criteria: ["The compact flow succeeds."],
+          risk: "high",
+          agent: "codex",
+        }],
+      });
+      const dispatched = await jsonTool(ctx, "dispatch_task", {
+        issue_id: created.value.id,
+        task_id: "T1",
+        isolate: false,
+        timeout_ms: 10_000,
+      });
+      expect(dispatched.value.run).toBeUndefined();
+      expect(dispatched.value.detail.get_task_run.run_id).toBe(dispatched.value.runId);
+      expect(responseSize(dispatched)).toBeLessThan(4_000);
+
+      const run = await waitForRun(ctx, dispatched.value.runId, (entry) => ["succeeded", "failed"].includes(entry.status), 80, 25);
+      expect(run.status).toBe("succeeded");
+
+      const verified = await jsonTool(ctx, "verify_task", {
+        issue_id: created.value.id,
+        task_id: "T1",
+        run_id: dispatched.value.runId,
+        reviewer: "test-controller",
+        acceptance_results: [{
+          criterion: "The compact flow succeeds.",
+          ok: true,
+          evidence: "Run completed and review advanced.",
+        }],
+      });
+      expect(verified.value.issueId).toBe(created.value.id);
+      expect(verified.value.taskId).toBe("T1");
+      expect(verified.value.task.id).toBe("T1");
+      expect(verified.value.task.objective).toBeUndefined();
+      expect(verified.value.issue.id).toBe(created.value.id);
+      expect(verified.value.issue.tasks).toHaveLength(1);
+      expect(verified.value.issue.tasks[0].objective).toBeUndefined();
+      expect(verified.value.issue.detail.get_issue.issue_id).toBe(created.value.id);
+      expect(verified.value.issue.issue).toBeUndefined();
+      expect(responseSize(verified)).toBeLessThan(8_000);
+    } finally {
+      process.env.PATH = originalPath;
+      rmSync(binRoot, { recursive: true, force: true });
+    }
+  });
+});
 
 function issueFilePath(
   repoRoot: string,
@@ -497,24 +573,43 @@ describe("MCP controller profile", () => {
   });
 
   test("submits high-risk local Jobs without an approval queue", async () => {
-    await withController(async (_repoRoot, ctx) => {
-      const submitted = await jsonTool(ctx, "submit_local_job", {
-        action: "quick-agent-session",
-        title: "Immediate local example",
-        objective: "Prepare a high-risk local Codex session.",
-        allowed_paths: ["src/**"],
-        checks: ["manual-review"],
-        acceptance_criteria: [
-          "The session is accepted immediately without a risk approval queue.",
-        ],
-        risk: "high",
-        agent: "codex",
-      });
-      expect(submitted.value.job.status).toBe("dispatched");
-      const status = await jsonTool(ctx, "local_bridge_status");
-      expect(status.value.approvalQueue).toBe(false);
-      expect(status.value.pendingApproval).toBeUndefined();
-      expect(status.value.endpoint).toContain("127.0.0.1");
+    await withController(async (repoRoot, baseCtx) => {
+      const binRoot = mkdtempSync(join(tmpdir(), "repo-harness-controller-local-job-bin-"));
+      const originalPath = process.env.PATH;
+      try {
+        const fakeCodex = join(binRoot, "codex");
+        writeFileSync(fakeCodex, '#!/usr/bin/env bash\necho "local-job-ok"\nexit 0\n');
+        chmodSync(fakeCodex, 0o755);
+        process.env.PATH = `${binRoot}:${originalPath ?? ""}`;
+        const ctx = {
+          ...baseCtx,
+          policy: getMcpPolicy("controller", {
+            repoRoot,
+            devAgentRunner: true,
+            allowedAgents: ["codex"],
+          }),
+        };
+        const submitted = await jsonTool(ctx, "submit_local_job", {
+          action: "quick-agent-session",
+          title: "Immediate local example",
+          objective: "Prepare a high-risk local Codex session.",
+          allowed_paths: ["src/**"],
+          checks: ["manual-review"],
+          acceptance_criteria: [
+            "The session is accepted immediately without a risk approval queue.",
+          ],
+          risk: "high",
+          agent: "codex",
+        });
+        expect(submitted.value.job.status).not.toBe("pending_approval");
+        const status = await jsonTool(ctx, "local_bridge_status");
+        expect(status.value.approvalQueue).toBe(false);
+        expect(status.value.pendingApproval).toBeUndefined();
+        expect(status.value.endpoint).toContain("127.0.0.1");
+      } finally {
+        process.env.PATH = originalPath;
+        rmSync(binRoot, { recursive: true, force: true });
+      }
     });
   });
 
