@@ -4374,7 +4374,7 @@ export async function callMcpTool(
           const command = Array.isArray(entry.command) ? entry.command.map(String).map((part) => part.trim()).filter(Boolean) : [];
           if (command.length === 0) return errorResult("INVALID_COMMAND_EVIDENCE", "reported command evidence requires a non-empty command argv");
           const cwdInput = typeof entry.cwd === "string" && entry.cwd.trim() ? entry.cwd.trim() : undefined;
-          if (cwdInput) {
+          if (cwdInput && cwdInput !== "." && cwdInput !== "./") {
             const cwdDecision = resolveMcpPath(ctx.repoRoot, cwdInput, ctx.policy, "read");
             if (!cwdDecision.ok) {
               const normalizedCwd = normalizeMcpRelativePath(cwdInput);

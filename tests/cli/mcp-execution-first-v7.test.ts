@@ -76,6 +76,7 @@ describe("MCP v7 compatibility on the V8 surface", () => {
       reviewed_diff_hash: "sha256:reviewed-diff",
       reported_commands: [{
         command: [process.execPath, "-e", "process.exit(0)"],
+        cwd: ".",
         ok: true,
         exit_code: 0,
         stdout: "external verification passed",
