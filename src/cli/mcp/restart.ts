@@ -106,7 +106,7 @@ export function shouldVerifyPublicSurface(config: {
   tunnelMode: ResolvedMcpRestartConfig['tunnelMode'];
   publicEndpoint?: string;
 }): boolean {
-  return config.tunnelMode !== 'none' && Boolean(config.publicEndpoint);
+  return Boolean(config.publicEndpoint);
 }
 
 export function buildMcpRestartKeepaliveArgs(config: ResolvedMcpRestartConfig): string[] {
@@ -143,10 +143,10 @@ export function buildMcpRestartKeepaliveArgs(config: ResolvedMcpRestartConfig): 
     args.push('--no-local-ui');
   }
 
-  if (config.tunnelMode === 'named') {
-    if (config.tunnelName) args.push('--cloudflare-tunnel-name', config.tunnelName);
-    if (config.publicEndpoint) args.push('--public-endpoint', config.publicEndpoint);
-  } else if ((config.tunnelMode === 'quick' || config.tunnelMode === 'tailscale') && config.publicEndpoint) {
+  if (config.tunnelMode === 'named' && config.tunnelName) {
+    args.push('--cloudflare-tunnel-name', config.tunnelName);
+  }
+  if (config.publicEndpoint) {
     args.push('--public-endpoint', config.publicEndpoint);
   }
 

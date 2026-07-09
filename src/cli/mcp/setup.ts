@@ -214,6 +214,17 @@ curl http://127.0.0.1:8765/health
 repo-harness mcp doctor --repo .
 \`\`\`
 
+For a fixed Cloudflare domain, verify both local and public discovery without leaking tokens:
+
+\`\`\`bash
+curl http://127.0.0.1:8765/health
+curl https://${CHATGPT_NAMED_TUNNEL_HOST_PLACEHOLDER}/.well-known/oauth-protected-resource/mcp
+env | grep -Ei 'proxy|no_proxy'
+HTTPS_PROXY= HTTP_PROXY= ALL_PROXY= curl -v https://${CHATGPT_NAMED_TUNNEL_HOST_PLACEHOLDER}/mcp
+\`\`\`
+
+If a local HTTP proxy interferes with endpoint checks, add the fixed domain, \`*.trycloudflare.com\`, \`*.ts.net\`, and \`100.64.0.0/10\` to \`NO_PROXY\` instead of disabling proxies globally.
+
 The controller profile stores service-level MCP config under \`controllerHome/mcp/mcp.local.json\`, including allowed local agents, timeout, endpoint, and \`chatgpt.serverName\`. OAuth credentials live in \`controllerHome/mcp/mcp.oauth.json\`; the bearer fallback lives in \`controllerHome/mcp/mcp.tokens.json\`. Existing repo-local \`.repo-harness/mcp.*\` files remain a legacy fallback.
 
 Repository-specific MCP access rules may be added in \`.repo-harness/mcp.policy.json\`. Repository policy can narrow access, but immutable secret, credential, Git-internal, and build-output denies remain enforced.
@@ -226,13 +237,20 @@ Use this Connector URL:
 ${endpoint}
 \`\`\`
 
-Quick tunnels are useful for one-off smoke tests, but their URL may change. For routine use, prefer a named tunnel:
+Quick tunnels are useful for one-off smoke tests, but their URL may change. For routine use, prefer a fixed Cloudflare domain. If repo-harness should start the Cloudflare tunnel process, use a named tunnel:
 
 \`\`\`bash
 cloudflared tunnel login
 cloudflared tunnel create repo-harness-mcp
 cloudflared tunnel route dns repo-harness-mcp ${CHATGPT_NAMED_TUNNEL_HOST_PLACEHOLDER}
 repo-harness mcp keepalive --repo . --profile controller --toolset core --enable-dev-runner --dev-runner-agents codex,claude --tunnel named --cloudflare-tunnel-name repo-harness-mcp --public-endpoint https://${CHATGPT_NAMED_TUNNEL_HOST_PLACEHOLDER}/mcp
+\`\`\`
+
+If Cloudflare is managed outside repo-harness, keep repo-harness on the fixed public origin without owning the tunnel process:
+
+\`\`\`bash
+repo-harness mcp setup chatgpt --repo . --endpoint https://${CHATGPT_NAMED_TUNNEL_HOST_PLACEHOLDER}/mcp
+repo-harness mcp keepalive --repo . --profile controller --toolset core --enable-dev-runner --dev-runner-agents codex,claude --tunnel none --public-endpoint https://${CHATGPT_NAMED_TUNNEL_HOST_PLACEHOLDER}/mcp
 \`\`\`
 
 Regenerate this guide with the stable endpoint:

@@ -120,7 +120,9 @@ export function inferMcpTunnelMode(
 ): McpRuntimeTunnelMode {
   const normalized = requested?.trim().toLowerCase();
   if (normalized === undefined || normalized.length === 0 || normalized === 'auto') {
-    return publicEndpoint && tunnelName ? 'named' : 'quick';
+    if (publicEndpoint && tunnelName) return 'named';
+    if (publicEndpoint) return 'none';
+    return 'quick';
   }
   if (normalized === 'none' || normalized === 'quick' || normalized === 'named' || normalized === 'tailscale') return normalized;
   throw new Error(`invalid --tunnel "${requested}" (expected: auto, none, quick, named, tailscale)`);
@@ -408,7 +410,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
       healthy: false,
       restartCount: 0,
     },
-    tunnel: tunnelMode === 'none' ? undefined : {
+    tunnel: tunnelMode === 'none' && !configuredEndpoint ? undefined : {
       running: false,
       restartCount: 0,
       ...(tunnelName ? { name: tunnelName } : {}),
@@ -437,7 +439,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
       return;
     }
     const localHealthy = runtime.server.healthy === true;
-    const publicHealthy = runtime.tunnelMode === 'none' || runtime.tunnel?.healthy === true;
+    const publicHealthy = !configuredEndpoint || runtime.tunnel?.healthy === true;
     if (localHealthy && publicHealthy) {
       runtime.status = 'running';
       return;
@@ -542,7 +544,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
     if (rawOpts.devRunnerTimeoutMs) args.push('--dev-runner-timeout-ms', String(rawOpts.devRunnerTimeoutMs));
     if (rawOpts.devRunnerMaxTimeoutMs) args.push('--dev-runner-max-timeout-ms', String(rawOpts.devRunnerMaxTimeoutMs));
     const env: NodeJS.ProcessEnv = { ...process.env, REPO_HARNESS_CONTROLLER_HOME: controllerHome };
-    if (configuredEndpoint && (tunnelMode === 'named' || tunnelMode === 'tailscale')) {
+    if (configuredEndpoint) {
       env.REPO_HARNESS_MCP_PUBLIC_ORIGIN = endpointOrigin(configuredEndpoint);
     }
     serverChild = spawn(cli.command, args, {
@@ -803,7 +805,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
       persistRuntime();
     }
 
-    const activePublicEndpoint = tunnelMode === 'named' || tunnelMode === 'tailscale'
+    const activePublicEndpoint = tunnelMode === 'named' || tunnelMode === 'tailscale' || tunnelMode === 'none'
       ? configuredEndpoint
       : currentQuickEndpoint ?? runtime.tunnel?.publicEndpoint;
 
@@ -811,11 +813,11 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
       runtime.tunnel.publicEndpoint = activePublicEndpoint ?? runtime.tunnel.publicEndpoint;
     }
 
-    if (runtime.tunnelMode !== 'none' && activePublicEndpoint) {
+    if (activePublicEndpoint && runtime.tunnel) {
       const publicHealth = await jsonHealth(oauthResourceUrl(activePublicEndpoint));
-      runtime.tunnel!.healthy = publicHealth?.resource === activePublicEndpoint;
-      if (runtime.tunnel!.healthy) {
-        runtime.tunnel!.lastHealthyAt = nowIso();
+      runtime.tunnel.healthy = publicHealth?.resource === activePublicEndpoint;
+      if (runtime.tunnel.healthy) {
+        runtime.tunnel.lastHealthyAt = nowIso();
         publicFailureCount = 0;
         publicUnhealthySinceAt = undefined;
         lastPublicHealthWarningAt = undefined;
@@ -823,7 +825,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
         const now = Date.now();
         publicFailureCount += 1;
         publicUnhealthySinceAt ??= now;
-        if (shouldRestartMcpTunnel(
+        if (tunnelMode !== 'none' && shouldRestartMcpTunnel(
           localHealthy,
           isRunning(tunnelChild),
           publicFailureCount,
@@ -840,15 +842,17 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
           continue;
         }
         if (lastPublicHealthWarningAt === undefined || now - lastPublicHealthWarningAt >= LOCAL_HEALTH_WARNING_INTERVAL_MS) {
-          const reason = localHealthy
-            ? 'preserving the live tunnel during the bounded recovery window'
-            : 'preserving the live tunnel because the local Gateway is unhealthy';
+          const reason = tunnelMode === 'none'
+            ? 'operator-managed fixed endpoint is not restarted by keepalive'
+            : localHealthy
+              ? 'preserving the live tunnel during the bounded recovery window'
+              : 'preserving the live tunnel because the local Gateway is unhealthy';
           recordError('health', `public MCP discovery is degraded at ${oauthResourceUrl(activePublicEndpoint)}; ${reason}`);
           lastPublicHealthWarningAt = now;
         }
       }
-    } else if (runtime.tunnelMode !== 'none') {
-      runtime.tunnel!.healthy = false;
+    } else if (runtime.tunnel) {
+      runtime.tunnel.healthy = false;
     }
 
     updateStatus();
