@@ -112,14 +112,18 @@ import {
   acknowledgeHandoffItem,
   buildFacadeResult,
   createHandoffItem,
-  evaluatePolicyGate,
+  dismissHandoffItem,
   getHandoffItem,
   listCapabilityDescriptors,
   listHandoffItems,
   normalizeCheckIds,
   resolveHandoffItem,
-  selectExecutionMode,
-  type ExecutionModeSelectionInput,
+  runGoalWorkloop,
+  runSelfHealingLoop,
+  delegateToCodexCerebellum,
+  summarizeHandoffItem,
+  listWorkContracts,
+  getWorkContract,
 } from '../../control-plane/facade';
 
 function definition(name: string, description: string, properties: Record<string, unknown>, required: string[] = [], readOnly = true): McpToolDefinition {
@@ -132,43 +136,67 @@ function definition(name: string, description: string, properties: Record<string
 }
 const repoId = { type: 'string', description: 'Stable repository id.' };
 export const runtimeToolDefinitions: McpToolDefinition[] = [
-  definition('rh_status', 'ChatGPT-facing facade: bounded controller status and capability readiness.', {
+  definition('rh_status', 'ChatGPT-facing facade: bounded controller status, capability readiness, and self-healing diagnose/repair entry.', {
     repo_id: repoId,
     operation: { type: 'string', enum: ['list', 'get', 'repair'] },
     detail_level: { type: 'string', enum: ['summary', 'detail'] },
+    repair_operation: { type: 'string', enum: ['diagnose', 'repair', 'verify', 'handoff'] },
+    dry_run: { type: 'boolean', description: 'Defaults to true for repair/diagnose.' },
+    approval_confirmed: { type: 'boolean' },
   }),
-  definition('rh_inbox', 'ChatGPT-facing facade: list, read, acknowledge, resolve, or create pending handoff decisions.', {
+  definition('rh_inbox', 'ChatGPT-facing facade: list, read, acknowledge, resolve, dismiss, or create pending handoff decisions.', {
     repo_id: repoId,
-    operation: { type: 'string', enum: ['list', 'get', 'ack', 'resolve', 'create'] },
+    operation: { type: 'string', enum: ['list', 'get', 'ack', 'resolve', 'dismiss', 'create'] },
     handoff_id: { type: 'string' },
     title: { type: 'string' },
     reason: { type: 'string' },
     summary: { type: 'string' },
     recommended_decision: { type: 'string' },
     recommended_prompt: { type: 'string' },
+    decision: { type: 'string', description: 'Required for resolve/dismiss decision record.' },
+    resolver: { type: 'string', description: 'Who resolved or dismissed the handoff.' },
     limit: { type: 'number' },
   }),
   definition('rh_context', 'ChatGPT-facing facade: bounded repository/controller context, registered checks, and internal capability registry.', {
     repo_id: repoId,
     operation: { type: 'string', enum: ['list', 'get'] },
     requested_check_ids: { type: 'array', items: { type: 'string' } },
-    detail_level: { type: 'string', enum: ['summary', 'detail'] },
+    work_id: { type: 'string' },
+    detail_level: { type: 'string', enum: ['summary', 'detail', 'raw'] },
   }),
-  definition('rh_work', 'ChatGPT-facing facade: choose direct control, goal workloop, or handoff-only without exposing a generic execute tool.', {
+  definition('rh_work', 'ChatGPT-facing facade: direct control, goal workloop, handoff-only, verify, finalize, stop, repair, and codex delegate.', {
     repo_id: repoId,
-    operation: { type: 'string', enum: ['start', 'continue', 'verify', 'repair', 'finalize', 'stop'] },
+    operation: { type: 'string', enum: ['start', 'continue', 'verify', 'repair', 'finalize', 'stop', 'delegate'] },
     objective: { type: 'string' },
+    work_id: { type: 'string' },
     expected_files: { type: 'number' },
     expected_changed_lines: { type: 'number' },
     scope_clear: { type: 'boolean' },
+    requires_investigation: { type: 'boolean' },
+    requires_long_running_checks: { type: 'boolean' },
+    requires_parallelism: { type: 'boolean' },
+    needs_dependencies: { type: 'boolean' },
     requires_recovery: { type: 'boolean' },
     requires_worker: { type: 'boolean' },
     requires_external_effect: { type: 'boolean' },
     requires_approval: { type: 'boolean' },
+    requires_user_approval: { type: 'boolean' },
+    destructive: { type: 'boolean' },
+    remote_write: { type: 'boolean' },
+    secret_access: { type: 'boolean' },
     capability_id: { type: 'string' },
     approval_confirmed: { type: 'boolean' },
     dry_run: { type: 'boolean' },
     check_ids: { type: 'array', items: { type: 'string' } },
+    check_id: { type: 'string' },
+    acceptance_criteria: { type: 'array', items: { type: 'string' } },
+    allowed_paths: { type: 'array', items: { type: 'string' } },
+    forbidden_paths: { type: 'array', items: { type: 'string' } },
+    repair_operation: { type: 'string', enum: ['diagnose', 'repair', 'verify', 'handoff'] },
+    infrastructure_failed: { type: 'boolean' },
+    check_failed: { type: 'boolean' },
+    codex_available: { type: 'boolean' },
+    authorize_destructive_cleanup: { type: 'boolean' },
   }, [], false),
   definition('work_submit', 'Submit one durable repository operation and return a resumable Work handle.', {
     repo_id: repoId,
@@ -1017,10 +1045,29 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
       case 'rh_status': {
         const repository = selected(ctx, args);
         const operation = String(args.operation ?? 'get');
+        const store = { controllerHome: ctx.controllerHome, repoId: repository.repoId };
+        if (operation === 'repair') {
+          const facade = runSelfHealingLoop(
+            { repoId: repository.repoId, handoffStore: store },
+            {
+              operation: args.repair_operation === 'repair' || args.repair_operation === 'verify' || args.repair_operation === 'handoff'
+                ? args.repair_operation
+                : 'diagnose',
+              dryRun: args.dry_run === undefined ? true : args.dry_run === true,
+              approvalConfirmed: args.approval_confirmed === true,
+              chatgptPullFailed: args.chatgpt_pull_failed === true,
+              destructive: args.destructive === true,
+              processKillOrRestart: args.process_kill_or_restart === true,
+              remoteEffect: args.remote_effect === true,
+            },
+          );
+          return result(facade as unknown as Record<string, unknown>, facade.status === 'blocked' || facade.status === 'approval_required');
+        }
         const readiness = controllerReadiness(ctx, repository);
         const manifests = listAssistantPluginManifests(ctx.controllerHome, repository);
         const capabilities = listCapabilityDescriptors(manifests);
-        const pendingHandoffs = listHandoffItems({ controllerHome: ctx.controllerHome, repoId: repository.repoId, status: 'pending', limit: 20 });
+        const pendingHandoffs = listHandoffItems({ ...store, status: 'pending', limit: 20 });
+        const activeWork = listWorkContracts({ ...store, status: 'active', limit: 20 });
         const facade = buildFacadeResult({
           status: readiness.ready ? 'ok' : 'blocked',
           summary: readiness.ready ? 'Controller is ready for bounded work.' : 'Controller needs attention before background work.',
@@ -1030,6 +1077,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             readiness,
             capabilityCount: capabilities.length,
             pendingHandoffCount: pendingHandoffs.length,
+            activeWorkCount: activeWork.length,
             toolSurface: ['rh_status', 'rh_inbox', 'rh_context', 'rh_work'],
           },
           suggestedNextActions: pendingHandoffs.length > 0 ? [{
@@ -1064,37 +1112,61 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           });
           return result(facade as unknown as Record<string, unknown>, facade.status === 'not_found');
         }
-        if (operation === 'ack' || operation === 'resolve') {
-          const handoffId = String(args.handoff_id ?? '').trim();
-          const item = operation === 'ack' ? acknowledgeHandoffItem(store, handoffId) : resolveHandoffItem(store, handoffId);
-          const facade = buildFacadeResult({
-            summary: `${operation === 'ack' ? 'Acknowledged' : 'Resolved'} handoff ${item.id}.`,
+        if (operation === 'ack') {
+          const item = acknowledgeHandoffItem(store, String(args.handoff_id ?? '').trim());
+          return result(buildFacadeResult({
+            summary: `Acknowledged handoff ${item.id}.`,
             data: { item },
-            suggestedNextActions: operation === 'ack' ? item.suggestedNextActions : [],
+            suggestedNextActions: item.suggestedNextActions,
+          }) as unknown as Record<string, unknown>);
+        }
+        if (operation === 'resolve') {
+          const item = resolveHandoffItem(store, String(args.handoff_id ?? '').trim(), {
+            decision: String(args.decision ?? 'resolved'),
+            resolver: String(args.resolver ?? 'chatgpt'),
           });
-          return result(facade as unknown as Record<string, unknown>);
+          return result(buildFacadeResult({
+            summary: `Resolved handoff ${item.id}.`,
+            data: { item: { id: item.id, status: item.status, decision: item.decision, resolver: item.resolver } },
+          }) as unknown as Record<string, unknown>);
+        }
+        if (operation === 'dismiss') {
+          const item = dismissHandoffItem(store, String(args.handoff_id ?? '').trim(), {
+            decision: String(args.decision ?? 'dismissed'),
+            resolver: String(args.resolver ?? 'chatgpt'),
+          });
+          return result(buildFacadeResult({
+            summary: `Dismissed handoff ${item.id}.`,
+            data: { item: { id: item.id, status: item.status, decision: item.decision, resolver: item.resolver } },
+          }) as unknown as Record<string, unknown>);
         }
         if (operation === 'create') {
           const id = String(args.handoff_id ?? `hnd-${Date.now()}`).trim();
           const item = createHandoffItem(store, {
             id,
             repoId: repository.repoId,
+            workId: typeof args.work_id === 'string' ? args.work_id : undefined,
             title: String(args.title ?? 'Controller handoff'),
             severity: 'needs_review',
+            creationReason: 'ambiguous_outcome',
             reason: String(args.reason ?? 'ChatGPT or user judgement is required before continuing.'),
             summary: String(args.summary ?? 'A bounded controller handoff was recorded.'),
-            currentState: { repoId: repository.repoId, statusSummary: 'pending decision' },
+            currentState: { repoId: repository.repoId, statusSummary: 'pending decision', workId: typeof args.work_id === 'string' ? args.work_id : undefined },
+            attemptedActions: Array.isArray(args.attempted_actions) ? args.attempted_actions.map(String) : [],
             evidenceRefs: [],
+            blockingDecision: typeof args.blocking_decision === 'string' ? args.blocking_decision : undefined,
             recommendedDecision: String(args.recommended_decision ?? 'Decide whether to continue, repair, or stop.'),
             recommendedPrompt: String(args.recommended_prompt ?? `Continue from handoff ${id}.`),
+            recommendedContinuationPrompt: typeof args.recommended_continuation_prompt === 'string' ? args.recommended_continuation_prompt : undefined,
             suggestedNextActions: [],
           });
-          return result(buildFacadeResult({ summary: `Created handoff ${item.id}.`, data: { item } }) as unknown as Record<string, unknown>);
+          return result(buildFacadeResult({ summary: `Created handoff ${item.id}.`, data: { item: summarizeHandoffItem(item) } }) as unknown as Record<string, unknown>);
         }
-        const items = listHandoffItems({ ...store, status: 'active', limit: typeof args.limit === 'number' ? args.limit : 50 });
+        // Default list: pending summary only.
+        const items = listHandoffItems({ ...store, status: 'pending', limit: typeof args.limit === 'number' ? args.limit : 50 });
         return result(buildFacadeResult({
-          summary: items.length ? `${items.length} active handoff item(s).` : 'No active handoff items.',
-          data: { items },
+          summary: items.length ? `${items.length} pending handoff item(s).` : 'No pending handoff items.',
+          data: { items: items.map(summarizeHandoffItem) },
           suggestedNextActions: items.slice(0, 1).map((item) => ({ label: `Read ${item.id}`, tool: 'rh_inbox', operation: 'get', payload: { handoff_id: item.id }, risk: 'readonly' as const })),
         }) as unknown as Record<string, unknown>);
       }
@@ -1105,17 +1177,28 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         const requested = Array.isArray(args.requested_check_ids) ? args.requested_check_ids.map(String) : [];
         const normalizedChecks = normalizeCheckIds(requested, checks);
         const capabilities = listCapabilityDescriptors(manifests);
-        const validationWarnings = normalizedChecks.warnings;
+        const store = { controllerHome: ctx.controllerHome, repoId: repository.repoId };
+        const workId = typeof args.work_id === 'string' ? args.work_id : undefined;
+        const work = workId ? getWorkContract(store, workId) : undefined;
+        const detailLevel = args.detail_level === 'detail' || args.detail_level === 'raw' ? args.detail_level : 'summary';
         const facade = buildFacadeResult({
-          summary: 'Bounded repository context is available through registered checks and internal capabilities.',
+          summary: work
+            ? `Bounded context for work ${work.workId}.`
+            : 'Bounded repository context is available through registered checks and internal capabilities.',
           data: {
             repoId: repository.repoId,
             repository: repositorySummary(repository),
             checks: checks.map((check) => ({ id: check.id, description: check.description, source: check.source })),
             normalizedChecks,
-            capabilities,
+            capabilities: detailLevel === 'summary'
+              ? capabilities.map((entry) => ({ capabilityId: entry.capabilityId, domain: entry.domain, exposedVia: entry.exposedVia }))
+              : capabilities,
+            work: work && detailLevel === 'summary'
+              ? { workId: work.workId, status: work.status, mode: work.mode, objective: work.objective.slice(0, 240) }
+              : work,
           },
-          warnings: validationWarnings,
+          warnings: normalizedChecks.warnings,
+          evidenceRefs: work?.evidenceRefs?.slice(0, 5) ?? [],
           suggestedNextActions: normalizedChecks.suggestedNextActions.length ? normalizedChecks.suggestedNextActions : [{
             label: 'Choose work mode',
             tool: 'rh_work',
@@ -1123,68 +1206,62 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             risk: 'readonly',
             confidence: 'medium',
           }],
-          detailLevel: args.detail_level === 'detail' ? 'detail' : 'summary',
+          detailLevel: detailLevel === 'raw' ? 'detail' : detailLevel,
+          rawAvailable: detailLevel === 'raw',
         });
         return result(facade as unknown as Record<string, unknown>);
       }
       case 'rh_work': {
         const repository = selected(ctx, args);
-        const manifests = listAssistantPluginManifests(ctx.controllerHome, repository);
-        const capabilities = listCapabilityDescriptors(manifests);
-        const capabilityId = typeof args.capability_id === 'string' ? args.capability_id : 'repository.direct_edit';
-        const capability = capabilities.find((entry) => entry.capabilityId === capabilityId);
-        const modeInput: ExecutionModeSelectionInput = {
-          expectedFiles: typeof args.expected_files === 'number' ? args.expected_files : undefined,
-          expectedChangedLines: typeof args.expected_changed_lines === 'number' ? args.expected_changed_lines : undefined,
-          scopeClear: args.scope_clear === undefined ? true : args.scope_clear === true,
-          requiresRecovery: args.requires_recovery === true,
-          requiresWorker: args.requires_worker === true,
-          requiresExternalEffect: args.requires_external_effect === true,
-          requiresApproval: args.requires_approval === true,
-        };
-        const mode = selectExecutionMode(modeInput);
-        const policy = evaluatePolicyGate({
-          capability,
-          capabilityId,
-          approvalConfirmed: args.approval_confirmed === true,
-          dryRun: args.dry_run === true,
-          directEditBoundary: {
-            scopeClear: modeInput.scopeClear,
-            maxChangedFiles: modeInput.expectedFiles,
-            maxChangedLines: modeInput.expectedChangedLines,
-            pathsExplicit: modeInput.scopeClear,
-          },
-        });
+        const store = { controllerHome: ctx.controllerHome, repoId: repository.repoId };
+        const operation = String(args.operation ?? 'start');
         const checks = listControllerChecks(repository.canonicalRoot);
-        const normalizedChecks = normalizeCheckIds(Array.isArray(args.check_ids) ? args.check_ids.map(String) : [], checks);
-        const handoffSuggested = mode.mode === 'handoff_only' || policy.decision === 'approval_required' ? [{
-          label: 'Record pending decision',
-          tool: 'rh_inbox' as const,
-          operation: 'create',
-          payload: { reason: mode.reason, capability_id: capabilityId },
-          risk: 'readonly' as const,
-          confidence: 'high' as const,
-        }] : [];
-        const facade = buildFacadeResult({
-          status: policy.decision === 'denied' ? 'blocked' : policy.decision === 'approval_required' ? 'approval_required' : 'ok',
-          summary: `Recommended execution mode: ${mode.mode}. Policy: ${policy.decision}.`,
-          data: {
-            repoId: repository.repoId,
-            operation: String(args.operation ?? 'start'),
-            objective: typeof args.objective === 'string' ? args.objective.slice(0, 1_000) : undefined,
-            mode,
-            policy,
-            capability,
-            normalizedChecks,
-            directControlPreserved: true,
-            goalWorkloopRequired: mode.mode === 'goal_workloop',
-            handoffOnly: mode.mode === 'handoff_only',
-          },
-          warnings: [...policy.warnings, ...normalizedChecks.warnings],
-          suggestedNextActions: [...handoffSuggested, ...normalizedChecks.suggestedNextActions, ...policy.suggestedNextActions],
-          rawAvailable: false,
-        });
-        return result(facade as unknown as Record<string, unknown>, facade.status === 'blocked');
+        const workloopCtx = {
+          workStore: store,
+          handoffStore: store,
+          repoId: repository.repoId,
+          availableChecks: checks,
+        };
+
+        if (operation === 'repair') {
+          const facade = runSelfHealingLoop(
+            { repoId: repository.repoId, handoffStore: store },
+            {
+              operation: args.repair_operation === 'repair' || args.repair_operation === 'verify' || args.repair_operation === 'handoff'
+                ? args.repair_operation
+                : 'diagnose',
+              dryRun: args.dry_run === undefined ? true : args.dry_run === true,
+              approvalConfirmed: args.approval_confirmed === true,
+              workId: typeof args.work_id === 'string' ? args.work_id : undefined,
+              chatgptPullFailed: args.chatgpt_pull_failed === true,
+              destructive: args.destructive === true,
+              processKillOrRestart: args.process_kill_or_restart === true,
+              remoteEffect: args.remote_write === true || args.remote_effect === true,
+            },
+          );
+          return result(facade as unknown as Record<string, unknown>, facade.status === 'blocked' || facade.status === 'approval_required');
+        }
+
+        if (operation === 'delegate') {
+          const facade = delegateToCodexCerebellum(
+            { repoId: repository.repoId, workStore: store, handoffStore: store },
+            {
+              workId: typeof args.work_id === 'string' ? args.work_id : undefined,
+              objective: typeof args.objective === 'string' ? args.objective : 'Delegated cerebellum work',
+              acceptanceCriteria: Array.isArray(args.acceptance_criteria) ? args.acceptance_criteria.map(String) : undefined,
+              allowedPaths: Array.isArray(args.allowed_paths) ? args.allowed_paths.map(String) : undefined,
+              forbiddenPaths: Array.isArray(args.forbidden_paths) ? args.forbidden_paths.map(String) : undefined,
+              codexAvailable: args.codex_available !== false,
+              workerOutput: args.worker_output && typeof args.worker_output === 'object' && !Array.isArray(args.worker_output)
+                ? args.worker_output as { uncertain?: boolean; summary?: string; patchProposal?: string; evidenceSummary?: string }
+                : undefined,
+            },
+          );
+          return result(facade as unknown as Record<string, unknown>, facade.status === 'blocked');
+        }
+
+        const facade = runGoalWorkloop(workloopCtx, operation as 'start' | 'continue' | 'verify' | 'finalize' | 'stop', args);
+        return result(facade as unknown as Record<string, unknown>, facade.status === 'blocked' || facade.status === 'failed' || facade.status === 'not_found');
       }
       case 'work_submit': {
         const repository = selected(ctx, args);

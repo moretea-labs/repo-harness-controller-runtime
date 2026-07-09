@@ -58,6 +58,30 @@ const CORE_CAPABILITIES: CapabilityDescriptor[] = [
     exposedVia: 'rh_status',
     summary: 'Run bounded runtime repair and maintenance only after policy gate approval.',
   },
+  {
+    capabilityId: 'controller.self_healing',
+    domain: 'maintenance',
+    operationClass: 'execute',
+    risk: 'workspace_write',
+    exposedVia: 'rh_work',
+    summary: 'Diagnose and dry-run repair stuck jobs, stale projections, invalid check pollution, and worker unavailability without treating infrastructure failure as acceptance failure.',
+  },
+  {
+    capabilityId: 'controller.codex_delegation',
+    domain: 'controller',
+    operationClass: 'execute',
+    risk: 'workspace_write',
+    exposedVia: 'rh_work',
+    summary: 'Delegate bounded cerebellum work to Codex/Claude with context packs; outputs evidence, handoff, patch proposal, and suggested actions only — never finalize.',
+  },
+  {
+    capabilityId: 'controller.work_contract',
+    domain: 'controller',
+    operationClass: 'execute',
+    risk: 'workspace_write',
+    exposedVia: 'rh_work',
+    summary: 'Persist and advance WorkContract records for goal workloop start/continue/verify/finalize/stop.',
+  },
 ];
 
 function riskFromAction(actionRisk: string): CapabilityRisk {

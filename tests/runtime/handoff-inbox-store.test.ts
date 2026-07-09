@@ -5,10 +5,13 @@ import { join } from 'path';
 import {
   acknowledgeHandoffItem,
   createHandoffItem,
+  dismissHandoffItem,
   getHandoffItem,
   handoffInboxPath,
   listHandoffItems,
   resolveHandoffItem,
+  shouldCreateHandoff,
+  summarizeHandoffItem,
 } from '../../src/runtime/control-plane/facade/handoff-inbox-store';
 import type { CreateHandoffInput } from '../../src/runtime/control-plane/facade/handoff-inbox-store';
 
@@ -26,7 +29,7 @@ function fixture() {
     root,
     options: {
       root,
-      now: () => `2026-07-09T00:00:0${tick++}.000Z`,
+      now: () => `2026-07-09T00:00:${String(tick++).padStart(2, '0')}.000Z`,
     },
   };
 }
@@ -53,7 +56,7 @@ function handoff(id: string, overrides: Partial<CreateHandoffInput> = {}): Creat
       {
         label: 'Read task context',
         tool: 'rh_context',
-        operation: 'task',
+        operation: 'get',
         risk: 'readonly',
       },
     ],
@@ -84,7 +87,7 @@ describe('handoff inbox store', () => {
     ]);
   });
 
-  test('acknowledges and resolves handoffs', () => {
+  test('acknowledges, resolves with decision/resolver, and dismisses handoffs', () => {
     const { options } = fixture();
     createHandoffItem(options, handoff('hnd_flow'));
 
@@ -95,16 +98,53 @@ describe('handoff inbox store', () => {
     expect(listHandoffItems({ ...options, status: 'active' }).map((item) => item.status)).toEqual([
       'acknowledged',
     ]);
-    expect(resolveHandoffItem(options, 'hnd_flow')).toMatchObject({
+    expect(resolveHandoffItem(options, 'hnd_flow', {
+      decision: 'continue with repair',
+      resolver: 'chatgpt',
+    })).toMatchObject({
       id: 'hnd_flow',
       status: 'resolved',
+      decision: 'continue with repair',
+      resolver: 'chatgpt',
     });
     expect(listHandoffItems({ ...options, status: 'active' })).toEqual([]);
+
+    createHandoffItem(options, handoff('hnd_dismiss'));
+    expect(dismissHandoffItem(options, 'hnd_dismiss', {
+      decision: 'not needed',
+      resolver: 'user',
+    })).toMatchObject({
+      status: 'dismissed',
+      decision: 'not needed',
+      resolver: 'user',
+    });
   });
 
   test('rejects duplicate handoff ids', () => {
     const { options } = fixture();
     createHandoffItem(options, handoff('hnd_duplicate'));
     expect(() => createHandoffItem(options, handoff('hnd_duplicate'))).toThrow('handoff already exists');
+  });
+
+  test('only eligible judgement reasons may create handoffs', () => {
+    expect(shouldCreateHandoff('policy_approval_required')).toBe(true);
+    expect(shouldCreateHandoff('ordinary_log_event')).toBe(false);
+  });
+
+  test('summary projection stays bounded', () => {
+    const { options } = fixture();
+    const item = createHandoffItem(options, handoff('hnd_summary', {
+      workId: 'work_1',
+      creationReason: 'ambiguous_outcome',
+      blockingDecision: 'Choose path A or B',
+    }));
+    const summary = summarizeHandoffItem(item);
+    expect(summary).toMatchObject({
+      id: 'hnd_summary',
+      workId: 'work_1',
+      status: 'pending',
+      creationReason: 'ambiguous_outcome',
+    });
+    expect(summary).not.toHaveProperty('evidenceRefs');
   });
 });

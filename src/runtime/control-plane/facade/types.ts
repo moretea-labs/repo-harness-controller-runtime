@@ -51,6 +51,44 @@ export const TERMINAL_HANDOFF_STATUSES: readonly HandoffStatus[] = [
   'expired',
 ] as const;
 
+export const WORK_CONTRACT_STATUSES = [
+  'pending',
+  'running',
+  'blocked',
+  'waiting_for_review',
+  'succeeded',
+  'failed',
+  'cancelled',
+] as const;
+export type WorkContractStatus = (typeof WORK_CONTRACT_STATUSES)[number];
+
+export const TERMINAL_WORK_CONTRACT_STATUSES: readonly WorkContractStatus[] = [
+  'succeeded',
+  'failed',
+  'cancelled',
+] as const;
+
+export const VERIFICATION_OUTCOMES = [
+  'valid_pass',
+  'valid_fail',
+  'invalid_check_id',
+  'infrastructure_failure',
+  'skipped',
+  'superseded',
+] as const;
+export type VerificationOutcome = (typeof VERIFICATION_OUTCOMES)[number];
+
+export const HANDOFF_CREATION_REASONS = [
+  'policy_approval_required',
+  'ambiguous_outcome',
+  'missing_authorization',
+  'invalid_objective',
+  'repeated_infrastructure_failure',
+  'codex_worker_requires_review',
+  'destructive_action_requires_confirmation',
+] as const;
+export type HandoffCreationReason = (typeof HANDOFF_CREATION_REASONS)[number];
+
 export interface EvidenceRef {
   evidenceId?: string;
   artifactId?: string;
@@ -86,29 +124,37 @@ export interface HandoffCurrentState {
   repoId: string;
   issueId?: string;
   taskId?: string;
+  workId?: string;
   mode?: ExecutionMode;
   statusSummary: string;
   blockedBy?: string[];
   changedFiles?: string[];
-  checks?: Array<{ checkId: string; ok: boolean; summary?: string }>;
+  checks?: Array<{ checkId: string; ok: boolean; summary?: string; outcome?: VerificationOutcome }>;
 }
 
 export interface HandoffItem {
   schemaVersion: 1;
   id: string;
   repoId: string;
+  workId?: string;
   issueId?: string;
   taskId?: string;
   title: string;
   severity: HandoffSeverity;
   status: HandoffStatus;
   reason: string;
+  creationReason?: HandoffCreationReason;
   summary: string;
   currentState: HandoffCurrentState;
+  attemptedActions?: string[];
   evidenceRefs: EvidenceRef[];
+  blockingDecision?: string;
   recommendedDecision: string;
   recommendedPrompt: string;
+  recommendedContinuationPrompt?: string;
   suggestedNextActions: SuggestedNextAction[];
+  decision?: string;
+  resolver?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -135,22 +181,77 @@ export interface WorkContractDriverPolicy {
   allowDirectEdit: boolean;
 }
 
+export interface WorktreePolicy {
+  required: boolean;
+  reason?: string;
+  ref?: string;
+}
+
+export interface EvidencePolicy {
+  defaultDetailLevel: FacadeDetailLevel;
+  allowRawOptIn: boolean;
+  maxEvidenceRefs: number;
+}
+
+export interface ApprovalPolicy {
+  required: boolean;
+  reasons: string[];
+  confirmed: boolean;
+}
+
+export interface RecoveryPolicy {
+  allowSelfHealing: boolean;
+  maxInfrastructureRetries: number;
+  handoffOnAmbiguity: boolean;
+}
+
+export interface VerificationRecord {
+  checkId: string;
+  outcome: VerificationOutcome;
+  summary: string;
+  recordedAt: string;
+  supersedes?: string;
+  evidenceRef?: EvidenceRef;
+}
+
 export interface WorkContract {
   schemaVersion: 1;
-  objective: string;
-  mode: ExecutionMode;
+  workId: string;
   repoId: string;
+  mode: ExecutionMode;
+  objective: string;
+  acceptanceCriteria: string[];
+  constraints: WorkContractConstraints;
+  status: WorkContractStatus;
+  createdAt: string;
+  updatedAt: string;
+  /** @deprecated Prefer workId; kept for phase-1 contract compatibility. */
   issueId?: string;
   taskId?: string;
-  scopeSummary: string;
-  acceptanceCriteria: string[];
+  scopeSummary?: string;
   allowedPaths: string[];
   forbiddenPaths: string[];
   checks: string[];
-  constraints: WorkContractConstraints;
   driver: WorkContractDriverPolicy;
+  worktreePolicy: WorktreePolicy;
+  evidencePolicy: EvidencePolicy;
+  approvalPolicy: ApprovalPolicy;
+  recoveryPolicy: RecoveryPolicy;
   requestedBy: 'chatgpt' | 'user' | 'system' | 'scheduler';
-  createdAt: string;
+  evidenceRefs: EvidenceRef[];
+  handoffRefs: string[];
+  suggestedNextActions: SuggestedNextAction[];
+  policyDecisions: PolicyDecision[];
+  checkRefs: VerificationRecord[];
+  continuationPrompt?: string;
+  worktreeRef?: string;
+  workerRef?: string;
+}
+
+export interface WorkContractStore {
+  schemaVersion: 1;
+  updatedAt: string;
+  contracts: WorkContract[];
 }
 
 export interface CapabilityDescriptor {
@@ -173,56 +274,106 @@ export interface PolicyDecision {
 }
 
 export interface ExecutionModeSelectionInput {
+  objective?: string;
   expectedFiles?: number;
   expectedChangedLines?: number;
   scopeClear: boolean;
-  requiresRecovery: boolean;
-  requiresWorker: boolean;
-  requiresExternalEffect: boolean;
-  requiresApproval: boolean;
+  requiresInvestigation?: boolean;
+  requiresLongRunningChecks?: boolean;
+  requiresParallelism?: boolean;
+  needsDependencies?: boolean;
+  requiresRecovery?: boolean;
+  requiresWorker?: boolean;
+  requiresExternalEffect?: boolean;
+  requiresApproval?: boolean;
+  requiresUserApproval?: boolean;
+  destructive?: boolean;
+  remoteWrite?: boolean;
+  secretAccess?: boolean;
+  risk?: CapabilityRisk;
 }
 
 export interface ExecutionModeSelection {
   mode: ExecutionMode;
   reason: string;
   missingContractFields: string[];
+  createWorkContract: boolean;
+  createHandoff: boolean;
 }
 
 export function isTerminalHandoffStatus(status: HandoffStatus): boolean {
   return TERMINAL_HANDOFF_STATUSES.includes(status);
 }
 
+export function isTerminalWorkContractStatus(status: WorkContractStatus): boolean {
+  return TERMINAL_WORK_CONTRACT_STATUSES.includes(status);
+}
+
 export function selectExecutionMode(input: ExecutionModeSelectionInput): ExecutionModeSelection {
   const expectedFiles = input.expectedFiles ?? 0;
   const expectedChangedLines = input.expectedChangedLines ?? 0;
-  const directControlFits =
-    input.scopeClear &&
-    !input.requiresRecovery &&
-    !input.requiresWorker &&
-    !input.requiresExternalEffect &&
-    !input.requiresApproval &&
-    expectedFiles <= 3 &&
-    expectedChangedLines <= 200;
+  const requiresApproval = input.requiresApproval === true || input.requiresUserApproval === true;
+  const highRisk =
+    input.destructive === true
+    || input.remoteWrite === true
+    || input.secretAccess === true
+    || input.risk === 'destructive'
+    || input.risk === 'destructive_remote'
+    || input.risk === 'remote_write'
+    || input.risk === 'raw_secret_config';
 
-  if (directControlFits) {
+  const objectiveClear = input.scopeClear && (input.objective === undefined || input.objective.trim().length > 0);
+  const missingContractFields: string[] = [];
+  if (!input.scopeClear) missingContractFields.push('scopeSummary', 'acceptanceCriteria', 'allowedPaths');
+  if (input.objective !== undefined && input.objective.trim().length === 0) missingContractFields.push('objective');
+
+  if (!objectiveClear || (highRisk && requiresApproval && !input.scopeClear)) {
+    return {
+      mode: 'handoff_only',
+      reason: 'The request is underspecified, high-risk without clear scope, or missing authorization and needs ChatGPT or user clarification before execution.',
+      missingContractFields: missingContractFields.length ? missingContractFields : ['scopeSummary'],
+      createWorkContract: false,
+      createHandoff: true,
+    };
+  }
+
+  if (highRisk && requiresApproval) {
+    return {
+      mode: 'handoff_only',
+      reason: 'High-risk side effects require explicit authorization before any work contract or direct edit starts.',
+      missingContractFields: [],
+      createWorkContract: false,
+      createHandoff: true,
+    };
+  }
+
+  const complex =
+    input.requiresRecovery === true
+    || input.requiresWorker === true
+    || input.requiresExternalEffect === true
+    || input.requiresInvestigation === true
+    || input.requiresLongRunningChecks === true
+    || input.requiresParallelism === true
+    || input.needsDependencies === true
+    || requiresApproval
+    || expectedFiles > 3
+    || expectedChangedLines > 200;
+
+  if (!complex) {
     return {
       mode: 'direct_control',
       reason: 'Small, clear, supervised work should stay on the fast direct-control path.',
       missingContractFields: [],
-    };
-  }
-
-  if (!input.scopeClear) {
-    return {
-      mode: 'handoff_only',
-      reason: 'The request is underspecified and needs ChatGPT or user clarification before execution.',
-      missingContractFields: ['scopeSummary', 'acceptanceCriteria', 'allowedPaths'],
+      createWorkContract: false,
+      createHandoff: false,
     };
   }
 
   return {
     mode: 'goal_workloop',
-    reason: 'The request benefits from recovery, isolation, worker execution, approval, or background continuation.',
+    reason: 'The request benefits from recovery, isolation, worker execution, approval, investigation, or background continuation.',
     missingContractFields: [],
+    createWorkContract: true,
+    createHandoff: false,
   };
 }

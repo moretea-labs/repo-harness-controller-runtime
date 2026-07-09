@@ -26,6 +26,7 @@ describe('app store connect plugin', () => {
     writeFileSync(keyPath, 'not-a-real-key-for-auth-status-only\n', 'utf-8');
 
     const result = await executeAppStoreConnectPluginAction({
+      controllerHome: repoRoot,
       repoId: 'repo_1',
       repoRoot,
       pluginId: 'app_store_connect',
