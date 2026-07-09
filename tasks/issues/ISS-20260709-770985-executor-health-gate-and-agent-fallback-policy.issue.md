@@ -1,14 +1,14 @@
 ---
 id: "ISS-20260709-770985"
 kind: "feature"
-status: "planned"
-updated_at: "2026-07-09T00:05:10.664Z"
+status: "done"
+updated_at: "2026-07-09T00:43:59.280Z"
 source: "repo-harness-controller-v8"
 ---
 
 # Executor health gate and agent fallback policy
 
-Add a first-class executor health gate and fallback policy so repo-harness does not repeatedly launch doomed agent runs when Codex, Claude, or GitHub Copilot/CCA are unavailable. MCP public endpoint/domain work is intentionally deferred to the later fixed-domain Cloudflare task.
+Executor health gate and fallback policy completed. Commit b2714d0 added structured executor health classification and dispatch fallback behavior; commit 9b1e5f6 fixed follow-up MCP controllerHome test typing so package:check:type passes. Cloudflare fixed-domain MCP endpoint support is tracked separately in commit 6a83b23.
 
 ## Goals
 
@@ -42,7 +42,7 @@ Add a first-class executor health gate and fallback policy so repo-harness does 
 
 ### T1 — Map executor launch and failure paths
 
-- Status: `ready`
+- Status: `done`
 - Objective: Inspect current dispatch_task, launch_issue, submit_local_job, local agent configuration, GitHub Copilot cloud launch, and run failure classification paths. Identify the smallest source locations for executor health and fallback policy.
 - Depends on: none
 - Allowed paths: `src/**`, `tests/**`, `docs/**`
@@ -51,7 +51,7 @@ Add a first-class executor health gate and fallback policy so repo-harness does 
 
 ### T2 — Implement executor health gate
 
-- Status: `planned`
+- Status: `done`
 - Objective: Add structured executor health/preflight classification used before agent launch. It should report available, disabled, auth_required, quota_or_balance, cloud_not_enabled, unknown, and include compact remediation guidance without exposing secrets.
 - Depends on: `T1`
 - Allowed paths: `src/**`, `tests/**`, `docs/**`
@@ -60,7 +60,7 @@ Add a first-class executor health gate and fallback policy so repo-harness does 
 
 ### T3 — Wire fallback policy into dispatch
 
-- Status: `planned`
+- Status: `done`
 - Objective: Use executor health/preflight before dispatch_task, launch_issue, and submit_local_job start an agent. Fail fast for known unavailable executors and return fallback recommendations, especially direct edit for small scoped tasks.
 - Depends on: `T2`
 - Allowed paths: `src/**`, `tests/**`, `docs/**`
@@ -69,7 +69,7 @@ Add a first-class executor health gate and fallback policy so repo-harness does 
 
 ### T4 — Add focused tests and operator docs
 
-- Status: `planned`
+- Status: `done`
 - Objective: Add targeted tests and concise docs/runbook for executor health, fallback policy, and remediation commands. Do not document Cloudflare fixed-domain work here except as a deferred separate item.
 - Depends on: `T3`
 - Allowed paths: `tests/**`, `docs/**`, `README.md`

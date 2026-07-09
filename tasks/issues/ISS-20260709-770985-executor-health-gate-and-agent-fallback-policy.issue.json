@@ -4,8 +4,8 @@
   "title": "Executor health gate and agent fallback policy",
   "slug": "executor-health-gate-and-agent-fallback-policy",
   "kind": "feature",
-  "status": "planned",
-  "summary": "Add a first-class executor health gate and fallback policy so repo-harness does not repeatedly launch doomed agent runs when Codex, Claude, or GitHub Copilot/CCA are unavailable. MCP public endpoint/domain work is intentionally deferred to the later fixed-domain Cloudflare task.",
+  "status": "done",
+  "summary": "Executor health gate and fallback policy completed. Commit b2714d0 added structured executor health classification and dispatch fallback behavior; commit 9b1e5f6 fixed follow-up MCP controllerHome test typing so package:check:type passes. Cloudflare fixed-domain MCP endpoint support is tracked separately in commit 6a83b23.",
   "goals": [
     "Expose structured executor health for Codex, Claude, GitHub Copilot/CCA, and MCP connector reachability where currently available.",
     "Before dispatch_task, launch_issue, or submit_local_job starts an agent, detect known unavailable executor states such as CCA disabled, local agent disabled, authentication required, usage limit, and insufficient balance.",
@@ -33,7 +33,7 @@
       "id": "T1",
       "title": "Map executor launch and failure paths",
       "objective": "Inspect current dispatch_task, launch_issue, submit_local_job, local agent configuration, GitHub Copilot cloud launch, and run failure classification paths. Identify the smallest source locations for executor health and fallback policy.",
-      "status": "ready",
+      "status": "done",
       "dependsOn": [],
       "allowedPaths": [
         "src/**",
@@ -54,17 +54,19 @@
         "No code changes outside investigation notes unless trivial."
       ],
       "risk": "readonly",
-      "notes": [],
+      "notes": [
+        "Completed by commit b2714d0. Launch/failure paths mapped and executor failure classes identified."
+      ],
       "runIds": [],
       "createdAt": "2026-07-09T00:05:10.664Z",
-      "updatedAt": "2026-07-09T00:05:10.664Z",
+      "updatedAt": "2026-07-09T00:43:19.647Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     },
     {
       "id": "T2",
       "title": "Implement executor health gate",
       "objective": "Add structured executor health/preflight classification used before agent launch. It should report available, disabled, auth_required, quota_or_balance, cloud_not_enabled, unknown, and include compact remediation guidance without exposing secrets.",
-      "status": "planned",
+      "status": "done",
       "dependsOn": [
         "T1"
       ],
@@ -87,17 +89,19 @@
         "No secrets or raw API keys are returned."
       ],
       "risk": "medium",
-      "notes": [],
+      "notes": [
+        "Completed by commit b2714d0. Added reusable executor health classifier with stable status, reason, remediation, fallback, and redacted compact output."
+      ],
       "runIds": [],
       "createdAt": "2026-07-09T00:05:10.664Z",
-      "updatedAt": "2026-07-09T00:05:10.664Z",
+      "updatedAt": "2026-07-09T00:43:26.541Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     },
     {
       "id": "T3",
       "title": "Wire fallback policy into dispatch",
       "objective": "Use executor health/preflight before dispatch_task, launch_issue, and submit_local_job start an agent. Fail fast for known unavailable executors and return fallback recommendations, especially direct edit for small scoped tasks.",
-      "status": "planned",
+      "status": "done",
       "dependsOn": [
         "T2"
       ],
@@ -120,17 +124,19 @@
         "Existing successful agent launch behavior remains unchanged."
       ],
       "risk": "high",
-      "notes": [],
+      "notes": [
+        "Completed by commit b2714d0. dispatch_task, launch_issue, dispatch_ready_tasks, retry_task_run, and local bridge launch paths now return structured executorHealth and fail/skip doomed launches where detectable."
+      ],
       "runIds": [],
       "createdAt": "2026-07-09T00:05:10.664Z",
-      "updatedAt": "2026-07-09T00:05:10.664Z",
+      "updatedAt": "2026-07-09T00:43:39.728Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     },
     {
       "id": "T4",
       "title": "Add focused tests and operator docs",
       "objective": "Add targeted tests and concise docs/runbook for executor health, fallback policy, and remediation commands. Do not document Cloudflare fixed-domain work here except as a deferred separate item.",
-      "status": "planned",
+      "status": "done",
       "dependsOn": [
         "T3"
       ],
@@ -153,14 +159,16 @@
         "No broad test expansion."
       ],
       "risk": "medium",
-      "notes": [],
+      "notes": [
+        "Completed by commit b2714d0 plus follow-up docs/check verification. Focused executor-health and MCP controller tests passed; package:check:type is green after follow-up commit 9b1e5f6."
+      ],
       "runIds": [],
       "createdAt": "2026-07-09T00:05:10.664Z",
-      "updatedAt": "2026-07-09T00:05:10.664Z",
+      "updatedAt": "2026-07-09T00:43:51.999Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     }
   ],
   "createdAt": "2026-07-09T00:05:10.664Z",
-  "updatedAt": "2026-07-09T00:05:10.664Z",
+  "updatedAt": "2026-07-09T00:43:59.280Z",
   "repoId": "repo_123b7cf58b6b17b5cbe46a56"
 }
