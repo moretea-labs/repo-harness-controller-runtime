@@ -106,6 +106,7 @@ describe('mcp http transport', () => {
           status: 'ok',
           auth: 'required',
           mcpEndpoint: `http://127.0.0.1:${port}/mcp`,
+          grokEndpoint: `http://127.0.0.1:${port}/mcp-grok`,
           bearerEndpoint: `http://127.0.0.1:${port}/mcp-bearer`,
           sessions: {
             active: 0,
@@ -212,6 +213,7 @@ describe('mcp http transport', () => {
           status: 'ok',
           auth: 'oauth',
           mcpEndpoint: `http://127.0.0.1:${port}/mcp`,
+          grokEndpoint: `http://127.0.0.1:${port}/mcp-grok`,
           bearerEndpoint: `http://127.0.0.1:${port}/mcp-bearer`,
         });
 
@@ -220,6 +222,14 @@ describe('mcp http transport', () => {
         });
         expect(await metadata.json()).toMatchObject({
           resource: 'https://example.test/mcp',
+          authorization_servers: ['https://example.test'],
+        });
+
+        const grokMetadata = await fetch(`http://127.0.0.1:${port}/.well-known/oauth-protected-resource/mcp-grok`, {
+          headers: { 'x-forwarded-proto': 'https', 'x-forwarded-host': 'example.test' },
+        });
+        expect(await grokMetadata.json()).toMatchObject({
+          resource: 'https://example.test/mcp-grok',
           authorization_servers: ['https://example.test'],
         });
 
@@ -284,6 +294,15 @@ describe('mcp http transport', () => {
         expect(noAuth.headers.get('www-authenticate')).toContain('resource_metadata');
         expect(noAuth.headers.get('www-authenticate')).toContain('/.well-known/oauth-protected-resource/mcp');
 
+        const grokNoAuth = await fetch(`http://127.0.0.1:${port}/mcp-grok`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: initializeBody(),
+        });
+        expect(grokNoAuth.status).toBe(401);
+        expect(grokNoAuth.headers.get('www-authenticate')).toContain('resource_metadata');
+        expect(grokNoAuth.headers.get('www-authenticate')).toContain('/.well-known/oauth-protected-resource/mcp-grok');
+
         // Bearer-only endpoint must not advertise OAuth resource_metadata.
         const bearerNoAuth = await fetch(`http://127.0.0.1:${port}/mcp-bearer`, {
           method: 'POST',
@@ -328,6 +347,7 @@ describe('mcp http transport', () => {
             code_challenge: challenge,
             code_challenge_method: 'S256',
             state: 'state-form',
+            resource: `http://127.0.0.1:${port}/mcp-grok`,
           }).toString()}`,
         );
         expect(authorizeForm.status).toBe(200);
@@ -336,6 +356,20 @@ describe('mcp http transport', () => {
         expect(formHtml).toContain('type="password"');
         expect(formHtml).toContain('name="passphrase"');
         expect(formHtml).toContain('Authorize repo-harness');
+        expect(formHtml).toContain('name="resource"');
+        expect(formHtml).toContain(encodeURI(`http://127.0.0.1:${port}/mcp-grok`).replace(/&/g, '&amp;'));
+
+        const initializedGrokWithOAuth = await fetch(`http://127.0.0.1:${port}/mcp-grok`, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${tokenJson.access_token}`,
+            'content-type': 'application/json',
+            accept: 'application/json, text/event-stream',
+          },
+          body: initializeBody(),
+        });
+        expect(initializedGrokWithOAuth.status).toBe(200);
+        expect(await initializedGrokWithOAuth.text()).toContain('repo-harness-mcp');
 
         const initializedWithStaticBearer = await fetch(`http://127.0.0.1:${port}/mcp`, {
           method: 'POST',

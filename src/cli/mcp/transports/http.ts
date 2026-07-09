@@ -266,12 +266,67 @@ function incompleteOAuthAuthorizeResponseBody(): {
   };
 }
 
+function isOAuthDebugTraceEnabled(): boolean {
+  return process.env.REPO_HARNESS_MCP_OAUTH_TRACE === '1' || process.env.REPO_HARNESS_MCP_OAUTH_TRACE === 'true';
+}
+
+const SENSITIVE_OAUTH_FIELDS = new Set([
+  'passphrase',
+  'code',
+  'code_verifier',
+  'client_secret',
+  'access_token',
+  'refresh_token',
+  'token',
+  'authorization',
+]);
+
+function safeOAuthFieldNames(source: Record<string, unknown>): string[] {
+  return Object.keys(source)
+    .filter((key) => !SENSITIVE_OAUTH_FIELDS.has(key.toLowerCase()))
+    .sort();
+}
+
+function oauthTrace(req: Request, event: string, extra: Record<string, unknown> = {}): void {
+  if (!isOAuthDebugTraceEnabled()) return;
+  const source = oauthAuthorizeParamSource(req);
+  const userAgent = typeof req.headers['user-agent'] === 'string'
+    ? req.headers['user-agent'].split(/[\s/]/)[0]
+    : undefined;
+  const safe = {
+    event,
+    method: req.method,
+    path: req.path,
+    fieldNames: safeOAuthFieldNames(source),
+    hasClientId: Boolean(readOAuthAuthorizeString(source, 'client_id')),
+    hasRedirectUri: Boolean(readOAuthAuthorizeString(source, 'redirect_uri')),
+    hasCodeChallenge: Boolean(readOAuthAuthorizeString(source, 'code_challenge')),
+    responseType: readOAuthAuthorizeString(source, 'response_type') || undefined,
+    codeChallengeMethod: readOAuthAuthorizeString(source, 'code_challenge_method') || undefined,
+    grantType: readOAuthAuthorizeString(source, 'grant_type') || undefined,
+    hasResource: Boolean(readOAuthAuthorizeString(source, 'resource')),
+    userAgent,
+    ...extra,
+  };
+  console.error(`[repo-harness:mcp-oauth] ${JSON.stringify(safe)}`);
+}
+
+function oauthTraceMiddleware(event: string): (req: Request, res: Response, next: NextFunction) => void {
+  return (req, res, next) => {
+    oauthTrace(req, `${event}:request`);
+    res.once('finish', () => oauthTrace(req, `${event}:response`, { statusCode: res.statusCode }));
+    next();
+  };
+}
+
 function rejectIncompleteOAuthAuthorize(req: Request, res: Response, next: NextFunction): void {
   const source = oauthAuthorizeParamSource(req);
   if (isIncompleteOAuthAuthorizeRequest(source)) {
+    oauthTrace(req, 'authorize:incomplete');
     res.status(400).json(incompleteOAuthAuthorizeResponseBody());
     return;
   }
+  oauthTrace(req, 'authorize:complete');
   next();
 }
 
@@ -368,8 +423,9 @@ function sendOAuthUnauthorized(
   res: Response,
   description: string,
   configuredOrigin: string | undefined,
+  resourcePath = '/mcp',
 ): void {
-  const resourceMetadataUrl = `${getPublicOrigin(req, configuredOrigin)}/.well-known/oauth-protected-resource/mcp`;
+  const resourceMetadataUrl = `${getPublicOrigin(req, configuredOrigin)}/.well-known/oauth-protected-resource${resourcePath}`;
   res.setHeader(
     'www-authenticate',
     `Bearer error="invalid_token", error_description="${description}", resource_metadata="${resourceMetadataUrl}"`,
@@ -382,6 +438,7 @@ function requireMcpHttpAuth(
   bearerToken: string | null,
   provider: ReturnType<typeof createMcpOAuthProvider> | null,
   configuredOrigin: string | undefined,
+  resourcePath = '/mcp',
 ) {
   return (req: Request, res: Response, next: NextFunction) => {
     if (mode === 'bearer') {
@@ -400,7 +457,7 @@ function requireMcpHttpAuth(
 
     const token = bearerFromRequest(req);
     if (!token || !provider) {
-      sendOAuthUnauthorized(req, res, token ? 'OAuth is not configured' : 'Missing Authorization header', configuredOrigin);
+      sendOAuthUnauthorized(req, res, token ? 'OAuth is not configured' : 'Missing Authorization header', configuredOrigin, resourcePath);
       return;
     }
     provider.verifyAccessToken(token)
@@ -410,7 +467,7 @@ function requireMcpHttpAuth(
       })
       .catch((error: unknown) => {
         if (error instanceof InvalidTokenError) {
-          sendOAuthUnauthorized(req, res, error.message, configuredOrigin);
+          sendOAuthUnauthorized(req, res, error.message, configuredOrigin, resourcePath);
         } else {
           res.status(500).json({ error: 'server_error', message: 'Internal Server Error' });
         }
@@ -595,8 +652,9 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   tokenStore?.load();
   const oauthProvider = tokenStore ? createMcpOAuthProvider(tokenStore) : null;
   const configuredPublicOrigin = getConfiguredPublicOrigin(serviceConfig);
-  // Separate transport maps so OAuth (/mcp) and bearer (/mcp-bearer) clients do not share session IDs.
+  // Separate transport maps so ChatGPT OAuth, Grok OAuth, and static bearer clients do not share session IDs.
   const transports = new Map<string, ManagedTransport>();
+  const grokTransports = new Map<string, ManagedTransport>();
   const bearerTransports = new Map<string, ManagedTransport>();
   const runtimeStats: McpRuntimeStats = { initializing: 0, activePosts: 0, rejectedOverload: 0 };
   const toolContext = createMcpToolContext({ ...opts, repo: repoRoot, controllerHome, profile });
@@ -635,6 +693,7 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
     if (toolSurfaceFingerprint) res.setHeader('x-repo-harness-tool-surface-fingerprint', toolSurfaceFingerprint);
     const activeStreams =
       [...transports.values()].reduce((count, entry) => count + entry.inFlightGets, 0)
+      + [...grokTransports.values()].reduce((count, entry) => count + entry.inFlightGets, 0)
       + [...bearerTransports.values()].reduce((count, entry) => count + entry.inFlightGets, 0);
     res.json({
       status: 'ok',
@@ -658,9 +717,10 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
       },
       auth: authMode === 'oauth' ? (oauthPassphrase ? 'oauth' : 'missing') : (authToken ? 'required' : 'missing'),
       mcpEndpoint: `${advertisedOrigin}/mcp`,
+      grokEndpoint: `${advertisedOrigin}/mcp-grok`,
       bearerEndpoint: `${advertisedOrigin}/mcp-bearer`,
       sessions: {
-        active: transports.size + bearerTransports.size,
+        active: transports.size + grokTransports.size + bearerTransports.size,
         maximum: MAX_MCP_SESSIONS,
         initializing: runtimeStats.initializing,
         activePosts: runtimeStats.activePosts,
@@ -701,12 +761,16 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
 
   if (authMode === 'oauth' && oauthProvider) {
     app.use('/authorize', express.urlencoded({ extended: false, limit: '10kb' }));
+    app.use('/authorize', oauthTraceMiddleware('authorize'));
     // Reject incomplete OAuth requests before rendering the passphrase form.
     app.use('/authorize', rejectIncompleteOAuthAuthorize);
     app.use('/authorize', requirePassphrase(oauthPassphrase ?? ''));
     app.use('/authorize', oauthAuthorizationHandler(oauthProvider));
+    app.use('/token', oauthTraceMiddleware('token'));
     app.use('/token', tokenHandler({ provider: oauthProvider, rateLimit: false }));
+    app.use('/revoke', oauthTraceMiddleware('revoke'));
     app.use('/revoke', revocationHandler({ provider: oauthProvider, rateLimit: false }));
+    app.use('/register', oauthTraceMiddleware('register'));
     app.use('/register', clientRegistrationHandler({ clientsStore: oauthProvider.clientsStore, rateLimit: false }));
     app.get('/.well-known/oauth-authorization-server', (req, res) => {
       const origin = getPublicOrigin(req, configuredPublicOrigin);
@@ -737,15 +801,18 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
         scopes_supported: ['repo-harness'],
       });
     });
-    app.get('/.well-known/oauth-protected-resource/mcp', (req, res) => {
+    const protectedResourceMetadata = (resourcePath: '/mcp' | '/mcp-grok' | '/mcp-bearer') => (req: Request, res: Response): void => {
       const origin = getPublicOrigin(req, configuredPublicOrigin);
       res.json({
-        resource: `${origin}/mcp`,
+        resource: `${origin}${resourcePath}`,
         authorization_servers: [origin],
         scopes_supported: ['repo-harness'],
         bearer_methods_supported: ['header'],
       });
-    });
+    };
+    app.get('/.well-known/oauth-protected-resource/mcp', protectedResourceMetadata('/mcp'));
+    app.get('/.well-known/oauth-protected-resource/mcp-grok', protectedResourceMetadata('/mcp-grok'));
+    app.get('/.well-known/oauth-protected-resource/mcp-bearer', protectedResourceMetadata('/mcp-bearer'));
   }
 
   const setMcpResponseHeaders = (_req: Request, res: Response, next: NextFunction): void => {
@@ -771,7 +838,20 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
     });
   });
 
-  // Bearer-only MCP path for non-OAuth clients (e.g. Grok). Never advertises OAuth resource_metadata.
+  // Grok-compatible MCP path: OAuth resource separate from ChatGPT's /mcp, same tools.
+  app.use('/mcp-grok', setMcpResponseHeaders);
+  app.post('/mcp-grok', requireMcpHttpAuth(authMode, authToken, oauthProvider, configuredPublicOrigin, '/mcp-grok'), express.raw({ type: '*/*', limit: '1mb' }), (req, res) => {
+    handleMcpPost(req, res, toolContext, grokTransports, runtimeStats).catch((error: unknown) => {
+      if (!res.headersSent) sendMcpRequestError(res, error);
+    });
+  });
+  app.get('/mcp-grok', requireMcpHttpAuth(authMode, authToken, oauthProvider, configuredPublicOrigin, '/mcp-grok'), (req, res) => {
+    handleMcpGet(req, res, grokTransports).catch((error: unknown) => {
+      if (!res.headersSent) sendMcpRequestError(res, error);
+    });
+  });
+
+  // Bearer-only MCP path for clients that can send Authorization headers. Never advertises OAuth resource_metadata.
   app.use('/mcp-bearer', setMcpResponseHeaders);
   app.post('/mcp-bearer', requireMcpHttpAuth('bearer', authToken, null, configuredPublicOrigin), express.raw({ type: '*/*', limit: '1mb' }), (req, res) => {
     handleMcpPost(req, res, toolContext, bearerTransports, runtimeStats).catch((error: unknown) => {
@@ -788,6 +868,7 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
 
   const cleanupTimer = setInterval(() => {
     void pruneTransports(transports);
+    void pruneTransports(grokTransports);
     void pruneTransports(bearerTransports);
   }, 60_000);
   cleanupTimer.unref();
@@ -800,8 +881,10 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   httpServer.on('close', () => {
     clearInterval(cleanupTimer);
     for (const entry of transports.values()) void closeManagedTransport(entry);
+    for (const entry of grokTransports.values()) void closeManagedTransport(entry);
     for (const entry of bearerTransports.values()) void closeManagedTransport(entry);
     transports.clear();
+    grokTransports.clear();
     bearerTransports.clear();
   });
 
@@ -810,11 +893,14 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   });
   const authLabel = authMode === 'oauth' ? (oauthPassphrase ? 'oauth' : 'oauth-missing') : (authToken ? 'bearer' : 'missing');
   console.error(
-    `repo-harness mcp http listening on http://${host}:${port}/mcp (auth: ${authLabel}) and http://${host}:${port}/mcp-bearer (auth: bearer)`,
+    `repo-harness mcp http listening on http://${host}:${port}/mcp (auth: ${authLabel}), http://${host}:${port}/mcp-grok (auth: ${authLabel}), and http://${host}:${port}/mcp-bearer (auth: bearer)`,
   );
 
   const shutdown = () => {
     for (const entry of transports.values()) {
+      void closeManagedTransport(entry);
+    }
+    for (const entry of grokTransports.values()) {
       void closeManagedTransport(entry);
     }
     for (const entry of bearerTransports.values()) {
