@@ -239,6 +239,70 @@ Execution should be staged:
 
 This design reduces the chance that ChatGPT triggers safety systems with a broad local-execution request. It also gives repo-harness a stronger audit trail.
 
+## Execution mode selection
+
+The facade should not force every request into the Goal Workloop. repo-harness needs a lightweight router that preserves the existing fast path while upgrading only the work that benefits from recovery, isolation, worker execution, approval, plugin authorization, or background continuation.
+
+### Direct Control
+
+Use Direct Control when ChatGPT is actively supervising a small, clear change.
+
+Typical conditions:
+
+- expected files are three or fewer
+- expected changed lines are roughly two hundred or fewer
+- scope and paths are clear
+- no external plugin side effect is required
+- no worker or background recovery is required
+- no merge, cleanup, or destructive approval is required
+
+Direct Control may still use bounded primitives such as search, read, direct edit, patch, targeted check, and selected-path commit. It is a fast execution path, not a policy bypass.
+
+### Goal Workloop
+
+Use Goal Workloop when the work has enough complexity to benefit from a durable contract.
+
+Typical conditions:
+
+- multi-step implementation or verification
+- controller-owned worktree isolation
+- Codex or another worker may be useful
+- explicit policy approval may be needed
+- a later ChatGPT session may need to resume
+- plugin capability or external service state is involved
+
+The Goal Workloop can internally choose direct edit, isolated worktree, worker execution, or handoff, but ChatGPT should not have to select the low-level mechanism in the request shape.
+
+### Handoff-only
+
+Use Handoff-only when repo-harness should not execute yet.
+
+Typical conditions:
+
+- the objective is underspecified
+- acceptance criteria are missing
+- allowed paths are unclear
+- a plugin is missing authorization
+- the next step requires product or architecture judgment
+- the operation is high risk and lacks approval
+
+Handoff-only creates a pending decision packet for ChatGPT or the user. It should not become a general log sink.
+
+### Routing rule
+
+```text
+small + clear + supervised
+  -> Direct Control
+
+clear + complex or needs recovery/worker/approval/external effect
+  -> Goal Workloop
+
+unclear or unsafe without a decision
+  -> Handoff-only
+```
+
+This rule prevents process inflation: direct edit remains the default for small supervised work, and Goal Workloop is an escalation path rather than a universal wrapper.
+
 ## Work start flow
 
 The expected implementation flow for new work is:

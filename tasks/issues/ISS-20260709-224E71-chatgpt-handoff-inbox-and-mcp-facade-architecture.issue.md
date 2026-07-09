@@ -2,7 +2,7 @@
 id: "ISS-20260709-224E71"
 kind: "feature"
 status: "in_progress"
-updated_at: "2026-07-09T03:38:25.972Z"
+updated_at: "2026-07-09T05:57:05.092Z"
 source: "repo-harness-controller-v8"
 ---
 
@@ -49,7 +49,7 @@ Design and implement the next repo-harness control-plane slice: a Handoff Inbox 
 
 ### T2 — Implement handoff/facade MVP contracts
 
-- Status: `ready`
+- Status: `review`
 - Objective: Add the smallest viable code slice for Handoff Inbox and MCP facade/result contracts, reusing existing controller storage and avoiding broad runtime changes.
 - Depends on: none
 - Allowed paths: `src/**`, `tests/**`, `docs/**`

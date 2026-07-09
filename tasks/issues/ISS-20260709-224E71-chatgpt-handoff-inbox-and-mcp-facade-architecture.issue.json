@@ -116,7 +116,7 @@
       "id": "T2",
       "title": "Implement handoff/facade MVP contracts",
       "objective": "Add the smallest viable code slice for Handoff Inbox and MCP facade/result contracts, reusing existing controller storage and avoiding broad runtime changes.",
-      "status": "ready",
+      "status": "review",
       "dependsOn": [],
       "allowedPaths": [
         "src/**",
@@ -139,14 +139,87 @@
         "Tests or targeted validation cover the new contracts where practical."
       ],
       "risk": "medium",
-      "notes": [],
+      "notes": [
+        "Verification evidence is incomplete or failed: Required named checks or equivalent command evidence are missing or failed.",
+        "Implementation is finalized and targeted validation passed: package:check:type succeeded and bun test tests/runtime/facade-contracts.test.ts passed with 6 tests. Current task verification was polluted by declared check aliases typecheck/test not matching registered check ids; this should be addressed by the planned check-id normalization/facade suggested_next_actions work."
+      ],
       "runIds": [],
       "createdAt": "2026-07-09T03:30:58.628Z",
-      "updatedAt": "2026-07-09T03:30:58.628Z",
-      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+      "updatedAt": "2026-07-09T05:57:05.092Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+      "verification": {
+        "reviewer": "chatgpt",
+        "checkResults": [
+          {
+            "checkId": "typecheck",
+            "ok": false,
+            "summary": "check not found: typecheck"
+          },
+          {
+            "checkId": "test",
+            "ok": false,
+            "summary": "check not found: test"
+          }
+        ],
+        "commandEvidence": [
+          {
+            "command": [
+              "bun",
+              "run",
+              "check:type"
+            ],
+            "cwd": ".",
+            "ok": true,
+            "exitCode": 0,
+            "stdout": "Passed via edit session verification: package:check:type / bun run check:type.",
+            "reportedBy": "chatgpt",
+            "executedAt": "2026-07-09T05:53:38.902Z",
+            "source": "reported"
+          },
+          {
+            "command": [
+              "bun",
+              "test",
+              "tests/runtime/facade-contracts.test.ts"
+            ],
+            "cwd": ".",
+            "ok": true,
+            "exitCode": 0,
+            "stdout": "6 pass, 0 fail, 10 expect() calls. Ran 6 tests across 1 file.",
+            "reportedBy": "chatgpt",
+            "executedAt": "2026-07-09T05:54:14.054Z",
+            "source": "reported"
+          }
+        ],
+        "acceptanceResults": [
+          {
+            "criterion": "Handoff item and unified facade result contracts are represented in code.",
+            "ok": true,
+            "evidence": "Added src/runtime/control-plane/facade/types.ts with HandoffItem, FacadeResult, SuggestedNextAction, WorkContract, PolicyDecision, CapabilityDescriptor, and execution mode contracts."
+          },
+          {
+            "criterion": "The design supports bounded summary/detail behavior and evidence refs.",
+            "ok": true,
+            "evidence": "FacadeResult includes detailLevel, evidenceRefs, rawAvailable, warnings, and suggestedNextActions; HandoffItem references bounded evidenceRefs rather than raw logs."
+          },
+          {
+            "criterion": "Facade contracts avoid adding one ChatGPT-facing tool per capability.",
+            "ok": true,
+            "evidence": "FACADE_TOOLS is limited to rh_status, rh_inbox, rh_context, and rh_work. CapabilityDescriptor exposes capabilities via facade tools."
+          },
+          {
+            "criterion": "Tests or targeted validation cover the new contracts where practical.",
+            "ok": true,
+            "evidence": "Added tests/runtime/facade-contracts.test.ts and ran it successfully; package:check:type passed."
+          }
+        ],
+        "verifiedAt": "2026-07-09T05:55:33.389Z",
+        "autoCompleted": false,
+        "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+      }
     }
   ],
   "createdAt": "2026-07-09T03:30:58.628Z",
-  "updatedAt": "2026-07-09T03:38:25.972Z",
+  "updatedAt": "2026-07-09T05:57:05.092Z",
   "repoId": "repo_123b7cf58b6b17b5cbe46a56"
 }
