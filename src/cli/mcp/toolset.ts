@@ -3,8 +3,20 @@ import type { MultiRepositoryMcpToolContext } from './multi-repository';
 import { buildMultiRepositoryToolDefinitions } from './multi-repository';
 import { repositoryToolDefinitions } from './repository-tools';
 import { runtimeToolDefinitions } from '../../runtime/gateway/mcp/runtime-tools';
+import { FACADE_TOOLS } from '../../runtime/control-plane/facade/types';
+
+/** Preferred ChatGPT-facing facade tools. Must stay small and stable. */
+export const PREFERRED_FACADE_TOOL_NAMES = [...FACADE_TOOLS] as const;
+
+export type ToolExposureClass = 'facade' | 'advanced' | 'internal' | 'compatibility';
 
 export const CORE_CONTROLLER_TOOL_NAMES = [
+  // Preferred ChatGPT facade (stage-2 control plane)
+  'rh_status',
+  'rh_inbox',
+  'rh_context',
+  'rh_work',
+  // Core controller entrypoints
   'controller_capabilities',
   'controller_ready',
   'controller_context',
@@ -61,6 +73,29 @@ export const CORE_CONTROLLER_TOOL_NAMES = [
   'reconcile_campaign',
   'harness_doctor',
 ] as const;
+
+export function classifyControllerToolExposure(toolName: string): ToolExposureClass {
+  if ((PREFERRED_FACADE_TOOL_NAMES as readonly string[]).includes(toolName)) return 'facade';
+  if ((CORE_CONTROLLER_TOOL_NAMES as readonly string[]).includes(toolName)) return 'advanced';
+  if (toolName.startsWith('rh_')) return 'facade';
+  return 'compatibility';
+}
+
+export function controllerToolExposureMetadata(toolNames: readonly string[]): {
+  preferredTools: string[];
+  advancedTools: string[];
+  compatibilityTools: string[];
+  classification: Record<string, ToolExposureClass>;
+} {
+  const classification: Record<string, ToolExposureClass> = {};
+  for (const name of toolNames) classification[name] = classifyControllerToolExposure(name);
+  return {
+    preferredTools: toolNames.filter((name) => classification[name] === 'facade'),
+    advancedTools: toolNames.filter((name) => classification[name] === 'advanced'),
+    compatibilityTools: toolNames.filter((name) => classification[name] === 'compatibility'),
+    classification,
+  };
+}
 
 const CORE_CONTROLLER_TOOL_SET = new Set<string>(CORE_CONTROLLER_TOOL_NAMES);
 

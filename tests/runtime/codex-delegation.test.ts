@@ -63,6 +63,24 @@ describe('codex cerebellum delegation', () => {
     expect(pack.expectedOutputFormat.mustProduce).toContain('evidence_artifact');
     expect(pack.expectedOutputFormat.mustNot).toContain('finalize_work_contract');
     expect(pack.forbiddenPaths).toContain('_ops/secrets');
+    expect(pack.target).toBe('codex');
+  });
+
+  test('grok target prepares bounded request packet without direct execution or finalize', () => {
+    const { ctx, work } = fixture();
+    const result = delegateToCodexCerebellum(ctx, {
+      workId: work.workId,
+      objective: work.objective,
+      target: 'grok',
+    });
+    expect(result.status).toBe('blocked');
+    expect((result.data as { target: string; directExecutionAvailable: boolean; canFinalize: boolean }).target).toBe('grok');
+    expect((result.data as { directExecutionAvailable: boolean }).directExecutionAvailable).toBe(false);
+    expect((result.data as { canFinalize: boolean }).canFinalize).toBe(false);
+    expect((result.data as { isAcceptanceFailure: boolean }).isAcceptanceFailure).toBe(false);
+    expect((result.data as { grokDelegateRequest: { requestId: string; mode: string } }).grokDelegateRequest.mode)
+      .toBe('bounded_handoff_request');
+    expect(listHandoffItems(ctx.handoffStore).length).toBe(1);
   });
 
   test('codex unavailable creates handoff/recovery suggestion and is not acceptance failure', () => {

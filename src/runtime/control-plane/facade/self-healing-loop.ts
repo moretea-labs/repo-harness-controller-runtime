@@ -35,6 +35,24 @@ export interface SelfHealingInput {
   workId?: string;
   /** Observed/simulated issues for deterministic testing and facade injection. */
   issues?: SelfHealingIssue[];
+  /** Bounded maintenance status snapshot from buildRuntimeMaintenanceStatus (optional). */
+  maintenanceStatus?: {
+    readyForExecution?: boolean;
+    recommendedActions?: string[];
+    candidates?: Array<{ kind?: string; reason?: string; suggestedAction?: string; safe?: boolean }>;
+    restartEscalation?: { recommended?: boolean; reason?: string };
+    warnings?: string[];
+  };
+  /** Optional watchdog/performance digests (bounded). */
+  diagnostics?: {
+    watchdogSummary?: string;
+    performanceSummary?: string;
+    codexUnavailable?: boolean;
+    grokUnavailable?: boolean;
+    pluginUnavailable?: boolean;
+    controllerDaemonUnhealthy?: boolean;
+    localBridgeUnhealthy?: boolean;
+  };
   /** ChatGPT pull failure must not become task failure. */
   chatgptPullFailed?: boolean;
   destructive?: boolean;
@@ -50,6 +68,30 @@ export interface SelfHealingContext {
 
 const DEFAULT_ISSUES: SelfHealingIssue[] = [];
 
+function mapMaintenanceCandidate(candidate: {
+  kind?: string;
+  reason?: string;
+  suggestedAction?: string;
+  safe?: boolean;
+}): SelfHealingIssue {
+  const kindText = `${candidate.kind ?? ''} ${candidate.suggestedAction ?? ''}`.toLowerCase();
+  let kind: SelfHealingIssueKind = 'runtime_projection_dirty';
+  if (kindText.includes('local_job') || kindText.includes('stale') || kindText.includes('reconcile')) {
+    kind = kindText.includes('stuck') ? 'stuck_execution_job' : 'stale_local_job';
+  } else if (kindText.includes('projection') || kindText.includes('storage')) {
+    kind = 'runtime_projection_dirty';
+  }
+  const safe = candidate.safe !== false;
+  return {
+    kind,
+    summary: (candidate.reason || candidate.suggestedAction || 'Runtime maintenance candidate').slice(0, 400),
+    severity: safe ? 'warning' : 'error',
+    safeToAutoRepair: safe,
+    requiresApproval: !safe,
+    suggestedAction: candidate.suggestedAction || 'runtime_maintenance_status',
+  };
+}
+
 function defaultDiagnoseIssues(input: SelfHealingInput): SelfHealingIssue[] {
   if (input.issues && input.issues.length > 0) return input.issues;
   const issues: SelfHealingIssue[] = [...DEFAULT_ISSUES];
@@ -61,6 +103,59 @@ function defaultDiagnoseIssues(input: SelfHealingInput): SelfHealingIssue[] {
       safeToAutoRepair: true,
       requiresApproval: false,
       suggestedAction: 'retry_with_bounded_artifact',
+    });
+  }
+  for (const candidate of input.maintenanceStatus?.candidates ?? []) {
+    issues.push(mapMaintenanceCandidate(candidate));
+  }
+  if (input.maintenanceStatus?.restartEscalation?.recommended) {
+    issues.push({
+      kind: 'controller_daemon_health',
+      summary: (input.maintenanceStatus.restartEscalation.reason || 'Restart escalation recommended after maintenance.').slice(0, 400),
+      severity: 'error',
+      safeToAutoRepair: false,
+      requiresApproval: true,
+      suggestedAction: 'restart_controller_or_bridge',
+    });
+  }
+  if (input.diagnostics?.codexUnavailable || input.diagnostics?.grokUnavailable) {
+    issues.push({
+      kind: 'codex_claude_unavailable',
+      summary: 'Codex/Grok small-brain helper unavailable; prefer handoff or retry, not acceptance failure.',
+      severity: 'warning',
+      safeToAutoRepair: false,
+      requiresApproval: false,
+      suggestedAction: 'handoff_or_retry_later',
+    });
+  }
+  if (input.diagnostics?.pluginUnavailable) {
+    issues.push({
+      kind: 'plugin_capability_unavailable',
+      summary: 'Plugin capability unavailable.',
+      severity: 'warning',
+      safeToAutoRepair: false,
+      requiresApproval: false,
+      suggestedAction: 'handoff_or_retry_later',
+    });
+  }
+  if (input.diagnostics?.controllerDaemonUnhealthy) {
+    issues.push({
+      kind: 'controller_daemon_health',
+      summary: 'Controller daemon health issue detected.',
+      severity: 'error',
+      safeToAutoRepair: false,
+      requiresApproval: true,
+      suggestedAction: 'restart_controller_or_bridge',
+    });
+  }
+  if (input.diagnostics?.localBridgeUnhealthy) {
+    issues.push({
+      kind: 'local_bridge_health',
+      summary: 'Local bridge health issue detected.',
+      severity: 'error',
+      safeToAutoRepair: false,
+      requiresApproval: true,
+      suggestedAction: 'restart_controller_or_bridge',
     });
   }
   return issues;
@@ -181,12 +276,35 @@ export function runSelfHealingLoop(ctx: SelfHealingContext, input: SelfHealingIn
         dryRun: true,
         issues,
         plans,
+        maintenance: input.maintenanceStatus
+          ? {
+              readyForExecution: input.maintenanceStatus.readyForExecution,
+              recommendedActions: (input.maintenanceStatus.recommendedActions ?? []).slice(0, 10),
+              candidateCount: input.maintenanceStatus.candidates?.length ?? 0,
+            }
+          : undefined,
+        diagnostics: input.diagnostics
+          ? {
+              watchdogSummary: input.diagnostics.watchdogSummary?.slice(0, 240),
+              performanceSummary: input.diagnostics.performanceSummary?.slice(0, 240),
+            }
+          : undefined,
+        linkedTools: [
+          'runtime_maintenance_status',
+          'runtime_maintenance_apply',
+          'self_healing_loop_plan',
+          'workflow_watchdog_report',
+          'runtime_performance_diagnostics',
+        ],
         isAcceptanceFailure: false,
         chatgptPullFailed: input.chatgptPullFailed === true,
       },
-      warnings: input.chatgptPullFailed
-        ? ['ChatGPT pull failure is not a task/acceptance failure; use bounded artifact, handoff, or retry.']
-        : [],
+      warnings: [
+        ...(input.chatgptPullFailed
+          ? ['ChatGPT pull failure is not a task/acceptance failure; use bounded artifact, handoff, or retry.']
+          : []),
+        ...(input.maintenanceStatus?.warnings ?? []).slice(0, 5),
+      ],
       suggestedNextActions: suggested,
       rawAvailable: false,
     });

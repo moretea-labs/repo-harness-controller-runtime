@@ -38,7 +38,7 @@ import {
 } from '../../../cli/controller/task-ledger';
 import { buildControllerContextPack } from '../../../cli/controller/context-pack';
 import { buildControllerOperationalPlan } from '../../../cli/controller/operational-plan';
-import { listControllerChecks } from '../../../cli/controller/check-runner';
+import { listControllerChecks, runControllerCheck } from '../../../cli/controller/check-runner';
 import { listActiveAgentJobSnapshots } from '../../../cli/agent-jobs/job-manager';
 import {
   commitSelectedPaths,
@@ -110,7 +110,9 @@ import {
 } from '../../../cli/local-bridge/job-store';
 import {
   acknowledgeHandoffItem,
+  allowedFacadeOperations,
   buildFacadeResult,
+  classifyVerificationOutcome,
   createHandoffItem,
   dismissHandoffItem,
   getHandoffItem,
@@ -124,6 +126,8 @@ import {
   summarizeHandoffItem,
   listWorkContracts,
   getWorkContract,
+  verifyGoalWorkloop,
+  type FacadeTool,
 } from '../../control-plane/facade';
 
 function definition(name: string, description: string, properties: Record<string, unknown>, required: string[] = [], readOnly = true): McpToolDefinition {
@@ -136,37 +140,42 @@ function definition(name: string, description: string, properties: Record<string
 }
 const repoId = { type: 'string', description: 'Stable repository id.' };
 export const runtimeToolDefinitions: McpToolDefinition[] = [
-  definition('rh_status', 'ChatGPT-facing facade: bounded controller status, capability readiness, and self-healing diagnose/repair entry.', {
+  definition('rh_status', 'Preferred ChatGPT facade: bounded controller status, capability readiness, and self-healing diagnose/repair.', {
     repo_id: repoId,
-    operation: { type: 'string', enum: ['list', 'get', 'repair'] },
-    detail_level: { type: 'string', enum: ['summary', 'detail'] },
+    operation: { type: 'string', enum: ['list', 'get', 'repair'], description: 'Defaults to get.' },
+    detail_level: { type: 'string', enum: ['summary', 'detail'], description: 'Defaults to summary.' },
     repair_operation: { type: 'string', enum: ['diagnose', 'repair', 'verify', 'handoff'] },
     dry_run: { type: 'boolean', description: 'Defaults to true for repair/diagnose.' },
     approval_confirmed: { type: 'boolean' },
+    chatgpt_pull_failed: { type: 'boolean' },
+    destructive: { type: 'boolean' },
+    process_kill_or_restart: { type: 'boolean' },
   }),
-  definition('rh_inbox', 'ChatGPT-facing facade: list, read, acknowledge, resolve, dismiss, or create pending handoff decisions.', {
+  definition('rh_inbox', 'Preferred ChatGPT facade: pending handoff decisions only (not logs).', {
     repo_id: repoId,
-    operation: { type: 'string', enum: ['list', 'get', 'ack', 'resolve', 'dismiss', 'create'] },
+    operation: { type: 'string', enum: ['list', 'get', 'ack', 'resolve', 'dismiss', 'create'], description: 'Defaults to list (pending).' },
     handoff_id: { type: 'string' },
+    work_id: { type: 'string' },
     title: { type: 'string' },
     reason: { type: 'string' },
     summary: { type: 'string' },
     recommended_decision: { type: 'string' },
     recommended_prompt: { type: 'string' },
-    decision: { type: 'string', description: 'Required for resolve/dismiss decision record.' },
+    decision: { type: 'string', description: 'Recorded on resolve/dismiss.' },
     resolver: { type: 'string', description: 'Who resolved or dismissed the handoff.' },
+    detail_level: { type: 'string', enum: ['summary', 'detail'] },
     limit: { type: 'number' },
   }),
-  definition('rh_context', 'ChatGPT-facing facade: bounded repository/controller context, registered checks, and internal capability registry.', {
+  definition('rh_context', 'Preferred ChatGPT facade: bounded repository context, checks, capabilities, and work contract summary.', {
     repo_id: repoId,
-    operation: { type: 'string', enum: ['list', 'get'] },
+    operation: { type: 'string', enum: ['list', 'get'], description: 'Defaults to get.' },
     requested_check_ids: { type: 'array', items: { type: 'string' } },
     work_id: { type: 'string' },
-    detail_level: { type: 'string', enum: ['summary', 'detail', 'raw'] },
+    detail_level: { type: 'string', enum: ['summary', 'detail', 'raw'], description: 'Defaults to summary; raw is still bounded.' },
   }),
-  definition('rh_work', 'ChatGPT-facing facade: direct control, goal workloop, handoff-only, verify, finalize, stop, repair, and codex delegate.', {
+  definition('rh_work', 'Preferred ChatGPT facade: direct control, goal workloop, verify, finalize, stop, repair, and small-brain delegate (codex/grok/claude).', {
     repo_id: repoId,
-    operation: { type: 'string', enum: ['start', 'continue', 'verify', 'repair', 'finalize', 'stop', 'delegate'] },
+    operation: { type: 'string', enum: ['start', 'continue', 'verify', 'repair', 'finalize', 'stop', 'delegate'], description: 'Defaults to start.' },
     objective: { type: 'string' },
     work_id: { type: 'string' },
     expected_files: { type: 'number' },
@@ -186,17 +195,22 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
     secret_access: { type: 'boolean' },
     capability_id: { type: 'string' },
     approval_confirmed: { type: 'boolean' },
-    dry_run: { type: 'boolean' },
+    dry_run: { type: 'boolean', description: 'Defaults to true for repair.' },
     check_ids: { type: 'array', items: { type: 'string' } },
     check_id: { type: 'string' },
     acceptance_criteria: { type: 'array', items: { type: 'string' } },
     allowed_paths: { type: 'array', items: { type: 'string' } },
     forbidden_paths: { type: 'array', items: { type: 'string' } },
+    constraints: { type: 'object' },
     repair_operation: { type: 'string', enum: ['diagnose', 'repair', 'verify', 'handoff'] },
+    target: { type: 'string', enum: ['codex', 'grok', 'claude'], description: 'Small-brain delegate target for operation=delegate.' },
+    available: { type: 'boolean', description: 'Whether the delegate target is currently available.' },
+    codex_available: { type: 'boolean' },
+    simulate_check: { type: 'boolean', description: 'Test hook: skip real check execution and use infrastructure_failed/check_failed flags.' },
     infrastructure_failed: { type: 'boolean' },
     check_failed: { type: 'boolean' },
-    codex_available: { type: 'boolean' },
     authorize_destructive_cleanup: { type: 'boolean' },
+    detail_level: { type: 'string', enum: ['summary', 'detail'] },
   }, [], false),
   definition('work_submit', 'Submit one durable repository operation and return a resumable Work handle.', {
     repo_id: repoId,
@@ -1039,29 +1053,294 @@ function resolveWorkJob(
   return getExecutionJobByRequestId(ctx.controllerHome, requestId, repoId);
 }
 
+function invalidFacadeOperation(tool: FacadeTool, operation: string): CallToolResult {
+  const allowed = allowedFacadeOperations(tool);
+  const facade = buildFacadeResult({
+    status: 'failed',
+    summary: `Invalid ${tool} operation: ${operation || '<empty>'}.`,
+    data: {
+      tool,
+      operation: operation || null,
+      allowedOperations: [...allowed],
+    },
+    warnings: [`invalid_operation: ${tool} does not support "${operation}"`],
+    suggestedNextActions: allowed.slice(0, 4).map((op) => ({
+      label: `Try ${tool}.${op}`,
+      tool,
+      operation: op,
+      risk: 'readonly' as const,
+      confidence: 'high' as const,
+    })),
+    rawAvailable: false,
+  });
+  return result(facade as unknown as Record<string, unknown>, true);
+}
+
+function runFacadeRepair(
+  ctx: MultiRepositoryMcpToolContext,
+  repository: ReturnType<typeof selected>,
+  args: Record<string, unknown>,
+): CallToolResult {
+  const store = { controllerHome: ctx.controllerHome, repoId: repository.repoId };
+  let maintenanceStatus: {
+    readyForExecution?: boolean;
+    recommendedActions?: string[];
+    candidates?: Array<{ kind?: string; reason?: string; suggestedAction?: string; safe?: boolean }>;
+    restartEscalation?: { recommended?: boolean; reason?: string };
+    warnings?: string[];
+  } | undefined;
+  try {
+    const status = buildRuntimeMaintenanceStatus(repository, ctx.controllerHome, {
+      minAgeMinutes: typeof args.min_age_minutes === 'number' ? args.min_age_minutes : undefined,
+      maxCandidates: typeof args.max_candidates === 'number' ? args.max_candidates : 20,
+      recentErrors: Array.isArray(args.recent_errors) ? args.recent_errors.map(String) : undefined,
+    });
+    maintenanceStatus = {
+      readyForExecution: status.readyForExecution,
+      recommendedActions: status.recommendedActions,
+      candidates: status.candidates.map((candidate) => ({
+        kind: candidate.kind,
+        reason: candidate.reason,
+        suggestedAction: candidate.suggestedAction,
+        safe: candidate.safe,
+      })),
+      restartEscalation: {
+        recommended: status.restartEscalation.recommended,
+        reason: status.restartEscalation.reason,
+      },
+      warnings: status.warnings,
+    };
+  } catch {
+    maintenanceStatus = {
+      readyForExecution: false,
+      recommendedActions: [],
+      candidates: [],
+      warnings: ['runtime_maintenance_status inspection failed; treating as infrastructure issue, not acceptance failure'],
+    };
+  }
+
+  let watchdogSummary: string | undefined;
+  let performanceSummary: string | undefined;
+  try {
+    const watchdog = buildWorkflowWatchdogReport(ctx.controllerHome, repository, { includeProcesses: false });
+    watchdogSummary = `status=${watchdog.status}; findings=${watchdog.findings.length}; stale=${watchdog.staleWork.length}`.slice(0, 240);
+  } catch {
+    watchdogSummary = undefined;
+  }
+  try {
+    const perf = collectRuntimePerformanceDiagnostics({
+      repoId: repository.repoId,
+      repoRoot: repository.canonicalRoot,
+      includeProcesses: false,
+      includeTempDirs: false,
+    });
+    performanceSummary = perf.summary.slice(0, 240);
+  } catch {
+    performanceSummary = undefined;
+  }
+
+  const daemon = readControllerDaemonStatus(ctx.controllerHome);
+  const facade = runSelfHealingLoop(
+    { repoId: repository.repoId, handoffStore: store },
+    {
+      operation: args.repair_operation === 'repair' || args.repair_operation === 'verify' || args.repair_operation === 'handoff'
+        ? args.repair_operation
+        : 'diagnose',
+      dryRun: args.dry_run === undefined ? true : args.dry_run === true,
+      approvalConfirmed: args.approval_confirmed === true,
+      workId: typeof args.work_id === 'string' ? args.work_id : undefined,
+      chatgptPullFailed: args.chatgpt_pull_failed === true,
+      destructive: args.destructive === true,
+      processKillOrRestart: args.process_kill_or_restart === true,
+      remoteEffect: args.remote_write === true || args.remote_effect === true,
+      maintenanceStatus,
+      diagnostics: {
+        watchdogSummary,
+        performanceSummary,
+        controllerDaemonUnhealthy: daemon.status !== 'ready',
+        codexUnavailable: args.codex_available === false,
+        grokUnavailable: args.grok_available === false || args.target === 'grok',
+        pluginUnavailable: args.plugin_unavailable === true,
+      },
+    },
+  );
+  return result(facade as unknown as Record<string, unknown>, facade.status === 'blocked' || facade.status === 'approval_required' || facade.status === 'failed');
+}
+
+function runFacadeVerify(
+  ctx: MultiRepositoryMcpToolContext,
+  repository: ReturnType<typeof selected>,
+  args: Record<string, unknown>,
+): CallToolResult {
+  const store = { controllerHome: ctx.controllerHome, repoId: repository.repoId };
+  const checks = listControllerChecks(repository.canonicalRoot);
+  const workloopCtx = {
+    workStore: store,
+    handoffStore: store,
+    repoId: repository.repoId,
+    availableChecks: checks,
+  };
+  const workId = typeof args.work_id === 'string' ? args.work_id : '';
+  const checkId = String(args.check_id ?? args.checkId ?? '');
+  const classified = classifyVerificationOutcome({
+    checkId,
+    available: checks,
+  });
+
+  if (classified.outcome === 'invalid_check_id') {
+    if (workId) {
+      const facade = verifyGoalWorkloop(workloopCtx, { workId, checkId });
+      return result(facade as unknown as Record<string, unknown>);
+    }
+    return result(buildFacadeResult({
+      status: 'ok',
+      summary: classified.summary,
+      data: {
+        verification: {
+          checkId,
+          outcome: 'invalid_check_id',
+          isAcceptanceFailure: false,
+          isInfrastructureIssue: true,
+          doesNotRequestTaskChanges: true,
+        },
+        registeredCheckCount: checks.length,
+      },
+      warnings: classified.warnings,
+      suggestedNextActions: normalizeCheckIds(checks.slice(0, 3).map((check) => check.id), checks).suggestedNextActions,
+    }) as unknown as Record<string, unknown>);
+  }
+
+  // Simulation path for unit tests / explicit dry verification without process execution.
+  if (args.simulate_check === true || args.infrastructure_failed === true || args.check_failed === true || args.skipped === true) {
+    if (!workId) {
+      return result(buildFacadeResult({
+        status: args.check_failed === true ? 'failed' : 'ok',
+        summary: 'Simulated verification without WorkContract.',
+        data: {
+          verification: {
+            checkId: classified.normalizedCheckId,
+            outcome: args.skipped ? 'skipped' : args.infrastructure_failed ? 'infrastructure_failure' : args.check_failed ? 'valid_fail' : 'valid_pass',
+            isAcceptanceFailure: args.check_failed === true,
+            simulated: true,
+          },
+        },
+      }) as unknown as Record<string, unknown>, args.check_failed === true);
+    }
+    const facade = verifyGoalWorkloop(workloopCtx, {
+      workId,
+      checkId: classified.normalizedCheckId ?? checkId,
+      infrastructureFailed: args.infrastructure_failed === true,
+      checkFailed: args.check_failed === true,
+      skipped: args.skipped === true,
+    });
+    return result(facade as unknown as Record<string, unknown>, facade.status === 'failed');
+  }
+
+  // Real registered check execution path.
+  try {
+    const executed = runControllerCheck(repository.canonicalRoot, classified.normalizedCheckId!);
+    const infrastructureFailed = executed.timedOut === true;
+    const checkFailed = !executed.ok && !infrastructureFailed;
+    if (workId) {
+      const facade = verifyGoalWorkloop(workloopCtx, {
+        workId,
+        checkId: classified.normalizedCheckId!,
+        infrastructureFailed,
+        checkFailed,
+      });
+      const data = facade.data as Record<string, unknown>;
+      return result({
+        ...facade,
+        data: {
+          ...data,
+          verification: {
+            ...(typeof data.verification === 'object' && data.verification ? data.verification as Record<string, unknown> : {}),
+            executed: true,
+            registeredCheckId: classified.normalizedCheckId,
+            ok: executed.ok,
+            timedOut: executed.timedOut,
+            // Never return raw stdout/stderr to ChatGPT by default.
+            evidenceArtifactPath: executed.artifactPath,
+            boundedStatus: executed.ok ? 'pass' : infrastructureFailed ? 'infrastructure_failure' : 'fail',
+          },
+        },
+      } as unknown as Record<string, unknown>, facade.status === 'failed');
+    }
+    return result(buildFacadeResult({
+      status: checkFailed ? 'failed' : 'ok',
+      summary: infrastructureFailed
+        ? `Infrastructure failure while running ${classified.normalizedCheckId}; not an acceptance failure.`
+        : executed.ok
+          ? `Check ${classified.normalizedCheckId} passed.`
+          : `Check ${classified.normalizedCheckId} failed acceptance.`,
+      data: {
+        verification: {
+          checkId: classified.normalizedCheckId,
+          outcome: infrastructureFailed ? 'infrastructure_failure' : executed.ok ? 'valid_pass' : 'valid_fail',
+          isAcceptanceFailure: checkFailed,
+          isInfrastructureIssue: infrastructureFailed,
+          executed: true,
+          evidenceArtifactPath: executed.artifactPath,
+        },
+      },
+      warnings: infrastructureFailed ? ['infrastructure_failure is distinct from acceptance failure'] : [],
+      suggestedNextActions: executed.ok
+        ? [{ label: 'Continue work', tool: 'rh_work', operation: 'continue', payload: { work_id: workId || undefined }, risk: 'readonly' }]
+        : [{ label: 'Diagnose if infrastructure', tool: 'rh_work', operation: 'repair', payload: { repair_operation: 'diagnose', dry_run: true }, risk: 'readonly' }],
+      rawAvailable: false,
+    }) as unknown as Record<string, unknown>, checkFailed);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (workId) {
+      const facade = verifyGoalWorkloop(workloopCtx, {
+        workId,
+        checkId: classified.normalizedCheckId ?? checkId,
+        infrastructureFailed: true,
+      });
+      return result({
+        ...facade,
+        warnings: [...facade.warnings, `check_runner_error: ${message.slice(0, 200)}`],
+        data: {
+          ...(facade.data as Record<string, unknown>),
+          isAcceptanceFailure: false,
+        },
+      } as unknown as Record<string, unknown>);
+    }
+    return result(buildFacadeResult({
+      status: 'ok',
+      summary: `Infrastructure failure invoking check runner for ${classified.normalizedCheckId}; not acceptance failure.`,
+      data: {
+        verification: {
+          checkId: classified.normalizedCheckId,
+          outcome: 'infrastructure_failure',
+          isAcceptanceFailure: false,
+          isInfrastructureIssue: true,
+        },
+      },
+      warnings: [`check_runner_error: ${message.slice(0, 200)}`],
+      suggestedNextActions: [{
+        label: 'Diagnose runtime (dry-run)',
+        tool: 'rh_work',
+        operation: 'repair',
+        payload: { repair_operation: 'diagnose', dry_run: true },
+        risk: 'readonly',
+      }],
+    }) as unknown as Record<string, unknown>);
+  }
+}
+
 export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: string, args: Record<string, unknown>): Promise<CallToolResult | undefined> {
   try {
     switch (name) {
       case 'rh_status': {
         const repository = selected(ctx, args);
         const operation = String(args.operation ?? 'get');
+        if (!allowedFacadeOperations('rh_status').includes(operation)) {
+          return invalidFacadeOperation('rh_status', operation);
+        }
         const store = { controllerHome: ctx.controllerHome, repoId: repository.repoId };
         if (operation === 'repair') {
-          const facade = runSelfHealingLoop(
-            { repoId: repository.repoId, handoffStore: store },
-            {
-              operation: args.repair_operation === 'repair' || args.repair_operation === 'verify' || args.repair_operation === 'handoff'
-                ? args.repair_operation
-                : 'diagnose',
-              dryRun: args.dry_run === undefined ? true : args.dry_run === true,
-              approvalConfirmed: args.approval_confirmed === true,
-              chatgptPullFailed: args.chatgpt_pull_failed === true,
-              destructive: args.destructive === true,
-              processKillOrRestart: args.process_kill_or_restart === true,
-              remoteEffect: args.remote_effect === true,
-            },
-          );
-          return result(facade as unknown as Record<string, unknown>, facade.status === 'blocked' || facade.status === 'approval_required');
+          return runFacadeRepair(ctx, repository, args);
         }
         const readiness = controllerReadiness(ctx, repository);
         const manifests = listAssistantPluginManifests(ctx.controllerHome, repository);
@@ -1101,6 +1380,9 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
       case 'rh_inbox': {
         const repository = selected(ctx, args);
         const operation = String(args.operation ?? 'list');
+        if (!allowedFacadeOperations('rh_inbox').includes(operation)) {
+          return invalidFacadeOperation('rh_inbox', operation);
+        }
         const store = { controllerHome: ctx.controllerHome, repoId: repository.repoId };
         if (operation === 'get') {
           const item = getHandoffItem(store, String(args.handoff_id ?? ''));
@@ -1172,6 +1454,10 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
       }
       case 'rh_context': {
         const repository = selected(ctx, args);
+        const operation = String(args.operation ?? 'get');
+        if (!allowedFacadeOperations('rh_context').includes(operation)) {
+          return invalidFacadeOperation('rh_context', operation);
+        }
         const manifests = listAssistantPluginManifests(ctx.controllerHome, repository);
         const checks = listControllerChecks(repository.canonicalRoot);
         const requested = Array.isArray(args.requested_check_ids) ? args.requested_check_ids.map(String) : [];
@@ -1182,14 +1468,17 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         const work = workId ? getWorkContract(store, workId) : undefined;
         const detailLevel = args.detail_level === 'detail' || args.detail_level === 'raw' ? args.detail_level : 'summary';
         const facade = buildFacadeResult({
+          status: 'ok',
           summary: work
             ? `Bounded context for work ${work.workId}.`
             : 'Bounded repository context is available through registered checks and internal capabilities.',
           data: {
+            operation,
             repoId: repository.repoId,
             repository: repositorySummary(repository),
             checks: checks.map((check) => ({ id: check.id, description: check.description, source: check.source })),
             normalizedChecks,
+            invalidCheckIdsAreNotFailures: true,
             capabilities: detailLevel === 'summary'
               ? capabilities.map((entry) => ({ capabilityId: entry.capabilityId, domain: entry.domain, exposedVia: entry.exposedVia }))
               : capabilities,
@@ -1215,6 +1504,9 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         const repository = selected(ctx, args);
         const store = { controllerHome: ctx.controllerHome, repoId: repository.repoId };
         const operation = String(args.operation ?? 'start');
+        if (!allowedFacadeOperations('rh_work').includes(operation)) {
+          return invalidFacadeOperation('rh_work', operation);
+        }
         const checks = listControllerChecks(repository.canonicalRoot);
         const workloopCtx = {
           workStore: store,
@@ -1224,22 +1516,11 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         };
 
         if (operation === 'repair') {
-          const facade = runSelfHealingLoop(
-            { repoId: repository.repoId, handoffStore: store },
-            {
-              operation: args.repair_operation === 'repair' || args.repair_operation === 'verify' || args.repair_operation === 'handoff'
-                ? args.repair_operation
-                : 'diagnose',
-              dryRun: args.dry_run === undefined ? true : args.dry_run === true,
-              approvalConfirmed: args.approval_confirmed === true,
-              workId: typeof args.work_id === 'string' ? args.work_id : undefined,
-              chatgptPullFailed: args.chatgpt_pull_failed === true,
-              destructive: args.destructive === true,
-              processKillOrRestart: args.process_kill_or_restart === true,
-              remoteEffect: args.remote_write === true || args.remote_effect === true,
-            },
-          );
-          return result(facade as unknown as Record<string, unknown>, facade.status === 'blocked' || facade.status === 'approval_required');
+          return runFacadeRepair(ctx, repository, args);
+        }
+
+        if (operation === 'verify') {
+          return runFacadeVerify(ctx, repository, args);
         }
 
         if (operation === 'delegate') {
@@ -1247,10 +1528,12 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             { repoId: repository.repoId, workStore: store, handoffStore: store },
             {
               workId: typeof args.work_id === 'string' ? args.work_id : undefined,
+              target: args.target === 'grok' || args.target === 'claude' || args.target === 'codex' ? args.target : 'codex',
               objective: typeof args.objective === 'string' ? args.objective : 'Delegated cerebellum work',
               acceptanceCriteria: Array.isArray(args.acceptance_criteria) ? args.acceptance_criteria.map(String) : undefined,
               allowedPaths: Array.isArray(args.allowed_paths) ? args.allowed_paths.map(String) : undefined,
               forbiddenPaths: Array.isArray(args.forbidden_paths) ? args.forbidden_paths.map(String) : undefined,
+              available: typeof args.available === 'boolean' ? args.available : undefined,
               codexAvailable: args.codex_available !== false,
               workerOutput: args.worker_output && typeof args.worker_output === 'object' && !Array.isArray(args.worker_output)
                 ? args.worker_output as { uncertain?: boolean; summary?: string; patchProposal?: string; evidenceSummary?: string }
@@ -1260,7 +1543,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           return result(facade as unknown as Record<string, unknown>, facade.status === 'blocked');
         }
 
-        const facade = runGoalWorkloop(workloopCtx, operation as 'start' | 'continue' | 'verify' | 'finalize' | 'stop', args);
+        const facade = runGoalWorkloop(workloopCtx, operation as 'start' | 'continue' | 'finalize' | 'stop', args);
         return result(facade as unknown as Record<string, unknown>, facade.status === 'blocked' || facade.status === 'failed' || facade.status === 'not_found');
       }
       case 'work_submit': {

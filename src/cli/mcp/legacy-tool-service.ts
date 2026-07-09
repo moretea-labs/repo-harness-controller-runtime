@@ -2881,7 +2881,11 @@ export function controllerExpectedToolNames(
   opts: { enableChatgptBrowser?: boolean } = {},
 ): string[] {
   const names = buildMcpToolDefinitions(policy, opts).map((tool) => tool.name);
-  return policy.profile === "controller" ? [...repositoryToolNames, ...names] : names;
+  if (policy.profile !== "controller") return names;
+  // Preferred ChatGPT facade first, then repository tools, then compatibility/legacy tools.
+  // Facade tools live in runtimeToolDefinitions and must appear in expectedTools for connector freshness checks.
+  const facadeTools = ["rh_status", "rh_inbox", "rh_context", "rh_work"];
+  return [...new Set([...facadeTools, ...repositoryToolNames, ...names])];
 }
 
 export async function callMcpTool(
@@ -2969,6 +2973,16 @@ export async function callMcpTool(
         const expectedTools = controllerExpectedToolNames(ctx.policy, {
           enableChatgptBrowser: ctx.enableChatgptBrowser === true,
         });
+        const preferredTools = ["rh_status", "rh_inbox", "rh_context", "rh_work"];
+        const connectorSnapshot = Array.isArray(args.connector_tool_names)
+          ? args.connector_tool_names.map(String)
+          : Array.isArray(args.connectorToolNames)
+            ? args.connectorToolNames.map(String)
+            : undefined;
+        const missingFacadeTools = connectorSnapshot
+          ? preferredTools.filter((tool) => !connectorSnapshot.includes(tool))
+          : [];
+        const staleConnector = missingFacadeTools.length > 0;
         const payload = {
           schemaVersion: CONTROLLER_SCHEMA_VERSION,
           toolSurface: CONTROLLER_TOOL_SURFACE,
@@ -3028,6 +3042,11 @@ export async function callMcpTool(
             controllerContextAggregation: true,
             taskLedgerProjection: true,
             assistantPluginRuntime: true,
+            chatgptFacadeTools: true,
+            goalWorkloop: true,
+            handoffInbox: true,
+            codexGrokDelegation: true,
+            selfHealingRepair: true,
           },
           runner: {
             enabled: ctx.policy.execution.agentRunner,
@@ -3042,7 +3061,17 @@ export async function callMcpTool(
             ),
             note: "Requested timeout values are validated explicitly and are never silently reduced to the default.",
           },
+          preferredTools,
+          toolExposure: {
+            preferred: preferredTools,
+            note: "Prefer rh_status/rh_inbox/rh_context/rh_work for ChatGPT control-plane work. Older tools remain available as advanced/compatibility.",
+            advanced: expectedTools.filter((tool) => !preferredTools.includes(tool)).slice(0, 40),
+            compatibilityRetained: true,
+          },
           expectedTools,
+          facadeToolsPresentInExpectedTools: preferredTools.every((tool) => expectedTools.includes(tool)),
+          staleConnector,
+          missingFacadeTools,
           docs: [
             "docs/repo-harness-chatgpt-controller.md",
             "docs/repo-harness-github-issue-launcher.md",
@@ -3054,8 +3083,9 @@ export async function callMcpTool(
             "docs/repo-harness-chatgpt-bridge-v8.md",
             "docs/repo-harness-v8-verification.md",
           ],
-          staleConnectorHint:
-            `Connector clients must match ${CONTROLLER_TOOL_SURFACE} schema ${CONTROLLER_SCHEMA_VERSION}. Refresh MCP setup when toolSurfaceVersion or fingerprint differs.`,
+          staleConnectorHint: staleConnector
+            ? `Stale ChatGPT connector tool snapshot is missing facade tools: ${missingFacadeTools.join(", ")}. Refresh/reconnect MCP so tools/list reloads rh_status, rh_inbox, rh_context, and rh_work.`
+            : `Connector clients must match ${CONTROLLER_TOOL_SURFACE} schema ${CONTROLLER_SCHEMA_VERSION}. Prefer rh_status/rh_inbox/rh_context/rh_work. If those tools are missing from ChatGPT tools/list, refresh or recreate the Connector. Refresh also when toolSurfaceVersion or fingerprint differs.`,
         };
         audit(ctx, name, "ok", args);
         return textResult(payload);
