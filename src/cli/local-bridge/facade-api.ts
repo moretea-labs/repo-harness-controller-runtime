@@ -45,9 +45,18 @@ import {
   EXPECTED_FACADE_TOOLS,
   type ConnectorFreshnessReport,
 } from './connector-freshness';
+import {
+  statusLabelForPhase,
+  type UserFacingErrorClass,
+  type UserFacingPhase,
+} from '../../runtime/control-plane/facade/operation-digest';
+import { repositoryGitStatus } from '../repositories/structured-git';
 import type {
+  ChangedFileEntryViewModel,
+  ChangedFilesSummaryViewModel,
   CommandCenterViewModel,
   ConnectorFreshnessViewModel,
+  ConsoleErrorViewModel,
   HandoffCardViewModel,
   ModePreviewViewModel,
   PlainStatusTone,
@@ -124,17 +133,150 @@ function mapSuggested(actions: SuggestedNextAction[] = []): SuggestedActionViewM
   });
 }
 
-function workStatusLabel(status: WorkContract['status']): { label: string; tone: PlainStatusTone } {
+function workStatusLabel(status: WorkContract['status']): { label: string; tone: PlainStatusTone; phase: UserFacingPhase } {
   switch (status) {
-    case 'running': return { label: '进行中', tone: 'blue' };
-    case 'pending': return { label: '待开始', tone: 'gray' };
-    case 'blocked': return { label: '已阻塞', tone: 'red' };
-    case 'waiting_for_review': return { label: '需要你审阅', tone: 'amber' };
-    case 'succeeded': return { label: '已完成', tone: 'green' };
-    case 'failed': return { label: '未通过验收', tone: 'red' };
-    case 'cancelled': return { label: '已停止', tone: 'gray' };
-    default: return { label: String(status), tone: 'gray' };
+    case 'running': return { label: '进行中', tone: 'blue', phase: 'running' };
+    case 'pending': return { label: '待开始', tone: 'gray', phase: 'queued' };
+    case 'blocked': return { label: '已阻塞', tone: 'red', phase: 'blocked' };
+    case 'waiting_for_review': return { label: '需要你审阅', tone: 'amber', phase: 'needs_attention' };
+    case 'succeeded': return { label: '已完成', tone: 'green', phase: 'succeeded' };
+    case 'failed': return { label: '未通过验收', tone: 'red', phase: 'failed' };
+    case 'cancelled': return { label: '已停止', tone: 'gray', phase: 'cancelled' };
+    default: return { label: String(status), tone: 'gray', phase: 'running' };
   }
+}
+
+const ERROR_COPY: Record<UserFacingErrorClass, { title: string; explanation: string; nextActions: string[] }> = {
+  controller_unavailable: {
+    title: '控制器暂不可用',
+    explanation: '后台控制器未就绪，暂时无法执行任务。',
+    nextActions: ['查看系统状态', '运行诊断', '重启 controller'],
+  },
+  connector_stale: {
+    title: '连接器可能过期',
+    explanation: '本地 MCP 与 ChatGPT 工具快照可能不一致；若 ChatGPT 里看不到 rh_* 请重连。',
+    nextActions: ['查看连接器诊断', '重启 MCP', '重连 ChatGPT Connector'],
+  },
+  infrastructure_failure: {
+    title: '环境/基础设施问题',
+    explanation: '失败来自运行环境（进程、存储、检查命令），不是业务验收本身。',
+    nextActions: ['运行修复诊断', '查看高级诊断', '稍后重试'],
+  },
+  acceptance_failure: {
+    title: '验收未通过',
+    explanation: '检查已运行，但结果不符合验收标准。',
+    nextActions: ['查看失败原因', '继续修改', '再次验证'],
+  },
+  invalid_check_id: {
+    title: '检查项无效',
+    explanation: '指定的检查 ID 未注册或不存在。',
+    nextActions: ['选择有效检查', '查看系统状态'],
+  },
+  approval_required: {
+    title: '需要你授权',
+    explanation: '该操作风险较高，需明确授权后才能继续。',
+    nextActions: ['查看待决定', '确认后继续'],
+  },
+  handoff_required: {
+    title: '需要你做决定',
+    explanation: '任务停在决策点，不能自动往下走。',
+    nextActions: ['打开待决定', '记录决定后继续'],
+  },
+  timeout: {
+    title: '执行超时',
+    explanation: '操作在限定时间内未完成。',
+    nextActions: ['重试', '运行诊断', '查看高级详情'],
+  },
+  policy_denied: {
+    title: '策略拒绝',
+    explanation: '当前策略不允许该操作。',
+    nextActions: ['调整范围', '查看高级诊断'],
+  },
+  not_found: {
+    title: '未找到目标',
+    explanation: '任务、仓库或资源不存在或已清理。',
+    nextActions: ['刷新控制台', '重新选择仓库或任务'],
+  },
+  unknown_failure: {
+    title: '出现未知错误',
+    explanation: '操作失败，但尚未归类到具体原因。',
+    nextActions: ['重试', '运行诊断', '查看高级详情'],
+  },
+};
+
+export function describeConsoleError(
+  errorClass: UserFacingErrorClass,
+  detail?: string,
+): ConsoleErrorViewModel {
+  const copy = ERROR_COPY[errorClass] ?? ERROR_COPY.unknown_failure;
+  const explanation = detail && detail.trim() && detail.trim() !== 'undefined'
+    ? `${copy.explanation} ${detail.trim().slice(0, 180)}`
+    : copy.explanation;
+  return {
+    errorClass,
+    title: copy.title,
+    explanation,
+    nextActions: copy.nextActions,
+  };
+}
+
+export function summarizeChangedFiles(paths: readonly string[]): ChangedFilesSummaryViewModel | undefined {
+  const unique = [...new Set(paths.map((entry) => String(entry || '').trim()).filter(Boolean))].slice(0, 40);
+  if (!unique.length) return undefined;
+  const files: ChangedFileEntryViewModel[] = unique.map((path) => {
+    let status: ChangedFileEntryViewModel['status'] = 'modified';
+    if (path.startsWith('A ') || path.includes('(new)') || path.startsWith('+')) status = 'added';
+    else if (path.startsWith('D ') || path.includes('(deleted)') || path.startsWith('-')) status = 'deleted';
+    else if (path.startsWith('R ') || path.includes(' -> ')) status = 'renamed';
+    const clean = path.replace(/^[AMD?R]\s+/, '').replace(/^\+/, '').replace(/^-/, '').trim();
+    return {
+      path: clean || path,
+      status,
+      statusLabel: status === 'added' ? '新增' : status === 'deleted' ? '删除' : status === 'renamed' ? '重命名' : '修改',
+    };
+  });
+  const added = files.filter((entry) => entry.status === 'added').length;
+  const deleted = files.filter((entry) => entry.status === 'deleted').length;
+  const modified = files.length - added - deleted;
+  const parts: string[] = [];
+  if (modified) parts.push(`修改 ${modified}`);
+  if (added) parts.push(`新增 ${added}`);
+  if (deleted) parts.push(`删除 ${deleted}`);
+  if (!parts.length) parts.push(`${files.length} 个文件`);
+  return {
+    total: files.length,
+    modified,
+    added,
+    deleted,
+    files,
+    summaryLabel: parts.join(' · '),
+  };
+}
+
+function extractChangedPathsFromWork(
+  work: WorkContract,
+  opts: { controllerHome: string; repoId: string } | null = null,
+): string[] {
+  const paths: string[] = [];
+  for (const evidence of work.evidenceRefs ?? []) {
+    const blob = `${evidence.title ?? ''} ${evidence.summary ?? ''}`;
+    for (const match of blob.matchAll(/(?:^|[\s`])([A-Za-z0-9_./-]+\.[A-Za-z0-9]+)(?:$|[\s`,])/g)) {
+      if (match[1] && !match[1].startsWith('http')) paths.push(match[1]);
+    }
+  }
+  if (opts) {
+    for (const handoffId of work.handoffRefs ?? []) {
+      try {
+        const item = getHandoffItem({ controllerHome: opts.controllerHome, repoId: opts.repoId }, handoffId);
+        for (const path of item?.currentState?.changedFiles ?? []) {
+          if (path) paths.push(path);
+        }
+      } catch {
+        // ignore missing handoffs
+      }
+    }
+  }
+  return paths;
 }
 
 function progressSteps(work: WorkContract): WorkSummaryViewModel['progressSteps'] {
@@ -182,32 +324,64 @@ function latestVerification(work: WorkContract): VerificationViewModel | undefin
   };
 }
 
-export function mapWorkSummary(work: WorkContract): WorkSummaryViewModel {
+export function mapWorkSummary(
+  work: WorkContract,
+  opts: { controllerHome?: string; repoId?: string } = {},
+): WorkSummaryViewModel {
   const status = workStatusLabel(work.status);
   const mode = plainMode(work.mode === 'direct_control' || work.mode === 'handoff_only' ? work.mode : 'goal_workloop');
   const verification = latestVerification(work);
-  const nextAction = work.suggestedNextActions[0]?.label
+  const suggested = mapSuggested(work.suggestedNextActions);
+  const nextAction = suggested[0]?.label
     ?? (work.status === 'waiting_for_review' ? '请审阅后继续或收尾'
       : work.status === 'running' ? '继续或运行检查'
         : work.status === 'succeeded' ? '任务已完成'
           : work.status === 'failed' ? '查看失败原因并决定是否重试'
             : '查看任务状态');
+  const storeOpts = opts.controllerHome && opts.repoId
+    ? { controllerHome: opts.controllerHome, repoId: opts.repoId }
+    : null;
+  const changedFiles = summarizeChangedFiles(extractChangedPathsFromWork(work, storeOpts));
+  let error: ConsoleErrorViewModel | undefined;
+  if (work.status === 'failed') {
+    error = describeConsoleError(
+      verification?.isInfrastructureIssue ? 'infrastructure_failure' : 'acceptance_failure',
+      verification?.summary,
+    );
+  } else if (work.status === 'blocked' || work.status === 'waiting_for_review') {
+    error = describeConsoleError(
+      work.status === 'waiting_for_review' ? 'handoff_required' : 'handoff_required',
+      work.suggestedNextActions[0]?.reason,
+    );
+  }
+  const latestSummary = verification?.summary
+    || work.evidenceRefs[0]?.summary
+    || work.evidenceRefs[0]?.title
+    || (work.status === 'running' ? '任务执行中…' : status.label);
   return {
     id: work.workId,
     title: work.objective.slice(0, 160) || '未命名任务',
+    objective: work.objective,
     modeLabel: mode.label,
     mode: mode.mode,
     statusLabel: status.label,
     tone: status.tone,
+    phase: status.phase,
+    phaseLabel: statusLabelForPhase(status.phase),
     nextAction,
+    latestAction: suggested[0]?.label || nextAction,
+    latestSummary,
     progressSteps: progressSteps(work),
     latestVerification: verification,
     acceptanceCriteria: work.acceptanceCriteria.slice(0, 8),
     evidenceLabels: work.evidenceRefs.slice(0, 6).map((entry) => entry.title || entry.summary || '证据'),
+    changedFiles,
+    error,
     delegateSummary: work.workerRef
       ? `已委派小助手（${work.workerRef.split(':')[0] ?? 'worker'}），等待 ChatGPT 审阅后才能收尾。`
       : undefined,
-    suggestedActions: mapSuggested(work.suggestedNextActions),
+    suggestedActions: suggested,
+    primaryActionLabel: suggested[0]?.label,
     advanced: {
       workId: work.workId,
       status: work.status,
@@ -276,6 +450,20 @@ export function mapRepositoryCard(
   repository: RepositoryRecord,
   current: boolean,
 ): RepositoryCardViewModel {
+  let branchLabel: string | undefined;
+  let dirtyLabel: string | undefined;
+  let readinessLabel: string | undefined;
+  if (current || repository.enabled !== false) {
+    try {
+      const git = repositoryGitStatus(repository);
+      branchLabel = git.branch || repository.defaultBranch || 'detached';
+      dirtyLabel = git.clean ? '工作区干净' : '有未提交变更';
+      readinessLabel = repository.enabled === false ? '已停用' : git.clean ? '可执行' : '可执行（脏工作区）';
+    } catch {
+      branchLabel = repository.defaultBranch || undefined;
+      readinessLabel = repository.enabled === false ? '已停用' : '可用';
+    }
+  }
   return {
     id: repository.repoId,
     name: repository.displayName || repository.repoId,
@@ -283,10 +471,14 @@ export function mapRepositoryCard(
     statusLabel: current ? '当前' : repository.enabled === false ? '已停用' : '可用',
     tone: current ? 'green' : repository.enabled === false ? 'gray' : 'blue',
     current,
+    branchLabel,
+    dirtyLabel,
+    readinessLabel,
     advanced: {
       repoId: repository.repoId,
       remote: repository.remoteUrl,
       defaultBranch: repository.defaultBranch,
+      checkoutId: repository.activeCheckoutId,
     },
   };
 }
@@ -521,15 +713,20 @@ export async function buildCommandCenter(
   repositories: RepositoryCardViewModel[],
 ): Promise<CommandCenterViewModel> {
   const readiness = await buildSystemReadiness(ctx);
+  const mapWork = (work: WorkContract) => mapWorkSummary(work, {
+    controllerHome: ctx.controllerHome,
+    repoId: ctx.repository.repoId,
+  });
   const currentRepository = repositories.find((entry) => entry.current) ?? mapRepositoryCard(ctx.repository, true);
-  const activeWork = listWorkContracts({ ...store(ctx), status: 'active', limit: 20 }).map(mapWorkSummary);
-  const allRecent = listWorkContracts({ ...store(ctx), status: 'all', limit: 12 }).map(mapWorkSummary);
+  const activeWork = listWorkContracts({ ...store(ctx), status: 'active', limit: 20 }).map(mapWork);
+  const allRecent = listWorkContracts({ ...store(ctx), status: 'all', limit: 12 }).map(mapWork);
   const handoffs = listHandoffItems({ ...store(ctx), status: 'pending', limit: 20 }).map(mapHandoffCard);
   const plugins = listConsolePlugins(ctx);
   const pluginSummary = buildPluginSummary(plugins);
   const banner = readiness.connectorFreshness?.severity === 'warning' || readiness.connectorFreshness?.severity === 'error'
     ? readiness.connectorFreshness.summary
     : undefined;
+  const needsSetup = readiness.state === 'needs_setup' || ctx.repository.enabled === false || !currentRepository;
   return {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
@@ -544,6 +741,14 @@ export async function buildCommandCenter(
     modePreviewDefault: plainMode('direct_control'),
     // Only surface confirmed warnings — never "maybe missing" when ChatGPT snapshot is unobserved.
     warnings: banner ? [banner] : [],
+    setupGuide: needsSetup
+      ? {
+        needed: true,
+        title: '先选择或注册一个仓库',
+        body: '没有可用仓库时，无法开始开发任务。请在“仓库”页添加本地 Git 仓库并设为当前。',
+        actionLabel: '去设置仓库',
+      }
+      : { needed: false, title: '', body: '', actionLabel: '' },
   };
 }
 
@@ -777,11 +982,60 @@ export function dismissConsoleHandoff(ctx: ConsoleFacadeContext, handoffId: stri
 
 export function getConsoleWork(ctx: ConsoleFacadeContext, workId: string): WorkSummaryViewModel | undefined {
   const work = getWorkContract(store(ctx), workId);
-  return work ? mapWorkSummary(work) : undefined;
+  return work
+    ? mapWorkSummary(work, { controllerHome: ctx.controllerHome, repoId: ctx.repository.repoId })
+    : undefined;
 }
 
 export function listConsoleWork(ctx: ConsoleFacadeContext, status: 'active' | 'all' = 'active'): WorkSummaryViewModel[] {
-  return listWorkContracts({ ...store(ctx), status, limit: 50 }).map(mapWorkSummary);
+  return listWorkContracts({ ...store(ctx), status, limit: 50 }).map((work) =>
+    mapWorkSummary(work, { controllerHome: ctx.controllerHome, repoId: ctx.repository.repoId }));
+}
+
+/** Normalize facade/tool results into GUI-friendly operation feedback. */
+export function toConsoleOperationFeedback(result: FacadeResult): {
+  phase: string;
+  statusLabel: string;
+  summary: string;
+  terminal: boolean;
+  errorClass?: UserFacingErrorClass;
+  error?: ConsoleErrorViewModel;
+  suggestedNextActions: SuggestedActionViewModel[];
+  changedFiles?: ChangedFilesSummaryViewModel;
+} {
+  const data = (result.data ?? {}) as Record<string, unknown>;
+  const status = result.status;
+  const phase: UserFacingPhase = status === 'ok'
+    ? 'succeeded'
+    : status === 'blocked' || status === 'approval_required'
+      ? 'needs_attention'
+      : status === 'failed'
+        ? 'failed'
+        : status === 'not_found'
+          ? 'failed'
+          : 'running';
+  const errorClass = status === 'ok'
+    ? undefined
+    : classifyUserFacingError({
+      code: String(data.errorClass ?? data.code ?? ''),
+      message: result.summary || String(data.errorMessage ?? ''),
+      status,
+      infrastructure: status === 'failed' && /环境|infrastructure|daemon|timeout/i.test(result.summary),
+      acceptance: /验收|acceptance|valid_fail|未通过/i.test(result.summary),
+    });
+  const changed = Array.isArray(data.changedFiles)
+    ? summarizeChangedFiles(data.changedFiles.map(String))
+    : undefined;
+  return {
+    phase,
+    statusLabel: statusLabelForPhase(phase),
+    summary: result.summary || (status === 'ok' ? '操作已完成' : '操作未完成'),
+    terminal: phase === 'succeeded' || phase === 'failed' || phase === 'needs_attention',
+    errorClass,
+    error: errorClass ? describeConsoleError(errorClass, result.summary) : undefined,
+    suggestedNextActions: mapSuggested(result.suggestedNextActions),
+    changedFiles: changed,
+  };
 }
 
 export function buildConsoleContext(ctx: ConsoleFacadeContext, workId?: string) {

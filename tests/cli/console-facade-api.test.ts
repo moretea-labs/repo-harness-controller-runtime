@@ -8,9 +8,12 @@ import { registerRepository } from '../../src/cli/repositories/registry';
 import {
   applyConsoleSafePatch,
   buildCommandCenter,
+  describeConsoleError,
   mapRepositoryCard,
   previewExecutionMode,
   startConsoleWork,
+  summarizeChangedFiles,
+  toConsoleOperationFeedback,
   listConsoleHandoffs,
 } from '../../src/cli/local-bridge/facade-api';
 
@@ -48,12 +51,34 @@ describe('console facade api', () => {
     const center = await buildCommandCenter(ctx, [mapRepositoryCard(repository, true)]);
     expect(center.readiness.label).toMatch(/就绪|需要设置|暂不可用|读取失败|未知|可用|系统/);
     expect(center.currentRepository?.name).toBe('Console Fixture');
+    expect(center.currentRepository?.branchLabel || center.currentRepository?.statusLabel).toBeTruthy();
     expect(center.modePreviewDefault.label).toBeTruthy();
     expect(center.pluginSummary).toBeTruthy();
     expect(Array.isArray(center.plugins)).toBe(true);
     expect(center.pluginSummary!.total).toBeGreaterThanOrEqual(0);
+    expect(center.setupGuide).toBeTruthy();
     expect(JSON.stringify(center.readiness)).not.toContain('stdout');
     expect(JSON.stringify(center.readiness)).not.toContain('stderr');
+  });
+
+  test('work summary exposes phase, next action, and error classification for failed work', async () => {
+    const { ctx } = fixture();
+    const complex = startConsoleWork(ctx, {
+      objective: 'Implement multi-file console polish',
+      expectedFiles: 10,
+      expectedChangedLines: 400,
+      requiresLongRunningChecks: true,
+      scopeClear: true,
+      checkIds: ['typecheck'],
+    });
+    expect((complex.data as { workContractCreated?: boolean }).workContractCreated).toBe(true);
+    const center = await buildCommandCenter(ctx, [mapRepositoryCard(ctx.repository, true)]);
+    const work = center.currentWork || center.recentWork[0];
+    expect(work).toBeTruthy();
+    expect(work!.phase).toBeTruthy();
+    expect(work!.phaseLabel).toBeTruthy();
+    expect(work!.latestAction || work!.nextAction).toBeTruthy();
+    expect(work!.objective).toContain('console polish');
   });
 
   test('mode preview distinguishes direct control and goal workloop', () => {
@@ -129,6 +154,30 @@ describe('console facade api', () => {
     if (result.phase === 'succeeded') {
       expect(Array.isArray(result.changedFiles)).toBe(true);
       expect((result.changedFiles as string[]).some((path) => path.includes('hello.md'))).toBe(true);
+      const summary = summarizeChangedFiles(result.changedFiles as string[]);
+      expect(summary?.total).toBeGreaterThan(0);
+      expect(summary?.summaryLabel).toBeTruthy();
     }
+  });
+
+  test('user-facing error catalog covers acceptance and infrastructure failures', () => {
+    const acceptance = describeConsoleError('acceptance_failure', 'typecheck failed');
+    expect(acceptance.title).toContain('验收');
+    expect(acceptance.nextActions.length).toBeGreaterThan(0);
+    const infra = describeConsoleError('infrastructure_failure');
+    expect(infra.title).toContain('环境');
+    const feedback = toConsoleOperationFeedback({
+      schemaVersion: 1,
+      status: 'failed',
+      summary: '验收未通过：typecheck failed',
+      data: {},
+      evidenceRefs: [],
+      warnings: [],
+      suggestedNextActions: [],
+      rawAvailable: false,
+      detailLevel: 'summary',
+    });
+    expect(feedback.phase).toBe('failed');
+    expect(feedback.error?.errorClass).toBe('acceptance_failure');
   });
 });

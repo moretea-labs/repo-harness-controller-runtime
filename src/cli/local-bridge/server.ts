@@ -85,6 +85,7 @@ import {
   evaluateConsoleConnectorFreshness,
   getConsolePlugin,
   listConsolePlugins,
+  toConsoleOperationFeedback,
   continueConsoleWork,
   delegateConsoleWork,
   dismissConsoleHandoff,
@@ -1305,11 +1306,21 @@ export async function startLocalBridgeServer(
         destructive: body.destructive === true,
         checkIds: Array.isArray(body.checkIds) ? body.checkIds.map(String) : undefined,
       });
-      response.status(result.status === "blocked" || result.status === "failed" ? 409 : 200).json(result);
+      const feedback = toConsoleOperationFeedback(result);
+      response.status(result.status === "blocked" || result.status === "failed" ? 409 : 200).json({
+        ...result,
+        ...feedback,
+        feedback,
+      });
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
   });
+
+  const withFeedback = (result: Parameters<typeof toConsoleOperationFeedback>[0]) => {
+    const feedback = toConsoleOperationFeedback(result);
+    return { ...result, ...feedback, feedback };
+  };
 
   app.post("/api/console/work/continue", (request, response) => {
     try {
@@ -1317,7 +1328,7 @@ export async function startLocalBridgeServer(
         ? request.body as Record<string, unknown>
         : {};
       const result = continueConsoleWork(consoleCtx(request), queryString(body.workId) ?? "", queryString(body.note));
-      response.status(result.status === "not_found" ? 404 : result.status === "blocked" || result.status === "failed" ? 409 : 200).json(result);
+      response.status(result.status === "not_found" ? 404 : result.status === "blocked" || result.status === "failed" ? 409 : 200).json(withFeedback(result));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
@@ -1335,7 +1346,7 @@ export async function startLocalBridgeServer(
         checkFailed: body.checkFailed === true,
         infrastructureFailed: body.infrastructureFailed === true,
       });
-      response.status(result.status === "not_found" ? 404 : result.status === "failed" ? 409 : 200).json(result);
+      response.status(result.status === "not_found" ? 404 : result.status === "failed" ? 409 : 200).json(withFeedback(result));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
@@ -1347,7 +1358,7 @@ export async function startLocalBridgeServer(
         ? request.body as Record<string, unknown>
         : {};
       const result = finalizeConsoleWork(consoleCtx(request), queryString(body.workId) ?? "");
-      response.status(result.status === "not_found" ? 404 : result.status === "failed" || result.status === "blocked" ? 409 : 200).json(result);
+      response.status(result.status === "not_found" ? 404 : result.status === "failed" || result.status === "blocked" ? 409 : 200).json(withFeedback(result));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
@@ -1359,7 +1370,7 @@ export async function startLocalBridgeServer(
         ? request.body as Record<string, unknown>
         : {};
       const result = stopConsoleWork(consoleCtx(request), queryString(body.workId) ?? "", queryString(body.reason));
-      response.status(result.status === "not_found" ? 404 : 200).json(result);
+      response.status(result.status === "not_found" ? 404 : 200).json(withFeedback(result));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
@@ -1377,7 +1388,7 @@ export async function startLocalBridgeServer(
         objective: queryString(body.objective),
         available: typeof body.available === "boolean" ? body.available : undefined,
       });
-      response.status(result.status === "blocked" ? 409 : 200).json(result);
+      response.status(result.status === "blocked" ? 409 : 200).json(withFeedback(result));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }

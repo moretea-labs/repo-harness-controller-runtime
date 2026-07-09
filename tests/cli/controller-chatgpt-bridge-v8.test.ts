@@ -164,13 +164,13 @@ describe("Controller V8 ChatGPT execution bridge", () => {
     const dashboard = localBridgeDashboardHtml();
     expect(dashboard).toContain("执行助手控制台");
     expect(dashboard).toContain("指挥中心");
-    expect(dashboard).toContain("待决定");
+    expect(dashboard).toContain("待我决定");
     expect(dashboard).toContain("当前任务");
-    expect(dashboard).toContain("能力 / 插件");
+    expect(dashboard).toContain("开始一个小任务");
+    expect(dashboard).toContain("改动文件");
     expect(dashboard).toContain("系统状态");
     expect(dashboard).toContain("高级诊断");
     expect(dashboard).toContain("/api/console/command-center");
-    expect(dashboard).toContain("/api/console/plugins");
     expect(dashboard).toContain("/api/console/work/start");
     expect(dashboard).toContain("startTask");
     expect(dashboard).toContain("previewMode");
@@ -179,15 +179,14 @@ describe("Controller V8 ChatGPT execution bridge", () => {
     expect(dashboard).toContain("selectRepo");
     expect(dashboard).toContain("repoQuery");
     expect(dashboard).toContain("建议模式");
-    expect(dashboard).toContain("直接执行");
-    expect(dashboard).toContain("可恢复的后台任务");
-    expect(dashboard).toContain("需要你先决定");
+    expect(dashboard).toContain("renderChangedFiles");
+    expect(dashboard).toContain("renderErrorBox");
+    expect(dashboard).toContain("请勿重复提交");
     const embeddedScript = dashboard.match(/<script>([\s\S]*?)<\/script>/)?.[1];
     expect(embeddedScript).toBeDefined();
     expect(() => new Function(embeddedScript!)).not.toThrow();
     expect(dashboard).not.toContain("Approval Queue");
     // Internals stay out of the default primary chrome copy.
     expect(dashboard).not.toContain("queueDepth");
-    expect(dashboard).not.toContain("fingerprint");
   });
 });

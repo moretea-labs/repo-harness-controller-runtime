@@ -54,12 +54,18 @@ details.advanced{margin-top:12px;border-top:1px dashed var(--line);padding-top:1
 .empty{padding:22px;border:1px dashed var(--line);border-radius:14px;color:var(--muted);text-align:center}
 .section-title{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
 .warn{padding:10px 12px;border-radius:12px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.25);color:#fde68a;margin-bottom:12px}
+.errbox{padding:12px 14px;border-radius:12px;background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.28);color:#fecaca;margin:10px 0}
+.errbox h4{margin:0 0 6px;font-size:14px}.errbox .muted{color:#fca5a5}
+.setup{padding:14px 16px;border-radius:14px;background:rgba(96,165,250,.08);border:1px solid rgba(96,165,250,.28);margin-bottom:14px}
+.files{display:grid;gap:6px;margin-top:8px}.file-row{display:flex;justify-content:space-between;gap:10px;padding:6px 8px;border-radius:8px;background:rgba(255,255,255,.03);border:1px solid var(--line);font-size:12px}
 .opbar{margin-bottom:12px;padding:10px 12px;border-radius:12px;border:1px solid var(--line);background:rgba(255,255,255,.03);display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .opbar.running{border-color:rgba(96,165,250,.35);background:rgba(96,165,250,.08)}
 .opbar.ok{border-color:rgba(52,211,153,.35);background:rgba(52,211,153,.08)}
 .opbar.err{border-color:rgba(248,113,113,.35);background:rgba(248,113,113,.08)}
 .btn:disabled{opacity:.55;cursor:not-allowed}
 .busy-banner{font-size:12px;color:var(--muted)}
+.refresh-meta{font-size:12px;color:var(--faint);margin-left:auto}
+.composer h2{font-size:20px}.composer .hint{color:var(--muted);margin:0 0 10px;font-size:13px}
 @media(max-width:980px){.body{grid-template-columns:1fr}.side{display:none}.grid.two,.grid.cards,.grid.stats{grid-template-columns:1fr}.top{flex-wrap:wrap;height:auto;padding:10px 12px}}
 </style>
 </head>
@@ -125,15 +131,111 @@ var lastOperation=null; // {phase,statusLabel,summary,errorMessage,at}
 var pluginActionResult=null;
 var busy=false;
 var pollTimer=null;
+var lastRefreshedAt='';
+var pageVisible=!document.hidden;
+var workExtras={}; // workId -> {changedFiles, error, summary}
+
+document.addEventListener('visibilitychange',function(){pageVisible=!document.hidden});
 
 function repoQuery(){return selectedRepoId?'?repoId='+encodeURIComponent(selectedRepoId):''}
 function rememberRepo(id){selectedRepoId=id||'';safeSet('repoHarnessSelectedRepoId',selectedRepoId);setQueryRepoId(selectedRepoId)}
 function rememberWork(id){selectedWorkId=id||'';safeSet('repoHarnessSelectedWorkId',selectedWorkId)}
-function api(path,opts){opts=opts||{};var headers=Object.assign({'content-type':'application/json'},opts.headers||{});return fetch(path,Object.assign({},opts,{credentials:'same-origin',headers:headers})).then(function(r){return r.json().catch(function(){return{}}).then(function(body){if(!r.ok){var msg=body.summary||body.errorMessage||body.error||body.message||('请求失败 '+r.status);var err=new Error(msg);err.payload=body;err.status=r.status;throw err}return body})})}
-function setBusy(on,label){busy=!!on;document.querySelectorAll('.btn.primary, .btn.danger').forEach(function(b){if(on)b.setAttribute('disabled','disabled');else b.removeAttribute('disabled')});if(on){lastOperation={phase:'running',statusLabel:label||'执行中',summary:label||'正在处理…',at:new Date().toISOString()};renderOpBar()}}
-function setLastOp(res,fallback){var phase=res&&res.phase||(res&&res.status==='ok'?'succeeded':res&&(res.status==='failed'||res.status==='blocked')?'failed':'succeeded');lastOperation={phase:phase,statusLabel:(res&&(res.statusLabel||res.digest&&res.digest.statusLabel))||fallback||'已更新',summary:(res&&(res.summary||res.digest&&res.digest.summary))||fallback||'操作已完成',errorMessage:res&&(res.errorMessage||res.errorClass||(res.digest&&res.digest.errorMessage))||'',next:res&&(res.next||(res.suggestedNextActions&&res.suggestedNextActions[0]&&res.suggestedNextActions[0].label))||'',at:new Date().toISOString()};lastFacade=res;renderOpBar()}
-function renderOpBar(){var nodes=document.querySelectorAll('#opBar');if(!nodes.length)return;var html='';if(lastOperation){var cls=lastOperation.phase==='running'||lastOperation.phase==='queued'||lastOperation.phase==='waiting'?'running':(lastOperation.phase==='failed'||lastOperation.phase==='timed_out'||lastOperation.phase==='blocked')?'err':'ok';html='<div class="opbar '+cls+'"><span class="pill '+(cls==='ok'?'green':cls==='err'?'red':'blue')+'">'+esc(lastOperation.statusLabel)+'</span><span>'+esc(lastOperation.summary)+'</span>'+(lastOperation.errorMessage?'<span class="muted">'+esc(lastOperation.errorMessage)+'</span>':'')+(lastOperation.next?'<span class="muted">下一步：'+esc(lastOperation.next)+'</span>':'')+(busy?'<span class="busy-banner">请稍候…</span>':'')+'</div>'}nodes.forEach(function(n){n.innerHTML=html})}
-function ensurePoll(){if(pollTimer)return;pollTimer=setInterval(function(){var work=obj(commandCenter&&commandCenter.currentWork);if(!work||!work.id)return;if(work.tone==='blue'||work.statusLabel==='进行中'||work.statusLabel==='待开始'){refreshAll({silent:true})}},4000)}
+function api(path,opts){opts=opts||{};var headers=Object.assign({'content-type':'application/json'},opts.headers||{});return fetch(path,Object.assign({},opts,{credentials:'same-origin',headers:headers})).then(function(r){return r.json().catch(function(){return{}}).then(function(body){if(!r.ok){var msg=(body.error&&body.error.title)||body.summary||body.errorMessage||body.error||body.message||('请求失败 '+r.status);if(!msg||msg==='undefined')msg='请求失败，请查看高级诊断';var err=new Error(msg);err.payload=body;err.status=r.status;throw err}return body})})}
+function setBusy(on,label){
+  busy=!!on;
+  document.querySelectorAll('button.btn').forEach(function(b){
+    if(on)b.setAttribute('disabled','disabled');else b.removeAttribute('disabled');
+  });
+  if(on){
+    lastOperation={phase:'running',statusLabel:label||'执行中',summary:label||'正在处理…',at:new Date().toISOString()};
+    renderOpBar();
+  }
+}
+function setLastOp(res,fallback){
+  res=obj(res);
+  var feedback=obj(res.feedback);
+  var phase=feedback.phase||res.phase||(res.status==='ok'?'succeeded':(res.status==='failed'||res.status==='blocked'||res.status==='approval_required')?'failed':'succeeded');
+  var next='';
+  var actions=arr(feedback.suggestedNextActions||res.suggestedNextActions);
+  if(actions.length)next=actions[0].label||'';
+  if(feedback.error&&feedback.error.nextActions&&feedback.error.nextActions[0])next=next||feedback.error.nextActions[0];
+  lastOperation={
+    phase:phase,
+    statusLabel:feedback.statusLabel||res.statusLabel||fallback||'已更新',
+    summary:feedback.summary||res.summary||fallback||'操作已完成',
+    errorMessage:(feedback.error&&feedback.error.title)||res.errorMessage||'',
+    error:feedback.error||res.error||null,
+    next:next,
+    changedFiles:feedback.changedFiles||res.changedFiles||null,
+    at:new Date().toISOString()
+  };
+  // Remember changed files / errors against active work for card rendering.
+  var wid=selectedWorkId||(res.data&&(res.data.work&&(res.data.work.workId||res.data.work.id)||res.data.workId));
+  if(wid){
+    workExtras[wid]=workExtras[wid]||{};
+    if(lastOperation.changedFiles)workExtras[wid].changedFiles=lastOperation.changedFiles;
+    if(lastOperation.error)workExtras[wid].error=lastOperation.error;
+    if(lastOperation.summary)workExtras[wid].summary=lastOperation.summary;
+  }
+  lastFacade=res;
+  renderOpBar();
+}
+function renderOpBar(){
+  var nodes=document.querySelectorAll('#opBar');
+  if(!nodes.length)return;
+  var html='';
+  if(lastOperation){
+    var cls=lastOperation.phase==='running'||lastOperation.phase==='queued'||lastOperation.phase==='waiting'||lastOperation.phase==='submitting'?'running':(lastOperation.phase==='failed'||lastOperation.phase==='timed_out'||lastOperation.phase==='blocked'||lastOperation.phase==='needs_attention')?'err':'ok';
+    html='<div class="opbar '+cls+'">'+
+      '<span class="pill '+(cls==='ok'?'green':cls==='err'?'red':'blue')+'">'+esc(lastOperation.statusLabel)+'</span>'+
+      '<span>'+esc(lastOperation.summary||'')+'</span>'+
+      (lastOperation.errorMessage?'<span class="muted">'+esc(lastOperation.errorMessage)+'</span>':'')+
+      (lastOperation.next?'<span class="muted">下一步：'+esc(lastOperation.next)+'</span>':'')+
+      (busy?'<span class="busy-banner">请稍候，勿重复点击…</span>':'')+
+      (lastRefreshedAt?'<span class="refresh-meta">刷新于 '+esc(lastRefreshedAt)+'</span>':'')+
+    '</div>';
+    if(lastOperation.error&&lastOperation.error.title){
+      html+=renderErrorBox(lastOperation.error);
+    }
+  } else if(lastRefreshedAt){
+    html='<div class="opbar"><span class="refresh-meta">刷新于 '+esc(lastRefreshedAt)+'</span></div>';
+  }
+  nodes.forEach(function(n){n.innerHTML=html});
+}
+function renderErrorBox(err){
+  err=obj(err);
+  if(!err.title)return '';
+  var next=arr(err.nextActions).map(function(a){return '<span class="pill amber">'+esc(a)+'</span>'}).join(' ');
+  return '<div class="errbox"><h4>'+esc(err.title)+'</h4><div class="muted">'+esc(err.explanation||'')+'</div>'+(next?'<div class="actions" style="margin-top:8px">'+next+'</div>':'')+
+    '<details class="advanced"><summary>高级详情（仅调试）</summary><pre class="mono" style="white-space:pre-wrap;font-size:12px">'+esc(JSON.stringify(err,null,2))+'</pre></details></div>';
+}
+function renderChangedFiles(summary){
+  summary=obj(summary);
+  if(!summary.total&&!arr(summary.files).length)return '';
+  var files=arr(summary.files).slice(0,12);
+  return '<div style="margin-top:10px"><div class="section-title"><strong>改动文件</strong>'+pill('blue',summary.summaryLabel||((summary.total||files.length)+' 个文件'))+'</div>'+
+    '<div class="files">'+files.map(function(f){
+      return '<div class="file-row"><span class="mono">'+esc(f.path)+'</span><span class="pill gray">'+esc(f.statusLabel||f.status||'修改')+'</span></div>';
+    }).join('')+'</div>'+
+    (files.length<(summary.total||0)?'<div class="faint" style="margin-top:6px">仅显示前 '+files.length+' 项</div>':'')+
+  '</div>';
+}
+function shouldPoll(){
+  if(!pageVisible)return false;
+  var work=obj(commandCenter&&commandCenter.currentWork);
+  var handoffs=arr(commandCenter&&commandCenter.handoffs);
+  if(handoffs.length)return true;
+  if(!work||!work.id)return false;
+  var phase=work.phase||'';
+  return phase==='running'||phase==='queued'||phase==='waiting'||work.tone==='blue'||work.statusLabel==='进行中'||work.statusLabel==='待开始';
+}
+function ensurePoll(){
+  if(pollTimer)return;
+  pollTimer=setInterval(function(){
+    if(!shouldPoll())return;
+    refreshAll({silent:true});
+  }, pageVisible?3500:12000);
+}
 
 function switchView(name){
   document.querySelectorAll('.nav button').forEach(function(b){b.classList.toggle('active',b.dataset.view===name)});
@@ -182,73 +284,94 @@ function renderChrome(){
 
 function renderHome(){
   var cc=obj(commandCenter), ready=obj(cc.readiness), work=obj(cc.currentWork), handoffs=arr(cc.handoffs).slice(0,3);
-  var plug=obj(cc.pluginSummary);
-  var plugins=arr(cc.plugins).slice(0,4);
+  var repo=obj(cc.currentRepository);
+  var setup=obj(cc.setupGuide);
   var warnings=arr(cc.warnings).map(function(w){return '<div class="warn">'+esc(w)+'</div>'}).join('');
   var mode=obj(modePreview||cc.modePreviewDefault);
   var el=document.getElementById('view-home');
+  var setupHtml=setup.needed
+    ? '<div class="setup"><strong>'+esc(setup.title||'需要先设置仓库')+'</strong><p class="muted" style="margin:6px 0 10px">'+esc(setup.body||'')+'</p>'+btn(setup.actionLabel||'去设置仓库','data-nav="repositories"','primary')+'</div>'
+    : '';
   el.innerHTML=
     '<div id="opBar"></div>'+
     warnings+
-    '<div class="page-head"><div><h1>指挥中心</h1><p>输入目标，系统会建议直接执行、可恢复的后台任务，或需要你先决定。</p></div></div>'+
+    setupHtml+
+    '<div class="page-head"><div><h1>指挥中心</h1><p>从这里开始一个小开发任务：描述目标 → 预览模式 → 开始 → 看进度与改动。</p></div>'+
+      '<div class="muted">当前仓库：<strong>'+esc(repo.name||'未选择')+'</strong>'+(repo.branchLabel?' · '+esc(repo.branchLabel):'')+(repo.dirtyLabel?' · '+esc(repo.dirtyLabel):'')+'</div></div>'+
     '<div class="grid two">'+
       '<div class="panel composer">'+
-        '<h2>你想完成什么？</h2>'+
+        '<h2>开始一个小任务</h2>'+
+        '<p class="hint">用一句话说清你想改什么。路径和验收标准可选，先点“预览模式”再开始更安心。</p>'+
         '<textarea id="taskObjective" placeholder="例如：优化会员购买页信息密度，保持现有业务逻辑不变。"></textarea>'+
-        '<div class="row"><input class="input" id="taskAcceptance" placeholder="验收标准（可选，用分号分隔）" style="flex:1"></div>'+
-        '<div class="row"><input class="input" id="taskPaths" placeholder="允许修改的路径（可选，逗号分隔）" style="flex:1"><input class="input" id="taskFiles" type="number" min="0" placeholder="预计改动文件数" style="width:150px"></div>'+
-        '<div class="row">'+
-          '<button class="btn primary" onclick="startTask()">开始</button>'+
-          '<button class="btn" onclick="previewMode()">预览模式</button>'+
+        '<details class="advanced" style="margin-top:10px"><summary>可选：验收标准与路径</summary>'+
+          '<div class="row" style="margin-top:10px"><input class="input" id="taskAcceptance" placeholder="验收标准（可选，用分号分隔）" style="flex:1"></div>'+
+          '<div class="row"><input class="input" id="taskPaths" placeholder="允许修改的路径（可选，逗号分隔）" style="flex:1"><input class="input" id="taskFiles" type="number" min="0" placeholder="预计文件数" style="width:140px"></div>'+
+        '</details>'+
+        '<div class="row" style="margin-top:12px">'+
+          '<button class="btn primary" id="btnStart" onclick="startTask()">开始</button>'+
+          '<button class="btn" id="btnPreview" onclick="previewMode()">预览模式</button>'+
           '<button class="btn" onclick="diagnoseFirst()">先诊断</button>'+
         '</div>'+
         '<div class="mode-card" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">'+
-          '<div class="muted">建议模式</div>'+
+          '<div class="muted">建议模式（白话）</div>'+
           '<div class="label">'+esc(mode.label||'直接执行')+'</div>'+
-          '<div class="muted">'+esc(mode.explanation||'')+'</div>'+
+          '<div class="muted">'+esc(mode.explanation||'小范围、目标清晰时会直接执行；复杂或需恢复的任务会创建可继续的后台任务。')+'</div>'+
         '</div>'+
       '</div>'+
       '<div class="panel">'+
-        '<div class="section-title"><h2>系统状态</h2>'+pill(ready.state==='ready'?'green':ready.state==='needs_setup'?'amber':'red', ready.label||'未知')+'</div>'+
+        '<div class="section-title"><h2>系统是否可用</h2>'+pill(ready.state==='ready'?'green':ready.state==='needs_setup'?'amber':'red', ready.label||'未知')+'</div>'+
         '<p class="muted">'+esc(ready.headline||'')+'</p>'+
         '<p class="faint">'+esc(ready.description||'')+'</p>'+
-        '<div class="actions">'+btn('查看详情','data-nav="readiness"')+btn('处理待决定','data-nav="inbox"')+btn('管理插件','data-nav="capabilities"')+'</div>'+
-        '<div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">'+
-          '<div class="section-title"><h3 style="margin:0">插件能力</h3>'+pill((plug.needsAttention||0)?'amber':'green',(plug.ready||0)+'/'+(plug.total||0)+' 可用')+'</div>'+
-          '<p class="muted" style="white-space:pre-line">'+(arr(plug.lines).length?esc(arr(plug.lines).slice(0,3).join('\\n')):'尚未发现插件')+'</p>'+
-          (plugins.length?'<div class="list" style="margin-top:8px">'+plugins.map(function(p){
-            return '<div class="card-row" style="padding:10px"><div><strong>'+esc(p.name)+'</strong><div class="muted">'+esc(p.nextStep||'')+'</div></div>'+pill(p.tone,p.statusLabel)+'</div>';
-          }).join('')+'</div>':'')+
-        '</div>'+
+        '<div style="margin-top:10px">'+pill(ready.connectorTone||'gray', ready.connectorLabel||'连接')+' '+
+          pill(arr(cc.handoffs).length?'amber':'green', (arr(cc.handoffs).length||0)+' 项待决定')+'</div>'+
+        '<div class="actions">'+btn('系统状态','data-nav="readiness"')+btn('待决定','data-nav="inbox"')+btn('切换仓库','data-nav="repositories"')+'</div>'+
       '</div>'+
     '</div>'+
     '<div class="grid two" style="margin-top:14px">'+
       renderWorkCard(work, '当前任务')+
-      '<div class="panel"><div class="section-title"><h2>待决定</h2>'+btn('全部','data-nav="inbox"','ghost')+'</div>'+
-        (handoffs.length?handoffs.map(function(h){return handoffMini(h)}).join(''):'<div class="empty">没有需要你判断的事项</div>')+
+      '<div class="panel"><div class="section-title"><h2>待我决定</h2>'+btn('全部','data-nav="inbox"','ghost')+'</div>'+
+        (handoffs.length?handoffs.map(function(h){return handoffMini(h)}).join(''):'<div class="empty">没有需要你拍板的事项</div>')+
       '</div>'+
     '</div>';
   bindNav(el);
   renderOpBar();
 }
 
-function renderWorkCard(work, title){
+function mergeWorkExtras(work){
   work=obj(work);
+  var extra=obj(workExtras[work.id]);
+  if(extra.changedFiles&&!work.changedFiles)work.changedFiles=extra.changedFiles;
+  if(extra.error&&!work.error)work.error=extra.error;
+  if(extra.summary&&!work.latestSummary)work.latestSummary=extra.summary;
+  return work;
+}
+
+function renderWorkCard(work, title){
+  work=mergeWorkExtras(obj(work));
   if(!work.id){
     return '<div class="panel"><div class="section-title"><h2>'+esc(title||'当前任务')+'</h2></div><div class="empty">还没有任务。在左侧描述目标并点击“开始”。</div></div>';
   }
   var v=obj(work.latestVerification);
   var id=esc(work.id);
+  var primary=work.primaryActionLabel||work.nextAction||'继续';
+  var primaryKind='continue';
+  var suggested=arr(work.suggestedActions);
+  if(suggested.length&&suggested[0].kind)primaryKind=suggested[0].kind;
   return '<div class="panel work-card" data-work-id="'+id+'">'+
-    '<div class="section-title"><h2>'+esc(title||'当前任务')+'</h2>'+pill(work.tone, work.statusLabel)+'</div>'+
-    '<h3 style="margin:0 0 6px">'+esc(work.title)+'</h3>'+
-    '<div class="muted">模式：'+esc(work.modeLabel)+' · 下一步：'+esc(work.nextAction)+'</div>'+
+    '<div class="section-title"><h2>'+esc(title||'当前任务')+'</h2>'+pill(work.tone, work.statusLabel||work.phaseLabel||'状态')+'</div>'+
+    '<h3 style="margin:0 0 6px">'+esc(work.title||work.objective||'未命名任务')+'</h3>'+
+    '<div class="muted">模式：'+esc(work.modeLabel||'—')+' · 阶段：'+esc(work.phaseLabel||work.statusLabel||'—')+'</div>'+
+    '<div class="muted" style="margin-top:4px">最近动作：'+esc(work.latestAction||primary)+'</div>'+
+    (work.latestSummary?'<p class="muted" style="margin:8px 0 0">'+esc(work.latestSummary)+'</p>':'')+
     stepsHtml(work.progressSteps)+
     (v.summary?'<div style="margin-top:8px">'+pill(v.tone,v.label)+' <span class="muted">'+esc(v.summary)+'</span></div>':'')+
+    (work.error?renderErrorBox(work.error):'')+
+    renderChangedFiles(work.changedFiles)+
     (work.delegateSummary?'<p class="muted" style="margin-top:8px">'+esc(work.delegateSummary)+'</p>':'')+
     evidenceHtml(work.evidenceLabels)+
+    (arr(work.acceptanceCriteria).length?'<p class="faint" style="margin-top:8px">验收：'+esc(arr(work.acceptanceCriteria).join(' · '))+'</p>':'')+
     '<div class="actions">'+
-      btn('继续','data-work-act="continue" data-work-id="'+id+'"','primary')+
+      btn(primary,'data-work-act="'+(primaryKind==='verify'?'verify':primaryKind==='finalize'?'finalize':primaryKind==='repair'?'repair':'continue')+'" data-work-id="'+id+'"','primary')+
       btn('验证','data-work-act="verify" data-work-id="'+id+'"')+
       btn('委派 Codex','data-work-act="delegate-codex" data-work-id="'+id+'"')+
       btn('请 Grok 审阅','data-work-act="delegate-grok" data-work-id="'+id+'"')+
@@ -264,7 +387,7 @@ function renderWorkCard(work, title){
 function handoffMini(h){
   var id=esc(h.id);
   return '<div class="card-row" style="margin-bottom:8px">'+
-    '<div><h3>'+esc(h.title)+'</h3><p>'+esc(h.reason)+'</p><div class="muted">建议：'+esc(h.recommendedDecision)+'</div></div>'+
+    '<div><h3>'+esc(h.title)+'</h3><p>'+esc(h.reason)+'</p><div class="muted">推荐：'+esc(h.recommendedDecision||'请先阅读详情')+'</div></div>'+
     '<div class="actions" style="flex-direction:column">'+
       btn('打开','data-open-handoff="'+id+'"','primary')+
       btn('解决','data-handoff-act="resolve" data-handoff-id="'+id+'"')+
@@ -274,16 +397,18 @@ function handoffMini(h){
 function renderInbox(){
   var items=arr(obj(commandCenter).handoffs);
   var detail=selectedHandoffId?items.find(function(x){return x.id===selectedHandoffId}):null;
+  if(!detail&&items.length){selectedHandoffId=items[0].id;detail=items[0]}
   var root=document.getElementById('view-inbox');
   root.innerHTML=
-    '<div class="page-head"><div><h1>待决定</h1><p>只显示需要你判断的事项，不是日志列表。</p></div><button class="btn" onclick="refreshAll()">刷新</button></div>'+
+    '<div class="page-head"><div><h1>待我决定</h1><p>这里只放需要你拍板的事项，不是运行日志。</p></div><button class="btn" onclick="refreshAll()">刷新</button></div>'+
     '<div class="grid two">'+
       '<div class="list">'+(items.length?items.map(function(h){
         var id=esc(h.id);
         return '<div class="panel" style="padding:14px;cursor:pointer;border-color:'+(selectedHandoffId===h.id?'rgba(96,165,250,.45)':'')+'" data-open-handoff="'+id+'">'+
           '<div class="section-title"><h3 style="margin:0">'+esc(h.title)+'</h3>'+pill(h.tone,h.severityLabel)+'</div>'+
-          '<p class="muted">'+esc(h.reason)+'</p></div>';
-      }).join(''):'<div class="empty">没有待处理决策</div>')+'</div>'+
+          '<p class="muted">为什么停住：'+esc(h.reason)+'</p>'+
+          '<p class="faint">推荐：'+esc(h.recommendedDecision||'—')+'</p></div>';
+      }).join(''):'<div class="empty">没有待处理决策。你可以回到指挥中心开始新任务。</div>')+'</div>'+
       '<div class="panel" id="handoffDetail">'+(detail?renderHandoffDetail(detail):'<div class="empty">选择左侧事项查看详情</div>')+'</div>'+
     '</div>';
   bindActions(root);
@@ -292,18 +417,18 @@ function renderInbox(){
 function renderHandoffDetail(h){
   var id=esc(h.id);
   return '<div class="section-title"><h2>'+esc(h.title)+'</h2>'+pill(h.tone,h.statusLabel)+'</div>'+
-    '<p><strong>原因</strong><br><span class="muted">'+esc(h.reason)+'</span></p>'+
-    '<p><strong>当前状态</strong><br><span class="muted">'+esc(h.workTitle||'—')+'</span></p>'+
-    '<p><strong>建议决定</strong><br><span class="muted">'+esc(h.recommendedDecision)+'</span></p>'+
-    '<p><strong>继续提示</strong><br><span class="muted mono" style="white-space:pre-wrap">'+esc(h.continuationPrompt||'')+'</span></p>'+
+    '<p><strong>为什么停下来</strong><br><span class="muted">'+esc(h.reason)+'</span></p>'+
+    '<p><strong>相关任务</strong><br><span class="muted">'+esc(h.workTitle||'—')+'</span></p>'+
+    '<div class="setup" style="margin:10px 0"><strong>推荐决定</strong><p class="muted" style="margin:6px 0 0">'+esc(h.recommendedDecision||'请阅读后自行判断')+'</p></div>'+
+    '<p><strong>继续提示</strong><br><span class="muted mono" style="white-space:pre-wrap">'+esc(h.continuationPrompt||'（无）')+'</span></p>'+
     (arr(h.attemptedActions).length?'<p><strong>已尝试</strong><br><span class="muted">'+esc(h.attemptedActions.join(' · '))+'</span></p>':'')+
     evidenceHtml(h.evidenceLabels)+
     '<div class="actions">'+
       btn('确认已知晓','data-handoff-act="ack" data-handoff-id="'+id+'"')+
       btn('解决并记录','data-handoff-act="resolve" data-handoff-id="'+id+'"','primary')+
-      btn('忽略','data-handoff-act="dismiss" data-handoff-id="'+id+'"')+
+      btn('忽略此项','data-handoff-act="dismiss" data-handoff-id="'+id+'"')+
       btn('复制继续提示','data-copy="1" data-copy-text="'+esc(h.continuationPrompt||'')+'"')+
-      (h.advanced&&h.advanced.workId?btn('继续任务','data-open-work="'+esc(h.advanced.workId)+'"'):'')+
+      (h.advanced&&h.advanced.workId?btn('继续相关任务','data-open-work="'+esc(h.advanced.workId)+'"','primary'):'')+
     '</div>'+
     advancedBlock(h.advanced);
 }
@@ -368,7 +493,7 @@ function renderRepositories(){
   var repos=arr(obj(commandCenter).repositories);
   var root=document.getElementById('view-repositories');
   root.innerHTML=
-    '<div class="page-head"><div><h1>仓库</h1><p>选择或注册本地仓库，不需要理解注册表内部字段。</p></div>'+
+    '<div class="page-head"><div><h1>仓库</h1><p>选择当前工作仓库。显示名称、分支和是否干净会直接影响你是否能开始任务。</p></div>'+
       '<button class="btn primary" onclick="toggleAddRepo()">添加本地仓库</button></div>'+
     '<div class="panel" id="repoAdd" style="display:none;margin-bottom:14px">'+
       '<div class="row" style="display:grid;grid-template-columns:1.4fr .8fr auto;gap:10px">'+
@@ -376,8 +501,10 @@ function renderRepositories(){
         '<input class="input" id="repoName" placeholder="显示名称（可选）">'+
         '<button class="btn primary" onclick="registerRepo()">注册</button>'+
       '</div></div>'+
+    (repos.length?'':'<div class="setup"><strong>还没有仓库</strong><p class="muted" style="margin:6px 0 0">添加一个本地 Git 仓库后，指挥中心才能启动任务。</p></div>')+
     '<div class="list">'+repos.map(function(r){
-      return '<div class="panel card-row"><div><h3>'+esc(r.name)+'</h3><div class="muted mono">'+esc(r.path)+'</div></div>'+
+      return '<div class="panel card-row"><div><h3>'+esc(r.name)+'</h3><div class="muted mono">'+esc(r.path)+'</div>'+
+        '<div class="muted" style="margin-top:6px">'+(r.branchLabel?('分支 '+esc(r.branchLabel)):'')+(r.dirtyLabel?' · '+esc(r.dirtyLabel):'')+(r.readinessLabel?' · '+esc(r.readinessLabel):'')+'</div></div>'+
         '<div class="actions">'+btn(r.current?'当前仓库':'设为当前','data-select-repo="'+esc(r.id)+'"',r.current?'primary':'')+'</div>'+
         advancedBlock(r.advanced)+
       '</div>';
@@ -476,10 +603,15 @@ function pluginActionRow(pluginId, action, isPreview){
 
 function renderAdvanced(){
   var root=document.getElementById('view-advanced');
+  var payload=advancedRaw||lastFacade||{note:'点击“读取原始快照”加载调试数据。日常任务请使用指挥中心。'};
   root.innerHTML=
-    '<div class="page-head"><div><h1>高级诊断</h1><p>开发/排错视图。默认任务流请回到指挥中心。</p></div>'+
-      '<div class="actions"><button class="btn" onclick="loadAdvanced()">读取原始快照</button>'+btn('返回指挥中心','data-nav="home"')+'</div></div>'+
-    '<div class="panel"><pre class="mono" style="white-space:pre-wrap;font-size:12px;color:var(--muted)">'+esc(JSON.stringify(advancedRaw||lastFacade||{note:'点击“读取原始快照”'},null,2))+'</pre></div>';
+    '<div class="page-head"><div><h1>高级诊断</h1><p>仅用于排错。默认任务流请回到指挥中心，不要从这里开始日常开发。</p></div>'+
+      '<div class="actions"><button class="btn" onclick="loadAdvanced()">读取原始快照</button>'+
+      '<button class="btn" onclick="copyText(JSON.stringify(advancedRaw||lastFacade||{},null,2))">复制 JSON</button>'+
+      btn('返回指挥中心','data-nav="home"','primary')+'</div></div>'+
+    '<div class="panel"><div class="warn">调试信息默认折叠，避免干扰主流程。</div>'+
+      '<details class="advanced" open><summary>原始 JSON（调试）</summary>'+
+      '<pre class="mono" style="white-space:pre-wrap;font-size:12px;color:var(--muted);max-height:60vh;overflow:auto">'+esc(JSON.stringify(payload,null,2))+'</pre></details></div>';
   bindNav(root);
 }
 
@@ -636,28 +768,39 @@ function taskPayload(){
 }
 
 function previewMode(){
-  var body=taskPayload();
-  if(!body.objective){toast('请先输入任务目标');return}
-  api('/api/console/mode-preview'+repoQuery(),{method:'POST',body:JSON.stringify(body)}).then(function(res){
-    modePreview=res.modePreview||res;
-    renderHome();
-    toast('已更新建议模式：'+(modePreview.label||''));
-  }).catch(function(e){toast(e.message)});
-}
-
-function startTask(){
   if(busy){toast('上一步仍在处理，请稍候');return}
   var body=taskPayload();
   if(!body.objective){toast('请先输入任务目标');return}
-  setBusy(true,'正在启动任务…');
+  setBusy(true,'预览模式…');
+  api('/api/console/mode-preview'+repoQuery(),{method:'POST',body:JSON.stringify(body)}).then(function(res){
+    modePreview=res.modePreview||res;
+    setLastOp({phase:'succeeded',statusLabel:'模式已预览',summary:'建议：'+(modePreview.label||'直接执行')+'。'+(modePreview.explanation||'')},'模式已预览');
+    renderHome();
+    toast('建议模式：'+(modePreview.label||''));
+  }).catch(function(e){setLastOp(e.payload||{phase:'failed',summary:e.message},e.message);toast(e.message||'预览失败')}).finally(function(){setBusy(false)});
+}
+
+function startTask(){
+  if(busy){toast('上一步仍在处理，请勿重复提交');return}
+  var body=taskPayload();
+  if(!body.objective){toast('请先输入任务目标');return}
+  setBusy(true,'正在提交任务…');
   api('/api/console/work/start'+repoQuery(),{method:'POST',body:JSON.stringify(body)}).then(function(res){
     setLastOp(res,'任务已提交');
     var data=obj(res.data);
     if(data.work&&data.work.workId){rememberWork(data.work.workId)}
     else if(data.work&&data.work.id){rememberWork(data.work.id)}
-    toast(res.summary||'任务已提交');
+    else if(data.workId){rememberWork(data.workId)}
+    toast(res.summary||(res.status==='blocked'?'已创建待决定事项':'任务已提交'));
     return refreshAll();
-  }).then(function(){if(selectedWorkId)switchView('work')}).catch(function(e){setLastOp(e.payload||{phase:'failed',summary:e.message},e.message);toast(e.message)}).finally(function(){setBusy(false)});
+  }).then(function(){
+    if(arr(obj(commandCenter).handoffs).length&&!selectedWorkId)switchView('inbox');
+    else if(selectedWorkId)switchView('work');
+    else switchView('home');
+  }).catch(function(e){
+    setLastOp(e.payload||{phase:'failed',summary:e.message||'启动失败'},e.message||'启动失败');
+    toast(e.message||'启动失败');
+  }).finally(function(){setBusy(false)});
 }
 
 function diagnoseFirst(){
@@ -717,20 +860,22 @@ function handoffAction(kind,id){
   if(busy){toast('上一步仍在处理，请稍候');return}
   var body={};
   if(kind==='resolve'){
-    var decision=prompt('记录你的决定','继续执行');
+    var decision=prompt('记录你的决定（会从待处理中移除）','继续执行');
     if(decision==null)return;
+    if(!String(decision).trim()){toast('请填写决定内容');return}
     body={decision:decision,resolver:'user'};
   }
   if(kind==='dismiss'){
+    if(!confirm('确认忽略此待决定事项？忽略后会从待处理列表移除。'))return;
     body={decision:'dismissed',resolver:'user'};
   }
-  setBusy(true,'更新待决定事项…');
+  setBusy(true,kind==='resolve'?'记录决定…':kind==='dismiss'?'忽略事项…':'更新中…');
   api('/api/console/inbox/'+encodeURIComponent(id)+'/'+kind+repoQuery(),{method:'POST',body:JSON.stringify(body)}).then(function(res){
-    setLastOp({phase:'succeeded',statusLabel:kind==='resolve'?'已解决':kind==='dismiss'?'已忽略':'已确认',summary:kind==='resolve'?'已记录你的决定':kind==='dismiss'?'已忽略该事项':'已确认已知晓'}, '已更新');
-    toast(kind==='resolve'?'已解决':kind==='dismiss'?'已忽略':'已确认');
+    setLastOp({phase:'succeeded',statusLabel:kind==='resolve'?'已解决':kind==='dismiss'?'已忽略':'已确认',summary:kind==='resolve'?'已记录你的决定，事项将离开待处理列表':kind==='dismiss'?'已忽略该事项':'已确认已知晓'}, '已更新');
+    toast(kind==='resolve'?'已解决并移出待处理':kind==='dismiss'?'已忽略并移出待处理':'已确认');
     selectedHandoffId='';
     return refreshAll();
-  }).catch(function(e){setLastOp(e.payload||{phase:'failed',summary:e.message},e.message);toast(e.message)}).finally(function(){setBusy(false)});
+  }).catch(function(e){setLastOp(e.payload||{phase:'failed',summary:e.message||'更新失败'},e.message||'更新失败');toast(e.message||'更新失败')}).finally(function(){setBusy(false)});
 }
 
 function selectRepo(id){
@@ -755,19 +900,32 @@ function refreshAll(opts){
   opts=opts||{};
   return api('/api/console/command-center'+repoQuery()).then(function(res){
     commandCenter=res;
+    lastRefreshedAt=new Date().toLocaleTimeString();
     var repo=obj(res.currentRepository);
     if(repo.id)rememberRepo(repo.id);
     if(!selectedWorkId&&res.currentWork&&res.currentWork.id)rememberWork(res.currentWork.id);
+    // Merge extras into current work for card display after silent polls.
+    if(res.currentWork&&res.currentWork.id)res.currentWork=mergeWorkExtras(res.currentWork);
     if(!opts.silent)renderAll();
-    else {renderChrome();renderOpBar()}
+    else {
+      renderChrome();
+      renderOpBar();
+      // Keep active views fresh without full re-render thrash when possible.
+      try{renderHome();renderWork();renderInbox()}catch(_e){renderAll()}
+    }
     ensurePoll();
   }).catch(function(e){
-    if(opts.silent)return;
+    if(opts.silent){
+      lastOperation={phase:'failed',statusLabel:'重连中',summary:e.message||'控制台暂时不可用，正在重试…',at:new Date().toISOString()};
+      renderOpBar();
+      return;
+    }
     commandCenter={
       readiness:{state:'blocked',label:'读取失败',headline:'控制台不可用',description:e.message||'本地 API 暂时不可用',connectorLabel:'未知',connectorTone:'red',pendingHandoffCount:0,sections:[]},
-      handoffs:[],recentWork:[],repositories:[],warnings:[e.message||'读取失败'],modePreviewDefault:{label:'—',explanation:''}
+      handoffs:[],recentWork:[],repositories:[],warnings:[e.message||'读取失败'],modePreviewDefault:{label:'—',explanation:''},
+      setupGuide:{needed:true,title:'控制台暂不可用',body:e.message||'请确认 controller 已启动。',actionLabel:'重试'}
     };
-    setLastOp({phase:'failed',statusLabel:'读取失败',summary:e.message||'本地 API 暂时不可用',errorMessage:e.message},e.message);
+    setLastOp({phase:'failed',statusLabel:'读取失败',summary:e.message||'本地 API 暂时不可用',error:{title:'控制器暂不可用',explanation:e.message||'本地 API 暂时不可用',nextActions:['刷新页面','重启 controller']}},e.message);
     renderAll();
     toast(e.message||'读取失败');
   });

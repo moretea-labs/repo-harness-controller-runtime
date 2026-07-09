@@ -51,20 +51,62 @@ export interface HandoffCardViewModel {
   };
 }
 
+export interface ChangedFileEntryViewModel {
+  path: string;
+  status: 'modified' | 'added' | 'deleted' | 'renamed' | 'unknown';
+  statusLabel: string;
+}
+
+export interface ChangedFilesSummaryViewModel {
+  total: number;
+  modified: number;
+  added: number;
+  deleted: number;
+  files: ChangedFileEntryViewModel[];
+  summaryLabel: string;
+}
+
+export interface ConsoleErrorViewModel {
+  errorClass:
+    | 'controller_unavailable'
+    | 'connector_stale'
+    | 'infrastructure_failure'
+    | 'acceptance_failure'
+    | 'invalid_check_id'
+    | 'approval_required'
+    | 'handoff_required'
+    | 'timeout'
+    | 'policy_denied'
+    | 'not_found'
+    | 'unknown_failure';
+  title: string;
+  explanation: string;
+  nextActions: string[];
+}
+
 export interface WorkSummaryViewModel {
   id: string;
   title: string;
+  objective: string;
   modeLabel: string;
   mode: ModePreviewViewModel['mode'];
   statusLabel: string;
   tone: PlainStatusTone;
+  /** Machine phase for UI feedback: running | waiting | succeeded | failed | blocked | ... */
+  phase: string;
+  phaseLabel: string;
   nextAction: string;
+  latestAction: string;
+  latestSummary: string;
   progressSteps: Array<{ label: string; done: boolean; active: boolean }>;
   latestVerification?: VerificationViewModel;
   acceptanceCriteria: string[];
   evidenceLabels: string[];
+  changedFiles?: ChangedFilesSummaryViewModel;
+  error?: ConsoleErrorViewModel;
   delegateSummary?: string;
   suggestedActions: SuggestedActionViewModel[];
+  primaryActionLabel?: string;
   advanced?: {
     workId: string;
     status: string;
@@ -124,10 +166,14 @@ export interface RepositoryCardViewModel {
   statusLabel: string;
   tone: PlainStatusTone;
   current: boolean;
+  branchLabel?: string;
+  dirtyLabel?: string;
+  readinessLabel?: string;
   advanced?: {
     repoId: string;
     remote?: string;
     defaultBranch?: string;
+    checkoutId?: string;
   };
 }
 
@@ -183,9 +229,16 @@ export interface CommandCenterViewModel {
   currentWork?: WorkSummaryViewModel;
   recentWork: WorkSummaryViewModel[];
   handoffs: HandoffCardViewModel[];
-  /** Assistant/plugin capabilities available to the controller. */
+  /** Assistant/plugin capabilities available to the controller (not the primary workflow). */
   pluginSummary?: PluginSummaryViewModel;
   plugins?: PluginCardViewModel[];
   modePreviewDefault: ModePreviewViewModel;
   warnings: string[];
+  /** Setup guidance when no usable repository is selected. */
+  setupGuide?: {
+    needed: boolean;
+    title: string;
+    body: string;
+    actionLabel: string;
+  };
 }
