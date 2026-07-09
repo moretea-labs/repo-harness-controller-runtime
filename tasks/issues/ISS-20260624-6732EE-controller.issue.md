@@ -2,7 +2,7 @@
 id: "ISS-20260624-6732EE"
 kind: "bug"
 status: "in_progress"
-updated_at: "2026-07-09T01:30:54.563Z"
+updated_at: "2026-07-09T02:36:03.486Z"
 source: "repo-harness-controller-v8"
 ---
 
@@ -163,7 +163,7 @@ source: "repo-harness-controller-v8"
 
 ### T14 — 压缩 MCP 默认响应并保持兼容
 
-- Status: `review`
+- Status: `done`
 - Objective: 移除 launch_task、verify_task 等工具返回中顶层与嵌套完整对象的重复副本；默认返回紧凑摘要，同时保留专用详情工具和必要兼容字段。
 - Depends on: `T2`
 - Allowed paths: `src/cli/mcp/tools.ts`, `tests/cli/mcp-controller.test.ts`, `docs/**`
@@ -190,7 +190,7 @@ source: "repo-harness-controller-v8"
 
 ### T17 — 限制 Durable Job 错误与列表响应体
 
-- Status: `planned`
+- Status: `ready`
 - Objective: 避免 MCP/Repository 工具失败时把完整 repository、runtimeStorage 和大日志嵌入 ExecutionJob.error；为 list_jobs/get_job 默认响应建立有界摘要，详情通过 Evidence/Artifact 按需读取，从而降低 Connector 502 与持久化历史膨胀。
 - Depends on: `T14`
 - Allowed paths: `src/runtime/execution/**`, `src/runtime/gateway/**`, `tests/runtime/**`, `tests/cli/**`

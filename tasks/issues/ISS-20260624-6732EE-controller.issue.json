@@ -676,7 +676,7 @@
       "id": "T14",
       "title": "压缩 MCP 默认响应并保持兼容",
       "objective": "移除 launch_task、verify_task 等工具返回中顶层与嵌套完整对象的重复副本；默认返回紧凑摘要，同时保留专用详情工具和必要兼容字段。",
-      "status": "review",
+      "status": "done",
       "dependsOn": [
         "T2"
       ],
@@ -706,13 +706,14 @@
         "Accepted RUN-iss-20260624-6732ee-t14-1782373635978-d0d56398 for asynchronous launch.",
         "Dispatched RUN-iss-20260624-6732ee-t14-1782373635978-d0d56398 to codex.",
         "RUN-iss-20260624-6732ee-t14-1782373635978-d0d56398 finished successfully. Automatic integration is starting.",
-        "Automatic integration failed for RUN-iss-20260624-6732ee-t14-1782373635978-d0d56398: main working tree changed since Task dispatch: src/cli/mcp/tools.ts"
+        "Automatic integration failed for RUN-iss-20260624-6732ee-t14-1782373635978-d0d56398: main working tree changed since Task dispatch: src/cli/mcp/tools.ts",
+        "Completed on current main by commit e1d041a. Default MCP dispatch/launch/verify responses are compact and no longer return full nested issue/run payloads. Compatibility fields accepted/reused/top-level compact tasks remain. Evidence: package:check:controller-v8 passed via EJOB-1783564391182-cd4adea3; package:check:type passed via EJOB-1783564495606-36ebc28d; focused local-bridge compatibility tests passed via EJOB-1783564351712-36262295 / JOB-1783564354403-8841c548; compact dispatch/verification regression passed earlier in tests/cli/mcp-controller.test.ts."
       ],
       "runIds": [
         "RUN-iss-20260624-6732ee-t14-1782373635978-d0d56398"
       ],
       "createdAt": "2026-06-25T00:43:56.169Z",
-      "updatedAt": "2026-06-25T08:03:17.248Z",
+      "updatedAt": "2026-07-09T02:36:03.486Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     },
     {
@@ -809,7 +810,7 @@
       "id": "T17",
       "title": "限制 Durable Job 错误与列表响应体",
       "objective": "避免 MCP/Repository 工具失败时把完整 repository、runtimeStorage 和大日志嵌入 ExecutionJob.error；为 list_jobs/get_job 默认响应建立有界摘要，详情通过 Evidence/Artifact 按需读取，从而降低 Connector 502 与持久化历史膨胀。",
-      "status": "planned",
+      "status": "ready",
       "dependsOn": [
         "T14"
       ],
@@ -1163,6 +1164,6 @@
     }
   ],
   "createdAt": "2026-06-24T08:57:01.690Z",
-  "updatedAt": "2026-07-09T01:30:54.563Z",
+  "updatedAt": "2026-07-09T02:36:03.486Z",
   "repoId": "repo_123b7cf58b6b17b5cbe46a56"
 }
