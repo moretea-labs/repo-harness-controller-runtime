@@ -2,10 +2,11 @@ import { describe, expect, test } from 'bun:test';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { listWebTargets, previewBrowserDomainAccess, resolveWebTargetUrl, summarizePluginForLowInterception, summarizeJobResultForLowInterception } from '../../src/runtime/safe-tooling';
+import { listWebTargets, previewBrowserDomainAccess, resolveWebTargetUrl, summarizeExecutionJobForMcp, summarizePluginForLowInterception, summarizeJobResultForLowInterception } from '../../src/runtime/safe-tooling';
 import { buildModelClientSummary, buildModelControlPlaneSummary, deepSeekControllerManifest, deepSeekFunctionToolManifest, prepareDeepSeekControllerHandoff, prepareDeepSeekControllerRequest, prepareDeepSeekToolCall } from '../../src/runtime/model-clients';
 import type { AssistantPluginManifest } from '../../src/runtime/plugins/types';
 import type { ExecutionJob } from '../../src/runtime/execution/jobs/types';
+import { boundExecutionResult, readExecutionArtifact } from '../../src/runtime/evidence/artifact-store';
 
 function repoRoot(): string {
   const root = mkdtempSync(join(tmpdir(), 'repo-harness-safe-tools-'));
@@ -86,6 +87,49 @@ describe('low-interception safe tool surface', () => {
     const screenshotSummary = summarizeJobResultForLowInterception(screenshotJob);
     expect(screenshotSummary.resultPreview?.screenshot).toMatchObject({ title: 'App Store Connect', relativePath: '.repo-harness/browser/screenshots/shot.png', bytes: 123 });
     expect(JSON.stringify(screenshotSummary)).not.toContain('redacted-root');
+  });
+
+  test('externalizes job error details and keeps durable summaries pointer-based', () => {
+    const controllerHome = mkdtempSync(join(tmpdir(), 'repo-harness-job-error-'));
+    const job = {
+      jobId: 'EJOB-error',
+      repoId: 'repo_1',
+      type: 'repository-command',
+      status: 'failed',
+      priority: 'P0',
+      requestId: 'REQ-error',
+      semanticKey: 'semantic-error',
+      payload: { operation: 'repository_command_execute', maxOutputBytes: 1024 * 1024 },
+      origin: { surface: 'mcp' },
+      resourceClaims: [],
+      dependencies: [],
+      leaseRefs: [],
+      createdAt: new Date(0).toISOString(),
+      updatedAt: new Date(0).toISOString(),
+      queuedAt: new Date(0).toISOString(),
+      attempt: 0,
+      maxAttempts: 1,
+      evidenceIds: ['EVD-error'],
+    } as unknown as ExecutionJob;
+    const rawDetails = {
+      repository: { canonicalRoot: '/Users/greyson/private/repo', runtimeStorage: { controllerRoot: '/Users/greyson/private/runtime' } },
+      stdout: `stdout-payload-${'x'.repeat(2000)}`,
+      stderr: `stderr-payload-${'y'.repeat(2000)}`,
+      result: { nested: `result-payload-${'z'.repeat(2000)}` },
+    };
+    const bounded = boundExecutionResult(controllerHome, job, rawDetails, 'job-error');
+    expect(bounded.artifact?.artifactId).toBeTruthy();
+    expect(JSON.stringify(bounded.result)).toContain('artifactId');
+    expect(JSON.stringify(bounded.result)).not.toContain('stdout-payload');
+    expect(JSON.stringify(bounded.result)).not.toContain('runtimeStorage');
+    const artifact = readExecutionArtifact(controllerHome, 'repo_1', String(bounded.artifact?.artifactId));
+    expect(JSON.stringify(artifact.content)).toContain('stdout-payload');
+
+    const summary = summarizeExecutionJobForMcp({ ...job, error: { code: 'COMMAND_FAILED', message: 'failed in /Users/greyson/private/repo', retryable: false, details: bounded.result } }, '/Users/greyson/private/repo');
+    expect(summary).toMatchObject({ evidenceIds: ['EVD-error'] });
+    expect(JSON.stringify(summary)).toContain(String(bounded.artifact?.artifactId));
+    expect(JSON.stringify(summary)).not.toContain('stdout-payload');
+    expect(JSON.stringify(summary)).not.toContain('/Users/greyson/private/repo');
   });
 
   test('summarizes playwright failure as dependency missing', () => {

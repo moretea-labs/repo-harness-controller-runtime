@@ -95,6 +95,27 @@ export function boundExecutionResult(
   const maxBytes = Math.max(16 * 1024, Math.min(configured, 2 * 1024 * 1024));
   const serialized = JSON.stringify(result);
   const bytes = Buffer.byteLength(serialized);
+
+  if (kind === 'job-error') {
+    const artifact = writeExecutionArtifact(controllerHome, job, kind, result);
+    return {
+      artifact,
+      result: {
+        externalized: true,
+        byteLength: bytes,
+        artifactId: artifact.artifactId,
+        artifactKind: artifact.kind,
+        detailPointer: {
+          tool: 'get_artifact',
+          repoId: job.repoId,
+          artifactId: artifact.artifactId,
+          maxBytes,
+        },
+        next: `Call get_artifact with repo_id=${job.repoId} and artifact_id=${artifact.artifactId}.`,
+      },
+    };
+  }
+
   if (bytes <= maxBytes) return { result };
   const artifact = writeExecutionArtifact(controllerHome, job, kind, result);
   return {

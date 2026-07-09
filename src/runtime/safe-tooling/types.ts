@@ -92,6 +92,8 @@ export interface SafeJobResultSummary {
   resultAvailable: boolean;
   resultPreview?: Record<string, unknown>;
   evidenceIds: string[];
+  artifactRefs?: Array<{ artifactId: string; artifactKind?: string; byteLength?: number; next?: string }>;
+  detailPointers?: Record<string, unknown>;
   redaction: {
     rawStdoutReturned: false;
     rawStderrReturned: false;

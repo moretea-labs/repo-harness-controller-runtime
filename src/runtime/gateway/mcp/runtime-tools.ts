@@ -56,6 +56,7 @@ import {
   mergeAllowedDomains,
   previewBrowserDomainAccess,
   resolveWebTargetUrl,
+  summarizeExecutionJobForMcp,
   summarizeJobResultForLowInterception,
   summarizePluginForLowInterception,
   applyExternalFilesystemGrant,
@@ -647,76 +648,7 @@ function summarizeJobEvents(controllerHome: string, repoId: string, jobId: strin
 }
 
 function summarizeExecutionJob(job: ExecutionJob, repoRoot?: string): Record<string, unknown> {
-  const payloadArguments = job.payload.arguments && typeof job.payload.arguments === 'object'
-    ? Object.keys(job.payload.arguments as Record<string, unknown>).slice(0, 20)
-    : undefined;
-  const replacements = repoRoot ? [repoRoot] : [];
-  const resultPreview = job.result !== undefined ? jsonPreview(job.result, 320, replacements) : undefined;
-  const errorPreview = job.error?.details !== undefined ? jsonPreview(job.error.details, 320, replacements) : undefined;
-  return {
-    jobId: job.jobId,
-    repoId: job.repoId,
-    checkoutId: job.checkoutId,
-    type: job.type,
-    status: job.status,
-    priority: job.priority,
-    requestId: job.requestId,
-    semanticKey: job.semanticKey,
-    payload: {
-      operation: job.payload.operation,
-      target: job.payload.target,
-      profile: job.payload.profile,
-      timeoutMs: job.payload.timeoutMs,
-      maxOutputBytes: job.payload.maxOutputBytes,
-      argumentKeys: payloadArguments,
-      summaryOnly: true,
-    },
-    origin: job.origin,
-    resourceClaims: job.resourceClaims.map((claim) => ({
-      resourceKey: redactMcpText(scrubPathText(claim.resourceKey, replacements)).text,
-      mode: claim.mode,
-    })),
-    dependencyCount: job.dependencies.length,
-    createdAt: job.createdAt,
-    updatedAt: job.updatedAt,
-    queuedAt: job.queuedAt,
-    startedAt: job.startedAt,
-    finishedAt: job.finishedAt,
-    heartbeatAt: job.heartbeatAt,
-    deadlineAt: job.deadlineAt,
-    workerPid: job.workerPid,
-    attempt: job.attempt,
-    maxAttempts: job.maxAttempts,
-    evidenceCount: job.evidenceIds.length,
-    outcome: job.outcome ? {
-      infrastructureError: job.outcome.infrastructureError ? {
-        code: job.outcome.infrastructureError.code,
-        message: redactMcpText(scrubPathText(job.outcome.infrastructureError.message, replacements)).text,
-      } : undefined,
-    } : undefined,
-    result: resultPreview
-      ? {
-        preview: resultPreview.preview,
-        truncated: resultPreview.truncated,
-        byteLength: resultPreview.byteLength,
-        next: 'Call get_job with detail_level=full or get_artifact if an artifactId is present.',
-      }
-      : undefined,
-    error: job.error
-      ? {
-        code: job.error.code,
-        message: redactMcpText(scrubPathText(job.error.message, replacements)).text,
-        retryable: job.error.retryable,
-        ...(errorPreview
-          ? {
-            detailsPreview: errorPreview.preview,
-            detailsTruncated: errorPreview.truncated,
-            detailsByteLength: errorPreview.byteLength,
-          }
-          : {}),
-      }
-      : undefined,
-  };
+  return summarizeExecutionJobForMcp(job, repoRoot);
 }
 
 function summarizeRuntimeProjectionForReadiness<T extends { currentAttention?: unknown; attention?: unknown }>(projection: T): T & { historicalAttention?: unknown } {

@@ -1,15 +1,24 @@
+import { redactMcpText } from '../../cli/mcp/redaction';
 import type { ExecutionJob } from '../execution/jobs/types';
 import type { SafeJobResultSummary } from './types';
 
 type SafeErrorClass = NonNullable<SafeJobResultSummary['safeError']>['class'];
+type SafeArtifactRef = NonNullable<SafeJobResultSummary['artifactRefs']>[number];
 
-function sanitizeMessage(message: string): string {
-  return message
+function scrubPathText(text: string, replacements: string[] = []): string {
+  let output = text;
+  for (const replacement of [...new Set(replacements.filter((entry) => entry.startsWith('/')))].sort((left, right) => right.length - left.length)) {
+    output = output.split(replacement).join('<repo>');
+  }
+  return output
     .replace(/\/Users\/[^\s"']+/g, '<abs-path>')
     .replace(/\/(?:private\/)?var\/folders\/[^\s"']+/g, '<abs-path>')
     .replace(/\/(?:private\/)?tmp\/[^\s"']+/g, '<abs-path>')
-    .replace(/[A-Za-z]:\\[^\s"']+/g, '<abs-path>')
-    .slice(0, 800);
+    .replace(/[A-Za-z]:\\[^\s"']+/g, '<abs-path>');
+}
+
+function sanitizeMessage(message: string, replacements: string[] = []): string {
+  return redactMcpText(scrubPathText(message, replacements)).text.slice(0, 800);
 }
 
 function classifyError(message: string): SafeErrorClass {
@@ -30,6 +39,48 @@ function safeString(value: unknown, maxChars: number): string | undefined {
 
 function objectValue(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function jsonPreview(value: unknown, maxChars = 800, replacements: string[] = []): { preview: string; truncated: boolean; byteLength: number } | undefined {
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    return undefined;
+  }
+  if (serialized === undefined) return undefined;
+  const redacted = redactMcpText(scrubPathText(serialized, replacements)).text;
+  const byteLength = Buffer.byteLength(serialized);
+  if (redacted.length <= maxChars) return { preview: redacted, truncated: false, byteLength };
+  return { preview: `${redacted.slice(0, maxChars)}...`, truncated: true, byteLength };
+}
+
+function collectArtifactRefsFromValue(value: unknown, refs: SafeArtifactRef[], seen: Set<unknown>, depth = 0): void {
+  if (refs.length >= 10 || depth > 5 || !value || typeof value !== 'object') return;
+  if (seen.has(value)) return;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const entry of value) collectArtifactRefsFromValue(entry, refs, seen, depth + 1);
+    return;
+  }
+  const record = value as Record<string, unknown>;
+  const artifactId = typeof record.artifactId === 'string' ? record.artifactId : undefined;
+  if (artifactId && !refs.some((entry) => entry.artifactId === artifactId)) {
+    refs.push({
+      artifactId,
+      artifactKind: typeof record.artifactKind === 'string' ? record.artifactKind : undefined,
+      byteLength: typeof record.byteLength === 'number' ? record.byteLength : undefined,
+      next: typeof record.next === 'string' ? sanitizeMessage(record.next) : undefined,
+    });
+  }
+  for (const entry of Object.values(record)) collectArtifactRefsFromValue(entry, refs, seen, depth + 1);
+}
+
+function collectArtifactRefs(...values: unknown[]): SafeArtifactRef[] {
+  const refs: SafeArtifactRef[] = [];
+  const seen = new Set<unknown>();
+  for (const value of values) collectArtifactRefsFromValue(value, refs, seen);
+  return refs;
 }
 
 function safeTextPreview(value: unknown): Record<string, unknown> | undefined {
@@ -73,6 +124,86 @@ function suggestedFixesFor(message: string, errorClass: SafeErrorClass): string[
   return ['Open the bounded job details only if the safe summary is insufficient.'];
 }
 
+export function summarizeExecutionJobForMcp(job: ExecutionJob, repoRoot?: string): Record<string, unknown> {
+  const payloadArguments = job.payload.arguments && typeof job.payload.arguments === 'object'
+    ? Object.keys(job.payload.arguments as Record<string, unknown>).slice(0, 20)
+    : undefined;
+  const replacements = repoRoot ? [repoRoot] : [];
+  const resultPreview = job.result !== undefined ? jsonPreview(job.result, 320, replacements) : undefined;
+  const artifactRefs = collectArtifactRefs(job.result, job.error?.details);
+  const evidenceIds = job.evidenceIds.slice(-20);
+  const errorDetailsAvailable = job.error?.details !== undefined;
+  return {
+    jobId: job.jobId,
+    repoId: job.repoId,
+    checkoutId: job.checkoutId,
+    type: job.type,
+    status: job.status,
+    priority: job.priority,
+    requestId: job.requestId,
+    semanticKey: job.semanticKey,
+    payload: {
+      operation: job.payload.operation,
+      target: job.payload.target,
+      profile: job.payload.profile,
+      timeoutMs: job.payload.timeoutMs,
+      maxOutputBytes: job.payload.maxOutputBytes,
+      argumentKeys: payloadArguments,
+      summaryOnly: true,
+    },
+    origin: job.origin,
+    resourceClaims: job.resourceClaims.map((claim) => ({
+      resourceKey: redactMcpText(scrubPathText(claim.resourceKey, replacements)).text,
+      mode: claim.mode,
+    })),
+    dependencyCount: job.dependencies.length,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    queuedAt: job.queuedAt,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt,
+    heartbeatAt: job.heartbeatAt,
+    deadlineAt: job.deadlineAt,
+    workerPid: job.workerPid,
+    attempt: job.attempt,
+    maxAttempts: job.maxAttempts,
+    evidenceCount: job.evidenceIds.length,
+    evidenceIds,
+    evidenceIdsTruncated: job.evidenceIds.length > evidenceIds.length,
+    ...(artifactRefs.length ? { artifactRefs } : {}),
+    detailPointers: {
+      includeEvents: `Call get_job with job_id=${job.jobId} and include_events=true for bounded event previews.`,
+      ...(artifactRefs.length ? { artifacts: artifactRefs } : {}),
+      evidenceIds,
+      rawJobStateReturned: false,
+    },
+    outcome: job.outcome ? {
+      infrastructureError: job.outcome.infrastructureError ? {
+        code: job.outcome.infrastructureError.code,
+        message: sanitizeMessage(job.outcome.infrastructureError.message, replacements),
+      } : undefined,
+    } : undefined,
+    result: resultPreview
+      ? {
+        preview: resultPreview.preview,
+        truncated: resultPreview.truncated,
+        byteLength: resultPreview.byteLength,
+        next: artifactRefs.length ? 'Call get_artifact with a listed artifactId for bounded content.' : 'Result is returned only as a bounded preview in job summaries.',
+      }
+      : undefined,
+    error: job.error
+      ? {
+        code: job.error.code,
+        message: sanitizeMessage(job.error.message, replacements),
+        retryable: job.error.retryable,
+        detailsAvailable: errorDetailsAvailable,
+        detailsSuppressed: errorDetailsAvailable && artifactRefs.length === 0,
+        ...(artifactRefs.length ? { artifactRefs } : {}),
+      }
+      : undefined,
+  };
+}
+
 export function summarizeJobResultForLowInterception(job: ExecutionJob): SafeJobResultSummary {
   const message = job.error?.message ?? (job.outcome && typeof job.outcome === 'object' ? JSON.stringify(job.outcome) : '');
   const errorClass = message ? classifyError(message) : undefined;
@@ -84,6 +215,7 @@ export function summarizeJobResultForLowInterception(job: ExecutionJob): SafeJob
   const resultPreview = pluginId === 'browser'
     ? safeBrowserResultPreview(actionId, job.result)
     : undefined;
+  const artifactRefs = collectArtifactRefs(job.result, job.error?.details);
   return {
     jobId: job.jobId,
     repoId: job.repoId,
@@ -101,6 +233,7 @@ export function summarizeJobResultForLowInterception(job: ExecutionJob): SafeJob
     resultAvailable: job.result !== undefined,
     ...(resultPreview ? { resultPreview } : {}),
     evidenceIds: [...job.evidenceIds],
+    ...(artifactRefs.length ? { artifactRefs, detailPointers: { artifacts: artifactRefs, rawJobStateReturned: false } } : {}),
     redaction: {
       rawStdoutReturned: false,
       rawStderrReturned: false,
