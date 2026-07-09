@@ -142,6 +142,13 @@ describe("personal assistant plugin runtime", () => {
       "tasks.delete",
     ]));
     expect(gmail?.actions.find((action) => action.actionId === "send_message")?.confirmation).toBe("strong_confirmation");
+    expect(gmail?.actions.map((action) => action.actionId)).toEqual(expect.arrayContaining([
+      "list_labels",
+      "modify_message_labels",
+      "archive_message",
+      "mark_message_read",
+      "mark_message_unread",
+    ]));
     expect(calendar?.actions.find((action) => action.actionId === "reschedule_event")?.confirmation).toBe("strong_confirmation");
     expect(tasks?.actions.find((action) => action.actionId === "delete_task")?.confirmation).toBe("strong_confirmation");
 
@@ -192,6 +199,29 @@ describe("personal assistant plugin runtime", () => {
     expect(gmailSend.execution.ok).toBe(true);
     const gmailSendResult = gmailSend.execution.result?.result as Record<string, unknown> | undefined;
     expect(gmailSendResult?.message).toBeDefined();
+
+    const gmailLabels = await executePluginAction(controllerHome, repository, {
+      pluginId: "gmail",
+      actionId: "list_labels",
+      requestId: "gmail-labels",
+      args: {},
+      origin: { surface: "local-ui", actor: "test" },
+    });
+    expect(gmailLabels.execution.ok).toBe(true);
+    const gmailLabelsResult = gmailLabels.execution.result?.result as Record<string, unknown> | undefined;
+    expect(gmailLabelsResult?.labels).toBeDefined();
+
+    const gmailArchive = await executePluginAction(controllerHome, repository, {
+      pluginId: "gmail",
+      actionId: "archive_message",
+      requestId: "gmail-archive",
+      args: { message_id: "msg-1" },
+      confirmAuthorization: true,
+      origin: { surface: "local-ui", actor: "test" },
+    });
+    expect(gmailArchive.execution.ok).toBe(true);
+    const gmailArchiveResult = gmailArchive.execution.result?.result as Record<string, unknown> | undefined;
+    expect(JSON.stringify(gmailArchiveResult)).toContain("INBOX");
 
     const calendarConfig = await executePluginAction(controllerHome, repository, {
       pluginId: "google_calendar",

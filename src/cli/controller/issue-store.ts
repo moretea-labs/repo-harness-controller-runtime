@@ -25,6 +25,8 @@ import {
 } from './task-status-resolver';
 import { tryAppendControllerWorklogEvent } from './worklog';
 import { executionScopesConflict, taskExecutionPolicy, verificationEvidencePassed } from './execution-policy';
+import { listControllerChecks } from './check-runner';
+import { normalizeCheckIds } from '../../runtime/control-plane/facade/check-normalization';
 
 const ISSUE_ROOT = 'tasks/issues';
 const EPHEMERAL_ISSUE_ROOT = '.ai/harness/ephemeral-issues';
@@ -900,18 +902,23 @@ export function recordTaskVerification(repoRoot: string, issueIdValue: string, t
   if (policy.requiresScopedPaths && task.allowedPaths.length === 0) {
     throw new Error(`${policy.executionClass} cannot be verified without an explicit allowed path scope`);
   }
-  const outcome = verificationEvidencePassed(task, verification, policy);
+  const normalizedDeclaredChecks = normalizeCheckIds(task.checks, listControllerChecks(repoRoot));
+  const verificationTask = { ...task, checks: normalizedDeclaredChecks.validCheckIds };
+  const outcome = verificationEvidencePassed(verificationTask, verification, policy);
   const successful = outcome.ok;
   const autoComplete = successful && policy.autoCompleteAfterSuccessfulRun && !policy.requiresHumanAcceptance;
+  const invalidCheckNote = normalizedDeclaredChecks.invalidCheckIds.length > 0
+    ? ` Ignored unregistered check id(s): ${normalizedDeclaredChecks.invalidCheckIds.join(', ')}. Invalid check ids are verification infrastructure metadata, not actual check failures.`
+    : '';
   verification.autoCompleted = autoComplete;
   return updateTask(repoRoot, issueIdValue, taskId, {
     status: successful ? (autoComplete ? 'done' : 'verified') : 'changes_requested',
     verification,
     note: successful
       ? autoComplete
-        ? `Verification evidence passed and ${policy.executionClass} policy auto-completed the Task.`
-        : 'Required verification evidence passed; explicit acceptance remains required.'
-      : `Verification evidence is incomplete or failed: ${outcome.reasons.join(' ')}`,
+        ? `Verification evidence passed and ${policy.executionClass} policy auto-completed the Task.${invalidCheckNote}`
+        : `Required verification evidence passed; explicit acceptance remains required.${invalidCheckNote}`
+      : `Verification evidence is incomplete or failed: ${outcome.reasons.join(' ')}${invalidCheckNote}`,
   });
 }
 

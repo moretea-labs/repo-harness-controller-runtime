@@ -1,4 +1,7 @@
 import { describe, expect, test } from 'bun:test';
+import { normalizeCheckIds } from '../../src/runtime/control-plane/facade/check-normalization';
+import { listCapabilityDescriptors } from '../../src/runtime/control-plane/facade/capability-registry';
+import { evaluatePolicyGate } from '../../src/runtime/control-plane/facade/policy-gate';
 import {
   FACADE_TOOLS,
   HANDOFF_STATUSES,
@@ -95,7 +98,7 @@ describe('handoff and facade contracts', () => {
         {
           label: 'Read task context',
           tool: 'rh_context',
-          operation: 'task',
+          operation: 'get',
           payload: { task_id: 'T1' },
           risk: 'readonly',
         },
@@ -107,4 +110,30 @@ describe('handoff and facade contracts', () => {
     expect(handoff.evidenceRefs[0]?.detailLevel).toBe('summary');
     expect(handoff.suggestedNextActions[0]?.tool).toBe('rh_context');
   });
+  test('registers parallel internal capabilities without expanding facade tools', () => {
+    const capabilities = listCapabilityDescriptors([]);
+    expect(capabilities.map((entry) => entry.capabilityId)).toContain('repository.direct_edit');
+    expect(capabilities.map((entry) => entry.capabilityId)).toContain('controller.goal_workloop');
+    expect(new Set(capabilities.map((entry) => entry.exposedVia))).toEqual(new Set(['rh_context', 'rh_inbox', 'rh_status', 'rh_work']));
+  });
+
+  test('policy gate preserves bounded direct edit and blocks raw secret access', () => {
+    expect(evaluatePolicyGate({
+      risk: 'local_repo_write',
+      directEditBoundary: { scopeClear: true, pathsExplicit: true, maxChangedFiles: 2, maxChangedLines: 80 },
+    })).toMatchObject({ decision: 'allowed' });
+    expect(evaluatePolicyGate({ risk: 'raw_secret_config' })).toMatchObject({ decision: 'denied' });
+    expect(evaluatePolicyGate({ risk: 'remote_write' })).toMatchObject({ decision: 'approval_required' });
+  });
+
+  test('normalizes check aliases without treating invalid ids as check failures', () => {
+    const normalized = normalizeCheckIds(['typecheck', 'docs', 'package:test'], [
+      { id: 'package:check:type' },
+      { id: 'package:test' },
+    ]);
+    expect(normalized.validCheckIds).toEqual(['package:check:type', 'package:test']);
+    expect(normalized.invalidCheckIds).toEqual(['docs']);
+    expect(normalized.warnings[0]).toContain('invalid_check_id');
+  });
+
 });

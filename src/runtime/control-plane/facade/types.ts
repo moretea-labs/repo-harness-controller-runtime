@@ -17,9 +17,12 @@ export type CapabilityOperationClass = (typeof CAPABILITY_OPERATION_CLASSES)[num
 
 export const CAPABILITY_RISKS = [
   'readonly',
+  'local_repo_write',
   'workspace_write',
   'remote_write',
+  'destructive_remote',
   'destructive',
+  'raw_secret_config',
   'unknown',
 ] as const;
 export type CapabilityRisk = (typeof CAPABILITY_RISKS)[number];

@@ -71,6 +71,7 @@ import {
   listControllerChecks,
   runControllerCheckAsync,
 } from "../controller/check-runner";
+import { normalizeCheckIds } from '../../runtime/control-plane/facade/check-normalization';
 import {
   getControllerTimeline,
   getProjectProgress,
@@ -4425,7 +4426,10 @@ export async function callMcpTool(
           checkId: String(entry.check_id ?? "").trim(),
           requestedSummary: typeof entry.summary === "string" ? entry.summary : undefined,
         })).filter((entry) => entry.checkId);
-        const checkIds = Array.from(new Set(task.checks.length > 0 ? task.checks : requestedCheckInputs.map((entry) => entry.checkId)));
+        const registryChecks = listControllerChecks(ctx.repoRoot);
+        const requestedCheckIds = task.checks.length > 0 ? task.checks : requestedCheckInputs.map((entry) => entry.checkId);
+        const normalizedChecks = normalizeCheckIds(requestedCheckIds, registryChecks);
+        const checkIds = normalizedChecks.validCheckIds;
         const checkResults = await Promise.all(checkIds.map(async (checkId) => {
           try {
             const result = await runControllerCheckAsync(ctx.repoRoot, checkId);
@@ -4507,6 +4511,11 @@ export async function callMcpTool(
           issueId,
           taskId,
           policy,
+          checkNormalization: {
+            validCheckIds: normalizedChecks.validCheckIds,
+            invalidCheckIds: normalizedChecks.invalidCheckIds,
+            warnings: normalizedChecks.warnings,
+          },
           task: verifiedTask ? compactTaskView(verifiedTask as unknown as Record<string, unknown>) : undefined,
           tasks: issueView.tasks.map((entry) => compactTaskView(entry as unknown as Record<string, unknown>)),
           issue: compactIssueView(issueView as unknown as Record<string, unknown>),

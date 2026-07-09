@@ -340,10 +340,10 @@ export function updateExecutionJob(
     if (next.jobId !== current.jobId || next.repoId !== current.repoId) throw new Error('JOB_IDENTITY_IMMUTABLE');
     next.revision = current.revision + 1;
     next.updatedAt = now();
-    persistJob(controllerHome, next);
-    if (eventType) appendJobEvent(controllerHome, next, eventType, eventData);
+    const persisted = persistJob(controllerHome, next);
+    if (eventType) appendJobEvent(controllerHome, persisted, eventType, eventData);
     if (notifyScheduler) touchSchedulerWakeSignal(controllerHome, `job-updated:${jobId}`);
-    return next;
+    return persisted;
   }, 10_000);
 }
 
@@ -371,10 +371,10 @@ function writeJobState(
       if (next.jobId !== current.jobId || next.repoId !== current.repoId) throw new Error('JOB_IDENTITY_IMMUTABLE');
       next.revision = current.revision + 1;
       next.updatedAt = now();
-      persistJob(controllerHome, next);
-      if (eventType) appendJobEvent(controllerHome, next, eventType, eventData);
+      const persisted = persistJob(controllerHome, next);
+      if (eventType) appendJobEvent(controllerHome, persisted, eventType, eventData);
       touchSchedulerWakeSignal(controllerHome, `job-state:${jobId}`);
-      return next;
+      return persisted;
     },
     10_000,
   );

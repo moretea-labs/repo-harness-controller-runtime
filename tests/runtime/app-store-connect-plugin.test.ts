@@ -38,7 +38,7 @@ describe('app store connect plugin', () => {
         key_id: 'ABC123DEFG',
         private_key_path: keyPath,
       },
-      origin: { surface: 'test', actor: 'test' },
+      origin: { surface: 'mcp', actor: 'test' },
     });
 
     expect(result.config).toMatchObject({ privateKeyPath: keyPath });

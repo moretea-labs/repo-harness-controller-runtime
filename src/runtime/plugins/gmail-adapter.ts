@@ -24,8 +24,13 @@ const GMAIL_PLUGIN_ID = 'gmail';
 interface GmailProvider {
   listMessages(args: Record<string, unknown>, config: GmailPluginConfig): Promise<Record<string, unknown>>;
   getMessage(args: Record<string, unknown>, config: GmailPluginConfig): Promise<Record<string, unknown>>;
+  listLabels(args: Record<string, unknown>, config: GmailPluginConfig): Promise<Record<string, unknown>>;
   createDraft(args: Record<string, unknown>, config: GmailPluginConfig): Promise<Record<string, unknown>>;
   sendMessage(args: Record<string, unknown>, config: GmailPluginConfig): Promise<Record<string, unknown>>;
+  modifyMessageLabels(args: Record<string, unknown>, config: GmailPluginConfig): Promise<Record<string, unknown>>;
+  archiveMessage(args: Record<string, unknown>, config: GmailPluginConfig): Promise<Record<string, unknown>>;
+  markMessageRead(args: Record<string, unknown>, config: GmailPluginConfig): Promise<Record<string, unknown>>;
+  markMessageUnread(args: Record<string, unknown>, config: GmailPluginConfig): Promise<Record<string, unknown>>;
   trashMessage(args: Record<string, unknown>, config: GmailPluginConfig): Promise<Record<string, unknown>>;
 }
 
@@ -47,6 +52,16 @@ function positiveNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.trunc(value) : fallback;
 }
 
+function requiredString(value: unknown, name: string): string {
+  const normalized = stringValue(value);
+  if (!normalized) throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', `${name} is required.`);
+  return normalized;
+}
+
+function optionalLabelArray(value: unknown): string[] {
+  return stringArray(value) ?? [];
+}
+
 function gmailPermissions(ready: boolean): AssistantPluginPermissionScope[] {
   return [
     googlePermission('gmail.readonly', 'read', 'Read Gmail message metadata and content.', ready),
@@ -61,9 +76,9 @@ function gmailCapabilities(): AssistantPluginCapability[] {
     {
       capabilityId: 'inbox-read',
       title: 'Inbox Read',
-      description: 'Search Gmail messages and read structured message details.',
+      description: 'Search Gmail messages, read structured message details, and inspect mailbox labels.',
       scopes: ['gmail.readonly'],
-      actions: ['list_messages', 'get_message'],
+      actions: ['list_messages', 'get_message', 'list_labels'],
     },
     {
       capabilityId: 'mail-compose',
@@ -75,9 +90,9 @@ function gmailCapabilities(): AssistantPluginCapability[] {
     {
       capabilityId: 'message-triage',
       title: 'Message Triage',
-      description: 'Move Gmail messages to trash with destructive confirmation.',
+      description: 'Archive messages, mark them read/unread, edit labels, or move messages to trash with destructive confirmation.',
       scopes: ['gmail.modify'],
-      actions: ['trash_message'],
+      actions: ['modify_message_labels', 'archive_message', 'mark_message_read', 'mark_message_unread', 'trash_message'],
     },
   ];
 }
@@ -156,6 +171,20 @@ function gmailActions(): AssistantPluginActionDescriptor[] {
       },
     },
     {
+      actionId: 'list_labels',
+      title: 'List Gmail labels',
+      description: 'List Gmail system and user labels for the configured mailbox.',
+      readOnly: true,
+      risk: 'readonly',
+      confirmation: 'none',
+      defaultTimeoutMs: 30_000,
+      cancellable: true,
+      idempotent: true,
+      scopes: ['gmail.readonly'],
+      resourceClaims: [{ resource: 'remote', mode: 'read' }],
+      argumentsSchema: { type: 'object', properties: {}, additionalProperties: false },
+    },
+    {
       actionId: 'create_draft',
       title: 'Create Gmail draft',
       description: 'Create a Gmail draft without sending it.',
@@ -207,6 +236,71 @@ function gmailActions(): AssistantPluginActionDescriptor[] {
       },
     },
     {
+      actionId: 'modify_message_labels',
+      title: 'Modify Gmail message labels',
+      description: 'Add or remove Gmail labels from one message.',
+      readOnly: false,
+      risk: 'remote_write',
+      confirmation: 'authorization',
+      defaultTimeoutMs: 30_000,
+      cancellable: true,
+      idempotent: true,
+      scopes: ['gmail.modify'],
+      resourceClaims: [{ resource: 'remote', mode: 'exclusive' }],
+      argumentsSchema: {
+        type: 'object',
+        properties: {
+          message_id: { type: 'string' },
+          add_label_ids: { type: 'array', items: { type: 'string' } },
+          remove_label_ids: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['message_id'],
+        additionalProperties: false,
+      },
+    },
+    {
+      actionId: 'archive_message',
+      title: 'Archive Gmail message',
+      description: 'Archive a Gmail message by removing the INBOX label.',
+      readOnly: false,
+      risk: 'remote_write',
+      confirmation: 'authorization',
+      defaultTimeoutMs: 30_000,
+      cancellable: true,
+      idempotent: true,
+      scopes: ['gmail.modify'],
+      resourceClaims: [{ resource: 'remote', mode: 'exclusive' }],
+      argumentsSchema: { type: 'object', properties: { message_id: { type: 'string' } }, required: ['message_id'], additionalProperties: false },
+    },
+    {
+      actionId: 'mark_message_read',
+      title: 'Mark Gmail message read',
+      description: 'Mark a Gmail message as read by removing the UNREAD label.',
+      readOnly: false,
+      risk: 'remote_write',
+      confirmation: 'authorization',
+      defaultTimeoutMs: 30_000,
+      cancellable: true,
+      idempotent: true,
+      scopes: ['gmail.modify'],
+      resourceClaims: [{ resource: 'remote', mode: 'exclusive' }],
+      argumentsSchema: { type: 'object', properties: { message_id: { type: 'string' } }, required: ['message_id'], additionalProperties: false },
+    },
+    {
+      actionId: 'mark_message_unread',
+      title: 'Mark Gmail message unread',
+      description: 'Mark a Gmail message as unread by adding the UNREAD label.',
+      readOnly: false,
+      risk: 'remote_write',
+      confirmation: 'authorization',
+      defaultTimeoutMs: 30_000,
+      cancellable: true,
+      idempotent: true,
+      scopes: ['gmail.modify'],
+      resourceClaims: [{ resource: 'remote', mode: 'exclusive' }],
+      argumentsSchema: { type: 'object', properties: { message_id: { type: 'string' } }, required: ['message_id'], additionalProperties: false },
+    },
+    {
       actionId: 'trash_message',
       title: 'Trash Gmail message',
       description: 'Move a Gmail message to trash.',
@@ -221,9 +315,7 @@ function gmailActions(): AssistantPluginActionDescriptor[] {
       resourceClaims: [{ resource: 'remote', mode: 'exclusive' }],
       argumentsSchema: {
         type: 'object',
-        properties: {
-          message_id: { type: 'string' },
-        },
+        properties: { message_id: { type: 'string' } },
         required: ['message_id'],
         additionalProperties: false,
       },
@@ -255,6 +347,19 @@ function buildMimeMessage(args: Record<string, unknown>, config: GmailPluginConf
 }
 
 function mockGmailProvider(): GmailProvider {
+  function labelChange(args: Record<string, unknown>, addLabelIds: string[] = optionalLabelArray(args.add_label_ids), removeLabelIds: string[] = optionalLabelArray(args.remove_label_ids)): Record<string, unknown> {
+    const messageId = requiredString(args.message_id, 'message_id');
+    return {
+      provider: 'mock',
+      message: {
+        id: messageId,
+        addLabelIds,
+        removeLabelIds,
+        changedAt: now(),
+      },
+    };
+  }
+
   return {
     async listMessages(args, config) {
       const messageId = stableMockId('gmail_msg', { query: args.query, labelIds: args.label_ids, provider: config.provider });
@@ -290,6 +395,17 @@ function mockGmailProvider(): GmailProvider {
         },
       };
     },
+    async listLabels(_args, config) {
+      return {
+        provider: 'mock',
+        mailbox: config.accountEmail ?? 'mock-user@example.com',
+        labels: [
+          { id: 'INBOX', name: 'INBOX', type: 'system' },
+          { id: 'UNREAD', name: 'UNREAD', type: 'system' },
+          { id: 'STARRED', name: 'STARRED', type: 'system' },
+        ],
+      };
+    },
     async createDraft(args, config) {
       const draftId = stableMockId('gmail_draft', args);
       return {
@@ -317,6 +433,18 @@ function mockGmailProvider(): GmailProvider {
         },
       };
     },
+    async modifyMessageLabels(args) {
+      return labelChange(args);
+    },
+    async archiveMessage(args) {
+      return labelChange(args, [], ['INBOX']);
+    },
+    async markMessageRead(args) {
+      return labelChange(args, [], ['UNREAD']);
+    },
+    async markMessageUnread(args) {
+      return labelChange(args, ['UNREAD'], []);
+    },
     async trashMessage(args) {
       return {
         provider: 'mock',
@@ -342,6 +470,19 @@ function liveGmailProvider(config: GmailPluginConfig): GmailProvider {
     });
   }
   const accessToken = auth.accessToken;
+
+  function modifyLabels(args: Record<string, unknown>, addLabelIds = optionalLabelArray(args.add_label_ids), removeLabelIds = optionalLabelArray(args.remove_label_ids)): Promise<Record<string, unknown>> {
+    const messageId = requiredString(args.message_id, 'message_id');
+    return googleApiRequest<Record<string, unknown>>({
+      service: 'gmail',
+      path: `/gmail/v1/users/me/messages/${encodeURIComponent(messageId)}/modify`,
+      method: 'POST',
+      accessToken,
+      body: { addLabelIds, removeLabelIds },
+      timeoutMs: config.defaultTimeoutMs,
+    });
+  }
+
   return {
     async listMessages(args) {
       return googleApiRequest<Record<string, unknown>>({
@@ -365,6 +506,14 @@ function liveGmailProvider(config: GmailPluginConfig): GmailProvider {
         query: {
           format: stringValue(args.format) ?? 'metadata',
         },
+        timeoutMs: config.defaultTimeoutMs,
+      });
+    },
+    async listLabels() {
+      return googleApiRequest<Record<string, unknown>>({
+        service: 'gmail',
+        path: '/gmail/v1/users/me/labels',
+        accessToken,
         timeoutMs: config.defaultTimeoutMs,
       });
     },
@@ -393,6 +542,18 @@ function liveGmailProvider(config: GmailPluginConfig): GmailProvider {
         },
         timeoutMs: config.defaultTimeoutMs,
       });
+    },
+    async modifyMessageLabels(args) {
+      return modifyLabels(args);
+    },
+    async archiveMessage(args) {
+      return modifyLabels(args, [], ['INBOX']);
+    },
+    async markMessageRead(args) {
+      return modifyLabels(args, [], ['UNREAD']);
+    },
+    async markMessageUnread(args) {
+      return modifyLabels(args, ['UNREAD'], []);
     },
     async trashMessage(args) {
       return googleApiRequest<Record<string, unknown>>({
@@ -465,10 +626,20 @@ export async function executeGmailPluginAction(input: AssistantPluginActionExecu
       return gmailProvider(current).listMessages(input.args, current);
     case 'get_message':
       return gmailProvider(current).getMessage(input.args, current);
+    case 'list_labels':
+      return gmailProvider(current).listLabels(input.args, current);
     case 'create_draft':
       return gmailProvider(current).createDraft(input.args, current);
     case 'send_message':
       return gmailProvider(current).sendMessage(input.args, current);
+    case 'modify_message_labels':
+      return gmailProvider(current).modifyMessageLabels(input.args, current);
+    case 'archive_message':
+      return gmailProvider(current).archiveMessage(input.args, current);
+    case 'mark_message_read':
+      return gmailProvider(current).markMessageRead(input.args, current);
+    case 'mark_message_unread':
+      return gmailProvider(current).markMessageUnread(input.args, current);
     case 'trash_message':
       return gmailProvider(current).trashMessage(input.args, current);
     default:

@@ -108,6 +108,19 @@ import {
   listLocalBridgeJobSnapshots,
   readLocalBridgeJobOutputSnapshot,
 } from '../../../cli/local-bridge/job-store';
+import {
+  acknowledgeHandoffItem,
+  buildFacadeResult,
+  createHandoffItem,
+  evaluatePolicyGate,
+  getHandoffItem,
+  listCapabilityDescriptors,
+  listHandoffItems,
+  normalizeCheckIds,
+  resolveHandoffItem,
+  selectExecutionMode,
+  type ExecutionModeSelectionInput,
+} from '../../control-plane/facade';
 
 function definition(name: string, description: string, properties: Record<string, unknown>, required: string[] = [], readOnly = true): McpToolDefinition {
   return {
@@ -119,6 +132,44 @@ function definition(name: string, description: string, properties: Record<string
 }
 const repoId = { type: 'string', description: 'Stable repository id.' };
 export const runtimeToolDefinitions: McpToolDefinition[] = [
+  definition('rh_status', 'ChatGPT-facing facade: bounded controller status and capability readiness.', {
+    repo_id: repoId,
+    operation: { type: 'string', enum: ['list', 'get', 'repair'] },
+    detail_level: { type: 'string', enum: ['summary', 'detail'] },
+  }),
+  definition('rh_inbox', 'ChatGPT-facing facade: list, read, acknowledge, resolve, or create pending handoff decisions.', {
+    repo_id: repoId,
+    operation: { type: 'string', enum: ['list', 'get', 'ack', 'resolve', 'create'] },
+    handoff_id: { type: 'string' },
+    title: { type: 'string' },
+    reason: { type: 'string' },
+    summary: { type: 'string' },
+    recommended_decision: { type: 'string' },
+    recommended_prompt: { type: 'string' },
+    limit: { type: 'number' },
+  }),
+  definition('rh_context', 'ChatGPT-facing facade: bounded repository/controller context, registered checks, and internal capability registry.', {
+    repo_id: repoId,
+    operation: { type: 'string', enum: ['list', 'get'] },
+    requested_check_ids: { type: 'array', items: { type: 'string' } },
+    detail_level: { type: 'string', enum: ['summary', 'detail'] },
+  }),
+  definition('rh_work', 'ChatGPT-facing facade: choose direct control, goal workloop, or handoff-only without exposing a generic execute tool.', {
+    repo_id: repoId,
+    operation: { type: 'string', enum: ['start', 'continue', 'verify', 'repair', 'finalize', 'stop'] },
+    objective: { type: 'string' },
+    expected_files: { type: 'number' },
+    expected_changed_lines: { type: 'number' },
+    scope_clear: { type: 'boolean' },
+    requires_recovery: { type: 'boolean' },
+    requires_worker: { type: 'boolean' },
+    requires_external_effect: { type: 'boolean' },
+    requires_approval: { type: 'boolean' },
+    capability_id: { type: 'string' },
+    approval_confirmed: { type: 'boolean' },
+    dry_run: { type: 'boolean' },
+    check_ids: { type: 'array', items: { type: 'string' } },
+  }, [], false),
   definition('work_submit', 'Submit one durable repository operation and return a resumable Work handle.', {
     repo_id: repoId,
     request_id: { type: 'string', description: 'Stable idempotency key used to resume the same Work after reconnecting.' },
@@ -963,6 +1014,178 @@ function resolveWorkJob(
 export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: string, args: Record<string, unknown>): Promise<CallToolResult | undefined> {
   try {
     switch (name) {
+      case 'rh_status': {
+        const repository = selected(ctx, args);
+        const operation = String(args.operation ?? 'get');
+        const readiness = controllerReadiness(ctx, repository);
+        const manifests = listAssistantPluginManifests(ctx.controllerHome, repository);
+        const capabilities = listCapabilityDescriptors(manifests);
+        const pendingHandoffs = listHandoffItems({ controllerHome: ctx.controllerHome, repoId: repository.repoId, status: 'pending', limit: 20 });
+        const facade = buildFacadeResult({
+          status: readiness.ready ? 'ok' : 'blocked',
+          summary: readiness.ready ? 'Controller is ready for bounded work.' : 'Controller needs attention before background work.',
+          data: {
+            operation,
+            repoId: repository.repoId,
+            readiness,
+            capabilityCount: capabilities.length,
+            pendingHandoffCount: pendingHandoffs.length,
+            toolSurface: ['rh_status', 'rh_inbox', 'rh_context', 'rh_work'],
+          },
+          suggestedNextActions: pendingHandoffs.length > 0 ? [{
+            label: 'Review pending handoffs',
+            tool: 'rh_inbox',
+            operation: 'list',
+            risk: 'readonly',
+            confidence: 'high',
+          }] : [{
+            label: 'Read repository context',
+            tool: 'rh_context',
+            operation: 'get',
+            risk: 'readonly',
+            confidence: 'medium',
+          }],
+          rawAvailable: false,
+          detailLevel: args.detail_level === 'detail' ? 'detail' : 'summary',
+        });
+        return result(facade as unknown as Record<string, unknown>, facade.status !== 'ok');
+      }
+      case 'rh_inbox': {
+        const repository = selected(ctx, args);
+        const operation = String(args.operation ?? 'list');
+        const store = { controllerHome: ctx.controllerHome, repoId: repository.repoId };
+        if (operation === 'get') {
+          const item = getHandoffItem(store, String(args.handoff_id ?? ''));
+          const facade = buildFacadeResult({
+            status: item ? 'ok' : 'not_found',
+            summary: item ? `Handoff ${item.id}.` : 'Handoff item not found.',
+            data: { item },
+            suggestedNextActions: item && item.status === 'pending' ? [{ label: 'Acknowledge handoff', tool: 'rh_inbox', operation: 'ack', payload: { handoff_id: item.id }, risk: 'readonly' }] : [],
+          });
+          return result(facade as unknown as Record<string, unknown>, facade.status === 'not_found');
+        }
+        if (operation === 'ack' || operation === 'resolve') {
+          const handoffId = String(args.handoff_id ?? '').trim();
+          const item = operation === 'ack' ? acknowledgeHandoffItem(store, handoffId) : resolveHandoffItem(store, handoffId);
+          const facade = buildFacadeResult({
+            summary: `${operation === 'ack' ? 'Acknowledged' : 'Resolved'} handoff ${item.id}.`,
+            data: { item },
+            suggestedNextActions: operation === 'ack' ? item.suggestedNextActions : [],
+          });
+          return result(facade as unknown as Record<string, unknown>);
+        }
+        if (operation === 'create') {
+          const id = String(args.handoff_id ?? `hnd-${Date.now()}`).trim();
+          const item = createHandoffItem(store, {
+            id,
+            repoId: repository.repoId,
+            title: String(args.title ?? 'Controller handoff'),
+            severity: 'needs_review',
+            reason: String(args.reason ?? 'ChatGPT or user judgement is required before continuing.'),
+            summary: String(args.summary ?? 'A bounded controller handoff was recorded.'),
+            currentState: { repoId: repository.repoId, statusSummary: 'pending decision' },
+            evidenceRefs: [],
+            recommendedDecision: String(args.recommended_decision ?? 'Decide whether to continue, repair, or stop.'),
+            recommendedPrompt: String(args.recommended_prompt ?? `Continue from handoff ${id}.`),
+            suggestedNextActions: [],
+          });
+          return result(buildFacadeResult({ summary: `Created handoff ${item.id}.`, data: { item } }) as unknown as Record<string, unknown>);
+        }
+        const items = listHandoffItems({ ...store, status: 'active', limit: typeof args.limit === 'number' ? args.limit : 50 });
+        return result(buildFacadeResult({
+          summary: items.length ? `${items.length} active handoff item(s).` : 'No active handoff items.',
+          data: { items },
+          suggestedNextActions: items.slice(0, 1).map((item) => ({ label: `Read ${item.id}`, tool: 'rh_inbox', operation: 'get', payload: { handoff_id: item.id }, risk: 'readonly' as const })),
+        }) as unknown as Record<string, unknown>);
+      }
+      case 'rh_context': {
+        const repository = selected(ctx, args);
+        const manifests = listAssistantPluginManifests(ctx.controllerHome, repository);
+        const checks = listControllerChecks(repository.canonicalRoot);
+        const requested = Array.isArray(args.requested_check_ids) ? args.requested_check_ids.map(String) : [];
+        const normalizedChecks = normalizeCheckIds(requested, checks);
+        const capabilities = listCapabilityDescriptors(manifests);
+        const validationWarnings = normalizedChecks.warnings;
+        const facade = buildFacadeResult({
+          summary: 'Bounded repository context is available through registered checks and internal capabilities.',
+          data: {
+            repoId: repository.repoId,
+            repository: repositorySummary(repository),
+            checks: checks.map((check) => ({ id: check.id, description: check.description, source: check.source })),
+            normalizedChecks,
+            capabilities,
+          },
+          warnings: validationWarnings,
+          suggestedNextActions: normalizedChecks.suggestedNextActions.length ? normalizedChecks.suggestedNextActions : [{
+            label: 'Choose work mode',
+            tool: 'rh_work',
+            operation: 'start',
+            risk: 'readonly',
+            confidence: 'medium',
+          }],
+          detailLevel: args.detail_level === 'detail' ? 'detail' : 'summary',
+        });
+        return result(facade as unknown as Record<string, unknown>);
+      }
+      case 'rh_work': {
+        const repository = selected(ctx, args);
+        const manifests = listAssistantPluginManifests(ctx.controllerHome, repository);
+        const capabilities = listCapabilityDescriptors(manifests);
+        const capabilityId = typeof args.capability_id === 'string' ? args.capability_id : 'repository.direct_edit';
+        const capability = capabilities.find((entry) => entry.capabilityId === capabilityId);
+        const modeInput: ExecutionModeSelectionInput = {
+          expectedFiles: typeof args.expected_files === 'number' ? args.expected_files : undefined,
+          expectedChangedLines: typeof args.expected_changed_lines === 'number' ? args.expected_changed_lines : undefined,
+          scopeClear: args.scope_clear === undefined ? true : args.scope_clear === true,
+          requiresRecovery: args.requires_recovery === true,
+          requiresWorker: args.requires_worker === true,
+          requiresExternalEffect: args.requires_external_effect === true,
+          requiresApproval: args.requires_approval === true,
+        };
+        const mode = selectExecutionMode(modeInput);
+        const policy = evaluatePolicyGate({
+          capability,
+          capabilityId,
+          approvalConfirmed: args.approval_confirmed === true,
+          dryRun: args.dry_run === true,
+          directEditBoundary: {
+            scopeClear: modeInput.scopeClear,
+            maxChangedFiles: modeInput.expectedFiles,
+            maxChangedLines: modeInput.expectedChangedLines,
+            pathsExplicit: modeInput.scopeClear,
+          },
+        });
+        const checks = listControllerChecks(repository.canonicalRoot);
+        const normalizedChecks = normalizeCheckIds(Array.isArray(args.check_ids) ? args.check_ids.map(String) : [], checks);
+        const handoffSuggested = mode.mode === 'handoff_only' || policy.decision === 'approval_required' ? [{
+          label: 'Record pending decision',
+          tool: 'rh_inbox' as const,
+          operation: 'create',
+          payload: { reason: mode.reason, capability_id: capabilityId },
+          risk: 'readonly' as const,
+          confidence: 'high' as const,
+        }] : [];
+        const facade = buildFacadeResult({
+          status: policy.decision === 'denied' ? 'blocked' : policy.decision === 'approval_required' ? 'approval_required' : 'ok',
+          summary: `Recommended execution mode: ${mode.mode}. Policy: ${policy.decision}.`,
+          data: {
+            repoId: repository.repoId,
+            operation: String(args.operation ?? 'start'),
+            objective: typeof args.objective === 'string' ? args.objective.slice(0, 1_000) : undefined,
+            mode,
+            policy,
+            capability,
+            normalizedChecks,
+            directControlPreserved: true,
+            goalWorkloopRequired: mode.mode === 'goal_workloop',
+            handoffOnly: mode.mode === 'handoff_only',
+          },
+          warnings: [...policy.warnings, ...normalizedChecks.warnings],
+          suggestedNextActions: [...handoffSuggested, ...normalizedChecks.suggestedNextActions, ...policy.suggestedNextActions],
+          rawAvailable: false,
+        });
+        return result(facade as unknown as Record<string, unknown>, facade.status === 'blocked');
+      }
       case 'work_submit': {
         const repository = selected(ctx, args);
         const requestId = String(args.request_id ?? '').trim();
