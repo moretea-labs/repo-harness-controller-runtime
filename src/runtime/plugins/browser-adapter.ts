@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'crypto';
 import { createRequire } from 'module';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
-import { dirname, join, relative, resolve } from 'path';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { basename, dirname, join, relative, resolve } from 'path';
 import type {
   AssistantPluginActionDescriptor,
   AssistantPluginActionExecutionInput,
@@ -21,12 +21,18 @@ const DEFAULT_POST_ACTION_WAIT_MS = 750;
 
 type WaitUntil = 'load' | 'domcontentloaded' | 'networkidle';
 type WaitForSelectorState = 'attached' | 'detached' | 'visible' | 'hidden';
+type BrowserProfileMode = 'repo_local' | 'custom';
+type BrowserChannel = 'chromium' | 'chrome' | 'chrome-beta' | 'chrome-dev' | 'chrome-canary';
 
 interface BrowserPluginConfig {
   schemaVersion: 1;
   enabled: boolean;
   provider: 'playwright';
+  profileMode?: BrowserProfileMode;
   profileDir?: string;
+  profileDirectory?: string;
+  browserChannel?: BrowserChannel;
+  executablePath?: string;
   defaultTimeoutMs?: number;
   allowedDomains?: string[];
 }
@@ -50,6 +56,12 @@ interface BrowserActionScreenshot {
   path: string;
   relativePath: string;
   bytes: number;
+}
+
+interface BrowserProfileSelection {
+  profileDir: string;
+  profileDirectory?: string;
+  selectedProfilePath: string;
 }
 
 type BrowserContextLike = {
@@ -133,6 +145,20 @@ function positiveNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.trunc(value) : fallback;
 }
 
+function browserProfileMode(value: unknown): BrowserProfileMode | undefined {
+  return value === 'repo_local' || value === 'custom' ? value : undefined;
+}
+
+function browserChannel(value: unknown): BrowserChannel | undefined {
+  return value === 'chromium'
+    || value === 'chrome'
+    || value === 'chrome-beta'
+    || value === 'chrome-dev'
+    || value === 'chrome-canary'
+    ? value
+    : undefined;
+}
+
 function stringArray(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const normalized = value
@@ -153,12 +179,46 @@ function defaultProfileDir(repoRoot: string): string {
   return join(stateDir(repoRoot, 'profiles'), 'default');
 }
 
+function resolveConfiguredPath(repoRoot: string, value: string): string {
+  return resolve(repoRoot, value);
+}
+
+function resolveProfileSelection(repoRoot: string, profileDir: string, profileDirectory?: string): BrowserProfileSelection {
+  const selectedProfilePath = resolveConfiguredPath(repoRoot, profileDir);
+  if (profileDirectory) {
+    return {
+      profileDir: selectedProfilePath,
+      profileDirectory,
+      selectedProfilePath: join(selectedProfilePath, profileDirectory),
+    };
+  }
+
+  const parent = dirname(selectedProfilePath);
+  if (existsSync(join(selectedProfilePath, 'Preferences')) && existsSync(join(parent, 'Local State'))) {
+    return {
+      profileDir: parent,
+      profileDirectory: basename(selectedProfilePath),
+      selectedProfilePath,
+    };
+  }
+
+  return {
+    profileDir: selectedProfilePath,
+    selectedProfilePath,
+  };
+}
+
 function normalizeConfig(raw: Partial<BrowserPluginConfig>): BrowserPluginConfig {
+  const normalizedProfileDir = stringValue(raw.profileDir);
   return {
     schemaVersion: 1,
     enabled: raw.enabled === true,
     provider: 'playwright',
-    profileDir: stringValue(raw.profileDir),
+    profileMode: browserProfileMode(raw.profileMode) ?? (normalizedProfileDir ? 'custom' : 'repo_local'),
+    profileDir: normalizedProfileDir,
+    profileDirectory: stringValue(raw.profileDirectory),
+    browserChannel: browserChannel(raw.browserChannel) ?? 'chromium',
+    executablePath: stringValue(raw.executablePath),
     defaultTimeoutMs: typeof raw.defaultTimeoutMs === 'number' ? positiveNumber(raw.defaultTimeoutMs, DEFAULT_TIMEOUT_MS) : undefined,
     allowedDomains: stringArray(raw.allowedDomains),
   };
@@ -246,6 +306,48 @@ function waitUntil(value: unknown): WaitUntil {
 
 function waitForSelectorState(value: unknown): WaitForSelectorState {
   return value === 'attached' || value === 'detached' || value === 'hidden' || value === 'visible' ? value : 'visible';
+}
+
+function parseProfileModeInput(value: unknown): BrowserProfileMode | undefined {
+  if (value === undefined) return undefined;
+  const parsed = browserProfileMode(value);
+  if (parsed) return parsed;
+  throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', 'profile_mode must be repo_local or custom.', { retryable: false });
+}
+
+function parseBrowserChannelInput(value: unknown): BrowserChannel | undefined {
+  if (value === undefined) return undefined;
+  const parsed = browserChannel(value);
+  if (parsed) return parsed;
+  throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', 'browser_channel must be chromium, chrome, chrome-beta, chrome-dev, or chrome-canary.', { retryable: false });
+}
+
+function validateConfig(config: BrowserPluginConfig): string[] {
+  const errors: string[] = [];
+  if (config.profileMode === 'custom' && !config.profileDir) {
+    errors.push('profileDir is required when profileMode is custom.');
+  }
+  if (config.profileMode !== 'custom' && config.profileDirectory) {
+    errors.push('profileDirectory requires profileMode=custom.');
+  }
+  if (config.browserChannel && config.browserChannel !== 'chromium' && config.executablePath) {
+    errors.push('browserChannel and executablePath cannot both be set.');
+  }
+  return errors;
+}
+
+function configWarnings(config: BrowserPluginConfig): string[] {
+  const warnings: string[] = [];
+  if (!config.allowedDomains || config.allowedDomains.length === 0) {
+    warnings.push('allowedDomains is empty; browser actions can target any domain.');
+  }
+  if (config.profileMode === 'custom') {
+    warnings.push('Custom profile mode uses the configured browser profile directly. If the browser reports the profile is in use, fully close the matching Chrome/Chromium instance first.');
+    if (!config.executablePath && (config.browserChannel ?? 'chromium') === 'chromium') {
+      warnings.push('Custom profile mode is more reliable with an explicit Chrome channel or executable path that matches the selected profile format.');
+    }
+  }
+  return warnings;
 }
 
 function truncateText(value: string, maxChars: number): Record<string, unknown> {
@@ -370,6 +472,21 @@ async function applyDomainGuard(context: BrowserContextLike, config: BrowserPlug
   });
 }
 
+function selectedProfile(config: BrowserPluginConfig, repoRoot: string): BrowserProfileSelection {
+  if (config.profileMode === 'custom') {
+    if (!config.profileDir) {
+      throw new AssistantPluginError('PLUGIN_CONFIGURATION_INVALID', 'Custom browser profile mode requires profileDir.', { retryable: false });
+    }
+    return resolveProfileSelection(repoRoot, config.profileDir, config.profileDirectory);
+  }
+
+  const repoLocal = resolve(defaultProfileDir(repoRoot));
+  return {
+    profileDir: repoLocal,
+    selectedProfilePath: repoLocal,
+  };
+}
+
 async function withPage<T>(
   repoRoot: string,
   config: BrowserPluginConfig,
@@ -378,13 +495,17 @@ async function withPage<T>(
   run: (page: PageLike) => Promise<T>,
 ): Promise<T> {
   assertUrlAllowed(url, config);
-  const profileDir = resolve(config.profileDir ?? defaultProfileDir(repoRoot));
-  mkdirSync(profileDir, { recursive: true });
-  const context = await runtimeHooks.loadPlaywright().chromium.launchPersistentContext(profileDir, {
+  const profile = selectedProfile(config, repoRoot);
+  mkdirSync(profile.profileDir, { recursive: true });
+  const launchOptions: Record<string, unknown> = {
     headless: false,
     acceptDownloads: false,
     viewport: { width: 1280, height: 900 },
-  });
+    ...(config.executablePath ? { executablePath: resolveConfiguredPath(repoRoot, config.executablePath) } : {}),
+    ...(!config.executablePath && config.browserChannel && config.browserChannel !== 'chromium' ? { channel: config.browserChannel } : {}),
+    ...(profile.profileDirectory ? { args: [`--profile-directory=${profile.profileDirectory}`] } : {}),
+  };
+  const context = await runtimeHooks.loadPlaywright().chromium.launchPersistentContext(profile.profileDir, launchOptions);
   try {
     await applyDomainGuard(context, config);
     const page = context.pages()[0] ?? await context.newPage();
@@ -491,8 +612,15 @@ function actions(): AssistantPluginActionDescriptor[] {
         type: 'object',
         properties: {
           enabled: { type: 'boolean' },
+          profile_mode: { type: 'string', enum: ['repo_local', 'custom'] },
           profile_dir: { type: 'string' },
+          profile_directory: { type: 'string' },
           clear_profile_dir: { type: 'boolean' },
+          clear_profile_directory: { type: 'boolean' },
+          browser_channel: { type: 'string', enum: ['chromium', 'chrome', 'chrome-beta', 'chrome-dev', 'chrome-canary'] },
+          clear_browser_channel: { type: 'boolean' },
+          browser_executable_path: { type: 'string' },
+          clear_browser_executable_path: { type: 'boolean' },
           default_timeout_ms: { type: 'number' },
           allowed_domains: { type: 'array', items: { type: 'string' } },
           clear_allowed_domains: { type: 'boolean' },
@@ -724,6 +852,8 @@ function actions(): AssistantPluginActionDescriptor[] {
 
 function health(config: BrowserPluginConfig): AssistantPluginHealth {
   const dependencyReady = runtimeHooks.moduleAvailable('playwright');
+  const configErrors = validateConfig(config);
+  const warnings = configWarnings(config);
   if (!config.enabled) {
     return {
       state: 'disabled',
@@ -732,7 +862,15 @@ function health(config: BrowserPluginConfig): AssistantPluginHealth {
       probed: false,
       errors: [],
       warnings: ['Browser plugin is disabled.'],
-      details: { dependencyReady },
+      details: {
+        dependencyReady,
+        profileMode: config.profileMode,
+        profileDir: config.profileDir,
+        profileDirectory: config.profileDirectory,
+        browserChannel: config.browserChannel,
+        executablePath: config.executablePath,
+        windowMode: 'visible',
+      },
     };
   }
   if (!dependencyReady) {
@@ -742,8 +880,37 @@ function health(config: BrowserPluginConfig): AssistantPluginHealth {
       ready: false,
       probed: true,
       errors: ['Browser plugin requires playwright. Run bun install before using browser actions.'],
-      warnings: [],
-      details: { dependencyReady, install: 'bun install' },
+      warnings,
+      details: {
+        dependencyReady,
+        install: 'bun install',
+        profileMode: config.profileMode,
+        profileDir: config.profileDir,
+        profileDirectory: config.profileDirectory,
+        browserChannel: config.browserChannel,
+        executablePath: config.executablePath,
+        windowMode: 'visible',
+      },
+    };
+  }
+  if (configErrors.length > 0) {
+    return {
+      state: 'error',
+      checkedAt: now(),
+      ready: false,
+      probed: true,
+      errors: configErrors,
+      warnings,
+      details: {
+        dependencyReady,
+        profileMode: config.profileMode,
+        profileDir: config.profileDir,
+        profileDirectory: config.profileDirectory,
+        browserChannel: config.browserChannel,
+        executablePath: config.executablePath,
+        windowMode: 'visible',
+        provider: 'playwright-persistent-context',
+      },
     };
   }
   return {
@@ -752,11 +919,16 @@ function health(config: BrowserPluginConfig): AssistantPluginHealth {
     ready: true,
     probed: true,
     errors: [],
-    warnings: config.allowedDomains && config.allowedDomains.length > 0 ? [] : ['allowedDomains is empty; browser actions can target any domain.'],
+    warnings,
     details: {
       dependencyReady,
+      profileMode: config.profileMode,
       profileDir: config.profileDir,
+      profileDirectory: config.profileDirectory,
+      browserChannel: config.browserChannel,
+      executablePath: config.executablePath,
       allowedDomains: config.allowedDomains,
+      windowMode: 'visible',
       provider: 'playwright-persistent-context',
     },
   };
@@ -800,18 +972,40 @@ export async function executeBrowserPluginAction(input: AssistantPluginActionExe
   if (!current.enabled && input.actionId !== 'configure') {
     throw new AssistantPluginError('PLUGIN_DISABLED', 'Browser plugin is disabled.', { retryable: false });
   }
+  if (input.actionId !== 'configure') {
+    const configErrors = validateConfig(current);
+    if (configErrors.length > 0) {
+      throw new AssistantPluginError('PLUGIN_CONFIGURATION_INVALID', configErrors[0], { retryable: false });
+    }
+  }
   try {
     switch (input.actionId) {
       case 'configure': {
         const args = input.args;
+        const nextProfileMode = parseProfileModeInput(args.profile_mode) ?? current.profileMode;
+        if (stringValue(args.profile_dir) && args.profile_mode === undefined && current.profileMode !== 'custom') {
+          throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', 'profile_mode must be set to custom before profile_dir can be used.', { retryable: false });
+        }
+        const nextProfileDir = args.clear_profile_dir === true ? undefined : stringValue(args.profile_dir) ?? current.profileDir;
+        const nextProfileDirectory = args.clear_profile_directory === true ? undefined : stringValue(args.profile_directory) ?? current.profileDirectory;
+        const nextBrowserChannel = args.clear_browser_channel === true ? undefined : parseBrowserChannelInput(args.browser_channel) ?? current.browserChannel;
+        const nextExecutablePath = args.clear_browser_executable_path === true ? undefined : stringValue(args.browser_executable_path) ?? current.executablePath;
         const config = saveConfig(input.repoRoot, {
           enabled: typeof args.enabled === 'boolean' ? args.enabled : current.enabled,
-          profileDir: args.clear_profile_dir === true ? undefined : stringValue(args.profile_dir) ?? current.profileDir,
+          profileMode: nextProfileMode,
+          profileDir: nextProfileMode === 'repo_local' ? undefined : nextProfileDir,
+          profileDirectory: nextProfileMode === 'repo_local' ? undefined : nextProfileDirectory,
+          browserChannel: nextBrowserChannel ?? 'chromium',
+          executablePath: nextExecutablePath,
           defaultTimeoutMs: typeof args.default_timeout_ms === 'number'
             ? positiveNumber(args.default_timeout_ms, DEFAULT_TIMEOUT_MS)
             : current.defaultTimeoutMs,
           allowedDomains: args.clear_allowed_domains === true ? undefined : stringArray(args.allowed_domains) ?? current.allowedDomains,
         });
+        const configErrors = validateConfig(config);
+        if (configErrors.length > 0) {
+          throw new AssistantPluginError('PLUGIN_CONFIGURATION_INVALID', configErrors[0], { retryable: false });
+        }
         return { config, health: health(config) };
       }
       case 'open_page': {

@@ -45,6 +45,7 @@ function mockPlaywright(options: { finalUrl?: string; title?: string; routeUrl?:
   let currentUrl = 'https://example.com/';
   let currentTitle = options.title ?? 'Example';
   const routeDecisions: string[] = [];
+  const launches: Array<{ userDataDir: string; options: Record<string, unknown> }> = [];
 
   const page = {
     async goto(url: string) {
@@ -82,7 +83,8 @@ function mockPlaywright(options: { finalUrl?: string; title?: string; routeUrl?:
 
   return {
     chromium: {
-      async launchPersistentContext() {
+      async launchPersistentContext(userDataDir: string, launchOptions: Record<string, unknown>) {
+        launches.push({ userDataDir, options: launchOptions });
         return {
           pages() {
             return [page];
@@ -103,6 +105,7 @@ function mockPlaywright(options: { finalUrl?: string; title?: string; routeUrl?:
       },
     },
     routeDecisions,
+    launches,
   } as never;
 }
 
@@ -256,6 +259,70 @@ describe('browser plugin', () => {
     expect(readFileSync(String(screenshot.path), 'utf-8')).toBe('png');
     const session = result.session as Record<string, unknown>;
     expect(String(session.sessionId)).toContain('browser_');
+  });
+
+  test('requires explicit custom profile mode before using a configured profile path', async () => {
+    const { repoRoot } = repoFixture();
+    writeBrowserConfig(repoRoot, {
+      schemaVersion: 1,
+      enabled: true,
+      provider: 'playwright',
+      allowedDomains: ['example.com'],
+    });
+
+    await expect(executeBrowserPluginAction({
+      controllerHome: repoRoot,
+      repoId: 'repo',
+      repoRoot,
+      pluginId: 'browser',
+      actionId: 'configure',
+      requestId: 'browser-config-reject-implicit-profile',
+      args: { profile_dir: '/Users/example/Library/Application Support/Google/Chrome' },
+      origin: { surface: 'local-ui', actor: 'test' },
+    })).rejects.toThrow('profile_mode must be set to custom before profile_dir can be used');
+  });
+
+  test('custom profile mode can launch visible Chrome against an explicit user profile selection', async () => {
+    const { repoRoot } = repoFixture();
+    const chromeRoot = join(repoRoot, 'Chrome/User Data');
+    const chromeProfile = join(chromeRoot, 'Profile 1');
+    mkdirSync(chromeProfile, { recursive: true });
+    writeFileSync(join(chromeRoot, 'Local State'), '{}\n');
+    writeFileSync(join(chromeProfile, 'Preferences'), '{}\n');
+    writeBrowserConfig(repoRoot, {
+      schemaVersion: 1,
+      enabled: true,
+      provider: 'playwright',
+      profileMode: 'custom',
+      profileDir: chromeProfile,
+      browserChannel: 'chrome',
+      allowedDomains: ['example.com'],
+    });
+    const runtime = mockPlaywright() as unknown as { launches: Array<{ userDataDir: string; options: Record<string, unknown> }> };
+
+    setBrowserPluginRuntimeHooksForTest({
+      moduleAvailable: () => true,
+      loadPlaywright: () => runtime as never,
+    });
+
+    await executeBrowserPluginAction({
+      controllerHome: repoRoot,
+      repoId: 'repo',
+      repoRoot,
+      pluginId: 'browser',
+      actionId: 'open_page',
+      requestId: 'browser-open-custom-profile',
+      args: { url: 'https://example.com/' },
+      origin: { surface: 'local-ui', actor: 'test' },
+    });
+
+    expect(runtime.launches).toHaveLength(1);
+    expect(runtime.launches[0]?.userDataDir).toBe(chromeRoot);
+    expect(runtime.launches[0]?.options).toMatchObject({
+      headless: false,
+      channel: 'chrome',
+      args: ['--profile-directory=Profile 1'],
+    });
   });
 
   test('wait_for_selector keeps authorization despite being read-only', () => {

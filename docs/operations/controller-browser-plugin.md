@@ -32,11 +32,12 @@ Those higher-risk actions are intentionally absent from the manifest. The plugin
 
 - `plugin_id` stays `browser`
 - the provider is a local Playwright persistent context
-- profile data lives under `.repo-harness/browser/profiles/`
+- the default profile mode is `repo_local`, with profile data under `.repo-harness/browser/profiles/`
+- `profileMode=custom` is explicit-only and uses the configured Chrome/Chromium profile path directly
 - saved sessions live under `.repo-harness/browser/sessions/`
 - screenshots live under `.repo-harness/browser/screenshots/`
 
-Each action launches the persistent context, restores the target URL, performs one bounded operation, persists the updated session metadata, then closes the context.
+Each action launches a visible browser context, restores the target URL, performs one bounded operation, persists the updated session metadata, then closes the context. The plugin is intentionally not a long-lived remote-control session.
 
 ## Configuration
 
@@ -49,12 +50,52 @@ Example:
   "schemaVersion": 1,
   "enabled": true,
   "provider": "playwright",
+  "profileMode": "repo_local",
+  "browserChannel": "chromium",
   "defaultTimeoutMs": 30000,
   "allowedDomains": ["example.com", "docs.example.com"]
 }
 ```
 
 `allowedDomains` is the safety boundary. If it is empty, the plugin can target any HTTP(S) host. If it is set, the plugin accepts only exact hosts or subdomains of those entries.
+
+Additional browser/profile fields:
+
+- `profileMode`
+  - `repo_local` keeps the plugin on the repo-owned Playwright profile under `.repo-harness/browser/profiles/default`.
+  - `custom` is the explicit opt-in path for an existing Chrome/Chromium profile.
+- `profileDir`
+  - required when `profileMode=custom`
+  - may point either at a browser user-data directory or at one profile subdirectory such as `Profile 1`
+- `profileDirectory`
+  - optional when `profileDir` points at the browser user-data directory
+  - selects one Chrome profile inside that user-data directory
+- `browserChannel`
+  - `chromium` (default bundled Playwright engine)
+  - `chrome`, `chrome-beta`, `chrome-dev`, `chrome-canary`
+- `executablePath`
+  - explicit Chrome/Chromium binary path
+  - mutually exclusive with `browserChannel`
+
+For an existing signed-in Chrome profile, prefer `profileMode=custom` plus `browserChannel=chrome` or an explicit `executablePath`. The plugin does not attach to a real user profile unless that custom mode is configured on purpose.
+
+Example custom Chrome binding:
+
+```json
+{
+  "schemaVersion": 1,
+  "enabled": true,
+  "provider": "playwright",
+  "profileMode": "custom",
+  "profileDir": "/Users/alice/Library/Application Support/Google/Chrome",
+  "profileDirectory": "Profile 1",
+  "browserChannel": "chrome",
+  "defaultTimeoutMs": 30000,
+  "allowedDomains": ["appstoreconnect.apple.com"]
+}
+```
+
+If `profileMode=custom` points at a live personal Chrome profile, close that same Chrome/Chromium instance first when the browser reports profile-lock or profile-in-use errors.
 
 ## Policy surface
 
@@ -139,3 +180,5 @@ Example response shape:
 - `click`, `type`, `press`, and `wait_for_selector` accept either `session_id` or `url`.
 - If both `session_id` and `url` are provided, they must resolve to the same page target.
 - `close_page` only removes saved session metadata. It does not delete the persistent profile.
+- `profile_dir` is rejected unless `profile_mode=custom` is already configured or supplied in the same `configure` call.
+- Visible Chrome/Chromium launches are supported, but each action still closes after it completes. For longer human-driven login, MFA, or consent steps, stop, let the user complete the step in their own browser, then rerun the next bounded action or Task.

@@ -161,6 +161,16 @@ Issue
 
 The legacy planner/orchestrator handoff remains available for compatibility. When explicitly enabled, `run_agent_goal` reads only `.ai/harness/handoff/codex-goal.md`; new work should prefer `dispatch_task` and persistent Task Runs.
 
+## Logged-in Browser Tasks
+
+Use the local controller path when a website task depends on existing browser state, a visible browser window, or a localhost-only target.
+
+- Prefer `dispatch_task` to a local `codex` or `claude` Run for browser-heavy work. The Task/Run record survives retries, pauses, and user-completed login or MFA steps.
+- Treat `run_agent_goal` as compatibility-only. It reads a single handoff file and does not add durable Task/Run state around browser checkpoints.
+- Do not send login-state-dependent browser work to `github-copilot` cloud sessions. Cloud sessions cannot see the local Chrome/Chromium profile, local cookies, or localhost-only pages.
+- For controller browser-plugin work that must reuse an existing signed-in Chrome profile, configure the plugin explicitly with `profileMode=custom` plus `browserChannel=chrome` or `executablePath`. Repo-local default mode stays isolated and does not silently attach to the user's real browser profile.
+- The browser plugin still closes after each bounded action. When a task needs manual login, captcha, MFA, or consent, let the user complete that step in the browser first, then continue the same local Task Run.
+
 ## Dev Mode Agent Runner
 
 Local Agent execution is opt-in. GitHub cloud sessions use authenticated `gh` and do not require the local dev runner:
