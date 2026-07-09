@@ -1,0 +1,152 @@
+{
+  "schemaVersion": 5,
+  "id": "ISS-20260709-224E71",
+  "title": "ChatGPT handoff inbox and MCP facade architecture",
+  "slug": "chatgpt-handoff-inbox-and-mcp-facade-architecture",
+  "kind": "feature",
+  "status": "in_progress",
+  "summary": "Design and implement the next repo-harness control-plane slice: a Handoff Inbox for ChatGPT continuation, a thin ChatGPT-facing MCP facade, capability routing, and policy-gated execution so plugin capabilities remain parallel to repository operations without expanding ChatGPT's visible tool surface.",
+  "goals": [
+    "Add a durable Handoff Inbox concept that lets repo-harness record pending decisions for ChatGPT/main-controller continuation.",
+    "Define a small ChatGPT-facing facade tool surface for status, inbox, context, work, and evidence-oriented operations.",
+    "Keep repository operations and plugin capabilities parallel internally, routed through capability/policy layers instead of exposing one MCP tool per feature.",
+    "Avoid unsafe or security-flag-prone request shapes by using typed operations, bounded summaries, policy gates, approval requests, and suggested next actions."
+  ],
+  "nonGoals": [
+    "Do not replace ChatGPT as the strong主控.",
+    "Do not build a low-level clone of Codex.",
+    "Do not expand the public ChatGPT-facing tool list for each new capability.",
+    "Do not modify unrelated browser plugin changes currently dirty on main."
+  ],
+  "acceptanceCriteria": [
+    "Architecture documentation explains how plugin capabilities are parallel to repository execution capabilities and how both route through a facade/capability/policy model.",
+    "A first implementation slice exists for Handoff Inbox and/or facade contracts with bounded result shapes.",
+    "ChatGPT-facing operations expose stable, limited entry points rather than new per-feature tools.",
+    "Security and safety considerations are documented: bounded payloads, no raw shell blobs by default, explicit approval for risky operations, and no prompt shapes that ask ChatGPT to bypass security.",
+    "Targeted checks or type checks are run where available, and the existing unrelated dirty main changes are not overwritten."
+  ],
+  "relatedArtifacts": [],
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Document handoff inbox and MCP facade architecture",
+      "objective": "Create or update architecture documentation describing Handoff Inbox, thin ChatGPT-facing facade tools, internal capability registry, policy gate, suggested_next_actions, and the separation between repository operations and plugin capabilities.",
+      "status": "review",
+      "dependsOn": [],
+      "allowedPaths": [
+        "docs/**",
+        "README.md"
+      ],
+      "forbiddenPaths": [
+        "src/runtime/plugins/browser-adapter.ts",
+        "tests/runtime/browser-plugin.test.ts",
+        "docs/operations/controller-browser-plugin.md"
+      ],
+      "checks": [
+        "docs"
+      ],
+      "acceptanceCriteria": [
+        "Docs define repository capability vs plugin capability as peer internal capability domains.",
+        "Docs define a stable ChatGPT-facing facade surface and explain why new capabilities should register internally instead of becoming new tools.",
+        "Docs include safety/security request-shape guidance for ChatGPT-facing operations.",
+        "Docs include a staged implementation plan."
+      ],
+      "risk": "low",
+      "notes": [
+        "Verification evidence is incomplete or failed: Required named checks or equivalent command evidence are missing or failed.",
+        "Docs-only architecture update was applied and finalized in edit session EDIT-1783567898812-d856545c. package:check:context-files passed. Earlier verification used invalid check id 'docs', which left stale changes_requested evidence; this should be handled by future facade suggested_next_actions/check-id normalization."
+      ],
+      "runIds": [],
+      "createdAt": "2026-07-09T03:30:58.628Z",
+      "updatedAt": "2026-07-09T03:38:25.972Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+      "verification": {
+        "reviewer": "chatgpt",
+        "checkResults": [
+          {
+            "checkId": "docs",
+            "ok": false,
+            "summary": "check not found: docs"
+          }
+        ],
+        "commandEvidence": [
+          {
+            "command": [
+              "bun",
+              "run",
+              "check:context-files"
+            ],
+            "cwd": ".",
+            "ok": true,
+            "exitCode": 0,
+            "stdout": "Passed via repo-harness package:check:context-files during edit session verification.",
+            "reportedBy": "chatgpt",
+            "executedAt": "2026-07-09T03:36:16.584Z",
+            "source": "reported"
+          }
+        ],
+        "acceptanceResults": [
+          {
+            "criterion": "Docs define repository capability vs plugin capability as peer internal capability domains.",
+            "ok": true,
+            "evidence": "docs/architecture/chatgpt-handoff-facade.md includes Capability domains with Repository capabilities and Plugin capabilities modeled as peer domains."
+          },
+          {
+            "criterion": "Docs define a stable ChatGPT-facing facade surface and explain why new capabilities should register internally instead of becoming new tools.",
+            "ok": true,
+            "evidence": "The document defines rh_status, rh_inbox, rh_context, rh_work, FacadeResult, and Capability Registry rules."
+          },
+          {
+            "criterion": "Docs include safety/security request-shape guidance for ChatGPT-facing operations.",
+            "ok": true,
+            "evidence": "The document includes Avoiding security-prone ChatGPT request shapes and Policy gate sections."
+          },
+          {
+            "criterion": "Docs include a staged implementation plan.",
+            "ok": true,
+            "evidence": "The document includes Implementation stages 1 through 5."
+          }
+        ],
+        "verifiedAt": "2026-07-09T03:37:15.144Z",
+        "autoCompleted": false,
+        "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+      }
+    },
+    {
+      "id": "T2",
+      "title": "Implement handoff/facade MVP contracts",
+      "objective": "Add the smallest viable code slice for Handoff Inbox and MCP facade/result contracts, reusing existing controller storage and avoiding broad runtime changes.",
+      "status": "ready",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src/**",
+        "tests/**",
+        "docs/**"
+      ],
+      "forbiddenPaths": [
+        "src/runtime/plugins/browser-adapter.ts",
+        "tests/runtime/browser-plugin.test.ts",
+        "docs/operations/controller-browser-plugin.md"
+      ],
+      "checks": [
+        "typecheck",
+        "test"
+      ],
+      "acceptanceCriteria": [
+        "Handoff item and unified facade result contracts are represented in code.",
+        "The design supports bounded summary/detail behavior and evidence refs.",
+        "Facade contracts avoid adding one ChatGPT-facing tool per capability.",
+        "Tests or targeted validation cover the new contracts where practical."
+      ],
+      "risk": "medium",
+      "notes": [],
+      "runIds": [],
+      "createdAt": "2026-07-09T03:30:58.628Z",
+      "updatedAt": "2026-07-09T03:30:58.628Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    }
+  ],
+  "createdAt": "2026-07-09T03:30:58.628Z",
+  "updatedAt": "2026-07-09T03:38:25.972Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+}
