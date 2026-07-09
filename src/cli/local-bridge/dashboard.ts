@@ -4,84 +4,512 @@ export function localBridgeDashboardHtml(): string {
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>repo-harness · 控制台</title>
+<title>repo-harness · 执行助手控制台</title>
 <style>
-:root{color-scheme:dark;--bg:#06090d;--surface:#0b1117;--panel:#101720;--panel2:#131b25;--line:rgba(255,255,255,.09);--line2:rgba(255,255,255,.16);--text:#f4f7fa;--muted:#a0a9b3;--faint:#707a86;--green:#36d675;--green2:#1fa65b;--amber:#f59e0b;--red:#f05266;--blue:#5b8cff;--purple:#8b5cf6;--radius:14px;--shadow:0 20px 60px rgba(0,0,0,.34)}
-*{box-sizing:border-box}html,body{height:100%;margin:0}body{background:radial-gradient(circle at 78% 0,rgba(34,197,94,.13),transparent 30%),linear-gradient(135deg,#05070a,#0a1118 54%,#06080b);color:var(--text);font:13px/1.5 Inter,"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}.mono{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace}.app{height:100vh;display:grid;grid-template-rows:58px minmax(0,1fr);background:rgba(5,8,11,.72);border:1px solid var(--line);overflow:hidden}.top{display:flex;align-items:center;gap:14px;padding:0 18px;background:rgba(9,13,18,.86);border-bottom:1px solid var(--line);backdrop-filter:blur(18px)}.traffic{display:flex;gap:7px}.traffic i{width:12px;height:12px;border-radius:50%;display:block}.traffic i:nth-child(1){background:#ff5f57}.traffic i:nth-child(2){background:#ffbd2e}.traffic i:nth-child(3){background:#28c840}.brand{display:flex;align-items:center;gap:10px;width:235px;font-weight:900;font-size:17px}.logo{width:24px;height:24px;border-radius:8px;display:grid;place-items:center;background:rgba(54,214,117,.12);color:var(--green);border:1px solid rgba(54,214,117,.25)}.topCenter{display:flex;align-items:center;gap:10px;flex:1;min-width:0}.chip{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);background:rgba(255,255,255,.045);border-radius:10px;padding:8px 11px;white-space:nowrap;min-height:36px}.chip strong{font-weight:850}.dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 0 5px rgba(54,214,117,.08)}.dot.amber{background:var(--amber);box-shadow:0 0 0 5px rgba(245,158,11,.08)}.dot.red{background:var(--red);box-shadow:0 0 0 5px rgba(240,82,102,.08)}.topRight{display:flex;align-items:center;gap:10px}.count{display:inline-grid;place-items:center;min-width:22px;height:22px;border-radius:999px;background:rgba(240,82,102,.2);color:#ffb8c2;font-weight:900}.avatar{width:32px;height:32px;border-radius:999px;display:grid;place-items:center;background:#171f29;border:1px solid var(--line2);font-weight:900}.body{min-height:0;display:grid;grid-template-columns:228px minmax(0,1fr)}.side{display:flex;flex-direction:column;justify-content:space-between;padding:18px 14px;background:linear-gradient(180deg,rgba(7,11,15,.98),rgba(6,9,12,.96));border-right:1px solid var(--line)}.nav{display:grid;gap:6px}.nav button{height:42px;border:0;background:transparent;color:#c3cad2;border-radius:11px;padding:0 13px;display:flex;align-items:center;gap:11px;text-align:left;cursor:pointer;font:inherit}.nav button:hover{background:rgba(255,255,255,.045)}.nav button.active{background:linear-gradient(135deg,rgba(54,214,117,.16),rgba(255,255,255,.045));color:#d8ffe6;box-shadow:inset 2px 0 0 var(--green),inset 0 0 0 1px rgba(54,214,117,.15)}.nav .count{margin-left:auto}.navSep{height:1px;background:var(--line);margin:12px 0}.repoMini{padding:14px;border:1px solid var(--line);border-radius:14px;background:rgba(255,255,255,.035)}.repoMini strong{display:block;font-size:16px;margin:4px 0}.btn{height:36px;border:1px solid var(--line2);background:rgba(255,255,255,.06);color:var(--text);border-radius:10px;padding:0 13px;cursor:pointer;font:inherit}.btn:hover{background:rgba(255,255,255,.1)}.btn.primary{background:linear-gradient(135deg,#43d875,#209f5b);border-color:rgba(54,214,117,.4);font-weight:850}.btn.warn{background:rgba(245,158,11,.12);border-color:rgba(245,158,11,.32);color:#ffc66d}.btn.red{background:rgba(240,82,102,.12);border-color:rgba(240,82,102,.32);color:#ffb8c2}.main{min-width:0;min-height:0;overflow:auto;padding:22px 26px 44px;scrollbar-color:rgba(255,255,255,.18) transparent}.view{display:none}.view.active{display:block}.pageHead{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:16px}.pageHead h1{margin:0;font-size:28px;line-height:1.15;letter-spacing:-.03em}.pageHead p{margin:6px 0 0;color:var(--muted)}.panel{border:1px solid var(--line);border-radius:var(--radius);background:linear-gradient(145deg,rgba(17,24,33,.9),rgba(10,14,19,.92));box-shadow:var(--shadow)}.hero{padding:18px 20px;margin-bottom:14px;border-color:rgba(54,214,117,.18);background:radial-gradient(circle at 88% 35%,rgba(54,214,117,.15),transparent 22%),linear-gradient(135deg,rgba(21,48,33,.72),rgba(10,15,20,.94) 62%)}.heroGrid{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:18px;align-items:center}.hero h2{font-size:30px;margin:0 0 6px}.hero p{margin:0;color:#cbd3da}.heroActions{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}.statusLine{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.statusLine .chip{min-height:30px;padding:5px 9px;border-radius:999px}.okMark{width:86px;height:86px;border-radius:999px;display:grid;place-items:center;font-size:38px;border:1px solid rgba(54,214,117,.45);background:rgba(54,214,117,.1);box-shadow:0 0 36px rgba(54,214,117,.2)}.grid{display:grid;gap:12px}.cards{grid-template-columns:repeat(4,minmax(0,1fr))}.two{grid-template-columns:1fr 1fr}.card{padding:15px;min-height:132px}.card h3{margin:0 0 8px;font-size:15px}.big{display:block;font-size:22px;font-weight:900;margin-bottom:4px}.muted{color:var(--muted)}.faint{color:var(--faint)}.pill{display:inline-flex;align-items:center;justify-content:center;border-radius:999px;padding:3px 8px;font-size:11px;font-weight:850}.pill.green{background:rgba(54,214,117,.14);color:#84efa8}.pill.amber{background:rgba(245,158,11,.15);color:#ffc66d}.pill.red{background:rgba(240,82,102,.15);color:#ffb8c2}.pill.blue{background:rgba(91,140,255,.15);color:#9ab8ff}.pill.gray{background:rgba(255,255,255,.08);color:#c5ccd5}.section{padding:16px;margin-top:12px}.sectionHead{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}.sectionHead h2{margin:0;font-size:17px}.row{display:grid;grid-template-columns:30px minmax(0,1fr) auto;gap:10px;align-items:center;padding:11px 0;border-top:1px solid var(--line)}.row:first-child{border-top:0}.rowTitle{font-weight:850;font-size:14px}.rowSub{color:var(--muted);font-size:12px;margin-top:2px}.iconBox{width:38px;height:38px;border-radius:11px;display:grid;place-items:center;background:rgba(255,255,255,.07);border:1px solid var(--line);font-weight:900}.input,.select,textarea{width:100%;border:1px solid var(--line2);background:rgba(0,0,0,.25);border-radius:11px;color:var(--text);padding:10px 12px;outline:none;font:inherit}textarea{min-height:92px;resize:vertical}.taskBox{padding:16px}.checkRow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px}.taskLayout{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}.progress{height:7px;border-radius:999px;background:rgba(255,255,255,.1);overflow:hidden;margin:12px 0}.progress span{display:block;height:100%;background:linear-gradient(90deg,var(--blue),#7fb0ff);border-radius:inherit}.attentionList{display:grid;gap:10px}.attentionItem{display:grid;grid-template-columns:44px minmax(0,1fr) 230px;gap:14px;align-items:center;padding:14px;border:1px solid var(--line);border-radius:14px;background:rgba(255,255,255,.035)}.attentionItem.confirm{border-color:rgba(139,92,246,.35)}.attentionItem.failed{border-color:rgba(240,82,102,.34);background:rgba(240,82,102,.055)}.attentionItem.plugin{border-color:rgba(245,158,11,.34);background:rgba(245,158,11,.055)}.attentionActions{display:grid;grid-template-columns:1fr 1fr;gap:8px}.repoCard,.pluginCard{display:grid;grid-template-columns:42px minmax(0,1fr) auto;gap:12px;align-items:center;padding:14px;margin-bottom:10px}.meta{display:flex;gap:12px;flex-wrap:wrap;margin-top:6px;color:var(--muted);font-size:12px}.statGrid{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:14px}.stat{padding:14px}.stat span{display:block;color:var(--muted)}.stat strong{display:block;font-size:22px;margin-top:5px}.filters{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0 16px}.filter{height:34px;border:1px solid var(--line);background:transparent;color:var(--muted);border-radius:10px;padding:0 12px}.filter.active{border-color:rgba(54,214,117,.5);color:#bfffd4;background:rgba(54,214,117,.1)}.inlineForm{display:grid;grid-template-columns:minmax(240px,1fr) 170px auto;gap:10px}.toast{position:fixed;right:18px;bottom:18px;background:#111a23;border:1px solid var(--line2);border-radius:12px;padding:11px 14px;box-shadow:var(--shadow);opacity:0;transform:translateY(8px);transition:.2s;z-index:20}.toast.show{opacity:1;transform:none}.empty{border:1px dashed var(--line2);border-radius:12px;padding:22px;text-align:center;color:var(--muted)}pre{white-space:pre-wrap;word-break:break-word;max-height:58vh;overflow:auto;color:#d7e3ec;background:rgba(0,0,0,.2);border-radius:12px;padding:12px}
-@media(max-width:1180px){.cards,.statGrid{grid-template-columns:repeat(2,1fr)}.taskLayout,.two{grid-template-columns:1fr}.attentionItem{grid-template-columns:44px minmax(0,1fr)}}@media(max-width:820px){body{overflow:auto}.app{height:auto;min-height:100vh}.body{display:block}.side{display:none}.main{overflow:visible}.top{flex-wrap:wrap;height:auto;padding:10px}.brand{width:auto}.topRight{display:none}.heroGrid{grid-template-columns:1fr}.okMark{display:none}.inlineForm{grid-template-columns:1fr}.cards,.statGrid{grid-template-columns:1fr}}
+:root{color-scheme:dark;--bg:#070b10;--panel:#0f1620;--panel2:#131c28;--line:rgba(255,255,255,.08);--text:#f3f6f9;--muted:#95a0ab;--faint:#6d7784;--green:#34d399;--amber:#fbbf24;--red:#f87171;--blue:#60a5fa;--radius:16px}
+*{box-sizing:border-box}html,body{height:100%;margin:0}body{background:radial-gradient(circle at 80% -10%,rgba(52,211,153,.14),transparent 32%),linear-gradient(160deg,#05080c,#0a1118 55%,#06090d);color:var(--text);font:14px/1.5 Inter,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif}
+button,input,textarea{font:inherit}button{cursor:pointer}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.app{min-height:100vh;display:grid;grid-template-rows:64px 1fr}
+.top{display:flex;align-items:center;gap:12px;padding:0 18px;border-bottom:1px solid var(--line);background:rgba(8,12,18,.88);backdrop-filter:blur(16px);position:sticky;top:0;z-index:20}
+.brand{display:flex;align-items:center;gap:10px;font-weight:800;min-width:180px}
+.logo{width:28px;height:28px;border-radius:9px;display:grid;place-items:center;background:rgba(52,211,153,.12);color:var(--green);border:1px solid rgba(52,211,153,.28)}
+.top-actions{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.chip,.btn,.pill{border:1px solid var(--line);background:rgba(255,255,255,.04);color:var(--text);border-radius:12px;padding:8px 12px}
+.chip{display:inline-flex;align-items:center;gap:8px;min-height:36px}.chip strong{font-weight:700}
+.btn{min-height:38px}.btn.primary{background:linear-gradient(180deg,#2f9f6b,#1f7a51);border-color:rgba(52,211,153,.4)}.btn.danger{background:rgba(248,113,113,.12);border-color:rgba(248,113,113,.35);color:#fecaca}.btn.ghost{background:transparent}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 0 4px rgba(52,211,153,.12)}.dot.amber{background:var(--amber);box-shadow:0 0 0 4px rgba(251,191,36,.12)}.dot.red{background:var(--red);box-shadow:0 0 0 4px rgba(248,113,113,.12)}.dot.blue{background:var(--blue);box-shadow:0 0 0 4px rgba(96,165,250,.12)}.dot.gray{background:#7b8794}
+.body{display:grid;grid-template-columns:220px 1fr;min-height:0}
+.side{border-right:1px solid var(--line);padding:16px 12px;background:rgba(8,12,18,.55)}
+.nav{display:grid;gap:6px}.nav button{text-align:left;width:100%;padding:11px 12px;border-radius:12px;border:1px solid transparent;background:transparent;color:var(--text)}.nav button.active,.nav button:hover{background:rgba(255,255,255,.05);border-color:var(--line)}
+.nav .count{margin-left:6px;display:inline-grid;place-items:center;min-width:20px;height:20px;border-radius:999px;background:rgba(248,113,113,.18);color:#fecaca;font-size:12px;font-weight:700}
+.main{padding:18px;overflow:auto}
+.view{display:none}.view.active{display:block}
+.page-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:16px}.page-head h1{margin:0 0 4px;font-size:24px}.page-head p{margin:0;color:var(--muted)}
+.grid{display:grid;gap:14px}.grid.two{grid-template-columns:1.4fr .9fr}.grid.cards{grid-template-columns:repeat(3,1fr)}
+.panel{background:rgba(15,22,32,.92);border:1px solid var(--line);border-radius:var(--radius);padding:16px;box-shadow:0 18px 40px rgba(0,0,0,.22)}
+.panel h2,.panel h3{margin:0 0 8px}.muted{color:var(--muted)}.faint{color:var(--faint)}
+.composer textarea,.composer input,.input,textarea,input[type=text],input[type=number]{width:100%;border:1px solid var(--line);background:rgba(0,0,0,.22);color:var(--text);border-radius:12px;padding:12px 14px}
+.composer textarea{min-height:120px;resize:vertical}
+.composer .row{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:center}
+.mode-card{display:grid;gap:6px}.mode-card .label{font-weight:800;font-size:16px}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;font-size:12px;font-weight:700;border-radius:999px}
+.pill.green{background:rgba(52,211,153,.12);color:#a7f3d0;border-color:rgba(52,211,153,.28)}
+.pill.amber{background:rgba(251,191,36,.12);color:#fde68a;border-color:rgba(251,191,36,.28)}
+.pill.red{background:rgba(248,113,113,.12);color:#fecaca;border-color:rgba(248,113,113,.28)}
+.pill.blue{background:rgba(96,165,250,.12);color:#bfdbfe;border-color:rgba(96,165,250,.28)}
+.pill.gray{background:rgba(255,255,255,.05);color:#cbd5e1}
+.steps{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
+.step{padding:6px 10px;border-radius:999px;border:1px solid var(--line);color:var(--faint);font-size:12px}.step.done{color:#a7f3d0;border-color:rgba(52,211,153,.3)}.step.active{color:#bfdbfe;border-color:rgba(96,165,250,.35)}
+.actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+.list{display:grid;gap:10px}
+.card-row{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:start;padding:14px;border:1px solid var(--line);border-radius:14px;background:rgba(255,255,255,.02)}
+.card-row h3{margin:0 0 6px;font-size:15px}.card-row p{margin:0 0 6px;color:var(--muted)}
+.evidence{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.evidence span{font-size:12px;padding:4px 8px;border-radius:999px;background:rgba(255,255,255,.04);border:1px solid var(--line);color:var(--muted)}
+details.advanced{margin-top:12px;border-top:1px dashed var(--line);padding-top:10px}.advanced summary{cursor:pointer;color:var(--muted)}
+.toast{position:fixed;right:18px;bottom:18px;background:#111827;border:1px solid var(--line);padding:12px 14px;border-radius:12px;opacity:0;transform:translateY(8px);transition:.2s;z-index:50;max-width:360px}.toast.show{opacity:1;transform:none}
+.empty{padding:22px;border:1px dashed var(--line);border-radius:14px;color:var(--muted);text-align:center}
+.section-title{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.warn{padding:10px 12px;border-radius:12px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.25);color:#fde68a;margin-bottom:12px}
+@media(max-width:980px){.body{grid-template-columns:1fr}.side{display:none}.grid.two,.grid.cards{grid-template-columns:1fr}.top{flex-wrap:wrap;height:auto;padding:10px 12px}}
 </style>
 </head>
 <body>
 <div class="app">
   <header class="top">
-    <div class="traffic"><i></i><i></i><i></i></div><div class="brand"><span class="logo">∞</span><span>repo-harness</span></div>
-    <div class="topCenter"><button class="chip" onclick="switchView('repositories')">□ 当前仓库：<strong id="topRepo">—</strong></button><span class="chip"><span class="dot" id="topReadyDot"></span><strong id="topReady">检查中</strong></span><button class="chip" onclick="switchView('capabilities')">插件 <strong id="topPlugins">—</strong> 可用</button></div>
-    <div class="topRight"><button class="chip" onclick="switchView('attention')">待处理 <span class="count" id="topAttention">0</span></button><span class="avatar">G</span></div>
+    <div class="brand"><span class="logo">∞</span><span>执行助手控制台</span></div>
+    <button class="chip" id="repoChip" onclick="switchView('repositories')">仓库 · <strong id="topRepo">—</strong></button>
+    <span class="chip"><span class="dot" id="readyDot"></span><strong id="topReady">检查中</strong></span>
+    <span class="chip"><span class="dot" id="connectorDot"></span><span id="topConnector">连接</span></span>
+    <button class="chip" onclick="switchView('inbox')">待决定 <span class="count" id="topHandoffs">0</span></button>
+    <div class="top-actions">
+      <button class="btn ghost" onclick="refreshAll()">刷新</button>
+      <button class="btn ghost" onclick="switchView('advanced')">高级</button>
+    </div>
   </header>
   <div class="body">
-    <aside class="side"><div><nav class="nav">
-      <button class="active" data-view="home">⌂ 首页</button><button data-view="work">▷ 执行任务</button><button data-view="plan">◇ 执行计划</button><button data-view="attention">△ 待处理 <span class="count" id="sideAttention">0</span></button><button data-view="repositories">□ 仓库</button><button data-view="capabilities">◇ 能力</button><button data-view="history">◷ 历史</button><div class="navSep"></div><button data-view="advanced">⌁ 高级诊断</button>
-    </nav></div><div class="repoMini"><span class="muted">当前仓库</span><strong id="sideRepoName">—</strong><span class="pill green" id="sideRepoStatus">—</span><p class="muted mono" id="sideRepoPath">—</p><button class="btn" style="width:100%" onclick="switchView('repositories')">切换仓库</button></div></aside>
-    <main class="main"><section class="view active" id="view-home"><div class="hero panel"><div class="heroGrid"><div><h2>正在读取控制台状态</h2><p>如果这里长时间不更新，说明本地 API 或页面脚本出现异常；控制台会保留可见的降级页面，避免空白。</p><div class="heroActions"><button class="btn" onclick="location.reload()">重新载入</button></div></div><div class="okMark">…</div></div></div><div class="panel section"><div class="sectionHead"><h2>基础入口</h2></div><div class="grid cards"><div class="panel card"><h3>执行任务</h3><span class="big">输入自然语言</span><p class="muted">状态加载后可直接提交任务。</p></div><div class="panel card"><h3>仓库</h3><span class="big">选择或注册</span><p class="muted">用于确定本次工作的目标项目。</p></div><div class="panel card"><h3>能力</h3><span class="big">插件配置</span><p class="muted">检查 GitHub、浏览器等能力是否可用。</p></div><div class="panel card"><h3>待处理</h3><span class="big">确认结果</span><p class="muted">任务完成、失败重试、清理建议集中处理。</p></div></div></div></section><section class="view" id="view-work"></section><section class="view" id="view-plan"></section><section class="view" id="view-attention"></section><section class="view" id="view-repositories"></section><section class="view" id="view-capabilities"></section><section class="view" id="view-history"></section><section class="view" id="view-advanced"></section></main>
+    <aside class="side">
+      <nav class="nav">
+        <button class="active" data-view="home">⌂ 指挥中心</button>
+        <button data-view="inbox">△ 待决定 <span class="count" id="sideHandoffs">0</span></button>
+        <button data-view="work">▷ 当前任务</button>
+        <button data-view="readiness">◎ 系统状态</button>
+        <button data-view="repositories">□ 仓库</button>
+        <button data-view="advanced">⌁ 高级诊断</button>
+      </nav>
+    </aside>
+    <main class="main">
+      <section class="view active" id="view-home"></section>
+      <section class="view" id="view-inbox"></section>
+      <section class="view" id="view-work"></section>
+      <section class="view" id="view-readiness"></section>
+      <section class="view" id="view-repositories"></section>
+      <section class="view" id="view-advanced"></section>
+    </main>
   </div>
-</div><div class="toast" id="toast"></div>
+</div>
+<div class="toast" id="toast"></div>
 <script>
-function safeStorageGet(key){try{return window.sessionStorage?window.sessionStorage.getItem(key):''}catch(_error){return ''}}
-function safeStorageSet(key,value){try{if(!window.sessionStorage)return;if(value)window.sessionStorage.setItem(key,value);else window.sessionStorage.removeItem(key)}catch(_error){}}
-function queryRepoId(){try{return new URLSearchParams(window.location.search).get('repoId')||''}catch(_error){return ''}}
-function setQueryRepoId(id){try{var url=new URL(window.location.href);if(id)url.searchParams.set('repoId',id);else url.searchParams.delete('repoId');window.history.replaceState(null,'',url)}catch(_error){}}
-var model=null;var raw=null;var selectedRepoId=queryRepoId()||safeStorageGet('repoHarnessSelectedRepoId')||'';
+function safeGet(k){try{return sessionStorage.getItem(k)||''}catch(_e){return ''}}
+function safeSet(k,v){try{if(v)sessionStorage.setItem(k,v);else sessionStorage.removeItem(k)}catch(_e){}}
+function queryRepoId(){try{return new URLSearchParams(location.search).get('repoId')||''}catch(_e){return ''}}
+function setQueryRepoId(id){try{var u=new URL(location.href);if(id)u.searchParams.set('repoId',id);else u.searchParams.delete('repoId');history.replaceState(null,'',u)}catch(_e){}}
 function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,function(c){return({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]})}
-function arr(v){return Array.isArray(v)?v:[]}function obj(v){return v&&typeof v==='object'&&!Array.isArray(v)?v:{}}
-function api(path,opts){opts=opts||{};var headers=Object.assign({'content-type':'application/json'},opts.headers||{});return fetch(path,Object.assign({},opts,{credentials:'same-origin',headers:headers})).then(function(r){return r.json().catch(function(){return{}}).then(function(body){if(!r.ok)throw new Error(body.error||body.message||String(r.status));return body})})}
-function currentRepoId(){var repo=obj(model&&model.currentRepository);return selectedRepoId||repo.id||''}
-function repoQuery(){var id=currentRepoId();return id?'?repoId='+encodeURIComponent(id):''}
-function rememberRepo(id){selectedRepoId=id||'';safeStorageSet('repoHarnessSelectedRepoId',selectedRepoId);setQueryRepoId(selectedRepoId)}
-function selectRepo(id){rememberRepo(id);toast('已切换仓库');refresh().then(function(){switchView('home')}).catch(function(e){toast(e.message)})}
-function withCurrentRepo(body){body=obj(body);var id=currentRepoId();return Object.assign({},body,id?{repoId:id}:{})}
-function toast(msg){var t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(function(){t.classList.remove('show')},3200)}
-function pill(status,label){var cls=status==='ready'||status==='completed'||status==='connected'||status==='healthy'||status==='available'?'green':status==='running'?'blue':status==='failed'||status==='blocked'||status==='removed'?'red':status==='needs_setup'||status==='authorization_required'||status==='attention'?'amber':'gray';return '<span class="pill '+cls+'">'+esc(label||status||'未知')+'</span>'}
-function switchView(name){document.querySelectorAll('.nav button').forEach(function(b){b.classList.toggle('active',b.dataset.view===name)});document.querySelectorAll('.view').forEach(function(v){v.classList.toggle('active',v.id==='view-'+name)});renderAll()}
+function arr(v){return Array.isArray(v)?v:[]}
+function obj(v){return v&&typeof v==='object'&&!Array.isArray(v)?v:{}}
+function toast(msg){var t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(function(){t.classList.remove('show')},2800)}
+function pill(tone,label){return '<span class="pill '+esc(tone||'gray')+'">'+esc(label||'')+'</span>'}
+function setDot(id,tone){document.getElementById(id).className='dot '+(tone&&tone!=='green'?tone:'')}
+
+var selectedRepoId=queryRepoId()||safeGet('repoHarnessSelectedRepoId')||'';
+var commandCenter=null;
+var selectedWorkId=safeGet('repoHarnessSelectedWorkId')||'';
+var selectedHandoffId='';
+var modePreview=null;
+var advancedRaw=null;
+var lastFacade=null;
+
+function repoQuery(){return selectedRepoId?'?repoId='+encodeURIComponent(selectedRepoId):''}
+function rememberRepo(id){selectedRepoId=id||'';safeSet('repoHarnessSelectedRepoId',selectedRepoId);setQueryRepoId(selectedRepoId)}
+function rememberWork(id){selectedWorkId=id||'';safeSet('repoHarnessSelectedWorkId',selectedWorkId)}
+function api(path,opts){opts=opts||{};var headers=Object.assign({'content-type':'application/json'},opts.headers||{});return fetch(path,Object.assign({},opts,{credentials:'same-origin',headers:headers})).then(function(r){return r.json().catch(function(){return{}}).then(function(body){if(!r.ok)throw new Error(body.error||body.message||body.summary||String(r.status));return body})})}
+
+function switchView(name){
+  document.querySelectorAll('.nav button').forEach(function(b){b.classList.toggle('active',b.dataset.view===name)});
+  document.querySelectorAll('.view').forEach(function(v){v.classList.toggle('active',v.id==='view-'+name)});
+  renderAll();
+}
 document.querySelectorAll('.nav button[data-view]').forEach(function(b){b.addEventListener('click',function(){switchView(b.dataset.view)})});
-function fallbackSnapshot(message){return {readiness:{state:'blocked',label:'读取失败',title:'控制台状态读取失败',description:message||'本地 API 暂时不可用，请刷新或查看高级诊断。',chips:[{label:'降级页面已显示',tone:'amber'},{label:'主内容不再空白',tone:'green'}]},currentRepository:{name:'未选择',path:'—',statusLabel:'—'},repositories:[],pluginSummary:{ready:0,total:0,lines:[]},plugins:[],attentionItems:[{id:'dashboard-load-failed',category:'dashboard',categoryLabel:'页面状态',icon:'!',title:'控制台状态读取失败',reason:message||'本地 API 暂时不可用，请刷新页面或查看高级诊断。',scope:'Local Bridge',primaryAction:{id:'view_advanced',label:'查看诊断'}}],recommendation:{title:'刷新或查看诊断',description:'页面已显示降级内容，但实时数据未加载。'},recentTasks:[],operationalPlan:{status:'blocked',diffProjection:{dirty:false,changedFiles:[],diffStat:'',reviewRequired:false},validationStrategy:{policy:'minimal',checks:[],reason:'状态读取失败'},recipeSystem:{recipes:[]},workerAbstraction:{workers:[],recommendedWorker:'direct_edit'},guiInteraction:{primaryPanels:[],primaryActions:[],hiddenByDefault:[]},mcpToolSchemaConvergence:{readModels:[],commandModels:[],compatibilityRules:[]},runtimeStorage:{controllerHomeFirst:true,legacyFallbackPreserved:true,repoLocalMutableRuntimeFilesAvoided:true},branchWorktreeCleanup:{safeToAutoClean:false,requiredBeforeCleanup:[],protectedCases:[]},taskRecovery:{continuationState:'unknown',nextActions:[],handoffArtifacts:[]}}}}
-function renderChrome(){var repo=obj(model.currentRepository);var ready=obj(model.readiness);var plugins=obj(model.pluginSummary);var attention=arr(model.attentionItems).length;document.getElementById('topRepo').textContent=repo.name||'未选择';document.getElementById('topReady').textContent=ready.label||'未知';document.getElementById('topReadyDot').className='dot '+(ready.state==='blocked'?'red':ready.state==='needs_setup'?'amber':'');document.getElementById('topPlugins').textContent=(plugins.ready||0)+'/'+(plugins.total||0);document.getElementById('topAttention').textContent=attention;document.getElementById('sideAttention').textContent=attention;document.getElementById('sideRepoName').textContent=repo.name||'未选择';document.getElementById('sideRepoStatus').textContent=repo.statusLabel||'—';document.getElementById('sideRepoPath').textContent=repo.path||'—'}
-function renderHome(){var r=obj(model.readiness),repo=obj(model.currentRepository),plug=obj(model.pluginSummary),att=arr(model.attentionItems),rec=obj(model.recommendation),recent=arr(model.recentTasks).slice(0,3);document.getElementById('view-home').innerHTML='<div class="hero panel"><div class="heroGrid"><div><h2>'+esc(r.title||'系统状态')+'</h2><p>'+esc(r.description||'正在读取状态')+'</p><div class="statusLine">'+arr(r.chips).map(function(c){return '<span class="chip"><span class="dot '+(c.tone==='amber'?'amber':c.tone==='red'?'red':'')+'"></span>'+esc(c.label)+'</span>'}).join('')+'</div><div class="heroActions"><button class="btn primary" onclick="switchView(&quot;work&quot;)">执行任务</button><button class="btn" onclick="switchView(&quot;repositories&quot;)">管理仓库</button><button class="btn" onclick="switchView(&quot;capabilities&quot;)">配置能力</button><button class="btn" onclick="switchView(&quot;attention&quot;)">处理待办</button></div></div><div class="okMark">✓</div></div></div><div class="grid cards">'+summaryCard('当前仓库',repo.name||'未选择',repo.path||'请先添加仓库',repo.statusLabel||'—','repositories')+summaryCard('插件能力',(plug.ready||0)+'/'+(plug.total||0)+' 可用',arr(plug.lines).slice(0,3).join('\\n')||'暂无插件状态','','capabilities')+summaryCard('待处理',att.length+' 项',attentionSummary(att),'','attention')+summaryCard('推荐下一步',rec.title||'执行一个任务',rec.description||'当前系统可用。','','work')+'</div>'+recentPanel('最近任务',recent)}
-function summaryCard(title,big,body,status,view){return '<div class="panel card"><h3>'+esc(title)+'</h3><span class="big">'+esc(big)+'</span><p class="muted" style="white-space:pre-line">'+esc(body)+'</p>'+(status?pill(status,status):'')+'<div style="margin-top:10px"><button class="btn" onclick="switchView(&quot;'+esc(view)+'&quot;)">查看</button></div></div>'}
-function attentionSummary(items){if(!items.length)return '没有需要处理的事项';var map={};items.forEach(function(x){map[x.categoryLabel]=(map[x.categoryLabel]||0)+1});return Object.keys(map).slice(0,3).map(function(k){return map[k]+' 个 '+k}).join('\\n')}
-function renderWork(){var running=arr(model.recentTasks).filter(function(t){return t.status==='running'});var plan=obj(model.operationalPlan);var validation=obj(plan.validationStrategy);var diff=obj(plan.diffProjection);var checks=arr(validation.checks);var preflight='<span class="muted">执行前检查</span><span class="pill green">仓库可执行</span>'+pill(diff.dirty?'attention':'ready',diff.dirty?'有未提交变更':'工作区干净')+pill(validation.policy==='release-gate'?'attention':'ready','验证策略 '+(validation.policy||'minimal'))+(checks.length?checks.slice(0,3).map(function(c){return '<span class="pill blue">'+esc(c)+'</span>'}).join(''):'<span class="pill amber">未声明检查</span>');document.getElementById('view-work').innerHTML='<div class="pageHead"><div><h1>执行任务</h1><p>描述你想完成的任务，repo-harness 将按执行计划、验证策略和 worker 路由推进。</p></div><button class="btn" onclick="switchView(&quot;plan&quot;)">查看执行计划</button></div><div class="panel taskBox"><strong>你想让 repo-harness 做什么？</strong><textarea id="taskInput" placeholder="例如：优化会员购买页面布局细节，避免信息拥挤，保持现有业务逻辑不变。"></textarea><div class="checkRow">'+preflight+'<button class="btn primary" style="margin-left:auto" onclick="submitTask()">执行任务</button></div></div><div class="taskLayout"><div class="panel section"><div class="sectionHead"><h2>当前任务</h2><span class="muted">运行状态</span></div>'+(running.length?running.map(taskRow).join(''):'<div class="empty">当前没有运行中的任务</div>')+'</div><div class="panel section"><div class="sectionHead"><h2>任务结果</h2><span class="pill green">等待确认</span></div><div class="row"><div class="iconBox">✓</div><div><div class="rowTitle">任务已完成，等待你确认</div><div class="rowSub">查看变更内容，确认结果是否符合预期。</div></div><button class="btn primary" onclick="switchView(&quot;attention&quot;)">去确认</button></div></div></div>'+recentPanel('最近任务',arr(model.recentTasks).slice(0,4))}
-function submitTask(){var input=document.getElementById('taskInput');var utterance=input&&input.value?input.value.trim():'';if(!utterance){toast('请输入任务内容');return}api('/api/assistant/intent',{method:'POST',body:JSON.stringify(withCurrentRepo({utterance:utterance,source:'local-ui',mode:'execute'}))}).then(function(){toast('任务已提交到当前仓库');input.value='';refresh();switchView('history')}).catch(function(e){toast(e.message)})}
-function renderPlan(){var plan=obj(model.operationalPlan);var diff=obj(plan.diffProjection),validation=obj(plan.validationStrategy),recipes=arr(obj(plan.recipeSystem).recipes),workers=arr(obj(plan.workerAbstraction).workers),gui=obj(plan.guiInteraction),schema=obj(plan.mcpToolSchemaConvergence),cleanup=obj(plan.branchWorktreeCleanup),recovery=obj(plan.taskRecovery),storage=obj(plan.runtimeStorage);var changed=arr(diff.changedFiles);document.getElementById('view-plan').innerHTML='<div class="pageHead"><div><h1>执行计划</h1><p>把任务恢复、diff、验证、recipe、worker、GUI 与 MCP schema 收敛到一个可读控制面。</p></div><div><button class="btn primary" onclick="runPlanChecks()">运行验证策略</button> <button class="btn" onclick="previewRecoveryPlan()">恢复诊断</button> <button class="btn" onclick="previewSafeCleanup()">清理预览</button> <button class="btn danger" onclick="applySafeCleanup()">执行安全清理</button> <button class="btn" onclick="refresh()">刷新计划</button></div></div><div class="grid cards">'+summaryCard('计划状态',plan.status||'unknown','worker: '+esc(obj(plan.workerAbstraction).recommendedWorker||'direct_edit'),'','work')+summaryCard('Diff Projection',diff.dirty?'有变更':'干净',(diff.diffStat||'没有未提交 diff'),'','advanced')+summaryCard('验证策略',validation.policy||'minimal',arr(validation.checks).join('\\n')||validation.reason||'未声明检查','','work')+summaryCard('任务恢复',recovery.continuationState||'unknown',arr(recovery.nextActions).slice(0,3).join('\\n')||'暂无恢复动作','','attention')+'</div><div class="grid two"><div class="panel section"><div class="sectionHead"><h2>Recipe System</h2>'+pill('ready',recipes.length+' 条')+'</div>'+recipes.map(recipeRow).join('')+'</div><div class="panel section"><div class="sectionHead"><h2>Worker 抽象</h2>'+pill('ready',obj(plan.workerAbstraction).recommendedWorker||'direct_edit')+'</div>'+workers.map(workerRow).join('')+'</div></div><div class="grid two"><div class="panel section"><div class="sectionHead"><h2>GUI 交互模型</h2></div>'+listBlock('Primary Panels',arr(gui.primaryPanels))+listBlock('Primary Actions',arr(gui.primaryActions))+listBlock('Hidden by default',arr(gui.hiddenByDefault))+'</div><div class="panel section"><div class="sectionHead"><h2>MCP Schema 收敛</h2></div>'+listBlock('Read Models',arr(schema.readModels))+listBlock('Command Models',arr(schema.commandModels))+listBlock('Compatibility Rules',arr(schema.compatibilityRules))+'</div></div><div class="grid two"><div class="panel section"><div class="sectionHead"><h2>controllerHome Runtime Storage</h2></div>'+booleanRow('controllerHome first',storage.controllerHomeFirst)+booleanRow('legacy fallback preserved',storage.legacyFallbackPreserved)+booleanRow('avoid repo-local mutable runtime files',storage.repoLocalMutableRuntimeFilesAvoided)+'</div><div class="panel section"><div class="sectionHead"><h2>分支 / Worktree 清理</h2>'+pill(cleanup.safeToAutoClean?'ready':'attention',cleanup.safeToAutoClean?'可安全清理':'需保护')+'</div>'+listBlock('Required before cleanup',arr(cleanup.requiredBeforeCleanup))+listBlock('Protected cases',arr(cleanup.protectedCases))+'</div></div><div class="panel section"><div class="sectionHead"><h2>Changed files</h2>'+pill(diff.reviewRequired?'attention':'ready',diff.reviewRequired?'需要 review':'无需 review')+'</div>'+(changed.length?changed.map(function(f){return '<div class="row"><div class="iconBox">Δ</div><div><div class="rowTitle mono">'+esc(f.path)+'</div><div class="rowSub">'+esc(f.status)+'</div></div>'+pill('blue','diff')+'</div>'}).join(''):'<div class="empty">当前没有未提交变更</div>')+'</div>'}
-function recipeRow(r){return '<div class="row"><div class="iconBox">R</div><div><div class="rowTitle">'+esc(r.label||r.id)+'</div><div class="rowSub">'+esc(r.when||'')+'</div><div class="meta">'+arr(r.steps).slice(0,4).map(function(s){return '<span>'+esc(s)+'</span>'}).join('')+'</div></div><button class="btn" onclick="prepareRecipe(&quot;'+esc(r.id)+'&quot;)">准备执行</button>'+pill('green',arr(r.requiredEvidence).length+' evidence')+'</div>'}
-function prepareRecipe(id){api('/api/recipes/'+encodeURIComponent(id)+'/prepare'+repoQuery()).then(function(result){raw={recipePreparation:result,snapshot:raw||model};toast('Recipe 已准备');switchView('advanced')}).catch(function(e){toast(e.message)})}
-function workerRow(w){return '<div class="row"><div class="iconBox">W</div><div><div class="rowTitle">'+esc(w.id)+'</div><div class="rowSub">'+esc(w.role)+'</div><div class="meta">'+arr(w.preferredFor).map(function(x){return '<span>'+esc(x)+'</span>'}).join('')+'</div></div>'+pill('blue','worker')+'</div>'}
-function listBlock(title,items){return '<h3 style="margin:12px 0 6px;font-size:13px;color:var(--muted)">'+esc(title)+'</h3>'+(items.length?items.map(function(x){return '<div class="row"><div class="iconBox">•</div><div><div class="rowTitle">'+esc(x)+'</div></div></div>'}).join(''):'<div class="empty">暂无</div>')}
-function booleanRow(title,value){return '<div class="row"><div class="iconBox">'+(value?'✓':'!')+'</div><div><div class="rowTitle">'+esc(title)+'</div></div>'+pill(value?'ready':'attention',value?'enabled':'disabled')+'</div>'}
-function runPlanChecks(){var plan=obj(model.operationalPlan),validation=obj(plan.validationStrategy),ids=arr(validation.checks);if(!ids.length){toast('当前执行计划没有声明检查');return}api('/api/checks/run'+repoQuery(),{method:'POST',body:JSON.stringify({checkIds:ids})}).then(function(result){toast(result.ok?'验证通过':'验证失败，查看高级诊断');raw={planChecks:result,snapshot:raw||model};refresh().then(function(){switchView(result.ok?'plan':'advanced')})}).catch(function(e){toast(e.message)})}
-function previewRecoveryPlan(){api('/api/recovery/plan'+repoQuery()).then(function(result){raw={recoveryPlan:result,snapshot:raw||model};toast('恢复诊断已生成');switchView('advanced')}).catch(function(e){toast(e.message)})}
-function previewSafeCleanup(){api('/api/assistant/maintenance/cleanup-preview'+repoQuery(),{method:'POST',body:JSON.stringify({})}).then(function(result){raw={cleanupPreview:result,snapshot:raw||model};toast('清理预览已生成');switchView('advanced')}).catch(function(e){toast(e.message)})}
-function applySafeCleanup(){var plan=obj(model.operationalPlan),cleanup=obj(plan.branchWorktreeCleanup);if(!cleanup.safeToAutoClean){toast('执行计划认为当前不能自动清理');raw={cleanupPolicy:cleanup,snapshot:raw||model};switchView('advanced');return}if(!confirm('确认执行安全清理？仅会清理策略允许的终态运行产物。'))return;api('/api/assistant/maintenance/cleanup-apply'+repoQuery(),{method:'POST',body:JSON.stringify({confirmCleanup:true})}).then(function(result){raw={cleanupApply:result,snapshot:raw||model};toast('安全清理完成');refresh().then(function(){switchView('advanced')})}).catch(function(e){toast(e.message)})}
-function renderAttention(){var items=arr(model.attentionItems);var tabs='<div class="filters"><button class="filter active">全部 '+items.length+'</button><button class="filter">需要确认</button><button class="filter">失败处理</button><button class="filter">插件授权</button><button class="filter">建议清理</button></div>';var list=items.length?items.map(attentionItem).join(''):'<div class="empty">没有待处理事项</div>';document.getElementById('view-attention').innerHTML='<div class="pageHead"><div><h1>待处理</h1><p>关键决策集中在这里，按类型分组后快速处理。</p></div><button class="btn" onclick="refresh()">刷新</button></div>'+tabs+'<div class="attentionList">'+list+'</div>'}
-function attentionItem(x){var cls=x.category==='fix_failed_run'?'failed':x.category==='connect_plugin'?'plugin':'confirm';var risk=x.category==='fix_failed_run'?'中风险':x.category==='connect_plugin'?'中风险':'低风险';return '<div class="attentionItem '+cls+'"><div class="iconBox">'+esc(x.icon||'!')+'</div><div><div class="rowTitle">'+esc(x.title)+'</div><div class="rowSub">'+esc(x.reason)+'</div><div class="meta"><span>'+esc(x.scope||'当前仓库')+'</span>'+pill(cls==='failed'?'attention':'ready',risk)+'</div></div><div class="attentionActions">'+attentionActions(x)+'</div></div>'}
-function attentionActions(x){var id=esc(x.id);if(x.category==='confirm_result')return '<button class="btn primary" onclick="handleAttention(&quot;'+id+'&quot;,&quot;accept&quot;)">确认完成</button><button class="btn" onclick="handleAttention(&quot;'+id+'&quot;,&quot;changes&quot;)">打回修改</button>';if(x.category==='fix_failed_run'||x.category==='changes_requested')return '<button class="btn primary" onclick="handleAttention(&quot;'+id+'&quot;,&quot;retry&quot;)">重试/继续</button><button class="btn" onclick="handleAttention(&quot;'+id+'&quot;,&quot;inspect&quot;)">详情</button>';if(x.category==='connect_plugin')return '<button class="btn primary" onclick="handleAttention(&quot;'+id+'&quot;,&quot;plugin&quot;)">配置能力</button><button class="btn" onclick="switchView(&quot;advanced&quot;)">详情</button>';return '<button class="btn primary" onclick="handleAttention(&quot;'+id+'&quot;,&quot;inspect&quot;)">查看诊断</button><button class="btn" onclick="switchView(&quot;advanced&quot;)">详情</button>'}
-function attentionById(id){return arr(model.attentionItems).find(function(x){return x.id===id})||{}}
-function handleAttention(id,verb){var item=attentionById(id),refs=obj(item.refs);if(verb==='plugin'){switchView('capabilities');return}if(verb==='inspect'){raw={attention:item,snapshot:raw||model};switchView('advanced');return}if(verb==='accept'&&refs.issueId&&refs.taskId){api('/api/issues/'+encodeURIComponent(refs.issueId)+'/tasks/'+encodeURIComponent(refs.taskId)+'/accept'+repoQuery(),{method:'POST',body:JSON.stringify({note:'Accepted from controller GUI'})}).then(function(){toast('已确认完成');refresh()}).catch(function(e){toast(e.message)});return}if(verb==='changes'&&refs.issueId&&refs.taskId){var note=prompt('说明需要修改的地方','Changes requested from controller GUI.');if(note==null)return;api('/api/issues/'+encodeURIComponent(refs.issueId)+'/tasks/'+encodeURIComponent(refs.taskId)+'/request-changes'+repoQuery(),{method:'POST',body:JSON.stringify({note:note})}).then(function(){toast('已打回修改');refresh()}).catch(function(e){toast(e.message)});return}if(verb==='retry'&&refs.runId){api('/api/runs/'+encodeURIComponent(refs.runId)+'/retry'+repoQuery(),{method:'POST',body:JSON.stringify({})}).then(function(){toast('已提交重试');refresh()}).catch(function(e){toast(e.message)});return}if(verb==='retry'&&refs.issueId&&refs.taskId){api('/api/issues/'+encodeURIComponent(refs.issueId)+'/tasks/'+encodeURIComponent(refs.taskId)+'/launch'+repoQuery(),{method:'POST',body:JSON.stringify({agent:'codex'})}).then(function(){toast('已继续任务');refresh()}).catch(function(e){toast(e.message)});return}viewAction(obj(item.primaryAction).id||'view_advanced')}
-function viewAction(id){if(id==='start_task')switchView('work');else if(id==='configure_plugins')switchView('capabilities');else if(id==='handle_attention')switchView('attention');else switchView('advanced')}
-function renderRepositories(){var repos=arr(model.repositories);document.getElementById('view-repositories').innerHTML='<div class="pageHead"><div><h1>仓库中心</h1><p>管理本地 Git 仓库，选择当前工作仓库。</p></div><div><button class="btn" onclick="refresh()">重新扫描</button> <button class="btn primary" onclick="showAddRepo()">添加本地仓库</button></div></div><div id="repoAdd" class="panel section" style="display:none"><div class="inlineForm"><input class="input" id="repoPath" placeholder="/Users/greyson/DevProjects/YourRepo"><input class="input" id="repoName" placeholder="显示名称（可选）"><button class="btn primary" onclick="registerRepo()">注册</button></div></div>'+repos.map(repoCard).join('')}
-function showAddRepo(){var el=document.getElementById('repoAdd');el.style.display=el.style.display==='none'?'block':'none'}
-function repoCard(r){return '<div class="panel repoCard"><div class="iconBox">□</div><div><div class="rowTitle">'+esc(r.name)+'</div><div class="rowSub mono">'+esc(r.path)+'</div><div class="meta"><span>最近使用：'+esc(r.lastSeenAt||'—')+'</span>'+pill(r.status,r.statusLabel)+'</div></div><div><button class="btn '+(r.current?'primary':'')+'" onclick="selectRepo(&quot;'+esc(r.id)+'&quot;)">'+(r.current?'当前仓库':'设为当前')+'</button> <button class="btn" onclick="selectRepo(&quot;'+esc(r.id)+'&quot;);switchView(&quot;advanced&quot;)">详情</button></div></div>'}
-function registerRepo(){var path=document.getElementById('repoPath').value.trim();var name=document.getElementById('repoName').value.trim();if(!path){toast('请输入仓库路径');return}api('/api/repositories/register',{method:'POST',body:JSON.stringify({path:path,displayName:name||undefined})}).then(function(result){var repo=obj(result.repository);if(repo.repoId)rememberRepo(repo.repoId);toast('仓库已注册');return refresh()}).catch(function(e){toast(e.message)})}
-function renderCapabilities(){var plugins=arr(model.plugins);var ready=plugins.filter(function(p){return p.status==='ready'}).length;var need=plugins.filter(function(p){return p.status==='needs_setup'||p.status==='authorization_required'}).length;var failed=plugins.filter(function(p){return p.status==='failed'||p.status==='disabled'}).length;document.getElementById('view-capabilities').innerHTML='<div class="pageHead"><div><h1>能力中心</h1><p>管理 repo-harness 可使用的能力，能力越完整，能完成的任务越多。</p></div><button class="btn" onclick="refresh()">检查连接</button></div><div class="statGrid"><div class="panel stat"><span>能力总数</span><strong>'+plugins.length+'</strong></div><div class="panel stat"><span>可用能力</span><strong>'+ready+'</strong></div><div class="panel stat"><span>需要配置</span><strong>'+need+'</strong></div><div class="panel stat"><span>不可用</span><strong>'+failed+'</strong></div><div class="panel stat"><span>整体健康度</span><strong>'+(failed?'一般':'良好')+'</strong></div></div>'+plugins.map(pluginCard).join('')}
-function pluginCard(p){return '<div class="panel pluginCard"><div class="iconBox">◇</div><div><div class="rowTitle">'+esc(p.name)+'</div><div class="rowSub">'+esc(p.description||p.nextStep||'')+'</div><div class="meta">'+pill(p.status,p.statusLabel)+'<span>'+esc(p.nextStep||'')+'</span></div></div><div><button class="btn '+(p.status==='ready'?'':'primary')+'">'+(p.status==='ready'?'配置':'去配置')+'</button> <button class="btn">更多</button></div></div>'}
-function renderHistory(){document.getElementById('view-history').innerHTML='<div class="pageHead"><div><h1>历史</h1><p>查看最近执行、结果和需要追溯的凭证。</p></div></div>'+recentPanel('最近任务',arr(model.recentTasks))}
-function renderAdvanced(){document.getElementById('view-advanced').innerHTML='<div class="pageHead"><div><h1>高级诊断</h1><p>原始 controller 状态仅用于排错。</p></div><button class="btn" onclick="refreshRaw()">读取原始快照</button></div><pre class="mono">'+esc(JSON.stringify(raw||model,null,2))+'</pre>'}
-function taskRow(t){return '<div class="row"><div class="iconBox">'+(t.status==='completed'?'✓':t.status==='running'?'◌':'!')+'</div><div><div class="rowTitle">'+esc(t.title)+'</div><div class="rowSub">'+esc(t.summary||'')+'</div></div>'+pill(t.status)+'</div>'}
-function recentPanel(title,items){return '<div class="panel section"><div class="sectionHead"><h2>'+esc(title)+'</h2><button class="btn" onclick="switchView(&quot;history&quot;)">查看全部</button></div>'+(items.length?items.map(taskRow).join(''):'<div class="empty">暂无记录</div>')+'</div>'}
-function renderAll(){if(!model)return;try{renderChrome();renderHome();renderWork();renderPlan();renderAttention();renderRepositories();renderCapabilities();renderHistory();renderAdvanced()}catch(e){model=fallbackSnapshot(e.message);raw={error:e.message,stage:'render',generatedAt:new Date().toISOString()};renderChrome();renderHome();renderPlan();renderAttention();renderAdvanced();toast(e.message)}}
-function refresh(){var query=repoQuery();return api('/api/user-snapshot'+query).then(function(s){model=s;var repo=obj(s.currentRepository);if(repo.id)rememberRepo(repo.id);return api('/api/snapshot'+repoQuery())}).then(function(s){raw=s;renderAll()}).catch(function(e){if(selectedRepoId){rememberRepo('');return refresh()}model=fallbackSnapshot(e.message);raw={error:e.message,generatedAt:new Date().toISOString()};renderAll();toast(e.message)})}
-function refreshRaw(){api('/api/snapshot'+repoQuery()).then(function(s){raw=s;renderAdvanced();toast('原始快照已刷新')}).catch(function(e){toast(e.message)})}
-window.onerror=function(message){model=fallbackSnapshot(String(message));raw={error:String(message),stage:'window.onerror',generatedAt:new Date().toISOString()};renderAll();return false};
-window.onunhandledrejection=function(event){var reason=event&&event.reason?event.reason:'unknown promise rejection';model=fallbackSnapshot(String(reason&&reason.message?reason.message:reason));raw={error:String(reason&&reason.message?reason.message:reason),stage:'unhandledrejection',generatedAt:new Date().toISOString()};renderAll()};
-refresh();
+
+function btn(label, attrs, cls){
+  return '<button class="btn'+(cls?(' '+cls):'')+'" '+attrs+'>'+esc(label)+'</button>';
+}
+function stepsHtml(steps){
+  return '<div class="steps">'+arr(steps).map(function(s){return '<span class="step '+(s.done?'done':'')+(s.active?' active':'')+'">'+esc(s.label)+'</span>'}).join('')+'</div>';
+}
+
+function evidenceHtml(labels){
+  if(!arr(labels).length)return '';
+  return '<div class="evidence">'+arr(labels).map(function(x){return '<span>'+esc(x)+'</span>'}).join('')+'</div>';
+}
+
+function advancedBlock(data){
+  if(!data)return '';
+  return '<details class="advanced"><summary>高级详情</summary><pre class="mono" style="white-space:pre-wrap;color:var(--muted);font-size:12px">'+esc(JSON.stringify(data,null,2))+'</pre></details>';
+}
+
+function renderChrome(){
+  var cc=obj(commandCenter), ready=obj(cc.readiness), repo=obj(cc.currentRepository);
+  document.getElementById('topRepo').textContent=repo.name||'未选择';
+  document.getElementById('topReady').textContent=ready.label||'未知';
+  setDot('readyDot', ready.state==='blocked'?'red':ready.state==='needs_setup'?'amber':'green');
+  document.getElementById('topConnector').textContent=ready.connectorLabel||'连接';
+  setDot('connectorDot', ready.connectorTone||'gray');
+  var n=ready.pendingHandoffCount||arr(cc.handoffs).length||0;
+  document.getElementById('topHandoffs').textContent=n;
+  document.getElementById('sideHandoffs').textContent=n;
+}
+
+function renderHome(){
+  var cc=obj(commandCenter), ready=obj(cc.readiness), work=obj(cc.currentWork), handoffs=arr(cc.handoffs).slice(0,3);
+  var warnings=arr(cc.warnings).map(function(w){return '<div class="warn">'+esc(w)+'</div>'}).join('');
+  var mode=obj(modePreview||cc.modePreviewDefault);
+  var el=document.getElementById('view-home');
+  el.innerHTML=
+    warnings+
+    '<div class="page-head"><div><h1>指挥中心</h1><p>输入目标，系统会建议直接执行、可恢复的后台任务，或需要你先决定。</p></div></div>'+
+    '<div class="grid two">'+
+      '<div class="panel composer">'+
+        '<h2>你想完成什么？</h2>'+
+        '<textarea id="taskObjective" placeholder="例如：优化会员购买页信息密度，保持现有业务逻辑不变。"></textarea>'+
+        '<div class="row"><input class="input" id="taskAcceptance" placeholder="验收标准（可选，用分号分隔）" style="flex:1"></div>'+
+        '<div class="row"><input class="input" id="taskPaths" placeholder="允许修改的路径（可选，逗号分隔）" style="flex:1"><input class="input" id="taskFiles" type="number" min="0" placeholder="预计改动文件数" style="width:150px"></div>'+
+        '<div class="row">'+
+          '<button class="btn primary" onclick="startTask()">开始</button>'+
+          '<button class="btn" onclick="previewMode()">预览模式</button>'+
+          '<button class="btn" onclick="diagnoseFirst()">先诊断</button>'+
+        '</div>'+
+        '<div class="mode-card" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">'+
+          '<div class="muted">建议模式</div>'+
+          '<div class="label">'+esc(mode.label||'直接执行')+'</div>'+
+          '<div class="muted">'+esc(mode.explanation||'')+'</div>'+
+        '</div>'+
+      '</div>'+
+      '<div class="panel">'+
+        '<div class="section-title"><h2>系统状态</h2>'+pill(ready.state==='ready'?'green':ready.state==='needs_setup'?'amber':'red', ready.label||'未知')+'</div>'+
+        '<p class="muted">'+esc(ready.headline||'')+'</p>'+
+        '<p class="faint">'+esc(ready.description||'')+'</p>'+
+        '<div class="actions">'+btn('查看详情','data-nav="readiness"')+btn('处理待决定','data-nav="inbox"')+'</div>'+
+      '</div>'+
+    '</div>'+
+    '<div class="grid two" style="margin-top:14px">'+
+      renderWorkCard(work, '当前任务')+
+      '<div class="panel"><div class="section-title"><h2>待决定</h2>'+btn('全部','data-nav="inbox"','ghost')+'</div>'+
+        (handoffs.length?handoffs.map(function(h){return handoffMini(h)}).join(''):'<div class="empty">没有需要你判断的事项</div>')+
+      '</div>'+
+    '</div>';
+  bindNav(el);
+}
+
+function renderWorkCard(work, title){
+  work=obj(work);
+  if(!work.id){
+    return '<div class="panel"><div class="section-title"><h2>'+esc(title||'当前任务')+'</h2></div><div class="empty">还没有任务。在左侧描述目标并点击“开始”。</div></div>';
+  }
+  var v=obj(work.latestVerification);
+  var id=esc(work.id);
+  return '<div class="panel work-card" data-work-id="'+id+'">'+
+    '<div class="section-title"><h2>'+esc(title||'当前任务')+'</h2>'+pill(work.tone, work.statusLabel)+'</div>'+
+    '<h3 style="margin:0 0 6px">'+esc(work.title)+'</h3>'+
+    '<div class="muted">模式：'+esc(work.modeLabel)+' · 下一步：'+esc(work.nextAction)+'</div>'+
+    stepsHtml(work.progressSteps)+
+    (v.summary?'<div style="margin-top:8px">'+pill(v.tone,v.label)+' <span class="muted">'+esc(v.summary)+'</span></div>':'')+
+    (work.delegateSummary?'<p class="muted" style="margin-top:8px">'+esc(work.delegateSummary)+'</p>':'')+
+    evidenceHtml(work.evidenceLabels)+
+    '<div class="actions">'+
+      btn('继续','data-work-act="continue" data-work-id="'+id+'"','primary')+
+      btn('验证','data-work-act="verify" data-work-id="'+id+'"')+
+      btn('委派 Codex','data-work-act="delegate-codex" data-work-id="'+id+'"')+
+      btn('请 Grok 审阅','data-work-act="delegate-grok" data-work-id="'+id+'"')+
+      btn('修复诊断','data-work-act="repair" data-work-id="'+id+'"')+
+      btn('收尾','data-work-act="finalize" data-work-id="'+id+'"')+
+      btn('停止','data-work-act="stop" data-work-id="'+id+'"','danger')+
+      btn('打开详情','data-open-work="'+id+'"','ghost')+
+    '</div>'+
+    advancedBlock(work.advanced)+
+  '</div>';
+}
+
+function handoffMini(h){
+  var id=esc(h.id);
+  return '<div class="card-row" style="margin-bottom:8px">'+
+    '<div><h3>'+esc(h.title)+'</h3><p>'+esc(h.reason)+'</p><div class="muted">建议：'+esc(h.recommendedDecision)+'</div></div>'+
+    '<div class="actions" style="flex-direction:column">'+
+      btn('打开','data-open-handoff="'+id+'"','primary')+
+      btn('解决','data-handoff-act="resolve" data-handoff-id="'+id+'"')+
+    '</div></div>';
+}
+
+function renderInbox(){
+  var items=arr(obj(commandCenter).handoffs);
+  var detail=selectedHandoffId?items.find(function(x){return x.id===selectedHandoffId}):null;
+  var root=document.getElementById('view-inbox');
+  root.innerHTML=
+    '<div class="page-head"><div><h1>待决定</h1><p>只显示需要你判断的事项，不是日志列表。</p></div><button class="btn" onclick="refreshAll()">刷新</button></div>'+
+    '<div class="grid two">'+
+      '<div class="list">'+(items.length?items.map(function(h){
+        var id=esc(h.id);
+        return '<div class="panel" style="padding:14px;cursor:pointer;border-color:'+(selectedHandoffId===h.id?'rgba(96,165,250,.45)':'')+'" data-open-handoff="'+id+'">'+
+          '<div class="section-title"><h3 style="margin:0">'+esc(h.title)+'</h3>'+pill(h.tone,h.severityLabel)+'</div>'+
+          '<p class="muted">'+esc(h.reason)+'</p></div>';
+      }).join(''):'<div class="empty">没有待处理决策</div>')+'</div>'+
+      '<div class="panel" id="handoffDetail">'+(detail?renderHandoffDetail(detail):'<div class="empty">选择左侧事项查看详情</div>')+'</div>'+
+    '</div>';
+  bindActions(root);
+}
+
+function renderHandoffDetail(h){
+  var id=esc(h.id);
+  return '<div class="section-title"><h2>'+esc(h.title)+'</h2>'+pill(h.tone,h.statusLabel)+'</div>'+
+    '<p><strong>原因</strong><br><span class="muted">'+esc(h.reason)+'</span></p>'+
+    '<p><strong>当前状态</strong><br><span class="muted">'+esc(h.workTitle||'—')+'</span></p>'+
+    '<p><strong>建议决定</strong><br><span class="muted">'+esc(h.recommendedDecision)+'</span></p>'+
+    '<p><strong>继续提示</strong><br><span class="muted mono" style="white-space:pre-wrap">'+esc(h.continuationPrompt||'')+'</span></p>'+
+    (arr(h.attemptedActions).length?'<p><strong>已尝试</strong><br><span class="muted">'+esc(h.attemptedActions.join(' · '))+'</span></p>':'')+
+    evidenceHtml(h.evidenceLabels)+
+    '<div class="actions">'+
+      btn('确认已知晓','data-handoff-act="ack" data-handoff-id="'+id+'"')+
+      btn('解决并记录','data-handoff-act="resolve" data-handoff-id="'+id+'"','primary')+
+      btn('忽略','data-handoff-act="dismiss" data-handoff-id="'+id+'"')+
+      btn('复制继续提示','data-copy="1" data-copy-text="'+esc(h.continuationPrompt||'')+'"')+
+      (h.advanced&&h.advanced.workId?btn('继续任务','data-open-work="'+esc(h.advanced.workId)+'"'):'')+
+    '</div>'+
+    advancedBlock(h.advanced);
+}
+
+function renderWork(){
+  var work=null;
+  if(selectedWorkId){
+    var all=[obj(commandCenter).currentWork].concat(arr(obj(commandCenter).recentWork));
+    work=all.find(function(w){return w&&w.id===selectedWorkId})||obj(commandCenter).currentWork;
+  } else {
+    work=obj(commandCenter).currentWork;
+  }
+  var recent=arr(obj(commandCenter).recentWork);
+  var root=document.getElementById('view-work');
+  root.innerHTML=
+    '<div class="page-head"><div><h1>任务详情</h1><p>用自然语言理解进度，不必关心内部 ID。</p></div></div>'+
+    renderWorkCard(work,'任务')+
+    '<div class="panel" style="margin-top:14px"><div class="section-title"><h2>最近任务</h2></div>'+
+      (recent.length?recent.map(function(w){
+        return '<div class="card-row" style="margin-bottom:8px"><div><h3>'+esc(w.title)+'</h3><div class="muted">'+esc(w.modeLabel)+' · '+esc(w.statusLabel)+'</div></div>'+
+          btn('打开','data-open-work="'+esc(w.id)+'"')+'</div>';
+      }).join(''):'<div class="empty">暂无任务记录</div>')+
+    '</div>';
+  bindActions(root);
+}
+
+function renderReadiness(){
+  var ready=obj(obj(commandCenter).readiness);
+  document.getElementById('view-readiness').innerHTML=
+    '<div class="page-head"><div><h1>系统状态</h1><p>用白话告诉你 repo-harness 是否可用。</p></div>'+
+      '<div class="actions"><button class="btn primary" onclick="diagnoseFirst()">诊断</button><button class="btn" onclick="repairDryRun()">预览修复</button></div></div>'+
+    '<div class="panel" style="margin-bottom:14px"><h2>'+esc(ready.headline||'')+'</h2><p class="muted">'+esc(ready.description||'')+'</p></div>'+
+    '<div class="grid cards">'+arr(ready.sections).map(function(s){
+      return '<div class="panel"><div class="section-title"><h3 style="margin:0">'+esc(s.title)+'</h3>'+pill(s.tone,s.statusLabel)+'</div><p class="muted">'+esc(s.detail)+'</p></div>';
+    }).join('')+'</div>';
+}
+
+function renderRepositories(){
+  var repos=arr(obj(commandCenter).repositories);
+  var root=document.getElementById('view-repositories');
+  root.innerHTML=
+    '<div class="page-head"><div><h1>仓库</h1><p>选择或注册本地仓库，不需要理解注册表内部字段。</p></div>'+
+      '<button class="btn primary" onclick="toggleAddRepo()">添加本地仓库</button></div>'+
+    '<div class="panel" id="repoAdd" style="display:none;margin-bottom:14px">'+
+      '<div class="row" style="display:grid;grid-template-columns:1.4fr .8fr auto;gap:10px">'+
+        '<input class="input" id="repoPath" placeholder="/Users/you/DevProjects/YourRepo">'+
+        '<input class="input" id="repoName" placeholder="显示名称（可选）">'+
+        '<button class="btn primary" onclick="registerRepo()">注册</button>'+
+      '</div></div>'+
+    '<div class="list">'+repos.map(function(r){
+      return '<div class="panel card-row"><div><h3>'+esc(r.name)+'</h3><div class="muted mono">'+esc(r.path)+'</div></div>'+
+        '<div class="actions">'+btn(r.current?'当前仓库':'设为当前','data-select-repo="'+esc(r.id)+'"',r.current?'primary':'')+'</div>'+
+        advancedBlock(r.advanced)+
+      '</div>';
+    }).join('')+'</div>';
+  bindActions(root);
+}
+
+function renderAdvanced(){
+  var root=document.getElementById('view-advanced');
+  root.innerHTML=
+    '<div class="page-head"><div><h1>高级诊断</h1><p>开发/排错视图。默认任务流请回到指挥中心。</p></div>'+
+      '<div class="actions"><button class="btn" onclick="loadAdvanced()">读取原始快照</button>'+btn('返回指挥中心','data-nav="home"')+'</div></div>'+
+    '<div class="panel"><pre class="mono" style="white-space:pre-wrap;font-size:12px;color:var(--muted)">'+esc(JSON.stringify(advancedRaw||lastFacade||{note:'点击“读取原始快照”'},null,2))+'</pre></div>';
+  bindNav(root);
+}
+
+function bindNav(root){
+  if(!root)return;
+  root.querySelectorAll('[data-nav]').forEach(function(el){
+    el.addEventListener('click',function(){switchView(el.getAttribute('data-nav'))});
+  });
+  bindActions(root);
+}
+
+function bindActions(root){
+  if(!root)return;
+  root.querySelectorAll('[data-work-act]').forEach(function(el){
+    el.addEventListener('click',function(ev){ev.stopPropagation();workAction(el.getAttribute('data-work-act'),el.getAttribute('data-work-id'))});
+  });
+  root.querySelectorAll('[data-open-work]').forEach(function(el){
+    el.addEventListener('click',function(ev){ev.stopPropagation();openWork(el.getAttribute('data-open-work'))});
+  });
+  root.querySelectorAll('[data-open-handoff]').forEach(function(el){
+    el.addEventListener('click',function(ev){ev.stopPropagation();openHandoff(el.getAttribute('data-open-handoff'))});
+  });
+  root.querySelectorAll('[data-handoff-act]').forEach(function(el){
+    el.addEventListener('click',function(ev){ev.stopPropagation();handoffAction(el.getAttribute('data-handoff-act'),el.getAttribute('data-handoff-id'))});
+  });
+  root.querySelectorAll('[data-select-repo]').forEach(function(el){
+    el.addEventListener('click',function(ev){ev.stopPropagation();selectRepo(el.getAttribute('data-select-repo'))});
+  });
+  root.querySelectorAll('[data-copy]').forEach(function(el){
+    el.addEventListener('click',function(ev){ev.stopPropagation();copyText(el.getAttribute('data-copy-text')||'')});
+  });
+}
+
+function renderAll(){
+  if(!commandCenter){
+    document.getElementById('view-home').innerHTML='<div class="panel"><h2>正在读取控制台状态</h2><p class="muted">如果长时间无响应，请刷新或打开高级诊断。</p><button class="btn" onclick="refreshAll()">重新载入</button></div>';
+    return;
+  }
+  try{
+    renderChrome();
+    renderHome();
+    renderInbox();
+    renderWork();
+    renderReadiness();
+    renderRepositories();
+    renderAdvanced();
+  }catch(e){
+    toast(e.message||String(e));
+  }
+}
+
+function openWork(id){rememberWork(id);switchView('work');refreshWorkDetail(id)}
+function openHandoff(id){selectedHandoffId=id;switchView('inbox');renderInbox()}
+function copyText(text){if(!text){toast('没有可复制内容');return}navigator.clipboard.writeText(text).then(function(){toast('已复制')}).catch(function(){toast('复制失败')})}
+function toggleAddRepo(){var el=document.getElementById('repoAdd');if(el)el.style.display=el.style.display==='none'?'block':'none'}
+
+function taskPayload(){
+  var objective=(document.getElementById('taskObjective')||{}).value||'';
+  var acceptance=((document.getElementById('taskAcceptance')||{}).value||'').split(/[;；\\n]/).map(function(s){return s.trim()}).filter(Boolean);
+  var paths=((document.getElementById('taskPaths')||{}).value||'').split(',').map(function(s){return s.trim()}).filter(Boolean);
+  var files=Number((document.getElementById('taskFiles')||{}).value||0)||undefined;
+  return {
+    objective:objective.trim(),
+    acceptanceCriteria:acceptance,
+    allowedPaths:paths,
+    expectedFiles:files,
+    scopeClear:true
+  };
+}
+
+function previewMode(){
+  var body=taskPayload();
+  if(!body.objective){toast('请先输入任务目标');return}
+  api('/api/console/mode-preview'+repoQuery(),{method:'POST',body:JSON.stringify(body)}).then(function(res){
+    modePreview=res.modePreview||res;
+    renderHome();
+    toast('已更新建议模式：'+(modePreview.label||''));
+  }).catch(function(e){toast(e.message)});
+}
+
+function startTask(){
+  var body=taskPayload();
+  if(!body.objective){toast('请先输入任务目标');return}
+  api('/api/console/work/start'+repoQuery(),{method:'POST',body:JSON.stringify(body)}).then(function(res){
+    lastFacade=res;
+    var data=obj(res.data);
+    if(data.work&&data.work.workId){rememberWork(data.work.workId)}
+    else if(data.work&&data.work.id){rememberWork(data.work.id)}
+    toast(res.summary||'任务已提交');
+    return refreshAll();
+  }).then(function(){if(selectedWorkId)switchView('work')}).catch(function(e){toast(e.message)});
+}
+
+function diagnoseFirst(){
+  api('/api/console/repair'+repoQuery(),{method:'POST',body:JSON.stringify({operation:'diagnose',dryRun:true})}).then(function(res){
+    lastFacade=res;toast(res.summary||'诊断完成');switchView('readiness');
+  }).catch(function(e){toast(e.message)});
+}
+function repairDryRun(){
+  api('/api/console/repair'+repoQuery(),{method:'POST',body:JSON.stringify({operation:'repair',dryRun:true})}).then(function(res){
+    lastFacade=res;advancedRaw=res;toast(res.summary||'已生成修复预览');switchView('advanced');
+  }).catch(function(e){toast(e.message)});
+}
+
+function workAction(kind,workId){
+  rememberWork(workId);
+  if(kind==='continue')return postWork('/api/console/work/continue',{workId:workId});
+  if(kind==='verify')return postWork('/api/console/work/verify',{workId:workId});
+  if(kind==='finalize')return postWork('/api/console/work/finalize',{workId:workId});
+  if(kind==='stop')return postWork('/api/console/work/stop',{workId:workId,reason:'stopped from console'});
+  if(kind==='repair')return api('/api/console/repair'+repoQuery(),{method:'POST',body:JSON.stringify({operation:'diagnose',dryRun:true,workId:workId})}).then(function(res){lastFacade=res;toast(res.summary||'诊断完成')}).catch(function(e){toast(e.message)});
+  if(kind==='delegate-codex')return postWork('/api/console/work/delegate',{workId:workId,target:'codex',available:true});
+  if(kind==='delegate-grok')return postWork('/api/console/work/delegate',{workId:workId,target:'grok'});
+}
+function postWork(path,body){
+  return api(path+repoQuery(),{method:'POST',body:JSON.stringify(body)}).then(function(res){
+    lastFacade=res;toast(res.summary||'已更新');return refreshAll();
+  }).catch(function(e){toast(e.message)});
+}
+function refreshWorkDetail(id){
+  api('/api/console/work/'+encodeURIComponent(id)+repoQuery()).then(function(res){
+    if(res.work){
+      // merge into command center recent
+      commandCenter=commandCenter||{};
+      commandCenter.currentWork=res.work;
+      renderWork();
+    }
+  }).catch(function(){});
+}
+
+function handoffAction(kind,id){
+  var body={};
+  if(kind==='resolve'){
+    var decision=prompt('记录你的决定','继续执行');
+    if(decision==null)return;
+    body={decision:decision,resolver:'user'};
+  }
+  if(kind==='dismiss'){
+    body={decision:'dismissed',resolver:'user'};
+  }
+  api('/api/console/inbox/'+encodeURIComponent(id)+'/'+kind+repoQuery(),{method:'POST',body:JSON.stringify(body)}).then(function(){
+    toast(kind==='resolve'?'已解决':kind==='dismiss'?'已忽略':'已确认');
+    selectedHandoffId='';
+    return refreshAll();
+  }).catch(function(e){toast(e.message)});
+}
+
+function selectRepo(id){
+  rememberRepo(id);
+  toast('已切换仓库');
+  refreshAll().then(function(){switchView('home')});
+}
+function registerRepo(){
+  var path=(document.getElementById('repoPath')||{}).value||'';
+  var name=(document.getElementById('repoName')||{}).value||'';
+  if(!path.trim()){toast('请输入仓库路径');return}
+  api('/api/repositories/register',{method:'POST',body:JSON.stringify({path:path.trim(),displayName:name.trim()||undefined})}).then(function(res){
+    var repo=obj(res.repository);if(repo.repoId)rememberRepo(repo.repoId);
+    toast('仓库已注册');return refreshAll();
+  }).catch(function(e){toast(e.message)});
+}
+function loadAdvanced(){
+  api('/api/console/advanced'+repoQuery()).then(function(res){advancedRaw=res;renderAdvanced();toast('原始快照已刷新')}).catch(function(e){toast(e.message)});
+}
+
+function refreshAll(){
+  return api('/api/console/command-center'+repoQuery()).then(function(res){
+    commandCenter=res;
+    var repo=obj(res.currentRepository);
+    if(repo.id)rememberRepo(repo.id);
+    if(!selectedWorkId&&res.currentWork&&res.currentWork.id)rememberWork(res.currentWork.id);
+    renderAll();
+  }).catch(function(e){
+    commandCenter={
+      readiness:{state:'blocked',label:'读取失败',headline:'控制台不可用',description:e.message||'本地 API 暂时不可用',connectorLabel:'未知',connectorTone:'red',pendingHandoffCount:0,sections:[]},
+      handoffs:[],recentWork:[],repositories:[],warnings:[e.message||'读取失败'],modePreviewDefault:{label:'—',explanation:''}
+    };
+    renderAll();
+    toast(e.message||'读取失败');
+  });
+}
+
+window.onerror=function(message){toast(String(message));return false};
+refreshAll();
 </script>
 </body>
 </html>`;

@@ -1308,10 +1308,10 @@ printf '%s\n' '{"type":"turn.completed"}'
     }).then((response) => response.json());
     expect(finalized.status).toBe("finalized");
     const dashboard = await fetch(handle.url).then((response) => response.text());
-    expect(dashboard).toContain("仓库中心");
-    expect(dashboard).toContain("待处理");
-    expect(dashboard).toContain("执行任务");
-    expect(dashboard).toContain("能力中心");
+    expect(dashboard).toContain("执行助手控制台");
+    expect(dashboard).toContain("指挥中心");
+    expect(dashboard).toContain("待决定");
+    expect(dashboard).toContain("当前任务");
     expect(dashboard).toContain("selectRepo");
   });
 
@@ -1379,8 +1379,9 @@ printf '%s\n' '{"type":"turn.completed"}'
     const dashboard = await dashboardResponse.text();
     expect(dashboard).not.toContain(handle.token);
     expect(dashboard).not.toContain("?token=");
-    expect(dashboard).toContain("repo-harness · 控制台");
-    expect(dashboard).toContain("执行任务");
+    expect(dashboard).toContain("repo-harness · 执行助手控制台");
+    expect(dashboard).toContain("指挥中心");
     expect(dashboard).toContain("正在读取控制台状态");
+    expect(dashboard).toContain("/api/console/command-center");
   });
 });

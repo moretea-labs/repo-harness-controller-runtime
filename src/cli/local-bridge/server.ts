@@ -76,6 +76,27 @@ import {
 import { localBridgeDashboardHtml } from "./dashboard";
 import type { LocalBridgeJobRequest } from "./types";
 import {
+  ackConsoleHandoff,
+  buildAdvancedDiagnosticsEnvelope,
+  buildCommandCenter,
+  buildSystemReadiness,
+  continueConsoleWork,
+  delegateConsoleWork,
+  dismissConsoleHandoff,
+  finalizeConsoleWork,
+  getConsoleHandoff,
+  getConsoleWork,
+  listConsoleHandoffs,
+  listConsoleWork,
+  mapRepositoryCard,
+  previewExecutionMode,
+  repairConsole,
+  resolveConsoleHandoff,
+  startConsoleWork,
+  stopConsoleWork,
+  verifyConsoleWork,
+} from "./facade-api";
+import {
   CONTROLLER_SCHEMA_VERSION,
   CONTROLLER_TOOL_SURFACE,
   CONTROLLER_TOOL_SURFACE_VERSION,
@@ -1038,6 +1059,286 @@ export async function startLocalBridgeServer(
   });
 
   app.use("/api", requireToken);
+
+  const consoleCtx = (request: Request) => {
+    const repository = requestRepositorySelection(request, options, controllerHome);
+    return { controllerHome, repository };
+  };
+
+  app.get("/api/console/command-center", (request, response) => {
+    try {
+      const ctx = consoleCtx(request);
+      const repositories = userFacingRepositories(ctx.repository.canonicalRoot, controllerHome, ctx.repository.repoId)
+        .map((entry) => {
+          const record = loadRepositoryRegistry(controllerHome).repositories.find((item) => item.repoId === entry.id);
+          if (!record) {
+            return {
+              id: entry.id,
+              name: entry.name,
+              path: entry.path,
+              statusLabel: entry.statusLabel,
+              tone: entry.current ? "green" as const : "blue" as const,
+              current: entry.current,
+            };
+          }
+          return mapRepositoryCard(record, entry.current);
+        });
+      response.json(buildCommandCenter(ctx, repositories));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.get("/api/console/readiness", (request, response) => {
+    try {
+      response.json(buildSystemReadiness(consoleCtx(request)));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.post("/api/console/mode-preview", (request, response) => {
+    try {
+      const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
+        ? request.body as Record<string, unknown>
+        : {};
+      const modePreview = previewExecutionMode({
+        objective: queryString(body.objective) ?? "",
+        expectedFiles: typeof body.expectedFiles === "number" ? body.expectedFiles : undefined,
+        expectedChangedLines: typeof body.expectedChangedLines === "number" ? body.expectedChangedLines : undefined,
+        scopeClear: body.scopeClear !== false,
+        requiresInvestigation: body.requiresInvestigation === true,
+        requiresLongRunningChecks: body.requiresLongRunningChecks === true,
+        requiresWorker: body.requiresWorker === true,
+        requiresApproval: body.requiresApproval === true,
+        destructive: body.destructive === true,
+      });
+      response.json({ modePreview });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.get("/api/console/inbox", (request, response) => {
+    try {
+      const status = queryString(request.query.status) === "all" ? "all"
+        : queryString(request.query.status) === "active" ? "active"
+          : "pending";
+      response.json({ items: listConsoleHandoffs(consoleCtx(request), status) });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.get("/api/console/inbox/:handoffId", (request, response) => {
+    try {
+      const item = getConsoleHandoff(consoleCtx(request), String(request.params.handoffId ?? ""));
+      if (!item) {
+        response.status(404).json({ error: "handoff not found" });
+        return;
+      }
+      response.json({ item });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.post("/api/console/inbox/:handoffId/ack", (request, response) => {
+    try {
+      response.json({ item: ackConsoleHandoff(consoleCtx(request), String(request.params.handoffId ?? "")) });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.post("/api/console/inbox/:handoffId/resolve", (request, response) => {
+    try {
+      const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
+        ? request.body as Record<string, unknown>
+        : {};
+      response.json({
+        item: resolveConsoleHandoff(
+          consoleCtx(request),
+          String(request.params.handoffId ?? ""),
+          queryString(body.decision) ?? "resolved",
+          queryString(body.resolver) ?? "user",
+        ),
+      });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.post("/api/console/inbox/:handoffId/dismiss", (request, response) => {
+    try {
+      const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
+        ? request.body as Record<string, unknown>
+        : {};
+      response.json({
+        item: dismissConsoleHandoff(
+          consoleCtx(request),
+          String(request.params.handoffId ?? ""),
+          queryString(body.decision) ?? "dismissed",
+          queryString(body.resolver) ?? "user",
+        ),
+      });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.get("/api/console/work", (request, response) => {
+    try {
+      const status = queryString(request.query.status) === "all" ? "all" : "active";
+      response.json({ items: listConsoleWork(consoleCtx(request), status) });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.get("/api/console/work/:workId", (request, response) => {
+    try {
+      const work = getConsoleWork(consoleCtx(request), String(request.params.workId ?? ""));
+      if (!work) {
+        response.status(404).json({ error: "work not found" });
+        return;
+      }
+      response.json({ work });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.post("/api/console/work/start", (request, response) => {
+    try {
+      const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
+        ? request.body as Record<string, unknown>
+        : {};
+      const result = startConsoleWork(consoleCtx(request), {
+        objective: queryString(body.objective) ?? "",
+        acceptanceCriteria: Array.isArray(body.acceptanceCriteria) ? body.acceptanceCriteria.map(String) : undefined,
+        allowedPaths: Array.isArray(body.allowedPaths) ? body.allowedPaths.map(String) : undefined,
+        forbiddenPaths: Array.isArray(body.forbiddenPaths) ? body.forbiddenPaths.map(String) : undefined,
+        expectedFiles: typeof body.expectedFiles === "number" ? body.expectedFiles : undefined,
+        expectedChangedLines: typeof body.expectedChangedLines === "number" ? body.expectedChangedLines : undefined,
+        scopeClear: body.scopeClear !== false,
+        requiresInvestigation: body.requiresInvestigation === true,
+        requiresLongRunningChecks: body.requiresLongRunningChecks === true,
+        requiresWorker: body.requiresWorker === true,
+        requiresApproval: body.requiresApproval === true,
+        destructive: body.destructive === true,
+        checkIds: Array.isArray(body.checkIds) ? body.checkIds.map(String) : undefined,
+      });
+      response.status(result.status === "blocked" || result.status === "failed" ? 409 : 200).json(result);
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.post("/api/console/work/continue", (request, response) => {
+    try {
+      const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
+        ? request.body as Record<string, unknown>
+        : {};
+      const result = continueConsoleWork(consoleCtx(request), queryString(body.workId) ?? "", queryString(body.note));
+      response.status(result.status === "not_found" ? 404 : result.status === "blocked" || result.status === "failed" ? 409 : 200).json(result);
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.post("/api/console/work/verify", (request, response) => {
+    try {
+      const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
+        ? request.body as Record<string, unknown>
+        : {};
+      const result = verifyConsoleWork(consoleCtx(request), {
+        workId: queryString(body.workId) ?? "",
+        checkId: queryString(body.checkId),
+        simulate: body.simulate === true,
+        checkFailed: body.checkFailed === true,
+        infrastructureFailed: body.infrastructureFailed === true,
+      });
+      response.status(result.status === "not_found" ? 404 : result.status === "failed" ? 409 : 200).json(result);
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.post("/api/console/work/finalize", (request, response) => {
+    try {
+      const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
+        ? request.body as Record<string, unknown>
+        : {};
+      const result = finalizeConsoleWork(consoleCtx(request), queryString(body.workId) ?? "");
+      response.status(result.status === "not_found" ? 404 : result.status === "failed" || result.status === "blocked" ? 409 : 200).json(result);
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.post("/api/console/work/stop", (request, response) => {
+    try {
+      const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
+        ? request.body as Record<string, unknown>
+        : {};
+      const result = stopConsoleWork(consoleCtx(request), queryString(body.workId) ?? "", queryString(body.reason));
+      response.status(result.status === "not_found" ? 404 : 200).json(result);
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.post("/api/console/work/delegate", (request, response) => {
+    try {
+      const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
+        ? request.body as Record<string, unknown>
+        : {};
+      const target = queryString(body.target);
+      const result = delegateConsoleWork(consoleCtx(request), {
+        workId: queryString(body.workId),
+        target: target === "grok" || target === "claude" || target === "codex" ? target : "codex",
+        objective: queryString(body.objective),
+        available: typeof body.available === "boolean" ? body.available : undefined,
+      });
+      response.status(result.status === "blocked" ? 409 : 200).json(result);
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.post("/api/console/repair", (request, response) => {
+    try {
+      const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
+        ? request.body as Record<string, unknown>
+        : {};
+      const operation = queryString(body.operation);
+      const result = repairConsole(consoleCtx(request), {
+        operation: operation === "repair" || operation === "verify" || operation === "handoff" || operation === "diagnose"
+          ? operation
+          : "diagnose",
+        dryRun: body.dryRun === undefined ? true : body.dryRun === true,
+        approvalConfirmed: body.approvalConfirmed === true,
+        destructive: body.destructive === true,
+        processKillOrRestart: body.processKillOrRestart === true,
+        workId: queryString(body.workId),
+      });
+      response.status(result.status === "approval_required" || result.status === "blocked" ? 409 : 200).json(result);
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.get("/api/console/advanced", (request, response) => {
+    try {
+      const ctx = consoleCtx(request);
+      const raw = cachedLocalControllerSnapshot(ctx.repository.canonicalRoot);
+      response.json(buildAdvancedDiagnosticsEnvelope(raw, ctx));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
   app.get("/api/snapshot", (request, response) => {
     try {
       response.json(cachedLocalControllerSnapshot(requestRepositoryRoot(request, options, controllerHome)));
