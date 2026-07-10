@@ -4,16 +4,19 @@ import { promisify } from 'util';
 import { getRepository } from '../../../cli/repositories/registry';
 import { createExecutionJob, findExecutionJob, listActiveExecutionJobs, listExecutionJobs } from '../../execution/jobs/store';
 import { rebuildRepositoryProjection } from '../../projections/materialized-view';
+import { previewAutomaticRuntimeMaintenance } from '../../recovery/maintenance-executor';
 import { listCandidateFindings } from '../findings/store';
 import {
   getOccurrence,
   listActiveOccurrences,
   listOccurrences,
+  recordScheduleOccurrenceHandoff,
   listSchedules,
   saveOccurrence,
   saveSchedule,
   saveScheduleDecision,
 } from './store';
+import { applyScheduleFailure } from './settlement';
 import type {
   RepositorySchedule,
   ScheduleDecisionType,
@@ -22,6 +25,7 @@ import type {
 } from './types';
 
 const execFileAsync = promisify(execFile);
+const LIVE_MAINTENANCE_OPERATION = 'runtime_maintenance_apply';
 
 function normalizedWindow(minutes: number, at = Date.now()): string {
   return String(Math.floor(at / (Math.max(1, minutes) * 60_000)));
@@ -167,7 +171,11 @@ async function stopReason(controllerHome: string, schedule: RepositorySchedule):
     if (recentInfrastructureFailure) return `External or infrastructure blocker detected from Job ${recentInfrastructureFailure.jobId}.`;
   }
   if (projection.activeJobs.some((job) => job.status === 'waiting_for_release_barrier')) return 'Repository is waiting on a release barrier.';
-  if (schedule.action.resourceClaims?.some((claim) => claim.mode !== 'read') && await workspaceDirty(controllerHome, schedule.repoId)) return 'Workspace is dirty; automatic write occurrence was suppressed.';
+  if (schedule.action.operation !== LIVE_MAINTENANCE_OPERATION
+    && schedule.action.resourceClaims?.some((claim) => claim.mode !== 'read')
+    && await workspaceDirty(controllerHome, schedule.repoId)) {
+    return 'Workspace is dirty; automatic write occurrence was suppressed.';
+  }
   return undefined;
 }
 
@@ -182,6 +190,14 @@ function dailyRuntimeMinutes(controllerHome: string, occurrences: ScheduleOccurr
       const finished = Date.parse(job.finishedAt ?? new Date().toISOString());
       return total + Math.max(1, Math.ceil(Math.max(0, finished - started) / 60_000));
     }, 0);
+}
+
+function occurrenceDecisionEvidence(extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(extra).filter(([, value]) => value !== undefined));
+}
+
+function isLiveMaintenanceSchedule(schedule: RepositorySchedule): boolean {
+  return schedule.action.operation === LIVE_MAINTENANCE_OPERATION;
 }
 
 function decideOccurrence(
@@ -242,7 +258,30 @@ export async function evaluateSchedule(
 
   const recent = listOccurrences(controllerHome, schedule.repoId, schedule.scheduleId, 1000);
   const stop = await stopReason(controllerHome, schedule);
-  if (stop) return decideOccurrence(controllerHome, schedule, occurrence, 'stopped', 'skipped', stop);
+  if (stop) {
+    const stopped = decideOccurrence(controllerHome, schedule, occurrence, 'stopped', 'skipped', stop);
+    if (!isLiveMaintenanceSchedule(schedule)) return stopped;
+    const failed = applyScheduleFailure(controllerHome, schedule.scheduleId, schedule.repoId, occurrence.occurrenceId, {
+      outcome: 'skipped',
+      decision: 'stopped',
+      reason: stop,
+      countFailure: false,
+      pauseReason: stop,
+      handoff: {
+        title: `Scheduled maintenance occurrence ${occurrence.occurrenceId} stopped`,
+        summary: 'A live maintenance occurrence was blocked by an explicit schedule stop condition and requires review before automation resumes.',
+        reason: stop,
+        creationReason: 'ambiguous_outcome',
+        blockingDecision: 'Review the stop condition and decide whether automatic maintenance should stay paused.',
+        recommendedDecision: 'Resolve the stop condition, then explicitly re-enable or retrigger the maintenance schedule.',
+        recommendedPrompt: `Review maintenance schedule ${schedule.scheduleId} for repo ${schedule.repoId}, inspect stop condition ${stop}, and decide whether to resume the schedule.`,
+        statusSummary: 'Scheduled maintenance occurrence stopped before dispatch.',
+        blockedBy: ['schedule_stop_condition'],
+        attemptedActions: [`schedule:${schedule.scheduleId}`, `operation:${schedule.action.operation}`],
+      },
+    });
+    return failed.occurrence ?? stopped;
+  }
 
   const active = listActiveOccurrences(controllerHome, schedule.repoId, schedule.scheduleId)
     .filter((entry) => entry.occurrenceId !== occurrence.occurrenceId);
@@ -263,8 +302,99 @@ export async function evaluateSchedule(
     return decideOccurrence(controllerHome, schedule, occurrence, 'budget_exhausted', 'skipped', 'Daily schedule budget exhausted.');
   }
   if (schedule.policy.shadowMode) {
+    if (isLiveMaintenanceSchedule(schedule)) {
+      const repository = getRepository(schedule.repoId, controllerHome, { includeRemoved: true });
+      const preview = previewAutomaticRuntimeMaintenance(repository, controllerHome, schedule.action.arguments);
+      if (!preview.allowed) {
+        const decision = preview.blockedPermanently ? 'operation_blocked' : 'maintenance_not_ready';
+        const blocked = decideOccurrence(controllerHome, schedule, occurrence, decision, 'skipped', preview.blockedReason, occurrenceDecisionEvidence({
+          actionId: preview.actionId,
+          safeCandidates: preview.selectedCandidateIds.length,
+          typedSafeCandidates: preview.selectedTypedCandidateIds.length,
+        }));
+        const failed = applyScheduleFailure(controllerHome, schedule.scheduleId, schedule.repoId, occurrence.occurrenceId, {
+          outcome: 'skipped',
+          decision,
+          reason: preview.blockedReason ?? 'Automatic maintenance preview blocked the occurrence.',
+          countFailure: !preview.blockedPermanently,
+          pauseReason: preview.blockedPermanently ? preview.blockedReason : undefined,
+          handoff: {
+            title: `Scheduled maintenance occurrence ${occurrence.occurrenceId} blocked`,
+            summary: 'A bounded live maintenance occurrence was blocked before dispatch and requires a human decision.',
+            reason: preview.blockedReason ?? 'Automatic maintenance preview blocked the occurrence.',
+            creationReason: preview.blockedPermanently ? 'missing_authorization' : 'ambiguous_outcome',
+            blockingDecision: preview.blockedPermanently
+              ? 'Fix the schedule operation or authorization before automatic maintenance can resume.'
+              : 'Inspect runtime maintenance readiness before allowing another unattended attempt.',
+            recommendedDecision: preview.blockedPermanently
+              ? 'Correct the automatic maintenance configuration and re-enable the schedule deliberately.'
+              : 'Review the maintenance preview, resolve the blocker, and then retrigger the schedule intentionally.',
+            recommendedPrompt: `Review blocked maintenance occurrence ${occurrence.occurrenceId} for schedule ${schedule.scheduleId}. Determine whether the schedule configuration or runtime maintenance readiness should be corrected before retrying.`,
+            statusSummary: 'Scheduled maintenance occurrence blocked before dispatch.',
+            blockedBy: [decision],
+            attemptedActions: [`schedule:${schedule.scheduleId}`, `operation:${schedule.action.operation}`],
+          },
+        });
+        return failed.occurrence ?? blocked;
+      }
+      if (preview.noOp) {
+        return decideOccurrence(controllerHome, schedule, occurrence, 'nothing_to_do', 'skipped', 'Automatic maintenance preview found nothing safe to repair.', occurrenceDecisionEvidence({
+          actionId: preview.actionId,
+          readyForExecution: preview.status.readyForExecution,
+        }));
+      }
+      saveSchedule(controllerHome, { ...schedule, lastTriggeredAt: timestamp, lastOccurrenceId: occurrenceId });
+      return decideOccurrence(controllerHome, schedule, occurrence, 'would_execute', 'shadowed', 'Shadow mode records the live maintenance decision without applying it.', occurrenceDecisionEvidence({
+        actionId: preview.actionId,
+        safeCandidates: preview.selectedCandidateIds.length,
+        typedSafeCandidates: preview.selectedTypedCandidateIds.length,
+      }));
+    }
     saveSchedule(controllerHome, { ...schedule, lastTriggeredAt: timestamp, lastOccurrenceId: occurrenceId });
     return decideOccurrence(controllerHome, schedule, occurrence, 'would_execute', 'shadowed', 'Shadow mode records the decision without modifying the repository.', due.evidence);
+  }
+
+  if (isLiveMaintenanceSchedule(schedule)) {
+    const repository = getRepository(schedule.repoId, controllerHome, { includeRemoved: true });
+    const preview = previewAutomaticRuntimeMaintenance(repository, controllerHome, schedule.action.arguments);
+    if (!preview.allowed) {
+      const decision = preview.blockedPermanently ? 'operation_blocked' : 'maintenance_not_ready';
+      const blocked = decideOccurrence(controllerHome, schedule, occurrence, decision, 'skipped', preview.blockedReason, occurrenceDecisionEvidence({
+        actionId: preview.actionId,
+        safeCandidates: preview.selectedCandidateIds.length,
+        typedSafeCandidates: preview.selectedTypedCandidateIds.length,
+      }));
+      const failed = applyScheduleFailure(controllerHome, schedule.scheduleId, schedule.repoId, occurrence.occurrenceId, {
+        outcome: 'skipped',
+        decision,
+        reason: preview.blockedReason ?? 'Automatic maintenance preview blocked the occurrence.',
+        countFailure: !preview.blockedPermanently,
+        pauseReason: preview.blockedPermanently ? preview.blockedReason : undefined,
+        handoff: {
+          title: `Scheduled maintenance occurrence ${occurrence.occurrenceId} blocked`,
+          summary: 'A bounded live maintenance occurrence was blocked before dispatch and requires a human decision.',
+          reason: preview.blockedReason ?? 'Automatic maintenance preview blocked the occurrence.',
+          creationReason: preview.blockedPermanently ? 'missing_authorization' : 'ambiguous_outcome',
+          blockingDecision: preview.blockedPermanently
+            ? 'Fix the schedule operation or authorization before automatic maintenance can resume.'
+            : 'Inspect runtime maintenance readiness before allowing another unattended attempt.',
+          recommendedDecision: preview.blockedPermanently
+            ? 'Correct the automatic maintenance configuration and re-enable the schedule deliberately.'
+            : 'Review the maintenance preview, resolve the blocker, and then retrigger the schedule intentionally.',
+          recommendedPrompt: `Review blocked maintenance occurrence ${occurrence.occurrenceId} for schedule ${schedule.scheduleId}. Determine whether the schedule configuration or runtime maintenance readiness should be corrected before retrying.`,
+          statusSummary: 'Scheduled maintenance occurrence blocked before dispatch.',
+          blockedBy: [decision],
+          attemptedActions: [`schedule:${schedule.scheduleId}`, `operation:${schedule.action.operation}`],
+        },
+      });
+      return failed.occurrence ?? blocked;
+    }
+    if (preview.noOp) {
+      return decideOccurrence(controllerHome, schedule, occurrence, 'nothing_to_do', 'skipped', 'Automatic maintenance preview found nothing safe to repair.', occurrenceDecisionEvidence({
+        actionId: preview.actionId,
+        readyForExecution: preview.status.readyForExecution,
+      }));
+    }
   }
 
   const requestId = `${schedule.scheduleId}:${schedule.repoId}:${key}`;
