@@ -1,6 +1,7 @@
 import { listAgentJobs } from "../agent-jobs/job-manager";
 import type { AgentJobMeta } from "../agent-jobs/types";
 import {
+  acceptVerifiedTask,
   archiveIssue,
   getIssue,
   listIssues,
@@ -10,6 +11,7 @@ import {
 } from "./issue-store";
 import { clearCurrentIssue, loadControllerProjectState, saveControllerProjectState } from "./project-state";
 import type { ControllerIssue, ControllerTask } from "./types";
+import { taskExecutionPolicy } from "./execution-policy";
 import { readIssueRunEvidence } from "./run-evidence";
 import { resolveEffectiveTaskState, resolveIssueTaskStates, resolveTaskDependencies, type EffectiveTaskState } from "./task-status-resolver";
 import { tryAppendControllerWorklogEvent } from "./worklog";
@@ -53,6 +55,7 @@ export interface ExecutionQueueItem {
 export interface ProjectGovernanceSnapshot {
   generatedAt: string;
   health: "healthy" | "attention" | "blocked";
+  status: GovernanceStatusSummary;
   currentIssueId?: string;
   currentIssueTitle?: string;
   activeIssueCount: number;
@@ -68,9 +71,25 @@ export interface ReconcileResult {
   governance: ProjectGovernanceSnapshot;
 }
 
+export type GovernanceStatusKind =
+  | "idle"
+  | "ready"
+  | "needs_review"
+  | "needs_retry"
+  | "blocked"
+  | "archive_ready";
+
+export interface GovernanceStatusSummary {
+  kind: GovernanceStatusKind;
+  label: string;
+  reason: string;
+  issueId?: string;
+  taskId?: string;
+}
+
 const ISSUE_TERMINAL = new Set(["done", "cancelled"]);
 const TASK_TERMINAL = new Set(["done", "cancelled", "superseded"]);
-const RUN_FAILED = new Set(["failed", "unknown"]);
+const GOVERNANCE_RETRY_BLOCKER_NOTE = "explicit retry is required and no new Run was created";
 
 function findingId(code: string, issueId?: string, taskId?: string): string {
   return [code, issueId, taskId].filter(Boolean).join(":");
@@ -90,6 +109,84 @@ function normalizedTitle(value: string): string {
 
 function activeIssues(issues: ControllerIssue[]): ControllerIssue[] {
   return issues.filter((issue) => !issue.archivedAt && !ISSUE_TERMINAL.has(issue.status));
+}
+
+function governanceStatusSummary(input: {
+  activeIssueCount: number;
+  executionQueue: ExecutionQueueItem[];
+  findings: GovernanceFinding[];
+}): GovernanceStatusSummary {
+  const blocked = input.findings.find((entry) => entry.severity === "critical");
+  if (blocked) {
+    return {
+      kind: "blocked",
+      label: "Blocked",
+      reason: blocked.message,
+      issueId: blocked.issueId,
+      taskId: blocked.taskId,
+    };
+  }
+
+  const review = input.findings.find((entry) => ["TASK_REVIEW_PENDING", "TASK_ACCEPTANCE_PENDING"].includes(entry.code));
+  if (review) {
+    return {
+      kind: "needs_review",
+      label: "Needs review",
+      reason: review.message,
+      issueId: review.issueId,
+      taskId: review.taskId,
+    };
+  }
+
+  const retry = input.findings.find((entry) => entry.code === "FAILED_RUN_BLOCKED_TASK");
+  if (retry) {
+    return {
+      kind: "needs_retry",
+      label: "Needs retry decision",
+      reason: retry.message,
+      issueId: retry.issueId,
+      taskId: retry.taskId,
+    };
+  }
+
+  const ready = input.executionQueue.find((entry) => entry.action === "launch");
+  if (ready) {
+    return {
+      kind: "ready",
+      label: "Ready to dispatch",
+      reason: `${ready.issueId}/${ready.taskId} can be launched without additional governance repair.`,
+      issueId: ready.issueId,
+      taskId: ready.taskId,
+    };
+  }
+
+  const archiveReady = input.findings.find((entry) => entry.code === "TERMINAL_ISSUE_NOT_ARCHIVED");
+  if (archiveReady) {
+    return {
+      kind: "archive_ready",
+      label: "Archive ready",
+      reason: archiveReady.message,
+      issueId: archiveReady.issueId,
+    };
+  }
+
+  return {
+    kind: "idle",
+    label: input.activeIssueCount > 0 ? "No immediate action" : "No active issues",
+    reason: input.activeIssueCount > 0
+      ? "No review, retry, blocked, or dispatchable task needs immediate governance action."
+      : "No active controller issues remain in the current workspace.",
+  };
+}
+
+function hasGovernanceRetryBlocker(task: ControllerTask): boolean {
+  return task.notes.some((note) => note.includes(GOVERNANCE_RETRY_BLOCKER_NOTE));
+}
+
+function shouldAutoAcceptVerifiedTask(task: ControllerTask): boolean {
+  if (task.status !== "verified" || !task.verification) return false;
+  const policy = taskExecutionPolicy(task);
+  return policy.autoCompleteAfterSuccessfulRun && !policy.requiresHumanAcceptance;
 }
 
 function taskQueueItem(issue: ControllerIssue, task: ControllerTask, state: EffectiveTaskState): ExecutionQueueItem | undefined {
@@ -335,6 +432,7 @@ export function inspectProjectGovernance(repoRoot: string): ProjectGovernanceSna
   return {
     generatedAt: new Date().toISOString(),
     health,
+    status: governanceStatusSummary({ activeIssueCount: active.length, executionQueue, findings }),
     currentIssueId: state.currentIssueId,
     currentIssueTitle: focus?.title,
     activeIssueCount: active.length,
@@ -379,6 +477,18 @@ export function reconcileProjectGovernance(repoRoot: string): ReconcileResult {
           note: `${latestRunId} succeeded; Task moved to review by explicit governance reconciliation.`,
         });
         changes.push({ issueId: issue.id, taskId: task.id, action: "review_after_run", summary: `Moved ${task.id} to review after succeeded Run.` });
+      } else if (
+        latestRunId &&
+        latestRunStatus === "succeeded" &&
+        task.status === "blocked" &&
+        hasGovernanceRetryBlocker(task)
+      ) {
+        updateTask(repoRoot, issue.id, task.id, {
+          status: "review",
+          transition: "run_sync",
+          note: `${latestRunId} succeeded after an earlier retry-required failure; stale governance blocker was cleared and the Task returned to review.`,
+        });
+        changes.push({ issueId: issue.id, taskId: task.id, action: "clear_stale_failed_run_blocker", summary: `Returned ${task.id} to review after a later succeeded Run superseded an older retry blocker.` });
       } else if (latestRunId && latestRunStatus && ["failed", "unknown", "cancelled"].includes(latestRunStatus) && ["backlog", "analysis", "planned", "ready", "running", "launch_blocked"].includes(task.status)) {
         updateTask(repoRoot, issue.id, task.id, {
           status: "blocked",
@@ -386,6 +496,10 @@ export function reconcileProjectGovernance(repoRoot: string): ReconcileResult {
           note: `${latestRunId} remains recorded as ${latestRunStatus}; explicit retry is required and no new Run was created.`,
         });
         changes.push({ issueId: issue.id, taskId: task.id, action: "block_after_run", summary: `Blocked ${task.id} after ${latestRunStatus} Run; explicit retry required.` });
+      }
+      if (shouldAutoAcceptVerifiedTask(task)) {
+        acceptVerifiedTask(repoRoot, issue.id, task.id, "Accepted during governance reconciliation because policy auto-completes verified work for this Task.");
+        changes.push({ issueId: issue.id, taskId: task.id, action: "auto_accept_verified_task", summary: `Closed ${task.id} because existing verification already satisfies the current auto-complete policy.` });
       }
     }
     const refreshed = getIssue(repoRoot, issue.id);
