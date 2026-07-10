@@ -98,8 +98,9 @@ export interface AgentJobMeta {
   autoIntegrationError?: string;
   worktreeCleanedAt?: string;
   diffArtifactPath?: string;
-  changeOutcome?: "changed" | "no_change";
+  changeOutcome?: "changed" | "no_change" | "already_integrated";
   changedFiles?: string[];
+  integrationReviewPath?: string;
   terminationReason?: "timeout" | "cancelled" | "signal" | "spawn_error";
   cancellationRequestedAt?: string;
   cancellationPids?: number[];

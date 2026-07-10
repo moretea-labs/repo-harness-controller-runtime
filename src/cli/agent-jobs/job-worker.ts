@@ -779,9 +779,12 @@ if (ok && config.autoIntegrate && finalMeta.executionMode === "worktree") {
       assertOwnership();
       event(
         "run_auto_integrated",
-        `Automatically integrated ${integrated.changedPaths.length} changed path(s).`,
+        integrated.changeOutcome === "already_integrated"
+          ? `Detected ${integrated.changedPaths.length} changed path(s) already integrated into the main workspace.`
+          : `Automatically integrated ${integrated.changedPaths.length} changed path(s).`,
         {
           changedPaths: integrated.changedPaths,
+          changeOutcome: integrated.changeOutcome,
           sessionId: integrated.session.sessionId,
         },
       );
@@ -794,7 +797,7 @@ if (ok && config.autoIntegrate && finalMeta.executionMode === "worktree") {
       ) as AgentJobMeta;
       const completedAt = new Date().toISOString();
       integratedMeta.status = "succeeded";
-      integratedMeta.changeOutcome = "changed";
+      integratedMeta.changeOutcome = integrated.changeOutcome;
       integratedMeta.changedFiles = integrated.changedPaths;
       integratedMeta.finishedAt = completedAt;
       integratedMeta.lastHeartbeatAt = completedAt;
@@ -802,7 +805,9 @@ if (ok && config.autoIntegrate && finalMeta.executionMode === "worktree") {
       integratedMeta.progress = {
         phase: "completed",
         percent: 100,
-        currentActivity: "实现已完成并自动集成到当前工作区",
+        currentActivity: integrated.changeOutcome === "already_integrated"
+          ? "实现已完成；等价修改已在当前工作区中"
+          : "实现已完成并自动集成到当前工作区",
         lastActivityAt: completedAt,
         activityCount: (integratedMeta.progress?.activityCount ?? 0) + 1,
       };
