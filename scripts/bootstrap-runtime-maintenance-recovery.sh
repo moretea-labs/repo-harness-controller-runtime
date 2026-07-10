@@ -2,12 +2,17 @@
 set -euo pipefail
 
 REPO_ROOT="${1:-$PWD}"
-REPO_ID="${REPO_HARNESS_REPO_ID:-repo_123b7cf58b6b17b5cbe46a56}"
+REPO_ID="${REPO_HARNESS_REPO_ID:-}"
 MIN_AGE_MINUTES="${REPO_HARNESS_RECOVERY_MIN_AGE_MINUTES:-0}"
 CANCEL_PENDING="${REPO_HARNESS_RECOVERY_CANCEL_PENDING_APPROVALS:-false}"
 CONTROLLER_HOME="${REPO_HARNESS_CONTROLLER_HOME:-$REPO_ROOT/_ops/controller-home}"
 
 cd "$REPO_ROOT"
+
+if [[ -z "$REPO_ID" ]]; then
+  echo "bootstrap-runtime-maintenance-recovery: set REPO_HARNESS_REPO_ID to the target repository id (no default id is shipped)." >&2
+  exit 2
+fi
 
 python3 - <<'PY' "$REPO_ROOT" "$REPO_ID" "$MIN_AGE_MINUTES" "$CANCEL_PENDING" "$CONTROLLER_HOME"
 from __future__ import annotations

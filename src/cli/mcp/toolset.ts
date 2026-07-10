@@ -4,18 +4,36 @@ import { buildMultiRepositoryToolDefinitions } from './multi-repository';
 import { repositoryToolDefinitions } from './repository-tools';
 import { runtimeToolDefinitions } from '../../runtime/gateway/mcp/runtime-tools';
 import { FACADE_TOOLS } from '../../runtime/control-plane/facade/types';
+import type { McpToolset } from './types';
 
 /** Preferred ChatGPT-facing facade tools. Must stay small and stable. */
 export const PREFERRED_FACADE_TOOL_NAMES = [...FACADE_TOOLS] as const;
 
 export type ToolExposureClass = 'facade' | 'advanced' | 'internal' | 'compatibility';
 
-export const CORE_CONTROLLER_TOOL_NAMES = [
-  // Preferred ChatGPT facade (stage-2 control plane)
+/**
+ * Default tools/list for controller profile (`--toolset core`).
+ * Facade entrypoints plus only indispensable repository bootstrap/selection tools.
+ */
+export const DEFAULT_CONTROLLER_TOOL_NAMES = [
   'rh_status',
   'rh_inbox',
   'rh_context',
   'rh_work',
+  'repository_list',
+  'repository_get',
+  'repository_register',
+  'repository_latest_source_diagnose',
+  'repository_bootstrap_local_project',
+] as const;
+
+/**
+ * Explicit advanced/supervised controller surface (`--toolset advanced`).
+ * Includes the default set plus recovery, work, campaign, and interactive git tools.
+ * This is the former large "core" exposure.
+ */
+export const ADVANCED_CONTROLLER_TOOL_NAMES = [
+  ...DEFAULT_CONTROLLER_TOOL_NAMES,
   // Core controller entrypoints
   'controller_capabilities',
   'controller_ready',
@@ -35,7 +53,6 @@ export const CORE_CONTROLLER_TOOL_NAMES = [
   'external_filesystem_grant_apply',
   'external_filesystem_text_snapshot',
   'local_bridge_status',
-  'repository_get',
   'list_plugins',
   'get_plugin',
   'plugin_action_execute',
@@ -86,10 +103,31 @@ export const CORE_CONTROLLER_TOOL_NAMES = [
   'harness_doctor',
 ] as const;
 
+/**
+ * Alias for the default (`core`) exposure set.
+ * Prefer DEFAULT_CONTROLLER_TOOL_NAMES in new code.
+ */
+export const CORE_CONTROLLER_TOOL_NAMES = DEFAULT_CONTROLLER_TOOL_NAMES;
+
+const DEFAULT_CONTROLLER_TOOL_SET = new Set<string>(DEFAULT_CONTROLLER_TOOL_NAMES);
+const ADVANCED_CONTROLLER_TOOL_SET = new Set<string>(ADVANCED_CONTROLLER_TOOL_NAMES);
+
+export function normalizeMcpToolset(value: unknown): McpToolset {
+  if (value === 'full' || value === 'advanced' || value === 'core') return value;
+  return 'core';
+}
+
+export function controllerToolNamesForToolset(toolset: McpToolset): readonly string[] | null {
+  if (toolset === 'full') return null;
+  if (toolset === 'advanced') return ADVANCED_CONTROLLER_TOOL_NAMES;
+  return DEFAULT_CONTROLLER_TOOL_NAMES;
+}
+
 export function classifyControllerToolExposure(toolName: string): ToolExposureClass {
   if ((PREFERRED_FACADE_TOOL_NAMES as readonly string[]).includes(toolName)) return 'facade';
-  if ((CORE_CONTROLLER_TOOL_NAMES as readonly string[]).includes(toolName)) return 'advanced';
   if (toolName.startsWith('rh_')) return 'facade';
+  if (DEFAULT_CONTROLLER_TOOL_SET.has(toolName)) return 'advanced';
+  if (ADVANCED_CONTROLLER_TOOL_SET.has(toolName)) return 'advanced';
   return 'compatibility';
 }
 
@@ -109,20 +147,20 @@ export function controllerToolExposureMetadata(toolNames: readonly string[]): {
   };
 }
 
-const CORE_CONTROLLER_TOOL_SET = new Set<string>(CORE_CONTROLLER_TOOL_NAMES);
-
 export function allControllerToolDefinitions(ctx: MultiRepositoryMcpToolContext): McpToolDefinition[] {
   return runtimeToolDefinitions.concat(repositoryToolDefinitions, buildMultiRepositoryToolDefinitions(ctx));
 }
 
 export function exposedControllerToolDefinitions(ctx: MultiRepositoryMcpToolContext): McpToolDefinition[] {
   const definitions = allControllerToolDefinitions(ctx);
-  return ctx.toolset === 'core'
-    ? definitions.filter((tool) => CORE_CONTROLLER_TOOL_SET.has(tool.name))
-    : definitions;
+  const allowed = controllerToolNamesForToolset(ctx.toolset);
+  if (allowed === null) return definitions;
+  const allowedSet = new Set<string>(allowed);
+  return definitions.filter((tool) => allowedSet.has(tool.name));
 }
 
 export function isControllerToolExposed(ctx: MultiRepositoryMcpToolContext, name: string): boolean {
   if (ctx.toolset === 'full') return true;
-  return CORE_CONTROLLER_TOOL_SET.has(name);
+  if (ctx.toolset === 'advanced') return ADVANCED_CONTROLLER_TOOL_SET.has(name);
+  return DEFAULT_CONTROLLER_TOOL_SET.has(name);
 }

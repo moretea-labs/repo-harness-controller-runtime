@@ -68,6 +68,8 @@
     "check:ci": "bash scripts/check-ci.sh",
     "check:release": "bash scripts/check-npm-release.sh",
     "check:release-surface": "bash scripts/check-public-release-surface.sh",
+    "check:release-readiness": "bash scripts/check-release-readiness.sh",
+    "check:open-source-surface": "bash scripts/check-open-source-tracked-surface.sh",
     "check:public-export": "bun scripts/public-release.ts",
     "package:source-zip": "bash scripts/package-source-archive.sh",
     "check:release-published": "bash scripts/check-release-published.sh",

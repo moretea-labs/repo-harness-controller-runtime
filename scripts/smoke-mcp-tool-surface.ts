@@ -6,7 +6,8 @@
 import { getMcpPolicy } from '../src/cli/mcp/policy';
 import { controllerExpectedToolNames } from '../src/cli/mcp/legacy-tool-service';
 import {
-  CORE_CONTROLLER_TOOL_NAMES,
+  ADVANCED_CONTROLLER_TOOL_NAMES,
+  DEFAULT_CONTROLLER_TOOL_NAMES,
   PREFERRED_FACADE_TOOL_NAMES,
   exposedControllerToolDefinitions,
 } from '../src/cli/mcp/toolset';
@@ -30,30 +31,43 @@ assert(
 );
 
 for (const name of EXPECTED_FACADE_TOOLS) {
-  assert(CORE_CONTROLLER_TOOL_NAMES.includes(name as typeof CORE_CONTROLLER_TOOL_NAMES[number]), `core exposure missing ${name}`);
+  assert(
+    (DEFAULT_CONTROLLER_TOOL_NAMES as readonly string[]).includes(name),
+    `default exposure missing ${name}`,
+  );
   assert(expected.includes(name), `expectedTools missing ${name}`);
 }
 
 for (const name of OPTIONAL_INTERACTIVE_DEVELOPMENT_TOOLS) {
   assert(
-    (CORE_CONTROLLER_TOOL_NAMES as readonly string[]).includes(name),
-    `interactive tool ${name} missing from CORE_CONTROLLER_TOOL_NAMES`,
+    (ADVANCED_CONTROLLER_TOOL_NAMES as readonly string[]).includes(name),
+    `interactive tool ${name} missing from ADVANCED_CONTROLLER_TOOL_NAMES`,
+  );
+  assert(
+    !(DEFAULT_CONTROLLER_TOOL_NAMES as readonly string[]).includes(name),
+    `interactive tool ${name} must not be in default core tools/list`,
   );
 }
 
-const stubCtx = {
+const coreCtx = {
   policy,
   toolset: 'core' as const,
   enableChatgptBrowser: false,
   audit: () => undefined,
 } as unknown as MultiRepositoryMcpToolContext;
+const advancedCtx = { ...coreCtx, toolset: 'advanced' as const };
 
-const exposed = exposedControllerToolDefinitions(stubCtx).map((tool) => tool.name);
+const coreExposed = exposedControllerToolDefinitions(coreCtx).map((tool) => tool.name);
+const advancedExposed = exposedControllerToolDefinitions(advancedCtx).map((tool) => tool.name);
 for (const name of EXPECTED_FACADE_TOOLS) {
-  assert(exposed.includes(name), `exposed core tools missing ${name}`);
+  assert(coreExposed.includes(name), `exposed core tools missing ${name}`);
 }
+assert(coreExposed.includes('repository_list'), 'default surface missing repository_list');
+assert(coreExposed.includes('repository_bootstrap_local_project'), 'default surface missing bootstrap tool');
+assert(coreExposed.length <= 12, `default tools/list is not minimal: ${coreExposed.length}`);
 for (const name of OPTIONAL_INTERACTIVE_DEVELOPMENT_TOOLS) {
-  assert(exposed.includes(name), `exposed core tools missing interactive ${name}`);
+  assert(!coreExposed.includes(name), `default surface must hide interactive ${name}`);
+  assert(advancedExposed.includes(name), `advanced surface missing interactive ${name}`);
 }
 
 const unable = evaluateConnectorFreshness({ localToolNames: expected });
@@ -83,9 +97,11 @@ console.log(JSON.stringify({
   ok: true,
   expectedFacadeTools: EXPECTED_FACADE_TOOLS,
   preferredTools: PREFERRED_FACADE_TOOL_NAMES,
+  defaultToolCount: coreExposed.length,
+  advancedToolCount: advancedExposed.length,
   expectedToolsHasFacade: EXPECTED_FACADE_TOOLS.every((name) => expected.includes(name)),
-  coreHasInteractive: OPTIONAL_INTERACTIVE_DEVELOPMENT_TOOLS.every((name) =>
-    (CORE_CONTROLLER_TOOL_NAMES as readonly string[]).includes(name)),
+  advancedHasInteractive: OPTIONAL_INTERACTIVE_DEVELOPMENT_TOOLS.every((name) =>
+    (ADVANCED_CONTROLLER_TOOL_NAMES as readonly string[]).includes(name)),
   states: {
     unable: unable.status,
     missingSnap: missingSnap.status,

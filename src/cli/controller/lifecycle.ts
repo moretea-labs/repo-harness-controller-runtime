@@ -323,7 +323,7 @@ function resolveServiceConfig(repoRoot: string, explicitLogFile?: string): {
   localControllerPort: number;
   tunnelMode: "none" | "quick" | "named" | "tailscale";
   publicEndpoint?: string;
-  toolset: "core" | "full";
+  toolset: "core" | "advanced" | "full";
   logPath: string;
 } {
   const controllerHome = resolveControllerHome();
@@ -333,6 +333,11 @@ function resolveServiceConfig(repoRoot: string, explicitLogFile?: string): {
   const tunnelMode = publicEndpoint || runtime?.tunnel?.name
     ? inferMcpTunnelMode(runtime?.tunnelMode, publicEndpoint, runtime?.tunnel?.name)
     : "none";
+  const toolset = localConfig?.toolset === "full"
+    ? "full"
+    : localConfig?.toolset === "advanced"
+      ? "advanced"
+      : "core";
   return {
     repoRoot,
     controllerHome,
@@ -343,7 +348,7 @@ function resolveServiceConfig(repoRoot: string, explicitLogFile?: string): {
     localControllerPort: localConfig?.localController?.port ?? 8766,
     tunnelMode,
     publicEndpoint,
-    toolset: localConfig?.toolset === "full" ? "full" : "core",
+    toolset,
     logPath: resolve(explicitLogFile ?? defaultControllerServiceLogPath(repoRoot)),
   };
 }

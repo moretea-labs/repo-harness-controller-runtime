@@ -16,12 +16,15 @@ import {
   controllerToolSurfaceFingerprint,
 } from '../controller/runtime-config';
 import { loadMcpLocalConfig, loadMcpRuntimeState, writeMcpRuntimeState } from '../mcp/auth';
-import { PREFERRED_FACADE_TOOL_NAMES, CORE_CONTROLLER_TOOL_NAMES } from '../mcp/toolset';
+import { PREFERRED_FACADE_TOOL_NAMES, DEFAULT_CONTROLLER_TOOL_NAMES } from '../mcp/toolset';
 import type { PlainStatusTone } from './console-view-models';
 
 export const EXPECTED_FACADE_TOOLS = [...PREFERRED_FACADE_TOOL_NAMES] as const;
 
-/** Interactive development tools that should stay consistent with core exposure. */
+/**
+ * Interactive development tools available on the advanced (and full) surface.
+ * Not part of the default core tools/list — require `--toolset advanced` or `full`.
+ */
 export const OPTIONAL_INTERACTIVE_DEVELOPMENT_TOOLS = [
   'work_wait',
   'repository_safe_patch_apply',
@@ -31,6 +34,9 @@ export const OPTIONAL_INTERACTIVE_DEVELOPMENT_TOOLS = [
   'get_job',
   'work_get',
 ] as const;
+
+/** @deprecated Prefer ADVANCED_CONTROLLER_TOOL_NAMES; kept for import stability. */
+export const CORE_SURFACE_INTERACTIVE_TOOLS = OPTIONAL_INTERACTIVE_DEVELOPMENT_TOOLS;
 
 export type ConnectorFreshnessStatus =
   | 'local_mcp_updated'
@@ -252,7 +258,9 @@ function refreshRuntimeFileFromLive(
         typeof live.runtimeToolSurfaceFingerprint === 'string'
           ? live.runtimeToolSurfaceFingerprint
           : existing.server.runtimeToolSurfaceFingerprint,
-      toolset: live.toolset === 'core' || live.toolset === 'full' ? live.toolset : existing.server.toolset,
+      toolset: live.toolset === 'core' || live.toolset === 'advanced' || live.toolset === 'full'
+        ? live.toolset
+        : existing.server.toolset,
       toolCount: observation.toolCount ?? existing.server.toolCount,
       healthMismatch: undefined,
     },
@@ -479,11 +487,11 @@ function finalize(
 
 /**
  * Build local tool names from the in-process controller registry (not ChatGPT).
- * Uses expectedTools when provided; otherwise falls back to core controller exposure.
+ * Uses expectedTools when provided; otherwise falls back to default core exposure.
  */
 export function localControllerToolNames(expectedTools?: readonly string[]): string[] {
   if (expectedTools && expectedTools.length > 0) return uniqueSorted(expectedTools);
-  return uniqueSorted([...CORE_CONTROLLER_TOOL_NAMES]);
+  return uniqueSorted([...DEFAULT_CONTROLLER_TOOL_NAMES]);
 }
 
 export function buildLocalConnectorStatus(input: {

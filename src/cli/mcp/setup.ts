@@ -283,7 +283,7 @@ Authenticate with \`Authorization: Bearer <token>\` using the token stored under
 
 ## Verify the loaded tool surface
 
-Call \`controller_capabilities\` from ChatGPT. It should report \`${CONTROLLER_TOOL_SURFACE}\` and list the Issue Launcher, GitHub session, Run inspection, bounded edit, and Verification Gate tools. \`expectedTools\` should also include \`repository_latest_source_diagnose\` and \`repository_bootstrap_local_project\`. If only legacy planning tools are visible, refresh or recreate the Connector so ChatGPT reloads the MCP tool schema.
+Default \`--toolset core\` exposes the ChatGPT facade (\`rh_status\`, \`rh_inbox\`, \`rh_context\`, \`rh_work\`) plus repository bootstrap/selection tools. Use \`--toolset advanced\` for the supervised controller menu or \`--toolset full\` for legacy compatibility. Confirm the four \`rh_*\` tools appear after connect. If only legacy planning tools are visible, refresh or recreate the Connector so ChatGPT reloads the MCP tool schema.
 
 ## Refresh newly added repository tools
 
@@ -805,7 +805,11 @@ export function runMcpDoctor(opts: {
       : "not_adopted",
     repo: repoRoot,
     mcp: {
-      toolset: localConfig?.toolset === "full" ? "full" : "core",
+      toolset: localConfig?.toolset === "full"
+        ? "full"
+        : localConfig?.toolset === "advanced"
+          ? "advanced"
+          : "core",
       localConfig: existsSync(mcpControllerHomeLocalConfigPath(controllerHome)) || existsSync(
         join(repoRoot, ".repo-harness", "mcp.local.json"),
       ),

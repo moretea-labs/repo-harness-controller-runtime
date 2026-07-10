@@ -40,7 +40,7 @@ function fixture(env: NodeJS.ProcessEnv = {}, overrides?: GoalLoopContext['provi
   const ctx: GoalLoopContext = {
     goalStore: { root: join(root, 'goals'), now },
     packetStore: { root: join(root, 'packets'), now },
-    repoId: 'repo_123b7cf58b6b17b5cbe46a56',
+    repoId: 'repo_fixture',
     providerEnv: {
       skipExecutableProbe: true,
       env: overrides?.env ?? env,

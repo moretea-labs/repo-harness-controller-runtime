@@ -109,6 +109,12 @@ _ops/
 
 # repo-harness plugin runtime state
 .repo-harness/plugins/*.json
+.repo-harness/external-filesystem-grants.json
+.repo-harness/**/*grants*.json
+.repo-harness/**/*.local.json
+.repo-harness/**/*.tokens.json
+.repo-harness/**/*.oauth*.json
+.repo-harness/**/*.runtime.json
 .ai
 
 # repo-harness local browser/runtime scratch

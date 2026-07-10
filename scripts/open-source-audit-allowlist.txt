@@ -1,0 +1,40 @@
+# Paths allowed to mention personal-style or identity-like patterns in tracked content.
+# Prefer placeholders (example, your-machine) in product docs. Keep this list short.
+# Format: one git path per line; shell globs allowed. Comments start with #.
+
+# Product docs use placeholder Tailscale / CGNAT guidance.
+README.md
+README.en.md
+README.zh-CN.md
+README.es.md
+README.fr.md
+README.ja.md
+docs/repo-harness-chatgpt-mcp-setup.md
+docs/repo-harness-app-store-connect-api.md
+docs/operations/controller-browser-plugin.md
+src/cli/mcp/setup.ts
+tests/readme-dx.test.ts
+
+# Scanner / redaction implementations intentionally embed pattern samples.
+scripts/public-release.ts
+scripts/check-open-source-tracked-surface.sh
+src/cli/mcp/redaction.ts
+tests/cli/mcp-policy.test.ts
+
+# Historical research / release checklists retain maintainer path evidence.
+# Prefer scrubbing over expanding this list for new files.
+docs/architecture/global-hook-runtime.md
+docs/researches/**
+deploy/release-checklists/**
+evals/benchmark.md
+plans/**
+tasks/**
+APPLY.md
+examples/agent-architecture.md
+
+# Test fixtures intentionally exercise absolute-path handling with synthetic paths.
+tests/hook-runtime.test.ts
+tests/runtime/browser-plugin.test.ts
+tests/runtime/capability-recovery.test.ts
+tests/runtime/low-interception-tooling.test.ts
+tests/runtime/target-architecture.test.ts

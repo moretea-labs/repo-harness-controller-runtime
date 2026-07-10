@@ -100,7 +100,7 @@ Authenticate with `Authorization: Bearer <token>` using the token stored under `
 
 ## Verify the loaded tool surface
 
-Call `controller_capabilities` from ChatGPT. It should report `controller-chatgpt-bridge-v8` and list the Issue Launcher, GitHub session, Run inspection, bounded edit, and Verification Gate tools. `expectedTools` should also include `repository_latest_source_diagnose` and `repository_bootstrap_local_project`. If only legacy planning tools are visible, refresh or recreate the Connector so ChatGPT reloads the MCP tool schema.
+Default `--toolset core` exposes only the ChatGPT facade (`rh_status`, `rh_inbox`, `rh_context`, `rh_work`) plus repository bootstrap/selection tools (`repository_list`, `repository_get`, `repository_register`, `repository_latest_source_diagnose`, `repository_bootstrap_local_project`). Use `--toolset advanced` for the supervised controller menu, or `--toolset full` for legacy compatibility. After connect, call `rh_status` (or, on advanced/full, `controller_capabilities`) and confirm the four `rh_*` tools appear. If only legacy planning tools are visible, refresh or recreate the Connector so ChatGPT reloads the MCP tool schema. See `docs/operations/mcp-tool-exposure.md`.
 
 ## Refresh newly added repository tools
 

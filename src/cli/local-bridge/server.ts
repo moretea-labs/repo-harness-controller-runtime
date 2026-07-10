@@ -154,7 +154,7 @@ import {
   revokeMobileIntentDevice,
   verifyMobileIntentRequest,
 } from "./mobile-intents";
-import { CORE_CONTROLLER_TOOL_NAMES } from "../mcp/toolset";
+import { controllerToolNamesForToolset, normalizeMcpToolset } from "../mcp/toolset";
 import { submitAssistantIntent, runAssistantRoutineNow } from "../../runtime/assistant/intent";
 import { assistantOpenApiSchema } from "../../runtime/assistant/openapi";
 import { buildAssistantReadinessReport } from "../../runtime/assistant/readiness";
@@ -431,12 +431,13 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
   const runtimeSurfaceVersion = mcpRuntime?.server?.toolSurfaceVersion;
   const runtimeFingerprint = mcpRuntime?.server?.toolSurfaceFingerprint;
   const runtimeToolset = mcpRuntime?.server?.toolset;
-  const configuredToolset = mcpConfig?.toolset === "full" ? "full" : "core";
+  const configuredToolset = normalizeMcpToolset(mcpConfig?.toolset);
   const runtimeToolFingerprint = mcpRuntime?.server?.runtimeToolSurfaceFingerprint;
   const expectedFingerprint = controllerToolSurfaceFingerprint(expectedToolNames);
-  const expectedRuntimeNames = configuredToolset === "core"
-    ? [...CORE_CONTROLLER_TOOL_NAMES]
-    : [...expectedToolNames, ...runtimeToolDefinitions.map((tool) => tool.name)];
+  const restrictedRuntimeNames = controllerToolNamesForToolset(configuredToolset);
+  const expectedRuntimeNames = restrictedRuntimeNames === null
+    ? [...expectedToolNames, ...runtimeToolDefinitions.map((tool) => tool.name)]
+    : [...restrictedRuntimeNames];
   const expectedRuntimeFingerprint = controllerToolSurfaceFingerprint(expectedRuntimeNames);
   const runtimeProfile = mcpRuntime?.server?.profile;
   const connectorHealthy =
@@ -951,10 +952,11 @@ export async function startLocalBridgeServer(
   });
   app.get("/health", (_request, response) => {
     const toolNames = controllerExpectedToolNames(runtimePolicy(options.repoRoot, { profile: "controller" }));
-    const configuredToolset = loadMcpLocalConfig(options.repoRoot)?.toolset === "full" ? "full" : "core";
-    const runtimeNames = configuredToolset === "core"
-      ? [...CORE_CONTROLLER_TOOL_NAMES]
-      : [...toolNames, ...runtimeToolDefinitions.map((tool) => tool.name)];
+    const configuredToolset = normalizeMcpToolset(loadMcpLocalConfig(options.repoRoot)?.toolset);
+    const restrictedRuntimeNames = controllerToolNamesForToolset(configuredToolset);
+    const runtimeNames = restrictedRuntimeNames === null
+      ? [...toolNames, ...runtimeToolDefinitions.map((tool) => tool.name)]
+      : [...restrictedRuntimeNames];
     response.json({
       status: "ok",
       localOnly: true,

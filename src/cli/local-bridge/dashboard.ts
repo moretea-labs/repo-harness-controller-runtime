@@ -527,7 +527,7 @@ function renderRepositories(){
       '<button class="btn primary" onclick="toggleAddRepo()">添加本地仓库</button></div>'+
     '<div class="panel" id="repoAdd" style="display:none;margin-bottom:14px">'+
       '<div class="row" style="display:grid;grid-template-columns:1.4fr .8fr auto;gap:10px">'+
-        '<input class="input" id="repoPath" placeholder="/Users/you/DevProjects/YourRepo">'+
+        '<input class="input" id="repoPath" placeholder="./YourRepo">'+
         '<input class="input" id="repoName" placeholder="显示名称（可选）">'+
         '<button class="btn primary" onclick="registerRepo()">注册</button>'+
       '</div></div>'+

@@ -655,30 +655,35 @@ describe("MCP controller profile", () => {
     });
   });
 
-  test("exposes the supervised core surface and resumes idempotent Work by request id", async () => {
+  test("exposes the supervised advanced surface and resumes idempotent Work by request id", async () => {
     await withController(async (repoRoot, _ctx) => {
       const controllerHome = join(repoRoot, ".controller-home");
       const repository = registerRepository({ path: repoRoot, controllerHome });
       const core = createMultiRepositoryContext({ repo: repoRoot, profile: "controller", toolset: "core", controllerHome });
+      const advanced = createMultiRepositoryContext({ repo: repoRoot, profile: "controller", toolset: "advanced", controllerHome });
       const full = createMultiRepositoryContext({ repo: repoRoot, profile: "controller", toolset: "full", controllerHome });
-      expect(exposedControllerToolDefinitions(core).length).toBeGreaterThanOrEqual(55);
-      expect(exposedControllerToolDefinitions(core).map((tool) => tool.name)).toContain("create_campaign");
-      expect(exposedControllerToolDefinitions(core).map((tool) => tool.name)).toContain("submit_campaign_review");
-      expect(exposedControllerToolDefinitions(core).map((tool) => tool.name)).toContain("finish_task_run");
-      expect(exposedControllerToolDefinitions(core).map((tool) => tool.name)).toContain("list_plugins");
-      expect(exposedControllerToolDefinitions(core).map((tool) => tool.name)).toContain("get_plugin");
-      expect(exposedControllerToolDefinitions(core).map((tool) => tool.name)).toContain("plugin_action_execute");
+      const coreNames = exposedControllerToolDefinitions(core).map((tool) => tool.name);
+      expect(coreNames).toEqual(expect.arrayContaining(["rh_status", "rh_inbox", "rh_context", "rh_work", "repository_list"]));
+      expect(coreNames).not.toContain("create_campaign");
+      expect(coreNames.length).toBeLessThanOrEqual(12);
+      expect(exposedControllerToolDefinitions(advanced).length).toBeGreaterThanOrEqual(55);
+      expect(exposedControllerToolDefinitions(advanced).map((tool) => tool.name)).toContain("create_campaign");
+      expect(exposedControllerToolDefinitions(advanced).map((tool) => tool.name)).toContain("submit_campaign_review");
+      expect(exposedControllerToolDefinitions(advanced).map((tool) => tool.name)).toContain("finish_task_run");
+      expect(exposedControllerToolDefinitions(advanced).map((tool) => tool.name)).toContain("list_plugins");
+      expect(exposedControllerToolDefinitions(advanced).map((tool) => tool.name)).toContain("get_plugin");
+      expect(exposedControllerToolDefinitions(advanced).map((tool) => tool.name)).toContain("plugin_action_execute");
       expect(exposedControllerToolDefinitions(full).length).toBeGreaterThan(100);
 
       let daemonPid: number | undefined;
       try {
-        const first = await callRuntimeTool(core, "work_submit", {
+        const first = await callRuntimeTool(advanced, "work_submit", {
           repo_id: repository.repoId,
           request_id: "work-resume-idempotent",
           operation: "create_issue",
           arguments: { title: "Work resume fixture", kind: "feature" },
         });
-        const second = await callRuntimeTool(core, "work_submit", {
+        const second = await callRuntimeTool(advanced, "work_submit", {
           repo_id: repository.repoId,
           request_id: "work-resume-idempotent",
           operation: "create_issue",
@@ -689,7 +694,7 @@ describe("MCP controller profile", () => {
         expect(secondValue.deduplicated).toBe(true);
         expect(secondValue.work.workId).toBe(firstValue.work.workId);
 
-        const resumed = await callRuntimeTool(core, "work_get", {
+        const resumed = await callRuntimeTool(advanced, "work_get", {
           repo_id: repository.repoId,
           request_id: "work-resume-idempotent",
         });
@@ -709,12 +714,12 @@ describe("MCP controller profile", () => {
     await withController(async (repoRoot, _ctx) => {
       const controllerHome = join(repoRoot, ".controller-home");
       const repository = registerRepository({ path: repoRoot, controllerHome });
-      const core = createMultiRepositoryContext({ repo: repoRoot, profile: "controller", toolset: "core", controllerHome });
+      const advanced = createMultiRepositoryContext({ repo: repoRoot, profile: "controller", toolset: "advanced", controllerHome });
       expect(spawnSync("git", ["config", "user.email", "test@example.com"], { cwd: repoRoot }).status).toBe(0);
       expect(spawnSync("git", ["config", "user.name", "Test"], { cwd: repoRoot }).status).toBe(0);
       expect(spawnSync("git", ["add", "."], { cwd: repoRoot }).status).toBe(0);
       expect(spawnSync("git", ["commit", "-m", "initial"], { cwd: repoRoot }).status).toBe(0);
-      const created = await callRuntimeTool(core, "create_campaign", {
+      const created = await callRuntimeTool(advanced, "create_campaign", {
         repo_id: repository.repoId,
         request_id: "campaign-normalization-via-core",
         title: "Controller-surface campaign",
@@ -755,15 +760,15 @@ describe("MCP controller profile", () => {
         writeFileSync(join(secondRoot, "src/example.ts"), "export const second = true;\n");
         spawnSync("git", ["init", "-b", "main"], { cwd: secondRoot, stdio: "ignore" });
         const secondRepository = registerRepository({ path: secondRoot, controllerHome });
-        const core = createMultiRepositoryContext({ repo: repoRoot, profile: "controller", toolset: "core", controllerHome });
-        const first = await callRuntimeTool(core, "work_submit", {
+        const advanced = createMultiRepositoryContext({ repo: repoRoot, profile: "controller", toolset: "advanced", controllerHome });
+        const first = await callRuntimeTool(advanced, "work_submit", {
           repo_id: firstRepository.repoId,
           request_id: "work-cross-repo-conflict",
           operation: "create_issue",
           arguments: { title: "First repository Work", kind: "feature" },
         });
         expect(first?.isError).not.toBe(true);
-        const conflict = await callRuntimeTool(core, "work_submit", {
+        const conflict = await callRuntimeTool(advanced, "work_submit", {
           repo_id: secondRepository.repoId,
           request_id: "work-cross-repo-conflict",
           operation: "create_issue",

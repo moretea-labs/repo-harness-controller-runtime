@@ -1,7 +1,12 @@
 export type McpProfileName = 'planner' | 'executor' | 'orchestrator' | 'controller';
 export type McpPathIntent = 'read' | 'write';
 export type McpAgentRunnerName = 'codex' | 'claude';
-export type McpToolset = 'core' | 'full';
+/** Controller MCP tools/list exposure profile.
+ * - core (default): facade + repository bootstrap/selection only
+ * - advanced: supervised controller surface (former large core set)
+ * - full: compatibility mode — all legacy + runtime tools
+ */
+export type McpToolset = 'core' | 'advanced' | 'full';
 
 export interface McpPolicy {
   profile: McpProfileName;

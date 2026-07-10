@@ -347,7 +347,7 @@ describe("Claude Code hook protocol compliance", () => {
 
   test("ContractScopeGuard: absolute paths under allowed_paths directories are NOT blocked", () => {
     // The bug we are fixing: an absolute path like
-    // /Users/.../repo/.ai/hooks/foo.sh used to be reported as outside the
+    // /absolute/path/to/repo/.ai/hooks/foo.sh used to be reported as outside the
     // contract because the allowed_paths pattern `.ai/hooks/` is repo-relative
     // and `==` shell glob match never matched the absolute form.
     const cwd = tmpWorkspace("hook-proto-abs-allowed");

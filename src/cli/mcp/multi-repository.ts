@@ -69,8 +69,8 @@ export function parseMcpToolset(value: unknown, profile: string): McpToolset {
   if (profile !== 'controller') return 'full';
   const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
   if (!normalized) return 'core';
-  if (normalized === 'core' || normalized === 'full') return normalized;
-  throw new Error(`invalid MCP toolset "${String(value)}" (expected: core or full)`);
+  if (normalized === 'core' || normalized === 'advanced' || normalized === 'full') return normalized;
+  throw new Error(`invalid MCP toolset "${String(value)}" (expected: core, advanced, or full)`);
 }
 
 function parseBooleanSetting(value: string | undefined): boolean | undefined {

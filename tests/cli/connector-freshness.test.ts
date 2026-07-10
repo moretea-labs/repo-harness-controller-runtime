@@ -18,7 +18,8 @@ import {
 import { controllerExpectedToolNames } from '../../src/cli/mcp/legacy-tool-service';
 import { getMcpPolicy } from '../../src/cli/mcp/policy';
 import {
-  CORE_CONTROLLER_TOOL_NAMES,
+  ADVANCED_CONTROLLER_TOOL_NAMES,
+  DEFAULT_CONTROLLER_TOOL_NAMES,
   PREFERRED_FACADE_TOOL_NAMES,
   exposedControllerToolDefinitions,
 } from '../../src/cli/mcp/toolset';
@@ -64,14 +65,15 @@ function fixture() {
 }
 
 describe('connector freshness diagnostics', () => {
-  test('expected facade tools and preferredTools stay aligned with core exposure', () => {
+  test('expected facade tools and preferredTools stay aligned with default core exposure', () => {
     expect(EXPECTED_FACADE_TOOLS).toEqual(['rh_status', 'rh_inbox', 'rh_context', 'rh_work']);
     expect([...PREFERRED_FACADE_TOOL_NAMES]).toEqual([...EXPECTED_FACADE_TOOLS]);
     for (const name of EXPECTED_FACADE_TOOLS) {
-      expect(CORE_CONTROLLER_TOOL_NAMES).toContain(name);
+      expect(DEFAULT_CONTROLLER_TOOL_NAMES).toContain(name);
     }
     for (const name of OPTIONAL_INTERACTIVE_DEVELOPMENT_TOOLS) {
-      expect(CORE_CONTROLLER_TOOL_NAMES).toContain(name);
+      expect(ADVANCED_CONTROLLER_TOOL_NAMES).toContain(name);
+      expect(DEFAULT_CONTROLLER_TOOL_NAMES).not.toContain(name);
     }
     const policy = getMcpPolicy('controller');
     const expected = controllerExpectedToolNames(policy);
@@ -81,10 +83,10 @@ describe('connector freshness diagnostics', () => {
     expect(expected.slice(0, 4)).toEqual([...EXPECTED_FACADE_TOOLS]);
   });
 
-  test('exposed core definitions include rh_* and interactive development tools', () => {
+  test('exposed core definitions include rh_* and bootstrap tools only; interactive tools need advanced', () => {
     const { repository, controllerHome, repoRoot } = fixture();
     const policy = getMcpPolicy('controller', { repoRoot });
-    const ctx = {
+    const coreCtx = {
       repoRoot,
       controllerHome,
       policy,
@@ -93,12 +95,17 @@ describe('connector freshness diagnostics', () => {
       explicitRepository: repository,
       audit: () => undefined,
     } as unknown as MultiRepositoryMcpToolContext;
-    const exposed = exposedControllerToolDefinitions(ctx).map((tool) => tool.name);
+    const advancedCtx = { ...coreCtx, toolset: 'advanced' as const };
+    const coreExposed = exposedControllerToolDefinitions(coreCtx).map((tool) => tool.name);
+    const advancedExposed = exposedControllerToolDefinitions(advancedCtx).map((tool) => tool.name);
     for (const name of EXPECTED_FACADE_TOOLS) {
-      expect(exposed).toContain(name);
+      expect(coreExposed).toContain(name);
     }
+    expect(coreExposed).toContain('repository_list');
+    expect(coreExposed).toContain('repository_bootstrap_local_project');
     for (const name of OPTIONAL_INTERACTIVE_DEVELOPMENT_TOOLS) {
-      expect(exposed).toContain(name);
+      expect(coreExposed).not.toContain(name);
+      expect(advancedExposed).toContain(name);
     }
   });
 

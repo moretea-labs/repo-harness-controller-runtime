@@ -6,7 +6,8 @@ import { join } from 'path';
 import { getMcpPolicy } from '../../src/cli/mcp/policy';
 import { controllerExpectedToolNames } from '../../src/cli/mcp/legacy-tool-service';
 import {
-  CORE_CONTROLLER_TOOL_NAMES,
+  ADVANCED_CONTROLLER_TOOL_NAMES,
+  DEFAULT_CONTROLLER_TOOL_NAMES,
   PREFERRED_FACADE_TOOL_NAMES,
   allControllerToolDefinitions,
   classifyControllerToolExposure,
@@ -61,10 +62,11 @@ function structured(result: Awaited<ReturnType<typeof callRuntimeTool>>): Record
 }
 
 describe('facade MCP surface wiring', () => {
-  test('preferred facade tools are part of core exposure and runtime definitions', () => {
+  test('preferred facade tools are part of default core exposure and runtime definitions', () => {
     expect(PREFERRED_FACADE_TOOL_NAMES).toEqual(['rh_status', 'rh_inbox', 'rh_context', 'rh_work']);
     for (const name of PREFERRED_FACADE_TOOL_NAMES) {
-      expect(CORE_CONTROLLER_TOOL_NAMES).toContain(name);
+      expect(DEFAULT_CONTROLLER_TOOL_NAMES).toContain(name);
+      expect(ADVANCED_CONTROLLER_TOOL_NAMES).toContain(name);
       expect(runtimeToolDefinitions.some((tool) => tool.name === name)).toBe(true);
       expect(classifyControllerToolExposure(name)).toBe('facade');
     }

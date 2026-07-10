@@ -23,7 +23,7 @@ import {
   repositoryIdentity,
 } from '../controller/runtime-config';
 import { controllerExpectedToolNames } from './tools';
-import { CORE_CONTROLLER_TOOL_NAMES } from './toolset';
+import { controllerToolNamesForToolset } from './toolset';
 import { parseMcpToolset } from './multi-repository';
 import { runtimeToolDefinitions } from '../../runtime/gateway/mcp/runtime-tools';
 
@@ -41,7 +41,7 @@ export interface McpKeepaliveOptions extends McpServerOptions {
   restartDelayMs?: number;
   unhealthyRestartWindowMs?: number;
   tunnelUnhealthyRestartWindowMs?: number;
-  toolset?: 'core' | 'full' | string;
+  toolset?: 'core' | 'advanced' | 'full' | string;
   localUi?: boolean;
   localUiHost?: string;
   localUiPort?: number;
@@ -318,9 +318,13 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
     ? controllerToolSurfaceFingerprint(compatibilityToolNames)
     : undefined;
   const expectedRuntimeToolNames = profile === 'controller'
-    ? (toolset === 'core'
-      ? [...CORE_CONTROLLER_TOOL_NAMES]
-      : [...compatibilityToolNames, ...runtimeToolDefinitions.map((tool) => tool.name)])
+    ? (() => {
+      const restricted = controllerToolNamesForToolset(toolset);
+      if (restricted === null) {
+        return [...compatibilityToolNames, ...runtimeToolDefinitions.map((tool) => tool.name)];
+      }
+      return [...restricted];
+    })()
     : [];
   const expectedRuntimeToolSurfaceFingerprint = profile === 'controller'
     ? controllerToolSurfaceFingerprint(expectedRuntimeToolNames)
@@ -475,7 +479,9 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
     runtime.server.toolSurfaceVersion = typeof localHealth?.toolSurfaceVersion === 'number' ? localHealth.toolSurfaceVersion : undefined;
     runtime.server.toolSurfaceFingerprint = typeof localHealth?.toolSurfaceFingerprint === 'string' ? localHealth.toolSurfaceFingerprint : undefined;
     runtime.server.runtimeToolSurfaceFingerprint = typeof localHealth?.runtimeToolSurfaceFingerprint === 'string' ? localHealth.runtimeToolSurfaceFingerprint : undefined;
-    runtime.server.toolset = localHealth?.toolset === 'core' || localHealth?.toolset === 'full' ? localHealth.toolset : undefined;
+    runtime.server.toolset = localHealth?.toolset === 'core' || localHealth?.toolset === 'advanced' || localHealth?.toolset === 'full'
+      ? localHealth.toolset
+      : undefined;
     runtime.server.toolCount = typeof localHealth?.toolCount === 'number' ? localHealth.toolCount : undefined;
     runtime.server.repoId = typeof localHealth?.repoId === 'string' ? localHealth.repoId : undefined;
     const runner = localHealth?.runner && typeof localHealth.runner === 'object' ? localHealth.runner as Record<string, unknown> : undefined;
