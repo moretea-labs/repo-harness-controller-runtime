@@ -2115,9 +2115,11 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           ...(args.include_events === true
             ? { events: summarizeJobEvents(ctx.controllerHome, job.repoId, job.jobId) }
             : {}),
-          next: digest.terminal
-            ? digest.summary
-            : 'Job is still active. Call get_job with wait=true for a terminal digest, or use get_artifact for bounded evidence.',
+          next: full
+            ? 'Raw job state is intentionally not returned through MCP. Use the bounded job summary, events, and get_artifact evidence instead.'
+            : digest.terminal
+              ? digest.summary
+              : 'Job is still active. Call get_job with wait=true for a terminal digest, or use get_artifact for bounded evidence.',
         }, digest.phase === 'failed' || digest.phase === 'timed_out');
       }
       case 'get_artifact': {
