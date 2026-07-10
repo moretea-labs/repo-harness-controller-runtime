@@ -21,9 +21,12 @@ function isReadyDirect(provider: ProviderDescriptor | undefined): boolean {
 function findReady(
   providers: ProviderDescriptor[],
   providerId: string,
+  requiredCapabilities: ExecutorRouteInput['requiredCapabilities'] = [],
 ): ProviderDescriptor | undefined {
   const provider = providers.find((entry) => entry.providerId === providerId);
-  return isReadyDirect(provider) ? provider : undefined;
+  if (!provider || !isReadyDirect(provider)) return undefined;
+  if (!requiredCapabilities.every((capability) => provider.capabilities.includes(capability))) return undefined;
+  return provider;
 }
 
 function allowedByGoal(providerId: string, input: ExecutorRouteInput): boolean {
@@ -47,7 +50,7 @@ function firstReady(
     if (!allowedByGoal(id, input)) continue;
     // Handoff-only ids in order lists are skipped for direct dispatch.
     if (id === 'chatgpt_handoff') continue;
-    const ready = findReady(providers, id);
+    const ready = findReady(providers, id, input.requiredCapabilities);
     if (ready) return ready;
   }
   return undefined;
@@ -82,16 +85,42 @@ function decision(
   };
 }
 
-const BUILTIN_ORDERS: Record<RoutingIntentKey, string[]> = {
-  deterministic_edit: ['direct_edit', 'codex_cli', 'grok_cli', 'chatgpt_handoff'],
-  implementation: ['codex_cli', 'grok_cli', 'claude_cli', 'grok_api', 'openai_api', 'deepseek_api', 'github_copilot_cloud', 'chatgpt_handoff'],
-  repair: ['grok_cli', 'grok_api', 'claude_cli', 'codex_cli', 'deepseek_api', 'openai_api', 'chatgpt_handoff'],
-  planning: ['chatgpt_handoff', 'grok_cli', 'grok_api', 'openai_api', 'deepseek_api', 'claude_cli'],
-  review: ['codex_cli', 'grok_cli', 'claude_cli', 'grok_api', 'openai_api', 'chatgpt_handoff'],
-  browser_planning: ['codex_cli', 'grok_cli', 'claude_cli', 'grok_api', 'openai_api', 'chatgpt_handoff'],
-  ios_analysis: ['codex_cli', 'grok_cli', 'claude_cli', 'grok_api', 'openai_api', 'chatgpt_handoff'],
-  fallback: ['direct_edit', 'codex_cli', 'grok_cli', 'claude_cli', 'grok_api', 'openai_api', 'deepseek_api', 'github_copilot_cloud', 'chatgpt_handoff'],
+const KIND_RANK: Record<ProviderDescriptor['kind'], number> = {
+  direct_edit: 0,
+  local_cli: 10,
+  remote_api: 20,
+  cloud_agent: 30,
+  handoff_only: 90,
 };
+
+const INTENT_CAPABILITY_PREFERENCE: Partial<Record<RoutingIntentKey, ProviderDescriptor['capabilities'][number]>> = {
+  deterministic_edit: 'code_patch',
+  implementation: 'code_patch',
+  repair: 'test_failure_repair',
+  planning: 'architecture_planning',
+  review: 'code_review',
+  browser_planning: 'browser_planning',
+  ios_analysis: 'ios_log_analysis',
+};
+
+function builtinOrder(input: ExecutorRouteInput, key: RoutingIntentKey): string[] {
+  const preferredCapability = INTENT_CAPABILITY_PREFERENCE[key];
+  const indexed = input.providers.map((provider, index) => ({ provider, index }));
+  const direct = indexed
+    .filter(({ provider }) => provider.kind !== 'handoff_only' && provider.providerId !== 'chatgpt_handoff')
+    .filter(({ provider }) => key === 'deterministic_edit' || provider.kind !== 'direct_edit')
+    .sort((left, right) => {
+      const leftSupports = preferredCapability ? left.provider.capabilities.includes(preferredCapability) : true;
+      const rightSupports = preferredCapability ? right.provider.capabilities.includes(preferredCapability) : true;
+      if (leftSupports !== rightSupports) return leftSupports ? -1 : 1;
+      const kindDiff = KIND_RANK[left.provider.kind] - KIND_RANK[right.provider.kind];
+      if (kindDiff !== 0) return kindDiff;
+      // listProviders already reflects controllerHome provider priority.
+      return left.index - right.index || left.provider.providerId.localeCompare(right.provider.providerId);
+    })
+    .map(({ provider }) => provider.providerId);
+  return [...direct, 'chatgpt_handoff'];
+}
 
 export function intentToRoutingKey(intent: TaskIntent): RoutingIntentKey {
   switch (intent) {
@@ -118,7 +147,7 @@ export function intentToRoutingKey(intent: TaskIntent): RoutingIntentKey {
 function orderFor(input: ExecutorRouteInput, key: RoutingIntentKey): string[] {
   const configured = input.routingConfig?.orders?.[key];
   if (Array.isArray(configured) && configured.length > 0) return configured.map(String);
-  return BUILTIN_ORDERS[key];
+  return builtinOrder(input, key);
 }
 
 function preferredDefault(input: ExecutorRouteInput, key: RoutingIntentKey): string | undefined {
@@ -142,8 +171,11 @@ export function routeExecutor(input: ExecutorRouteInput): ExecutorRouteDecision 
   const providers = input.providers;
   const chatHandoff = providers.find((p) => p.providerId === 'chatgpt_handoff');
   const alternatives = providers
-    .filter((p) => p.directDispatch && p.status === 'ready' && p.kind !== 'handoff_only')
-    .map((p) => p.providerId);
+    .filter((provider) => isReadyDirect(provider))
+    .filter((provider) => (input.requiredCapabilities ?? []).every(
+      (capability) => provider.capabilities.includes(capability),
+    ))
+    .map((provider) => provider.providerId);
 
   if (input.policyBlocked) {
     return decision(null, 'Policy blocked; waiting for user authorization.', {

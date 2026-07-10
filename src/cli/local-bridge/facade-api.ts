@@ -74,6 +74,7 @@ import {
   buildAutomationSettingsView,
   executorRoutePreviewWithConfig,
   executorRoutingConfigGet,
+  executorRoutingConfigReset,
   executorRoutingConfigUpdate,
   goalLoopPolicyGet,
   goalLoopPolicyUpdate,
@@ -995,6 +996,10 @@ export function consoleRoutingGet(ctx: ConsoleFacadeContext) {
 
 export function consoleRoutingUpdate(ctx: ConsoleFacadeContext, body: Record<string, unknown>) {
   return executorRoutingConfigUpdate(configCtx(ctx), body as unknown as Parameters<typeof executorRoutingConfigUpdate>[1]);
+}
+
+export function consoleRoutingReset(ctx: ConsoleFacadeContext) {
+  return executorRoutingConfigReset(configCtx(ctx));
 }
 
 export function consoleRoutePreview(ctx: ConsoleFacadeContext, body: Record<string, unknown> = {}) {

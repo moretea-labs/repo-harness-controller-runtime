@@ -12,6 +12,7 @@ import {
   readLocalToolConfig,
   readProviderConfig,
   readRoutingConfig,
+  resetRoutingConfig,
   REMOTE_API_DEFAULTS,
   REMOTE_API_PROVIDER_IDS,
   resolveProviderAuthPresent,
@@ -292,15 +293,9 @@ function buildOverview(
         : 'Autonomous mode has no direct-invokable providers ready.',
     );
   }
-  const grokCli = cards.find((c) => c.providerId === 'grok_cli');
-  if (grokCli?.directDispatch) {
-    parts.push('Grok CLI is ready for local direct dispatch.');
-  }
-  const grok = cards.find((c) => c.providerId === 'grok_api');
-  if (grok?.credential.authPresent && !liveEffective) {
-    parts.push('Grok API is configured but live API calls are disabled.');
-  } else if (grok?.directDispatch) {
-    parts.push('Grok API is ready for direct dispatch.');
+  const configuredRemoteApis = cards.filter((card) => card.kind === 'remote_api' && card.credential.authPresent);
+  if (configuredRemoteApis.length > 0 && !liveEffective) {
+    parts.push(`${configuredRemoteApis.length} configured remote API provider(s) are currently proposal-only because live calls are disabled.`);
   }
   parts.push('ChatGPT is available only as handoff.');
 
@@ -567,6 +562,10 @@ export function executorRoutingConfigGet(ctx: ConfigFacadeContext): ExecutorRout
   return readRoutingConfig(location(ctx));
 }
 
+export function executorRoutingConfigReset(ctx: ConfigFacadeContext): ExecutorRoutingConfigFile {
+  return resetRoutingConfig(location(ctx));
+}
+
 export function executorRoutingConfigUpdate(
   ctx: ConfigFacadeContext,
   patch: Partial<ExecutorRoutingConfigFile>,
@@ -691,10 +690,11 @@ export function policyPreviewExternalWrite(ctx: ConfigFacadeContext, approvalCon
 
 export function resetAllGoalLoopConfigs(ctx: ConfigFacadeContext) {
   const loc = location(ctx);
+  const providers = writeProviderConfig(loc, defaultProviderConfig());
   return {
-    providers: writeProviderConfig(loc, defaultProviderConfig()),
+    providers,
     tools: writeLocalToolConfig(loc, defaultLocalToolConfig()),
-    routing: writeRoutingConfig(loc, defaultRoutingConfig()),
+    routing: resetRoutingConfig(loc),
     policy: writeGoalLoopPolicyConfig(loc, defaultGoalLoopPolicy()),
   };
 }

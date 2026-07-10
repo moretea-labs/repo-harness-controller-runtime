@@ -715,8 +715,8 @@ function renderAutomation(){
         '</div></div>';
       }).join('')+
     '</div></div>'+
-    '<div class="panel" style="margin-bottom:14px"><div class="section-title"><h2>路由偏好</h2></div>'+
-      '<p class="muted">Handoff-only（ChatGPT）只能出现在 handoff 回退位置，不能作为直接调度开关。</p>'+
+    '<div class="panel" style="margin-bottom:14px"><div class="section-title"><h2>路由偏好</h2><button class="btn" onclick="resetRouting()">使用自动路由</button></div>'+
+      '<p class="muted">自动路由会按提供方优先级、能力和健康状态选择；显式路由会覆盖通用优先级。Handoff-only（ChatGPT）只能作为回退。</p>'+
       ['implementation','repair','planning','review','browser_planning','ios_analysis'].map(function(key){
         var order=arr(obj(routing.orders)[key]);
         return '<div style="margin:10px 0;padding:10px;border:1px solid var(--line);border-radius:12px">'+
@@ -885,6 +885,13 @@ function resetProviders(){
   setBusy(true,'恢复默认');
   api('/api/console/providers/reset'+repoQuery(),{method:'POST',body:'{}'}).then(function(){
     toast('已恢复默认');return loadAutomationSettings();
+  }).catch(function(e){toast(e.message)}).finally(function(){setBusy(false)});
+}
+function resetRouting(){
+  if(!confirm('移除显式路由并恢复按提供方优先级、能力与健康状态自动选择？'))return;
+  setBusy(true,'恢复自动路由');
+  api('/api/console/executor-routing/reset'+repoQuery(),{method:'POST',body:'{}'}).then(function(){
+    toast('已恢复自动路由');return loadAutomationSettings();
   }).catch(function(e){toast(e.message)}).finally(function(){setBusy(false)});
 }
 

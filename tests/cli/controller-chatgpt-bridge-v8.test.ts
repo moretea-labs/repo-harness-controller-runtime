@@ -194,6 +194,8 @@ describe("Controller V8 ChatGPT execution bridge", () => {
     expect(dashboard).toContain("改动文件");
     expect(dashboard).toContain("系统状态");
     expect(dashboard).toContain("高级诊断");
+    expect(dashboard).toContain("使用自动路由");
+    expect(dashboard).toContain("/api/console/executor-routing/reset");
     expect(dashboard).toContain("/api/console/command-center");
     expect(dashboard).toContain("/api/console/work/start");
     expect(dashboard).toContain("startTask");

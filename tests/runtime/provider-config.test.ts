@@ -1,10 +1,13 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync, readFileSync } from 'fs';
+import { existsSync, mkdtempSync, rmSync, readFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import {
   buildAutomationSettingsView,
+  defaultProviderConfig,
+  defaultRoutingConfig,
   executorRoutePreviewWithConfig,
+  executorRoutingConfigReset,
   executorRoutingConfigUpdate,
   goalLoopPolicyUpdate,
   listProviders,
@@ -20,6 +23,7 @@ import {
   providerEnable,
   providerPriorityUpdate,
   readProviderConfig,
+  readRoutingConfig,
   readProviderSecrets,
   routeExecutor,
   type ConfigFacadeContext,
@@ -44,6 +48,48 @@ function fixture(env: NodeJS.ProcessEnv = {}) {
 }
 
 describe('provider config persistence', () => {
+  test('fresh defaults are vendor-neutral and generated from provider configuration', () => {
+    const updatedAt = '2026-07-10T00:00:00.000Z';
+    const providers = defaultProviderConfig(updatedAt);
+    const localPriorities = providers.providers
+      .filter((provider) => ['codex_cli', 'claude_cli', 'grok_cli'].includes(provider.providerId))
+      .map((provider) => provider.priority);
+    const apiPriorities = providers.providers
+      .filter((provider) => ['openai_api', 'deepseek_api', 'grok_api'].includes(provider.providerId))
+      .map((provider) => provider.priority);
+
+    expect(new Set(localPriorities).size).toBe(1);
+    expect(new Set(apiPriorities).size).toBe(1);
+
+    providers.providers.push({
+      providerId: 'community_provider',
+      enabled: true,
+      priority: 50,
+      updatedAt,
+    });
+    const routing = defaultRoutingConfig(updatedAt, providers);
+    expect(routing.defaultRepairProvider).toBeUndefined();
+    expect(routing.orders.implementation[0]).toBe('community_provider');
+    expect(routing.orders.repair[0]).not.toBe('grok_cli');
+  });
+
+  test('reading generated routing follows provider priority without writing a routing file', () => {
+    const { ctx, root } = fixture();
+    const routingPath = join(root, 'executor-routing.json');
+    const current = providerConfigGet(ctx);
+    providerConfigUpdate(ctx, {
+      providers: current.providers.map((provider) => ({
+        ...provider,
+        priority: provider.providerId === 'grok_cli' ? 1 : provider.priority,
+      })),
+    });
+
+    expect(existsSync(routingPath)).toBe(false);
+    const routing = readRoutingConfig({ root });
+    expect(routing.orders.implementation[0]).toBe('grok_cli');
+    expect(existsSync(routingPath)).toBe(false);
+  });
+
   test('provider config persistence', () => {
     const { ctx, root } = fixture();
     const config = providerConfigUpdate(ctx, { preferLiveModelProviders: true, goalLoopEnabled: true });
@@ -171,6 +217,86 @@ describe('routing respects config', () => {
     });
     expect(decision.selectedProviderId).toBe('chatgpt_handoff');
     expect(decision.directDispatch).toBe(false);
+  });
+
+  test('required capabilities exclude otherwise higher-priority providers', () => {
+    const providers = listProviders({
+      skipExecutableProbe: true,
+      overrides: {
+        codex_cli: { status: 'ready', directDispatch: true },
+        grok_cli: { status: 'ready', directDispatch: true },
+      },
+    });
+    const decision = routeExecutor({
+      goal: {
+        goalId: 'g-capability',
+        repoId: 'r',
+        mode: 'autonomous',
+        status: 'ready',
+        objective: 'architecture repair',
+        constraints: {},
+        allowedExecutors: [],
+        forbiddenExecutors: [],
+        repairAttempts: 0,
+        retryBudget: 5,
+      },
+      taskIntent: 'code_repair',
+      risk: 'workspace_write',
+      requiredCapabilities: ['architecture_planning'],
+      providers,
+      routingConfig: {
+        ...defaultRoutingConfig(),
+        orders: {
+          ...defaultRoutingConfig().orders,
+          repair: ['codex_cli', 'grok_cli', 'chatgpt_handoff'],
+        },
+      },
+    });
+
+    expect(decision.selectedProviderId).toBe('grok_cli');
+    expect(decision.alternatives).toContain('grok_cli');
+    expect(decision.alternatives).not.toContain('codex_cli');
+  });
+
+  test('explicit routing remains authoritative after provider priority changes', () => {
+    const { ctx } = fixture();
+    executorRoutingConfigUpdate(ctx, {
+      orders: {
+        ...defaultRoutingConfig().orders,
+        repair: ['openai_api', 'grok_cli', 'chatgpt_handoff'],
+      },
+    });
+    const current = providerConfigGet(ctx);
+    providerConfigUpdate(ctx, {
+      providers: current.providers.map((provider) => ({
+        ...provider,
+        priority: provider.providerId === 'grok_cli' ? 1 : provider.priority,
+      })),
+    });
+    expect(readRoutingConfig({ root: ctx.configRoot }).orders.repair[0]).toBe('openai_api');
+  });
+
+  test('resetting routing removes explicit overrides and resumes provider priority', () => {
+    const { ctx, root } = fixture();
+    const routingPath = join(root, 'executor-routing.json');
+    executorRoutingConfigUpdate(ctx, {
+      orders: {
+        ...defaultRoutingConfig().orders,
+        repair: ['openai_api', 'grok_cli', 'chatgpt_handoff'],
+      },
+    });
+    expect(existsSync(routingPath)).toBe(true);
+
+    const current = providerConfigGet(ctx);
+    providerConfigUpdate(ctx, {
+      providers: current.providers.map((provider) => ({
+        ...provider,
+        priority: provider.providerId === 'grok_cli' ? 1 : provider.priority,
+      })),
+    });
+    const reset = executorRoutingConfigReset(ctx);
+    expect(existsSync(routingPath)).toBe(false);
+    expect(reset.orders.repair[0]).toBe('grok_cli');
   });
 
   test('routing config fallback order works', () => {
@@ -400,6 +526,7 @@ describe('policy and facade view model', () => {
     expect(view.providers.some((p) => p.providerId === 'chatgpt_handoff' && p.handoffOnly && !p.canEnableDirectDispatch)).toBe(true);
     expect(view.overview.plainLanguageSummary.toLowerCase()).toContain('chatgpt');
     expect(view.overview.plainLanguageSummary).toContain('when a live goal or live schedule needs direct dispatch');
+    expect(view.overview.plainLanguageSummary).not.toMatch(/Grok (CLI|API) is/);
   });
 
   test('GUI view model maps statuses correctly', () => {

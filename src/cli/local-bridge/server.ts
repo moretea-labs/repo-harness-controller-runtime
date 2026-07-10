@@ -102,6 +102,7 @@ import {
   consoleProviderReset,
   consoleRoutePreview,
   consoleRoutingGet,
+  consoleRoutingReset,
   consoleRoutingUpdate,
   evaluateConsoleConnectorFreshness,
   getAutomationSettings,
@@ -1285,6 +1286,13 @@ export async function startLocalBridgeServer(
   app.get("/api/console/executor-routing", (request, response) => {
     try {
       response.json({ config: consoleRoutingGet(consoleCtx(request)), redacted: true });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/console/executor-routing/reset", (request, response) => {
+    try {
+      response.json({ config: consoleRoutingReset(consoleCtx(request)), redacted: true });
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }

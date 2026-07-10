@@ -1,4 +1,4 @@
-import { mkdirSync } from 'fs';
+import { mkdirSync, rmSync } from 'fs';
 import { join } from 'path';
 import { resolveControllerHome } from '../../../cli/repositories/controller-home';
 import { readJsonFile, writeJsonAtomic } from '../../shared/json-files';
@@ -59,13 +59,13 @@ export function globalConfigRoot(location: GoalLoopConfigLocation): string {
 export function defaultProviderConfig(updatedAt = nowIso()): ProviderConfigFile {
   const defaults: Array<Omit<ProviderPreference, 'updatedAt'>> = [
     { providerId: 'direct_edit', enabled: true, priority: 10 },
-    { providerId: 'codex_cli', enabled: true, priority: 20 },
-    { providerId: 'grok_cli', enabled: true, priority: 25 },
-    { providerId: 'claude_cli', enabled: true, priority: 30 },
+    { providerId: 'codex_cli', enabled: true, priority: 100 },
+    { providerId: 'grok_cli', enabled: true, priority: 100 },
+    { providerId: 'claude_cli', enabled: true, priority: 100 },
     {
       providerId: 'grok_api',
       enabled: true,
-      priority: 40,
+      priority: 200,
       credentialEnvVars: REMOTE_API_DEFAULTS.grok_api!.envVars,
       baseUrl: REMOTE_API_DEFAULTS.grok_api!.baseUrl,
       model: REMOTE_API_DEFAULTS.grok_api!.model,
@@ -73,7 +73,7 @@ export function defaultProviderConfig(updatedAt = nowIso()): ProviderConfigFile 
     {
       providerId: 'openai_api',
       enabled: true,
-      priority: 50,
+      priority: 200,
       credentialEnvVars: REMOTE_API_DEFAULTS.openai_api!.envVars,
       baseUrl: REMOTE_API_DEFAULTS.openai_api!.baseUrl,
       model: REMOTE_API_DEFAULTS.openai_api!.model,
@@ -81,12 +81,12 @@ export function defaultProviderConfig(updatedAt = nowIso()): ProviderConfigFile 
     {
       providerId: 'deepseek_api',
       enabled: true,
-      priority: 60,
+      priority: 200,
       credentialEnvVars: REMOTE_API_DEFAULTS.deepseek_api!.envVars,
       baseUrl: REMOTE_API_DEFAULTS.deepseek_api!.baseUrl,
       model: REMOTE_API_DEFAULTS.deepseek_api!.model,
     },
-    { providerId: 'github_copilot_cloud', enabled: true, priority: 70 },
+    { providerId: 'github_copilot_cloud', enabled: true, priority: 300 },
     {
       providerId: 'chatgpt_handoff',
       enabled: true,
@@ -127,27 +127,42 @@ export function defaultLocalToolConfig(updatedAt = nowIso()): LocalToolConfigFil
   };
 }
 
-export function defaultRoutingConfig(updatedAt = nowIso()): ExecutorRoutingConfigFile {
+function neutralProviderOrder(providerConfig: ProviderConfigFile): string[] {
+  return providerConfig.providers
+    .filter((provider) => provider.enabled)
+    .filter((provider) => !['direct_edit', 'chatgpt_handoff'].includes(provider.providerId))
+    .sort((left, right) => {
+      if (left.priority !== right.priority) return left.priority - right.priority;
+      return left.providerId.localeCompare(right.providerId);
+    })
+    .map((provider) => provider.providerId);
+}
+
+/**
+ * Fresh-install routing is vendor-neutral: execution kind first, then user
+ * priority, then provider id as a deterministic tie-breaker. Persisted routing
+ * files remain authoritative and are never rewritten by a read.
+ */
+export function defaultRoutingConfig(
+  updatedAt = nowIso(),
+  providerConfig = defaultProviderConfig(updatedAt),
+): ExecutorRoutingConfigFile {
+  const executors = neutralProviderOrder(providerConfig);
+  const withHandoff = [...executors, 'chatgpt_handoff'];
   const orders: Record<RoutingIntentKey, string[]> = {
-    deterministic_edit: ['direct_edit', 'codex_cli', 'grok_cli', 'chatgpt_handoff'],
-    implementation: ['codex_cli', 'grok_cli', 'claude_cli', 'grok_api', 'openai_api', 'deepseek_api', 'github_copilot_cloud', 'chatgpt_handoff'],
-    repair: ['grok_cli', 'grok_api', 'claude_cli', 'codex_cli', 'deepseek_api', 'openai_api', 'chatgpt_handoff'],
-    planning: ['chatgpt_handoff', 'grok_cli', 'grok_api', 'openai_api', 'deepseek_api', 'claude_cli'],
-    review: ['codex_cli', 'grok_cli', 'claude_cli', 'grok_api', 'openai_api', 'chatgpt_handoff'],
-    browser_planning: ['codex_cli', 'grok_cli', 'claude_cli', 'grok_api', 'openai_api', 'chatgpt_handoff'],
-    ios_analysis: ['codex_cli', 'grok_cli', 'claude_cli', 'grok_api', 'openai_api', 'chatgpt_handoff'],
-    fallback: ['direct_edit', 'codex_cli', 'grok_cli', 'claude_cli', 'grok_api', 'openai_api', 'deepseek_api', 'github_copilot_cloud', 'chatgpt_handoff'],
+    deterministic_edit: ['direct_edit', ...withHandoff],
+    implementation: [...withHandoff],
+    repair: [...withHandoff],
+    planning: [...withHandoff],
+    review: [...withHandoff],
+    browser_planning: [...withHandoff],
+    ios_analysis: [...withHandoff],
+    fallback: ['direct_edit', ...withHandoff],
   };
   return {
     schemaVersion: 1,
     updatedAt,
     orders,
-    defaultImplementationProvider: 'codex_cli',
-    defaultRepairProvider: 'grok_cli',
-    defaultPlanningProvider: 'chatgpt_handoff',
-    defaultReviewProvider: 'codex_cli',
-    defaultBrowserPlanningProvider: 'codex_cli',
-    defaultIosAnalysisProvider: 'codex_cli',
   };
 }
 
@@ -262,8 +277,11 @@ function mergeToolDefaults(stored: LocalToolConfigFile | undefined): LocalToolCo
   return { schemaVersion: 1, updatedAt: stored.updatedAt ?? base.updatedAt, tools };
 }
 
-function mergeRoutingDefaults(stored: ExecutorRoutingConfigFile | undefined): ExecutorRoutingConfigFile {
-  const base = defaultRoutingConfig(stored?.updatedAt ?? nowIso());
+function mergeRoutingDefaults(
+  stored: ExecutorRoutingConfigFile | undefined,
+  providerConfig: ProviderConfigFile = defaultProviderConfig(stored?.updatedAt ?? nowIso()),
+): ExecutorRoutingConfigFile {
+  const base = defaultRoutingConfig(stored?.updatedAt ?? nowIso(), providerConfig);
   if (!stored) return base;
   const orders = { ...base.orders };
   for (const key of Object.keys(base.orders) as RoutingIntentKey[]) {
@@ -476,15 +494,24 @@ export function writeLocalToolConfig(location: GoalLoopConfigLocation, config: L
 }
 
 export function readRoutingConfig(location: GoalLoopConfigLocation): ExecutorRoutingConfigFile {
-  return mergeRoutingDefaults(readJsonFile(routingConfigPath(location), undefined));
+  return mergeRoutingDefaults(
+    readJsonFile(routingConfigPath(location), undefined),
+    readProviderConfig(location),
+  );
 }
 
 export function writeRoutingConfig(location: GoalLoopConfigLocation, config: ExecutorRoutingConfigFile): ExecutorRoutingConfigFile {
   const at = nowIso();
   // Strip handoff-only from non-terminal direct slots? Allow handoff only at end — validated by facade.
-  const next = { ...mergeRoutingDefaults(config), updatedAt: at };
+  const next = { ...mergeRoutingDefaults(config, readProviderConfig(location)), updatedAt: at };
   writeJsonAtomic(routingConfigPath(location), next);
   return next;
+}
+
+/** Remove explicit routing overrides and resume generated provider-priority routing. */
+export function resetRoutingConfig(location: GoalLoopConfigLocation): ExecutorRoutingConfigFile {
+  rmSync(routingConfigPath(location), { force: true });
+  return readRoutingConfig(location);
 }
 
 export function readGoalLoopPolicyConfig(location: GoalLoopConfigLocation): GoalLoopPolicyConfigFile {
