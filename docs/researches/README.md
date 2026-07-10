@@ -1,14 +1,11 @@
 # Research Reports
 
-Durable research reports live in this directory as topic-scoped Markdown files.
+Research reports are bounded evidence and hypotheses. They are not current runtime authority.
 
-Use `YYYYMMDD-topic.md` names when chronology matters, or `<topic>.md` for
-stable subject reports. Keep task-local implementation decisions in
-`tasks/notes/`, and keep repeated correction-derived rules in `tasks/lessons.md`.
+- Use one dated file per topic: `YYYYMMDD-topic.md`.
+- Remove personal paths, credentials, raw logs, and local runtime dumps before committing.
+- Promote accepted runtime rules into `docs/architecture/current/` or an ADR.
+- Keep task-local investigation notes under `tasks/notes/` instead of appending to one global research log.
+- External-model replies remain local raw artifacts until a reviewed synthesis is promoted here with provenance.
 
-External model consults such as GPT Pro reviews are raw evidence, not durable
-research by themselves. Store timestamped raw replies under
-`.ai/harness/handoff/gptpro/` and promote only the reviewed synthesis into this
-directory. Include provenance for promoted notes: raw artifact path, local
-`sessionId`, upstream provider session id when available, requested model,
-capture timestamp, and conversation URL when available.
+The former monolithic legacy research notes were removed because they mixed unrelated projects, personal filesystem paths, and obsolete migration history.

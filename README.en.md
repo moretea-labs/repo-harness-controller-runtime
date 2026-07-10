@@ -167,23 +167,13 @@ bash scripts/controller-runtime.sh status --repo .
 
 `start` performs bounded preflight checks for Bun, repository root resolution, package version, tracked PID state, MCP and Local Controller ports, controller home, and detached repo-harness orphan processes before launching the daemon, MCP Gateway, and Local Bridge. Logs default to `.ai/local/logs/repo-harness-controller.log`.
 
-`controller-runtime.sh` no longer starts the legacy ngrok rotation by default, which prevents old public endpoints from conflicting with the current Tailscale or Cloudflare endpoint. Enable the legacy ngrok rotation only when explicitly needed:
-
-```bash
-REPO_HARNESS_CONTROLLER_EXTERNAL_TUNNEL=ngrok scripts/controller-runtime.sh start
-```
-
-Stable public endpoints should be stored in the controllerHome-backed MCP service config; legacy `.repo-harness/mcp.local.json` is only a fallback.
+Store stable public endpoints in the Controller Home MCP service configuration. Repo-local MCP files are read only for compatibility and are not part of the new-install path; see [MCP tool exposure](docs/operations/mcp-tool-exposure.md).
 
 ## Connect ChatGPT
 
-1. Make the MCP endpoint reachable over HTTPS, ending in `/mcp`; for personal long-running use, prefer Tailscale Funnel, for example `https://your-machine.your-tailnet.ts.net/mcp`.
-2. In ChatGPT, enable developer mode in **Settings → Apps & Connectors → Advanced settings**.
-3. Create a connector and enter the public MCP URL, for example `https://mcp.example.com/mcp`.
-4. Start a new chat and add the connector from the composer tools menu.
-5. Before allowing writes, test repository inspection and `project_snapshot` first.
+Start with [Tutorial 2: Connect ChatGPT](docs/tutorials/02-connect-chatgpt.md). After connecting, call `rh_status`, then use `rh_context` for the selected repository. Normal use requires only `rh_status`, `rh_inbox`, `rh_context`, and `rh_work`; the `advanced` and `full` toolsets are diagnostic and compatibility surfaces.
 
-This README is the public usage guide. Switch to [README.md](README.md) for Simplified Chinese.
+See the [documentation hub](docs/README.md), or switch to [README.md](README.md) for Simplified Chinese.
 
 ## Make one repository the default in a ChatGPT Project
 
@@ -195,20 +185,20 @@ Default repoId: <repo-id returned by repo-harness repo register>
 Default checkoutId: <checkout-id returned by repo-harness repo register>
 
 Always pass this repoId and checkoutId to repo-harness tools unless I explicitly select another repository.
-Start repository work with controller_capabilities and project_snapshot.
-Prefer repository search plus Direct Edit for bounded changes. Do not start an Agent unless the work genuinely requires one.
+Start repository work with rh_status and rh_context.
+Use rh_work for bounded changes. Delegate to an Agent only when the work genuinely requires one.
 ```
 
 Project instructions are a durable conversation default, not a server-side authorization boundary. The controller still requires an explicit `repoId` when multiple repositories are enabled. This is intentional protection against changing the wrong repository.
 
-## Documentation policy
+## Documentation
 
-Public usage documentation is limited to:
+- [Public documentation hub](docs/README.md)
+- [English tutorials](docs/tutorials/README.md)
+- [中文快速教程](docs/tutorials/README.zh-CN.md)
+- [Current architecture authority](docs/architecture/index.md)
 
-- [English README](README.en.md)
-- [简体中文 README](README.md)
-
-The `docs/` directory remains for architecture notes, historical design records, operations notes, and internal references. It is not the normal user entry point.
+Historical designs and research records are explicitly non-authoritative. A new user can install, connect, and complete a first task without reading them.
 
 ## Security model
 

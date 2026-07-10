@@ -80,7 +80,7 @@ self_healing_loop_plan
 ### 2. 从源码运行
 
 ```bash
-git clone https://github.com/greysonOuyang/repo-harness-controller-runtime.git
+git clone https://github.com/moretea-labs/repo-harness-controller-runtime.git
 cd repo-harness-controller-runtime
 bun install
 bun run src/cli/index.ts doctor
@@ -194,23 +194,13 @@ bash scripts/controller-runtime.sh status --repo .
 
 `start` 会在真正拉起 daemon、MCP Gateway 和 Local Bridge 之前，先做 Bun、兼容仓库根目录、包版本、PID 状态、MCP / Local Controller 端口、controller home 以及 detached repo-harness 孤儿进程检查。长期架构上，MCP Gateway 和 Local Bridge 是全局 controller 服务，仓库通过 registry、`repoId` 和 `checkoutId` 被选择；`--repo` 只作为兼容默认仓库和配置引导入口。日志默认写到 `.ai/local/logs/repo-harness-controller.log`。
 
-`controller-runtime.sh` 默认不会再启动 legacy ngrok rotation，避免旧公网入口和当前 Tailscale/Cloudflare endpoint 混淆。只有显式设置下面环境变量才会启用旧 ngrok rotation：
-
-```bash
-REPO_HARNESS_CONTROLLER_EXTERNAL_TUNNEL=ngrok scripts/controller-runtime.sh start
-```
-
-稳定公网 endpoint 应写入 controllerHome-backed MCP service config；legacy `.repo-harness/mcp.local.json` 只作为 fallback 兼容。
+稳定公网 endpoint 应写入 Controller Home 的 MCP service config。旧版 repo-local MCP 文件仅用于兼容读取，不属于新安装流程；迁移说明见 [MCP 工具面与兼容策略](docs/operations/mcp-tool-exposure.md)。
 
 ## 连接 ChatGPT
 
-1. 准备一个以 `/mcp` 结尾、可通过 HTTPS 访问的 MCP 地址；个人长期使用优先考虑 Tailscale Funnel，例如 `https://your-machine.your-tailnet.ts.net/mcp`。
-2. 在 ChatGPT 中进入 **Settings → Apps & Connectors → Advanced settings**，开启 developer mode。
-3. 创建 Connector，填入公开 MCP 地址，例如 `https://mcp.example.com/mcp`。
-4. 新建聊天，从输入框附近的工具菜单添加这个 Connector。
-5. 在允许写入前，先测试仓库读取、`controller_capabilities` 和 `project_snapshot`。
+新用户从 [中文教程：连接 ChatGPT](docs/tutorials/02-connect-chatgpt.zh-CN.md) 开始。连接后先调用 `rh_status`，再用 `rh_context` 获取当前仓库上下文；正常工作流只需要 `rh_status`、`rh_inbox`、`rh_context` 和 `rh_work`。`advanced` 与 `full` 工具面只用于诊断和兼容，不是默认教程路径。
 
-公开使用说明以本 README 为准；英文用户切换到 [README.en.md](README.en.md)。
+完整文档入口见 [docs/README.md](docs/README.md)；英文用户切换到 [README.en.md](README.en.md)。
 
 ## 在 ChatGPT Project 中固定默认仓库
 
@@ -222,20 +212,20 @@ REPO_HARNESS_CONTROLLER_EXTERNAL_TUNNEL=ngrok scripts/controller-runtime.sh star
 默认 checkoutId：<repo-harness repo register 返回的 checkout-id>
 
 除非我明确选择其他仓库，否则每次调用 repo-harness 工具都传入以上 repoId 和 checkoutId。
-开始仓库工作时先调用 controller_capabilities 和 project_snapshot。
-已知且有边界的修改优先使用仓库搜索和 Direct Edit；只有确实需要时才启动 Agent。
+开始仓库工作时先调用 rh_status 和 rh_context。
+通过 rh_work 执行有边界的修改；只有确实需要时才委派给 Agent。
 ```
 
 Project instructions 是长期会话默认值，不是服务端权限边界。启用多个仓库时，Controller 仍要求工具调用显式携带 `repoId`，避免误改其他仓库。这是安全设计，不应取消。
 
-## 文档治理
+## 文档
 
-公开使用文档只保留：
+- [公开文档中心](docs/README.md)
+- [中文快速教程](docs/tutorials/README.zh-CN.md)
+- [English tutorials](docs/tutorials/README.md)
+- [当前架构权威入口](docs/architecture/index.md)
 
-- [简体中文 README](README.md)
-- [English README](README.en.md)
-
-`docs/` 目录仅保留架构、历史设计、运维和内部参考材料，不作为普通用户入口。
+历史设计和研究记录会明确标注为非运行时权威；普通用户不需要阅读它们即可完成安装和首个任务。
 
 ## 安全边界
 

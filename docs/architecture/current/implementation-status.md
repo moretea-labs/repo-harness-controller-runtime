@@ -51,15 +51,13 @@ The migration preserves the existing Issue, Task, Run, Edit Session, Local Job, 
 
 ## Public Contract and Tool Surface
 
-The compatibility baseline contains **97 original Controller tools**: 86 legacy repository-scoped MCP tools plus 11 repository-registry tools. Their compatibility fingerprint remains:
+The public MCP surface is profile-based:
 
-```text
-2f4977857957118e
-```
+- `core` is the default onboarding surface: four stable facade tools (`rh_status`, `rh_inbox`, `rh_context`, `rh_work`) plus five repository bootstrap and selection tools;
+- `advanced` exposes the supervised controller menu for maintainers and diagnostics;
+- `full` retains the historical compatibility surface and fingerprint for existing integrations.
 
-The target runtime adds **20 control tools** for durable Jobs, Artifacts, readiness, plugin runtime discovery/action dispatch, Schedules, Portfolio workflows, Candidate Findings and release gates. With the development runner enabled, the Controller profile exposes **117 tools total**. Existing names were not removed or renamed.
-
-Potentially long or mutating legacy calls now acknowledge a durable Job. The operation result remains available through `get_job`; repository identity and runtime-storage envelope fields are preserved in the Worker result.
+Legacy names remain implemented behind the compatibility profile, but they are not returned by the default `tools/list`. Potentially long or mutating compatibility calls acknowledge a durable Job, and their result remains available through `get_job`.
 
 ## Runtime Truth
 
@@ -118,4 +116,4 @@ Completion is guarded by:
 - HTTP Gateway `/health`, `/ready` and repository-health smoke;
 - package and source-manifest verification.
 
-The packaging environment did not contain Bun, so the Bun-native full test suite remains an explicit release-environment gate rather than a falsely claimed result.
+Release readiness requires Bun-native tests, TypeScript checking, MCP surface checks, public-document validation, tracked-file hygiene, and package export verification in the release environment.

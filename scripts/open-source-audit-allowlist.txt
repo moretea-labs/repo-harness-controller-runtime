@@ -24,7 +24,6 @@ tests/cli/mcp-policy.test.ts
 # Historical research / release checklists retain maintainer path evidence.
 # Prefer scrubbing over expanding this list for new files.
 docs/architecture/global-hook-runtime.md
-docs/researches/**
 deploy/release-checklists/**
 evals/benchmark.md
 plans/**

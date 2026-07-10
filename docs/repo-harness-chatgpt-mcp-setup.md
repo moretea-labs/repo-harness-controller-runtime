@@ -1,5 +1,7 @@
 # repo-harness ChatGPT Controller Setup
 
+> Advanced manual setup reference. New users should follow [Tutorial 1](tutorials/01-install-and-start.md), [Tutorial 2](tutorials/02-connect-chatgpt.md), and [Tutorial 3](tutorials/03-first-repository-task.md) first.
+
 ## Purpose
 
 The `controller` profile makes ChatGPT the project control plane. ChatGPT can inspect code and documents, maintain durable Issues and dependency-aware Tasks, apply bounded direct edits, publish Issues to GitHub Projects, dispatch short local Codex/Claude runs or visible GitHub Copilot cloud sessions, and review the resulting state. Repository files remain the source of truth; chat history is not required for recovery.
@@ -123,7 +125,7 @@ After either command, rescan or recreate the ChatGPT Connector, then call `contr
 Start a new ChatGPT conversation with:
 
 ```text
-Use repo-harness as the project controller. Read project_snapshot, current Issues, active Runs, and relevant code before deciding the next action. Keep work in small dependency-aware Tasks. Do not dispatch one large Issue as one agent run.
+Use repo-harness as the project controller. Start with rh_status and rh_context. Use rh_work for bounded repository work and rh_inbox when a decision or approval is required. Keep work in small dependency-aware units and delegate to an Agent only when needed.
 ```
 
 Typical requests:

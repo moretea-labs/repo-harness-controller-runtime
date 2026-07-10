@@ -4,13 +4,13 @@
   "description": "Installs, migrates, audits, and repairs repo-local agentic development harnesses",
   "license": "MIT",
   "author": "greysonOuyang",
-  "homepage": "https://github.com/greysonOuyang/repo-harness-controller-runtime#readme",
+  "homepage": "https://github.com/moretea-labs/repo-harness-controller-runtime#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/greysonOuyang/repo-harness-controller-runtime.git"
+    "url": "git+https://github.com/moretea-labs/repo-harness-controller-runtime.git"
   },
   "bugs": {
-    "url": "https://github.com/greysonOuyang/repo-harness-controller-runtime/issues"
+    "url": "https://github.com/moretea-labs/repo-harness-controller-runtime/issues"
   },
   "type": "module",
   "files": [
@@ -20,6 +20,8 @@
     ".agents/skills/repo-harness-chatgpt-bridge/",
     "agents/",
     "assets/",
+    "docs/README.md",
+    "docs/tutorials/",
     "docs/images/",
     "docs/architecture/",
     "docs/operations/",
@@ -70,6 +72,7 @@
     "check:release-surface": "bash scripts/check-public-release-surface.sh",
     "check:release-readiness": "bash scripts/check-release-readiness.sh",
     "check:open-source-surface": "bash scripts/check-open-source-tracked-surface.sh",
+    "check:public-docs": "bash scripts/check-public-docs.sh",
     "check:public-export": "bun scripts/public-release.ts",
     "package:source-zip": "bash scripts/package-source-archive.sh",
     "check:release-published": "bash scripts/check-release-published.sh",
