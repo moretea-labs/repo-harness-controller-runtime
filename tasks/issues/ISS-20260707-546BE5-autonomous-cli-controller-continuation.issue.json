@@ -138,9 +138,112 @@
       "createdAt": "2026-07-07T00:40:46.328Z",
       "updatedAt": "2026-07-07T00:40:46.328Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    },
+    {
+      "id": "T5",
+      "title": "Implement one bounded live autonomous maintenance loop",
+      "objective": "Implement and verify one real live Schedule/Occurrence execution path for safe repo-harness runtime maintenance, instead of shadow-only readiness. The loop must be daemon-owned and bounded by daily runtime budget, cooldown, exponential backoff, maximum consecutive failures, explicit stop conditions and low-risk operation allowlist. Health/readiness/preview reads must never dispatch work. A failed or blocked occurrence must create a bounded Inbox/Handoff item and stop according to policy rather than repeatedly executing. Add focused tests and concise operator documentation, commit in an isolated branch, do not push.",
+      "status": "ready",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src/runtime/control-plane/schedules/**",
+        "src/runtime/control-plane/goal-loop/**schedule**",
+        "src/runtime/control-plane/goal-loop/**occurrence**",
+        "src/runtime/control-plane/**maintenance**",
+        "src/cli/controller/**schedule**",
+        "src/cli/local-bridge/facade-api.ts",
+        "tests/runtime/**schedule**",
+        "tests/runtime/**occurrence**",
+        "tests/cli/**schedule**",
+        "docs/operations/**",
+        "docs/repo-harness-autonomous-goal-loop.md"
+      ],
+      "forbiddenPaths": [
+        "src/runtime/control-plane/goal-loop/provider-registry.ts",
+        "src/runtime/control-plane/goal-loop/local-tools.ts",
+        "src/cli/mcp/**",
+        "src/cli/agent-jobs/**",
+        "src/cli/local-jobs/**",
+        "node_modules/**",
+        "_ops/**",
+        ".ai/**"
+      ],
+      "checks": [
+        "package:check:type",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "At least one safe maintenance schedule can run live and create a bounded occurrence.",
+        "Readiness and preview calls remain side-effect free.",
+        "Daily budget, cooldown, backoff, max failures and stop conditions are enforced.",
+        "Only explicitly allowlisted low-risk maintenance operations dispatch automatically.",
+        "Failure or policy block creates one bounded handoff/inbox item and prevents retry storms.",
+        "Focused tests and typecheck pass.",
+        "Changes are committed and not pushed."
+      ],
+      "risk": "high",
+      "recommendedAgent": "codex",
+      "notes": [],
+      "runIds": [],
+      "createdAt": "2026-07-10T03:33:50.216Z",
+      "updatedAt": "2026-07-10T03:33:50.216Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    },
+    {
+      "id": "T6",
+      "title": "Implement precise bounded live maintenance occurrence",
+      "objective": "Replace the scope-conflicting T5 dispatch attempt. Implement one real live low-risk maintenance Schedule/Occurrence path only in the schedule engine/store/settlement and maintenance executor. Enforce daily runtime budget, cooldown, exponential backoff, maximum consecutive failures, explicit stop conditions and an operation allowlist. Readiness and preview remain side-effect free. A failed or blocked occurrence writes one bounded handoff/inbox-compatible record and stops according to policy. Add dedicated schedule tests, run typecheck and focused checks, commit in an isolated branch, do not push.",
+      "status": "blocked",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src/runtime/workflow/schedules/engine.ts",
+        "src/runtime/workflow/schedules/types.ts",
+        "src/runtime/workflow/schedules/settlement.ts",
+        "src/runtime/workflow/schedules/store.ts",
+        "src/runtime/recovery/maintenance-executor.ts",
+        "tests/runtime/schedule-dedupe.test.ts",
+        "tests/runtime/live-maintenance-schedule.test.ts"
+      ],
+      "forbiddenPaths": [
+        "src/runtime/control-plane/**",
+        "src/runtime/gateway/**",
+        "src/runtime/execution/**",
+        "src/cli/**",
+        "src/runtime/facade/**",
+        "docs/**",
+        "node_modules/**",
+        "_ops/**",
+        ".ai/**"
+      ],
+      "checks": [
+        "package:check:type",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "A safe maintenance schedule can dispatch one live bounded occurrence.",
+        "Readiness and preview paths remain side-effect free.",
+        "Daily budget, cooldown, backoff, failure limit and stop conditions are enforced.",
+        "Only allowlisted low-risk maintenance actions execute automatically.",
+        "Failure or policy block creates one bounded handoff-compatible record and prevents retry storms.",
+        "Dedicated schedule tests and typecheck pass.",
+        "Changes are committed and not pushed."
+      ],
+      "risk": "high",
+      "recommendedAgent": "codex",
+      "notes": [
+        "Accepted RUN-iss-20260707-546be5-t6-1783654950248-2c60595c for asynchronous launch.",
+        "Dispatched RUN-iss-20260707-546be5-t6-1783654950248-2c60595c to codex.",
+        "RUN-iss-20260707-546be5-t6-1783654950248-2c60595c ended as unknown; explicit retry is required. Controller process 64053 is no longer running"
+      ],
+      "runIds": [
+        "RUN-iss-20260707-546be5-t6-1783654950248-2c60595c"
+      ],
+      "createdAt": "2026-07-10T03:42:16.121Z",
+      "updatedAt": "2026-07-10T05:33:38.831Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     }
   ],
   "createdAt": "2026-07-07T00:40:46.328Z",
-  "updatedAt": "2026-07-07T00:52:20.417Z",
+  "updatedAt": "2026-07-10T05:33:38.831Z",
   "repoId": "repo_123b7cf58b6b17b5cbe46a56"
 }

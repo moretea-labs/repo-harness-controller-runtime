@@ -2,7 +2,7 @@
 id: "ISS-20260707-546BE5"
 kind: "feature"
 status: "in_progress"
-updated_at: "2026-07-07T00:52:20.417Z"
+updated_at: "2026-07-10T05:33:38.831Z"
 source: "repo-harness-controller-v8"
 ---
 
@@ -73,6 +73,24 @@ Allow repo-harness daemon to continue work with local Codex/ChatGPT-compatible C
 - Depends on: none
 - Allowed paths: `src`, `tests`, `docs`, `plans`
 - Checks: `npm run check:type`, `bun test`
+- Execution hint: agent / codex
+
+### T5 — Implement one bounded live autonomous maintenance loop
+
+- Status: `ready`
+- Objective: Implement and verify one real live Schedule/Occurrence execution path for safe repo-harness runtime maintenance, instead of shadow-only readiness. The loop must be daemon-owned and bounded by daily runtime budget, cooldown, exponential backoff, maximum consecutive failures, explicit stop conditions and low-risk operation allowlist. Health/readiness/preview reads must never dispatch work. A failed or blocked occurrence must create a bounded Inbox/Handoff item and stop according to policy rather than repeatedly executing. Add focused tests and concise operator documentation, commit in an isolated branch, do not push.
+- Depends on: none
+- Allowed paths: `src/runtime/control-plane/schedules/**`, `src/runtime/control-plane/goal-loop/**schedule**`, `src/runtime/control-plane/goal-loop/**occurrence**`, `src/runtime/control-plane/**maintenance**`, `src/cli/controller/**schedule**`, `src/cli/local-bridge/facade-api.ts`, `tests/runtime/**schedule**`, `tests/runtime/**occurrence**`, `tests/cli/**schedule**`, `docs/operations/**`, `docs/repo-harness-autonomous-goal-loop.md`
+- Checks: `package:check:type`, `package:check:controller-v8`
+- Execution hint: agent / codex
+
+### T6 — Implement precise bounded live maintenance occurrence
+
+- Status: `blocked`
+- Objective: Replace the scope-conflicting T5 dispatch attempt. Implement one real live low-risk maintenance Schedule/Occurrence path only in the schedule engine/store/settlement and maintenance executor. Enforce daily runtime budget, cooldown, exponential backoff, maximum consecutive failures, explicit stop conditions and an operation allowlist. Readiness and preview remain side-effect free. A failed or blocked occurrence writes one bounded handoff/inbox-compatible record and stops according to policy. Add dedicated schedule tests, run typecheck and focused checks, commit in an isolated branch, do not push.
+- Depends on: none
+- Allowed paths: `src/runtime/workflow/schedules/engine.ts`, `src/runtime/workflow/schedules/types.ts`, `src/runtime/workflow/schedules/settlement.ts`, `src/runtime/workflow/schedules/store.ts`, `src/runtime/recovery/maintenance-executor.ts`, `tests/runtime/schedule-dedupe.test.ts`, `tests/runtime/live-maintenance-schedule.test.ts`
+- Checks: `package:check:type`, `package:check:controller-v8`
 - Execution hint: agent / codex
 
 ## Related Artifacts

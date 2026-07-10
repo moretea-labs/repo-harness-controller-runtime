@@ -4,7 +4,7 @@
   "title": "Fix MCP keepalive aggressive gateway restart locally",
   "slug": "fix-mcp-keepalive-aggressive-gateway-restart-locally",
   "kind": "bug",
-  "status": "planned",
+  "status": "in_progress",
   "summary": "GitHub Copilot cloud execution for ISS-20260626-A674DE/T10 failed because Copilot Coding Agent is not enabled for the user or repository. Create a local fallback task to fix the same MCP keepalive aggressive restart behavior using a local executor, limited to the intended keepalive source and tests.",
   "goals": [
     "Prevent transient /health failures from restarting an otherwise live MCP Gateway.",
@@ -57,17 +57,115 @@
       "notes": [
         "Accepted RUN-iss-20260709-1064d1-t1-1783555108504-f6a1ebaa for asynchronous launch.",
         "Dispatched RUN-iss-20260709-1064d1-t1-1783555108504-f6a1ebaa to codex.",
-        "RUN-iss-20260709-1064d1-t1-1783555108504-f6a1ebaa ended as failed; explicit retry is required. Reading additional input from stdin..."
+        "RUN-iss-20260709-1064d1-t1-1783555108504-f6a1ebaa ended as failed; explicit retry is required. Reading additional input from stdin...",
+        "Failed Claude run produced no usable implementation. Replacement implementation is T2; do not retry T1."
       ],
       "runIds": [
         "RUN-iss-20260709-1064d1-t1-1783555108504-f6a1ebaa"
       ],
       "createdAt": "2026-07-08T23:54:15.536Z",
-      "updatedAt": "2026-07-08T23:58:43.655Z",
+      "updatedAt": "2026-07-10T03:33:28.736Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    },
+    {
+      "id": "T2",
+      "title": "Implement bounded Gateway keepalive and supervisor-safe restart",
+      "objective": "Replace the failed zero-output keepalive attempt. Inspect and update MCP keepalive/restart lifecycle so transient health failures mark degraded and preserve a live Gateway, process exit restarts immediately, and a still-live but unhealthy Gateway restarts only after a configurable sustained-failure threshold. Ensure restart is supervisor-safe/asynchronous so the caller is not synchronously killing its own control path. Add focused regression tests, run targeted checks and typecheck, commit in an isolated branch, do not push.",
+      "status": "planned",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src/cli/mcp/keepalive.ts",
+        "src/cli/mcp/restart.ts",
+        "src/cli/mcp/setup.ts",
+        "src/cli/mcp/transports/http.ts",
+        "tests/cli/**",
+        "docs/operations/**"
+      ],
+      "forbiddenPaths": [
+        "src/cli/mcp/tools.ts",
+        "src/cli/mcp/legacy-tool-service.ts",
+        "src/cli/local-jobs/**",
+        "src/cli/agent-jobs/**",
+        "src/runtime/control-plane/goal-loop/**",
+        "node_modules/**",
+        "_ops/**",
+        ".ai/**"
+      ],
+      "checks": [
+        "package:check:type",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "Transient health failure does not restart a live Gateway.",
+        "Exited Gateway restarts immediately.",
+        "Sustained unhealthy live Gateway restarts only after the configured threshold.",
+        "Restart is initiated by an independent supervisor path and does not require the caller to survive.",
+        "Focused lifecycle tests and typecheck pass.",
+        "Changes are committed and not pushed."
+      ],
+      "risk": "high",
+      "recommendedAgent": "codex",
+      "notes": [],
+      "runIds": [],
+      "createdAt": "2026-07-10T03:33:15.127Z",
+      "updatedAt": "2026-07-10T03:33:15.127Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    },
+    {
+      "id": "T3",
+      "title": "Implement precise keepalive degradation and restart policy",
+      "objective": "Replace the scope-conflicting T2 launch attempt. Modify only keepalive/restart implementation and the two dedicated lifecycle tests. Transient health failures mark degraded without restarting a live Gateway; process exit restarts immediately; a still-live unhealthy Gateway restarts only after a configurable sustained-failure threshold. Restart initiation must be supervisor-safe and not depend on the caller surviving. Run focused tests and typecheck, commit in an isolated branch, do not push.",
+      "status": "review",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src/cli/mcp/keepalive.ts",
+        "src/cli/mcp/restart.ts",
+        "tests/cli/mcp-keepalive.test.ts",
+        "tests/cli/mcp-restart-process-ownership.test.ts"
+      ],
+      "forbiddenPaths": [
+        "src/cli/mcp/tools.ts",
+        "src/cli/mcp/legacy-tool-service.ts",
+        "src/cli/mcp/policy.ts",
+        "src/cli/mcp/types.ts",
+        "src/cli/mcp/setup.ts",
+        "src/cli/mcp/transports/**",
+        "src/cli/mcp/repository-tools.ts",
+        "src/runtime/**",
+        "docs/**",
+        "node_modules/**",
+        "_ops/**",
+        ".ai/**"
+      ],
+      "checks": [
+        "package:check:type",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "Transient health failure does not restart a live Gateway.",
+        "Exited Gateway restarts immediately.",
+        "Sustained unhealthy live Gateway restarts only after the configured threshold.",
+        "Restart initiation is supervisor-safe.",
+        "Dedicated keepalive/restart tests and typecheck pass.",
+        "Changes are committed and not pushed."
+      ],
+      "risk": "high",
+      "recommendedAgent": "codex",
+      "notes": [
+        "Accepted RUN-iss-20260709-1064d1-t3-1783654855784-d3a3cd88 for asynchronous launch.",
+        "Dispatched RUN-iss-20260709-1064d1-t3-1783654855784-d3a3cd88 to codex.",
+        "RUN-iss-20260709-1064d1-t3-1783654855784-d3a3cd88 finished successfully. Automatic integration is starting.",
+        "Automatic integration failed for RUN-iss-20260709-1064d1-t3-1783654855784-d3a3cd88: task worktree has no changes to integrate"
+      ],
+      "runIds": [
+        "RUN-iss-20260709-1064d1-t3-1783654855784-d3a3cd88"
+      ],
+      "createdAt": "2026-07-10T03:40:18.674Z",
+      "updatedAt": "2026-07-10T03:48:04.056Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     }
   ],
   "createdAt": "2026-07-08T23:54:15.536Z",
-  "updatedAt": "2026-07-08T23:58:43.655Z",
+  "updatedAt": "2026-07-10T03:48:04.056Z",
   "repoId": "repo_123b7cf58b6b17b5cbe46a56"
 }
