@@ -30,6 +30,19 @@ export interface VerificationViewModel {
   summary: string;
 }
 
+export interface HandoffDecisionViewModel {
+  type: 'approval' | 'authorization' | 'review' | 'clarification';
+  typeLabel: string;
+  requestedAction: string;
+  necessityLabel: string;
+  necessityExplanation: string;
+  impact: string;
+  afterApproval: string;
+  ifRejected: string;
+  canApproveAndContinue: boolean;
+  primaryActionLabel: string;
+}
+
 export interface HandoffCardViewModel {
   id: string;
   title: string;
@@ -43,6 +56,7 @@ export interface HandoffCardViewModel {
   attemptedActions: string[];
   evidenceLabels: string[];
   suggestedActions: SuggestedActionViewModel[];
+  decision: HandoffDecisionViewModel;
   /** Advanced only */
   advanced?: {
     handoffId: string;

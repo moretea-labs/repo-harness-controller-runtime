@@ -132,6 +132,14 @@ export interface HandoffCurrentState {
   checks?: Array<{ checkId: string; ok: boolean; summary?: string; outcome?: VerificationOutcome }>;
 }
 
+export interface HandoffApprovalAction {
+  operation: 'start' | 'repair';
+  label: string;
+  summary: string;
+  risk: CapabilityRisk;
+  payload: Record<string, unknown>;
+}
+
 export interface HandoffItem {
   schemaVersion: 1;
   id: string;
@@ -152,6 +160,8 @@ export interface HandoffItem {
   recommendedDecision: string;
   recommendedPrompt: string;
   recommendedContinuationPrompt?: string;
+  /** Exact action that may run after explicit approval. Absent on legacy/non-executable handoffs. */
+  approvalAction?: HandoffApprovalAction;
   suggestedNextActions: SuggestedNextAction[];
   decision?: string;
   resolver?: string;

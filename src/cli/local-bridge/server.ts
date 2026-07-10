@@ -77,6 +77,7 @@ import { localBridgeDashboardHtml } from "./dashboard";
 import type { LocalBridgeJobRequest } from "./types";
 import {
   ackConsoleHandoff,
+  approveConsoleHandoff,
   applyConsoleSafePatch,
   buildAdvancedDiagnosticsEnvelope,
   buildCommandCenter,
@@ -1460,6 +1461,25 @@ export async function startLocalBridgeServer(
     }
   });
 
+  app.post("/api/console/inbox/:handoffId/approve", (request, response) => {
+    try {
+      const result = approveConsoleHandoff(
+        consoleCtx(request),
+        String(request.params.handoffId ?? ""),
+        "user",
+      );
+      const feedback = toConsoleOperationFeedback(result.actionResult);
+      response.status(result.continued ? 200 : 409).json({
+        ...result,
+        phase: feedback.phase,
+        statusLabel: feedback.statusLabel,
+        feedback,
+      });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
   app.post("/api/console/inbox/:handoffId/resolve", (request, response) => {
     try {
       const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
@@ -1536,6 +1556,10 @@ export async function startLocalBridgeServer(
         requiresWorker: body.requiresWorker === true,
         requiresApproval: body.requiresApproval === true,
         destructive: body.destructive === true,
+        approvalConfirmed: body.approvalConfirmed === true,
+        forceMode: body.forceMode === "direct_control" || body.forceMode === "goal_workloop" || body.forceMode === "handoff_only"
+          ? body.forceMode
+          : undefined,
         checkIds: Array.isArray(body.checkIds) ? body.checkIds.map(String) : undefined,
       });
       const feedback = toConsoleOperationFeedback(result);

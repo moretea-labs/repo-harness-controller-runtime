@@ -1310,7 +1310,7 @@ printf '%s\n' '{"type":"turn.completed"}'
     const dashboard = await fetch(handle.url).then((response) => response.text());
     expect(dashboard).toContain("执行助手控制台");
     expect(dashboard).toContain("指挥中心");
-    expect(dashboard).toContain("待决定");
+    expect(dashboard).toContain("审批与决定");
     expect(dashboard).toContain("当前任务");
     expect(dashboard).toContain("selectRepo");
   });
@@ -1385,6 +1385,11 @@ printf '%s\n' '{"type":"turn.completed"}'
     expect(dashboard).toContain("/api/console/plugins");
     expect(dashboard).toContain("正在读取控制台状态");
     expect(dashboard).toContain("/api/console/command-center");
+    expect(dashboard).toContain("你正在批准 / 决定什么");
+    expect(dashboard).toContain("是否有必要");
+    expect(dashboard).toContain("批准并创建任务");
+    expect(dashboard).toContain("查看审批详情");
+    expect(dashboard).toContain("kind==='approve'");
 
     const plugins = await fetch(new URL("/api/console/plugins", handle.url), {
       headers: { "x-repo-harness-local-token": handle.token },

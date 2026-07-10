@@ -428,6 +428,86 @@ function handoffTone(severity: HandoffItem['severity']): PlainStatusTone {
   return 'blue';
 }
 
+function describeHandoffDecision(item: HandoffItem): HandoffCardViewModel['decision'] {
+  const reason = item.creationReason;
+  const isApproval = reason === 'policy_approval_required' || reason === 'destructive_action_requires_confirmation';
+  const approvalAction = item.approvalAction;
+  const canApproveAndContinue = isApproval
+    && (item.status === 'pending' || item.status === 'acknowledged')
+    && approvalAction?.operation === 'start';
+  if (isApproval) {
+    const destructive = reason === 'destructive_action_requires_confirmation' || approvalAction?.risk === 'destructive';
+    const payload = approvalAction?.payload ?? {};
+    const objective = typeof payload.objective === 'string' ? payload.objective.trim() : '';
+    const allowedPaths = Array.isArray(payload.allowedPaths) ? payload.allowedPaths.map(String).filter(Boolean) : [];
+    const expectedFiles = typeof payload.expectedFiles === 'number' ? payload.expectedFiles : undefined;
+    const scopeSummary = allowedPaths.length
+      ? `允许修改：${allowedPaths.slice(0, 4).join('、')}${allowedPaths.length > 4 ? ' 等' : ''}`
+      : '修改范围仍受原任务描述和仓库策略限制';
+    const estimate = expectedFiles === undefined ? '' : `；预计涉及约 ${expectedFiles} 个文件`;
+    return {
+      type: 'approval',
+      typeLabel: destructive ? '高风险操作审批' : '执行授权',
+      requestedAction: approvalAction?.operation === 'start' && objective
+        ? `创建任务并继续处理：“${objective.slice(0, 240)}”`
+        : item.blockingDecision || item.summary,
+      necessityLabel: '必须确认',
+      necessityExplanation: destructive
+        ? '此操作包含高风险或潜在不可逆副作用，系统不能替你默认同意。'
+        : '当前安全策略要求显式授权；缩小范围或改为只读预览后可避免本次审批。',
+      impact: approvalAction?.operation === 'start'
+        ? `批准后会创建正式任务。${scopeSummary}${estimate}。`
+        : '当前审批没有保存可安全重放的具体动作，因此不能自动续跑。',
+      afterApproval: canApproveAndContinue
+        ? '系统会记录批准、立即创建任务并打开任务详情；接下来会明确显示继续、委派、验证或收尾动作，不代表任务已经完成。'
+        : '只会记录你的决定，不会自动执行。请按人工继续提示处理，或重新提交范围明确的任务。',
+      ifRejected: '相关操作保持未执行；你可以缩小范围、改成预览、补充信息或取消。',
+      canApproveAndContinue,
+      primaryActionLabel: canApproveAndContinue ? '批准并创建任务' : '仅记录决定',
+    };
+  }
+  if (reason === 'missing_authorization') {
+    return {
+      type: 'authorization',
+      typeLabel: '缺少权限',
+      requestedAction: item.blockingDecision || item.summary,
+      necessityLabel: '不是审批',
+      necessityExplanation: '系统缺少执行所需的账号、插件或仓库权限；单击“批准”不能补齐权限。',
+      impact: '补齐权限后需要重新检查任务，系统才会决定是否继续。',
+      afterApproval: '配置或授权完成后，返回任务页重新运行检查或继续任务。',
+      ifRejected: '任务保持阻塞，但不会产生额外副作用。',
+      canApproveAndContinue: false,
+      primaryActionLabel: '记录处理结果',
+    };
+  }
+  if (reason === 'invalid_objective') {
+    return {
+      type: 'clarification',
+      typeLabel: '需要补充范围',
+      requestedAction: item.blockingDecision || item.summary,
+      necessityLabel: '需要澄清',
+      necessityExplanation: '目标或修改边界不足，继续执行可能偏离你的真实需求。',
+      impact: '补充目标、允许路径和验收标准后，系统会重新选择执行方式。',
+      afterApproval: '此项不能通过“批准”自动解决，需要修改任务描述后重新提交。',
+      ifRejected: '当前请求不会执行。',
+      canApproveAndContinue: false,
+      primaryActionLabel: '记录补充说明',
+    };
+  }
+  return {
+    type: 'review',
+    typeLabel: '结果审阅',
+    requestedAction: item.blockingDecision || item.summary,
+    necessityLabel: '需要判断',
+    necessityExplanation: '系统遇到了验收失败、结果歧义或助手产出，需要你选择修复、调整范围或停止。',
+    impact: '你的决定会影响下一步采用修复、重新验证还是结束任务。',
+    afterApproval: '记录决定后，请从相关任务进入对应的修复、验证或收尾动作。',
+    ifRejected: '任务保持在审阅状态，不会自动继续。',
+    canApproveAndContinue: false,
+    primaryActionLabel: '记录审阅决定',
+  };
+}
+
 export function mapHandoffCard(item: HandoffItem): HandoffCardViewModel {
   return {
     id: item.id,
@@ -450,6 +530,7 @@ export function mapHandoffCard(item: HandoffItem): HandoffCardViewModel {
     attemptedActions: item.attemptedActions ?? [],
     evidenceLabels: item.evidenceRefs.map((entry) => entry.title || '证据').slice(0, 6),
     suggestedActions: mapSuggested(item.suggestedNextActions),
+    decision: describeHandoffDecision(item),
     advanced: {
       handoffId: item.id,
       workId: item.workId,
@@ -1034,6 +1115,8 @@ export function startConsoleWork(
     requiresWorker?: boolean;
     requiresApproval?: boolean;
     destructive?: boolean;
+    approvalConfirmed?: boolean;
+    forceMode?: 'direct_control' | 'goal_workloop' | 'handoff_only';
     checkIds?: string[];
   },
 ): FacadeResult {
@@ -1063,6 +1146,8 @@ export function startConsoleWork(
         destructive: input.destructive === true,
       },
       requestedBy: 'user',
+      approvalConfirmed: input.approvalConfirmed === true,
+      forceMode: input.forceMode,
     },
   );
 }
@@ -1241,6 +1326,58 @@ export function ackConsoleHandoff(ctx: ConsoleFacadeContext, handoffId: string) 
 
 export function resolveConsoleHandoff(ctx: ConsoleFacadeContext, handoffId: string, decision: string, resolver = 'user') {
   return mapHandoffCard(resolveHandoffItem(store(ctx), handoffId, { decision, resolver }));
+}
+
+export function approveConsoleHandoff(ctx: ConsoleFacadeContext, handoffId: string, resolver = 'user') {
+  const item = getHandoffItem(store(ctx), handoffId);
+  if (!item) throw new Error(`handoff not found: ${handoffId}`);
+  const decision = describeHandoffDecision(item);
+  if (decision.type !== 'approval') throw new Error('该事项不是审批，不能使用“批准并继续”。');
+  if (!item.approvalAction || item.approvalAction.operation !== 'start') {
+    throw new Error('该审批项没有保存可安全重放的任务创建动作，请仅记录决定并按人工提示处理。');
+  }
+  if (item.status !== 'pending' && item.status !== 'acknowledged') {
+    throw new Error(`该审批已处理（${item.status}）。`);
+  }
+
+  const payload = item.approvalAction.payload;
+  const strings = (value: unknown): string[] | undefined => Array.isArray(value) ? value.map(String) : undefined;
+  const actionResult = startConsoleWork(ctx, {
+    objective: typeof payload.objective === 'string' ? payload.objective : '',
+    acceptanceCriteria: strings(payload.acceptanceCriteria),
+    allowedPaths: strings(payload.allowedPaths),
+    forbiddenPaths: strings(payload.forbiddenPaths),
+    expectedFiles: typeof payload.expectedFiles === 'number' ? payload.expectedFiles : undefined,
+    expectedChangedLines: typeof payload.expectedChangedLines === 'number' ? payload.expectedChangedLines : undefined,
+    scopeClear: payload.scopeClear !== false,
+    requiresInvestigation: payload.requiresInvestigation === true,
+    requiresLongRunningChecks: payload.requiresLongRunningChecks === true,
+    requiresWorker: payload.requiresWorker === true,
+    requiresApproval: payload.requiresApproval === true,
+    destructive: payload.destructive === true,
+    approvalConfirmed: true,
+    forceMode: 'goal_workloop',
+    checkIds: strings(payload.checkIds),
+  });
+
+  if (actionResult.status !== 'ok') {
+    return {
+      item: mapHandoffCard(item),
+      actionResult,
+      continued: false,
+      summary: `批准已收到，但后续动作未成功：${actionResult.summary}`,
+    };
+  }
+  const resolved = resolveHandoffItem(store(ctx), handoffId, {
+    decision: `approved: ${item.approvalAction.label}`,
+    resolver,
+  });
+  return {
+    item: mapHandoffCard(resolved),
+    actionResult,
+    continued: true,
+    summary: '已批准并创建任务，页面将进入任务详情并显示后续动作。',
+  };
 }
 
 export function dismissConsoleHandoff(ctx: ConsoleFacadeContext, handoffId: string, decision = 'dismissed', resolver = 'user') {

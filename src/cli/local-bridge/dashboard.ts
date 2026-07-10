@@ -66,7 +66,9 @@ details.advanced{margin-top:12px;border-top:1px dashed var(--line);padding-top:1
 .busy-banner{font-size:12px;color:var(--muted)}
 .refresh-meta{font-size:12px;color:var(--faint);margin-left:auto}
 .composer h2{font-size:20px}.composer .hint{color:var(--muted);margin:0 0 10px;font-size:13px}
-@media(max-width:980px){.body{grid-template-columns:1fr}.side{display:none}.grid.two,.grid.cards,.grid.stats{grid-template-columns:1fr}.top{flex-wrap:wrap;height:auto;padding:10px 12px}}
+.decision-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:12px 0}.decision-box{padding:12px;border:1px solid var(--line);border-radius:12px;background:rgba(255,255,255,.025)}.decision-box strong{display:block;margin-bottom:5px}.decision-box p{margin:0;color:var(--muted)}
+.flow{display:flex;align-items:stretch;gap:6px;margin:12px 0;overflow:auto}.flow-step{min-width:130px;flex:1;padding:9px 10px;border-radius:10px;border:1px solid var(--line);background:rgba(255,255,255,.025);color:var(--muted);font-size:12px}.flow-arrow{display:grid;place-items:center;color:var(--faint)}
+@media(max-width:980px){.body{grid-template-columns:1fr}.side{display:none}.grid.two,.grid.cards,.grid.stats,.decision-grid{grid-template-columns:1fr}.top{flex-wrap:wrap;height:auto;padding:10px 12px}}
 </style>
 </head>
 <body>
@@ -77,7 +79,7 @@ details.advanced{margin-top:12px;border-top:1px dashed var(--line);padding-top:1
     <span class="chip"><span class="dot" id="readyDot"></span><strong id="topReady">检查中</strong></span>
     <span class="chip"><span class="dot" id="connectorDot"></span><span id="topConnector">连接</span></span>
     <button class="chip" onclick="switchView('capabilities')">插件 <strong id="topPlugins">—</strong></button>
-    <button class="chip" onclick="switchView('inbox')">待决定 <span class="count" id="topHandoffs">0</span></button>
+    <button class="chip" onclick="switchView('inbox')">待审批 / 决定 <span class="count" id="topHandoffs">0</span></button>
     <div class="top-actions">
       <button class="btn ghost" onclick="refreshAll()">刷新</button>
       <button class="btn ghost" onclick="switchView('advanced')">高级</button>
@@ -87,7 +89,7 @@ details.advanced{margin-top:12px;border-top:1px dashed var(--line);padding-top:1
     <aside class="side">
       <nav class="nav">
         <button class="active" data-view="home">⌂ 指挥中心</button>
-        <button data-view="inbox">△ 待决定 <span class="count" id="sideHandoffs">0</span></button>
+        <button data-view="inbox">△ 审批与决定 <span class="count" id="sideHandoffs">0</span></button>
         <button data-view="work">▷ 当前任务</button>
         <button data-view="capabilities">◇ 能力 / 插件 <span class="count" id="sidePlugins" style="display:none">0</span></button>
         <button data-view="automation">⚙ 模型与工具</button>
@@ -327,7 +329,7 @@ function renderHome(){
     '</div>'+
     '<div class="grid two" style="margin-top:16px">'+
       renderWorkCard(work, '当前任务')+
-      '<div class="panel"><div class="section-title"><h2>待我决定</h2>'+btn('查看全部','data-nav="inbox"','ghost')+'</div>'+
+      '<div class="panel"><div class="section-title"><h2>待审批 / 决定</h2>'+btn('查看全部','data-nav="inbox"','ghost')+'</div>'+
         (handoffs.length?handoffs.map(function(h){return handoffMini(h)}).join(''):'<div class="empty">目前没有需要你拍板的事项</div>')+
       '</div>'+
     '</div>'+
@@ -416,11 +418,13 @@ function renderWorkCard(work, title){
 
 function handoffMini(h){
   var id=esc(h.id);
+  var d=obj(h.decision);
   return '<div class="card-row" style="margin-bottom:8px">'+
-    '<div><h3>'+esc(h.title)+'</h3><p>'+esc(h.reason)+'</p><div class="muted">推荐：'+esc(h.recommendedDecision||'请先阅读详情')+'</div></div>'+
+    '<div><div style="margin-bottom:6px">'+pill(h.tone,d.typeLabel||h.severityLabel||'需要决定')+'</div><h3>'+esc(h.title)+'</h3>'+
+      '<p><strong>需要你决定：</strong>'+esc(d.requestedAction||h.reason||'请打开查看详情')+'</p>'+
+      '<div class="faint">'+esc(d.afterApproval||h.recommendedDecision||'请先阅读详情')+'</div></div>'+
     '<div class="actions" style="flex-direction:column">'+
-      btn('打开','data-open-handoff="'+id+'"','primary')+
-      btn('解决','data-handoff-act="resolve" data-handoff-id="'+id+'"')+
+      btn(d.canApproveAndContinue?'查看审批详情':'查看并决定','data-open-handoff="'+id+'"','primary')+
     '</div></div>';
 }
 
@@ -430,35 +434,45 @@ function renderInbox(){
   if(!detail&&items.length){selectedHandoffId=items[0].id;detail=items[0]}
   var root=document.getElementById('view-inbox');
   root.innerHTML=
-    '<div class="page-head"><div><h1>待我决定</h1><p>这里只放需要你拍板的事项，不是运行日志。</p></div><button class="btn" onclick="refreshAll()">刷新</button></div>'+
+    '<div class="page-head"><div><h1>审批与决定</h1><p>每项都说明你在批准什么、为何需要、会产生什么影响，以及处理后系统是否真的继续。</p></div><button class="btn" onclick="refreshAll()">刷新</button></div>'+
     '<div class="grid two">'+
       '<div class="list">'+(items.length?items.map(function(h){
-        var id=esc(h.id);
+        var id=esc(h.id);var d=obj(h.decision);
         return '<div class="panel" style="padding:14px;cursor:pointer;border-color:'+(selectedHandoffId===h.id?'rgba(96,165,250,.45)':'')+'" data-open-handoff="'+id+'">'+
-          '<div class="section-title"><h3 style="margin:0">'+esc(h.title)+'</h3>'+pill(h.tone,h.severityLabel)+'</div>'+
-          '<p class="muted">为什么停住：'+esc(h.reason)+'</p>'+
-          '<p class="faint">推荐：'+esc(h.recommendedDecision||'—')+'</p></div>';
-      }).join(''):'<div class="empty">没有待处理决策。你可以回到指挥中心开始新任务。</div>')+'</div>'+
+          '<div class="section-title"><h3 style="margin:0">'+esc(h.title)+'</h3>'+pill(h.tone,d.typeLabel||h.severityLabel)+'</div>'+
+          '<p class="muted"><strong>需要决定：</strong>'+esc(d.requestedAction||h.reason)+'</p>'+
+          '<p class="faint"><strong>处理后：</strong>'+esc(d.afterApproval||h.recommendedDecision||'—')+'</p></div>';
+      }).join(''):'<div class="empty">没有待审批或待决定事项。你可以回到指挥中心开始新任务。</div>')+'</div>'+
       '<div class="panel" id="handoffDetail">'+(detail?renderHandoffDetail(detail):'<div class="empty">选择左侧事项查看详情</div>')+'</div>'+
     '</div>';
   bindActions(root);
 }
 
 function renderHandoffDetail(h){
-  var id=esc(h.id);
-  return '<div class="section-title"><h2>'+esc(h.title)+'</h2>'+pill(h.tone,h.statusLabel)+'</div>'+
+  var id=esc(h.id);var d=obj(h.decision);
+  var primary=d.canApproveAndContinue
+    ? btn(d.primaryActionLabel||'批准并继续执行','data-handoff-act="approve" data-handoff-id="'+id+'"','primary')
+    : btn(d.primaryActionLabel||'记录决定','data-handoff-act="resolve" data-handoff-id="'+id+'"','primary');
+  return '<div class="section-title"><div><h2>'+esc(h.title)+'</h2><div>'+pill(h.tone,d.typeLabel||h.severityLabel)+' '+pill(d.necessityLabel==='必须确认'?'amber':'gray',d.necessityLabel||'需要判断')+'</div></div>'+pill(h.tone,h.statusLabel)+'</div>'+
+    '<div class="setup" style="margin:12px 0"><strong>你正在批准 / 决定什么</strong><p class="muted" style="margin:6px 0 0">'+esc(d.requestedAction||h.reason||'—')+'</p></div>'+
+    '<div class="decision-grid">'+
+      '<div class="decision-box"><strong>是否有必要</strong><p>'+esc(d.necessityExplanation||h.reason||'—')+'</p></div>'+
+      '<div class="decision-box"><strong>会产生什么影响</strong><p>'+esc(d.impact||'—')+'</p></div>'+
+      '<div class="decision-box"><strong>批准 / 记录后</strong><p>'+esc(d.afterApproval||'—')+'</p></div>'+
+      '<div class="decision-box"><strong>不批准会怎样</strong><p>'+esc(d.ifRejected||'—')+'</p></div>'+
+    '</div>'+
+    '<div class="flow"><div class="flow-step">1. 当前停在安全点</div><div class="flow-arrow">→</div><div class="flow-step">2. 阅读对象、必要性和影响</div><div class="flow-arrow">→</div><div class="flow-step">3. '+esc(d.canApproveAndContinue?'批准后创建任务':'记录决定或补充信息')+'</div><div class="flow-arrow">→</div><div class="flow-step">4. 打开任务详情并显示下一步</div></div>'+
     '<p><strong>为什么停下来</strong><br><span class="muted">'+esc(h.reason)+'</span></p>'+
-    '<p><strong>相关任务</strong><br><span class="muted">'+esc(h.workTitle||'—')+'</span></p>'+
-    '<div class="setup" style="margin:10px 0"><strong>推荐决定</strong><p class="muted" style="margin:6px 0 0">'+esc(h.recommendedDecision||'请阅读后自行判断')+'</p></div>'+
-    '<p><strong>继续提示</strong><br><span class="muted mono" style="white-space:pre-wrap">'+esc(h.continuationPrompt||'（无）')+'</span></p>'+
+    '<p><strong>相关任务</strong><br><span class="muted">'+esc(h.workTitle||'尚未创建任务')+'</span></p>'+
+    '<div class="setup" style="margin:10px 0"><strong>系统建议</strong><p class="muted" style="margin:6px 0 0">'+esc(h.recommendedDecision||'请阅读后自行判断')+'</p></div>'+
     (arr(h.attemptedActions).length?'<p><strong>已尝试</strong><br><span class="muted">'+esc(h.attemptedActions.join(' · '))+'</span></p>':'')+
     evidenceHtml(h.evidenceLabels)+
-    '<div class="actions">'+
+    '<div class="actions">'+primary+
+      (d.canApproveAndContinue?btn('仅记录其他决定','data-handoff-act="resolve" data-handoff-id="'+id+'"'):'')+
       btn('确认已知晓','data-handoff-act="ack" data-handoff-id="'+id+'"')+
-      btn('解决并记录','data-handoff-act="resolve" data-handoff-id="'+id+'"','primary')+
-      btn('忽略此项','data-handoff-act="dismiss" data-handoff-id="'+id+'"')+
-      btn('复制继续提示','data-copy="1" data-copy-text="'+esc(h.continuationPrompt||'')+'"')+
-      (h.advanced&&h.advanced.workId?btn('继续相关任务','data-open-work="'+esc(h.advanced.workId)+'"','primary'):'')+
+      btn('暂不处理','data-handoff-act="dismiss" data-handoff-id="'+id+'"')+
+      (h.continuationPrompt?btn('复制人工继续提示','data-copy="1" data-copy-text="'+esc(h.continuationPrompt)+'"'):'')+
+      (h.advanced&&h.advanced.workId?btn('查看相关任务','data-open-work="'+esc(h.advanced.workId)+'"'):'')+
     '</div>'+
     advancedBlock(h.advanced);
 }
@@ -1139,23 +1153,35 @@ function refreshWorkDetail(id){
 
 function handoffAction(kind,id){
   if(busy){toast('上一步仍在处理，请稍候');return}
-  var body={};
+  var item=arr(obj(commandCenter).handoffs).find(function(h){return h.id===id})||{};
+  var d=obj(item.decision);var body={};
+  if(kind==='approve'){
+    var approvalText='确认'+(d.primaryActionLabel||'批准并创建任务')+'？\\n\\n批准对象：'+(d.requestedAction||item.title||'当前操作')+'\\n影响：'+(d.impact||'按当前任务范围执行')+'\\n后续：'+(d.afterApproval||'打开任务详情');
+    if(!confirm(approvalText))return;
+  }
   if(kind==='resolve'){
-    var decision=prompt('记录你的决定（会从待处理中移除）','继续执行');
+    var decision=prompt('记录你的决定。注意：此操作只保存决定并移出待处理，不会自动继续任务。',item.recommendedDecision||'');
     if(decision==null)return;
     if(!String(decision).trim()){toast('请填写决定内容');return}
     body={decision:decision,resolver:'user'};
   }
   if(kind==='dismiss'){
-    if(!confirm('确认忽略此待决定事项？忽略后会从待处理列表移除。'))return;
+    if(!confirm('确认暂不处理此事项？它会从待处理列表移除，相关操作不会执行。'))return;
     body={decision:'dismissed',resolver:'user'};
   }
-  setBusy(true,kind==='resolve'?'记录决定…':kind==='dismiss'?'忽略事项…':'更新中…');
+  setBusy(true,kind==='approve'?'正在批准并创建任务…':kind==='resolve'?'仅记录决定…':kind==='dismiss'?'暂不处理…':'更新中…');
   api('/api/console/inbox/'+encodeURIComponent(id)+'/'+kind+repoQuery(),{method:'POST',body:JSON.stringify(body)}).then(function(res){
-    setLastOp({phase:'succeeded',statusLabel:kind==='resolve'?'已解决':kind==='dismiss'?'已忽略':'已确认',summary:kind==='resolve'?'已记录你的决定，事项将离开待处理列表':kind==='dismiss'?'已忽略该事项':'已确认已知晓'}, '已更新');
-    toast(kind==='resolve'?'已解决并移出待处理':kind==='dismiss'?'已忽略并移出待处理':'已确认');
+    if(kind==='approve'){
+      setLastOp(res,'已批准并创建任务');
+      var data=obj(obj(res.actionResult).data);var work=obj(data.work);
+      if(work.workId)rememberWork(work.workId);else if(work.id)rememberWork(work.id);
+      toast(res.summary||'已批准并创建任务');
+    } else {
+      setLastOp({phase:'succeeded',statusLabel:kind==='resolve'?'已记录决定':kind==='dismiss'?'已暂不处理':'已确认',summary:kind==='resolve'?'决定已保存；未触发任何后续执行':kind==='dismiss'?'事项已移出列表，相关操作未执行':'已确认已知晓'}, '已更新');
+      toast(kind==='resolve'?'已记录决定（未自动继续）':kind==='dismiss'?'已暂不处理':'已确认');
+    }
     selectedHandoffId='';
-    return refreshAll();
+    return refreshAll().then(function(){if(kind==='approve'&&selectedWorkId)switchView('work')});
   }).catch(function(e){setLastOp(e.payload||{phase:'failed',summary:e.message||'更新失败'},e.message||'更新失败');toast(e.message||'更新失败')}).finally(function(){setBusy(false)});
 }
 

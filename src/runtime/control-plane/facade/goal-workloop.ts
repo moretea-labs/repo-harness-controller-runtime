@@ -169,7 +169,13 @@ export function routeWorkStart(
   const policy = evaluatePolicyGate({
     capabilityId: mode.mode === 'direct_control' ? 'repository.direct_edit' : mode.mode === 'goal_workloop' ? 'controller.goal_workloop' : 'controller.handoff_inbox',
     risk: input.modeInput.risk
-      ?? (mode.mode === 'direct_control' ? 'local_repo_write' : mode.mode === 'goal_workloop' ? 'workspace_write' : 'readonly'),
+      ?? (input.modeInput.secretAccess === true ? 'raw_secret_config'
+        : input.modeInput.destructive === true ? 'destructive'
+          : input.modeInput.remoteWrite === true ? 'remote_write'
+            : input.modeInput.requiresApproval === true || input.modeInput.requiresUserApproval === true ? 'workspace_write'
+              : mode.mode === 'direct_control' ? 'local_repo_write'
+                : mode.mode === 'goal_workloop' ? 'workspace_write'
+                  : 'readonly'),
     approvalConfirmed: input.approvalConfirmed === true,
     dryRun: input.dryRun === true,
     directEditBoundary: {
@@ -262,7 +268,32 @@ export function routeWorkStart(
         : 'Clarify objective, scope, and acceptance criteria.',
       recommendedDecision: 'Provide a clear objective and authorization, or cancel the request.',
       recommendedPrompt: `Resolve handoff and restate work for repo ${ctx.repoId}.`,
-      recommendedContinuationPrompt: `After decision, call rh_work start with a clear objective for ${ctx.repoId}.`,
+      recommendedContinuationPrompt: `After approval, start the approved work for ${ctx.repoId}.`,
+      approvalAction: policy.decision === 'approval_required'
+        ? {
+            operation: 'start',
+            label: 'Approve and start work',
+            summary: 'Create the work contract with the original scope and explicit approval.',
+            risk: input.modeInput.destructive ? 'destructive' : 'workspace_write',
+            payload: {
+              objective: input.objective,
+              acceptanceCriteria: input.acceptanceCriteria,
+              allowedPaths: input.allowedPaths,
+              forbiddenPaths: input.forbiddenPaths,
+              checkIds: input.checks,
+              expectedFiles: input.modeInput.expectedFiles,
+              expectedChangedLines: input.modeInput.expectedChangedLines,
+              scopeClear: input.modeInput.scopeClear,
+              requiresInvestigation: input.modeInput.requiresInvestigation,
+              requiresLongRunningChecks: input.modeInput.requiresLongRunningChecks,
+              requiresWorker: input.modeInput.requiresWorker,
+              requiresApproval: input.modeInput.requiresApproval === true || input.modeInput.requiresUserApproval === true,
+              destructive: input.modeInput.destructive === true,
+              approvalConfirmed: true,
+              forceMode: 'goal_workloop',
+            },
+          }
+        : undefined,
       suggestedNextActions: [
         {
           label: 'Review handoff inbox',

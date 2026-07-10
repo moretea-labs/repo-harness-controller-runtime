@@ -7,6 +7,7 @@ import { ensureControllerHome } from '../../src/cli/repositories/controller-home
 import { registerRepository } from '../../src/cli/repositories/registry';
 import {
   applyConsoleSafePatch,
+  approveConsoleHandoff,
   buildCommandCenter,
   describeConsoleError,
   mapRepositoryCard,
@@ -127,7 +128,7 @@ describe('console facade api', () => {
     }
   });
 
-  test('high-risk start creates handoff-only pending decision', () => {
+  test('high-risk approval explains the decision and continues only after explicit approval', async () => {
     const { ctx } = fixture();
     const result = startConsoleWork(ctx, {
       objective: 'Rotate secrets and force push',
@@ -136,7 +137,34 @@ describe('console facade api', () => {
       scopeClear: true,
     });
     expect((result.data as { mode?: { mode?: string } }).mode?.mode).toBe('handoff_only');
-    expect(listConsoleHandoffs(ctx).length).toBeGreaterThan(0);
+    const handoff = listConsoleHandoffs(ctx)[0];
+    expect(handoff).toBeTruthy();
+    expect(handoff.decision.type).toBe('approval');
+    expect(handoff.decision.typeLabel).toContain('审批');
+    expect(handoff.decision.requestedAction).toBeTruthy();
+    expect(handoff.decision.necessityExplanation).toBeTruthy();
+    expect(handoff.decision.requestedAction).toContain('Rotate secrets');
+    expect(handoff.decision.afterApproval).toContain('创建任务');
+    expect(handoff.decision.primaryActionLabel).toBe('批准并创建任务');
+    expect(handoff.decision.canApproveAndContinue).toBe(true);
+
+    const approved = approveConsoleHandoff(ctx, handoff.id);
+    expect(approved.continued).toBe(true);
+    expect(approved.item.statusLabel).toBe('已解决');
+    const center = await buildCommandCenter(ctx, [mapRepositoryCard(ctx.repository, true)]);
+    expect(center.currentWork?.objective).toContain('Rotate secrets');
+  });
+
+  test('clarification handoff is not mislabeled as approval', () => {
+    const { ctx } = fixture();
+    startConsoleWork(ctx, {
+      objective: 'Improve it',
+      scopeClear: false,
+    });
+    const handoff = listConsoleHandoffs(ctx)[0];
+    expect(handoff.decision.type).toBe('clarification');
+    expect(handoff.decision.necessityLabel).toBe('需要澄清');
+    expect(handoff.decision.canApproveAndContinue).toBe(false);
   });
 
   test('console safe patch applies synchronously with readable digest', () => {
