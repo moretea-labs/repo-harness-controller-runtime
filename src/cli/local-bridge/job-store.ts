@@ -29,7 +29,6 @@ import { loadMcpLocalConfig } from "../mcp/auth";
 import {
   executeRepositoryCommandAsync,
 } from "../repositories/command-executor";
-import { withControllerLockAsync } from "../repositories/locks";
 import { registerRepository, resolveRepositorySelection } from "../repositories/registry";
 import type { ControllerAgent, ControllerTask } from "../controller/types";
 import { taskExecutionPolicy } from "../controller/execution-policy";
@@ -1518,45 +1517,44 @@ async function executeRepositoryCommand(
       controllerHome: payload.controllerHome,
       allowSoleRepository: true,
     });
-    const execution = await withControllerLockAsync(
-      payload.controllerHome,
-      { scope: "repository", repoId: repository.repoId },
-      "local-bridge:repository-command",
-      () => executeRepositoryCommandAsync(payload.controllerHome, repository, {
-        command: payload.command,
-        cwd: payload.cwd,
-        authorization: "confirmed_plan",
-        approvalToken: payload.approvalToken,
-        timeoutMs: payload.timeoutMs,
-        maxOutputBytes: payload.maxOutputBytes,
-      }, {
-        onSpawn: (pid) => {
-          const current = tryReadLocalBridgeJob(repoRoot, jobId);
-          if (!current || current.status !== "running") {
-            signalWorker(pid, "SIGTERM");
-            return;
-          }
-          current.workerPid = pid;
-          current.ownerPid = process.pid;
-          current.heartbeatAt = now();
-          saveJob(repoRoot, current);
-        },
-        onStdout: (chunk) => {
-          appendJobOutput(repoRoot, jobId, "stdout", chunk);
-          const current = tryReadLocalBridgeJob(repoRoot, jobId);
-          if (!current || current.status !== "running") return;
-          current.heartbeatAt = now();
-          saveJob(repoRoot, current);
-        },
-        onStderr: (chunk) => {
-          appendJobOutput(repoRoot, jobId, "stderr", chunk);
-          const current = tryReadLocalBridgeJob(repoRoot, jobId);
-          if (!current || current.status !== "running") return;
-          current.heartbeatAt = now();
-          saveJob(repoRoot, current);
-        },
-      }),
-    );
+    // Durable Execution Jobs already hold repository-scoped leases for the
+    // command lifetime. Holding the controller repository lock here as well
+    // blocks the owning worker from renewing those leases and turns any
+    // command longer than the renewal interval into a false LOCK_HELD failure.
+    const execution = await executeRepositoryCommandAsync(payload.controllerHome, repository, {
+      command: payload.command,
+      cwd: payload.cwd,
+      authorization: "confirmed_plan",
+      approvalToken: payload.approvalToken,
+      timeoutMs: payload.timeoutMs,
+      maxOutputBytes: payload.maxOutputBytes,
+    }, {
+      onSpawn: (pid) => {
+        const current = tryReadLocalBridgeJob(repoRoot, jobId);
+        if (!current || current.status !== "running") {
+          signalWorker(pid, "SIGTERM");
+          return;
+        }
+        current.workerPid = pid;
+        current.ownerPid = process.pid;
+        current.heartbeatAt = now();
+        saveJob(repoRoot, current);
+      },
+      onStdout: (chunk) => {
+        appendJobOutput(repoRoot, jobId, "stdout", chunk);
+        const current = tryReadLocalBridgeJob(repoRoot, jobId);
+        if (!current || current.status !== "running") return;
+        current.heartbeatAt = now();
+        saveJob(repoRoot, current);
+      },
+      onStderr: (chunk) => {
+        appendJobOutput(repoRoot, jobId, "stderr", chunk);
+        const current = tryReadLocalBridgeJob(repoRoot, jobId);
+        if (!current || current.status !== "running") return;
+        current.heartbeatAt = now();
+        saveJob(repoRoot, current);
+      },
+    });
     job = tryReadLocalBridgeJob(repoRoot, jobId);
     if (!job || job.status !== "running") return;
     job.status = execution.ok ? "succeeded" : execution.timedOut ? "timed_out" : "failed";

@@ -5,6 +5,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { MAX_AGENT_TIMEOUT_MS, MIN_AGENT_TIMEOUT_MS } from '../../src/cli/controller/runtime-config';
 import {
+  executeLocalBridgeJob,
   getLocalBridgeJob,
   reconcileLocalBridgeJobs,
   submitLocalBridgeJob,
@@ -19,6 +20,7 @@ import { registerRepository } from '../../src/cli/repositories/registry';
 import { createExecutionJob, getExecutionJob, updateExecutionJob } from '../../src/runtime/execution/jobs/store';
 import { waitForExecutionJob } from '../../src/runtime/execution/jobs/wait';
 import { executeExecutionJob } from '../../src/runtime/execution/workers/executor';
+import { acquireExecutionLeases, releaseExecutionLeases, renewExecutionLeases } from '../../src/runtime/resources/leases/store';
 import { terminateProcessTree } from '../../src/runtime/shared/process-tree';
 import { terminateProcessesByCommand, waitForNoProcessesByCommand } from './process-hygiene';
 
@@ -198,6 +200,71 @@ describe('repository command execution lifecycle', () => {
     // executeExecutionJob returns the worker result; Job store transition is owned by worker-entry.
     const stillQueued = getExecutionJob(controllerHome, repository.repoId, created.jobId);
     expect(stillQueued.status).toBe('queued');
+  });
+
+  test('does not hold the repository lock while a command runs so the outer lease can renew', async () => {
+    const controllerHome = tempRoot('repo-harness-cmd-renew-home-');
+    const repoRoot = tempRoot('repo-harness-cmd-renew-repo-');
+    const repository = seedRepo(controllerHome, repoRoot);
+    const command = "sleep 1 && printf 'renew-ok\\n'";
+    const preview = previewRepositoryCommandExecution(repository, {
+      command,
+      dryRun: true,
+      timeoutMs: 10_000,
+    });
+    const acquired = acquireExecutionLeases(
+      controllerHome,
+      repository.repoId,
+      'EJOB-renew-owner',
+      [{ resourceKey: `workspace:${repository.activeCheckoutId}`, mode: 'write' }],
+      30_000,
+    );
+    expect(acquired.acquired).toBe(true);
+
+    const submitted = submitLocalBridgeJob(repoRoot, {
+      action: 'repository-command',
+      requestedBy: 'test',
+      payload: {
+        controllerHome,
+        repoId: repository.repoId,
+        checkoutId: repository.activeCheckoutId,
+        command,
+        approvalToken: preview.execution.approvalToken,
+        timeoutMs: 10_000,
+      },
+    });
+    executeLocalBridgeJob(repoRoot, submitted.jobId);
+
+    let active = getLocalBridgeJob(repoRoot, submitted.jobId);
+    for (let attempt = 0; attempt < 100 && !active.workerPid; attempt += 1) {
+      await Bun.sleep(10);
+      active = getLocalBridgeJob(repoRoot, submitted.jobId);
+    }
+    expect(active.status).toBe('running');
+    expect(active.workerPid).toBeTruthy();
+
+    const renewed = renewExecutionLeases(
+      controllerHome,
+      repository.repoId,
+      'EJOB-renew-owner',
+      30_000,
+      acquired.leases.map((lease) => ({ leaseId: lease.leaseId, fencingToken: lease.fencingToken })),
+    );
+    expect(renewed).toHaveLength(1);
+    expect(Date.parse(renewed[0]!.heartbeatAt)).toBeGreaterThanOrEqual(Date.parse(acquired.leases[0]!.heartbeatAt));
+
+    let terminal = active;
+    for (let attempt = 0; attempt < 200 && !['succeeded', 'failed', 'timed_out'].includes(terminal.status); attempt += 1) {
+      await Bun.sleep(10);
+      terminal = getLocalBridgeJob(repoRoot, submitted.jobId);
+    }
+    expect(terminal.status).toBe('succeeded');
+    releaseExecutionLeases(
+      controllerHome,
+      repository.repoId,
+      'EJOB-renew-owner',
+      renewed.map((lease) => ({ leaseId: lease.leaseId, fencingToken: lease.fencingToken })),
+    );
   });
 
   test('propagates terminal Local Job failure to the durable Execution Job result', async () => {
