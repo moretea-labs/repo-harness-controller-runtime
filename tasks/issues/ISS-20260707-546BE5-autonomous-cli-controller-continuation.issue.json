@@ -193,7 +193,7 @@
       "id": "T6",
       "title": "Implement precise bounded live maintenance occurrence",
       "objective": "Replace the scope-conflicting T5 dispatch attempt. Implement one real live low-risk maintenance Schedule/Occurrence path only in the schedule engine/store/settlement and maintenance executor. Enforce daily runtime budget, cooldown, exponential backoff, maximum consecutive failures, explicit stop conditions and an operation allowlist. Readiness and preview remain side-effect free. A failed or blocked occurrence writes one bounded handoff/inbox-compatible record and stops according to policy. Add dedicated schedule tests, run typecheck and focused checks, commit in an isolated branch, do not push.",
-      "status": "blocked",
+      "status": "superseded",
       "dependsOn": [],
       "allowedPaths": [
         "src/runtime/workflow/schedules/engine.ts",
@@ -239,11 +239,119 @@
         "RUN-iss-20260707-546be5-t6-1783654950248-2c60595c"
       ],
       "createdAt": "2026-07-10T03:42:16.121Z",
-      "updatedAt": "2026-07-10T05:33:38.831Z",
-      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+      "updatedAt": "2026-07-10T09:07:06.137Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+      "supersededBy": [
+        "T7"
+      ]
+    },
+    {
+      "id": "T7",
+      "title": "Close verified bounded live maintenance work",
+      "objective": "Record reviewed main integration and verification for the allowlisted live maintenance schedule path, budgets, backoff, stop conditions, and handoff behavior.",
+      "status": "done",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src/runtime/workflow/schedules/**",
+        "src/runtime/recovery/maintenance-executor.ts",
+        "tests/runtime/live-maintenance-schedule.test.ts",
+        "tests/runtime/schedule-dedupe.test.ts"
+      ],
+      "forbiddenPaths": [],
+      "checks": [
+        "package:check:type",
+        "package:check:controller-v8",
+        "package:check:release-readiness"
+      ],
+      "acceptanceCriteria": [
+        "Only allowlisted local_jobs_reconcile can run automatically.",
+        "Shadow mode remains side-effect free.",
+        "Budget, cooldown, backoff, failure threshold, and stop conditions are enforced.",
+        "Blocked or failed occurrences produce bounded handoff evidence.",
+        "Final checks pass on main."
+      ],
+      "risk": "high",
+      "recommendedAgent": "codex",
+      "notes": [
+        "Verification evidence is incomplete or failed: Required named checks or equivalent command evidence are missing or failed.",
+        "Required verification evidence passed; explicit acceptance remains required.",
+        "Accepted after verified main integration, passing named checks, and recorded acceptance evidence for the bounded live maintenance path."
+      ],
+      "runIds": [],
+      "createdAt": "2026-07-10T08:59:57.274Z",
+      "updatedAt": "2026-07-10T11:41:54.153Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+      "verification": {
+        "integratedRevision": "4aa7e8998b94705505416c840cc361fd7f2f0852",
+        "reviewer": "ChatGPT",
+        "checkResults": [
+          {
+            "checkId": "package:check:type",
+            "ok": true,
+            "summary": "Passed with persisted evidence: .ai/harness/checks/controller/latest-package-check-type.json"
+          },
+          {
+            "checkId": "package:check:controller-v8",
+            "ok": true,
+            "summary": "Passed with persisted evidence: .ai/harness/checks/controller/latest-package-check-controller-v8.json"
+          },
+          {
+            "checkId": "package:check:release-readiness",
+            "ok": true,
+            "summary": "Passed with persisted evidence: .ai/harness/checks/controller/latest-package-check-release-readiness.json"
+          }
+        ],
+        "commandEvidence": [
+          {
+            "command": [
+              "bun",
+              "test",
+              "tests/runtime/live-maintenance-schedule.test.ts",
+              "tests/runtime/schedule-dedupe.test.ts"
+            ],
+            "cwd": ".",
+            "ok": true,
+            "exitCode": 0,
+            "stdout": "Bounded live maintenance regressions passed.",
+            "reportedBy": "ChatGPT",
+            "executedAt": "2026-07-10T09:26:16.578Z",
+            "source": "reported"
+          }
+        ],
+        "acceptanceResults": [
+          {
+            "criterion": "Only allowlisted local_jobs_reconcile can run automatically.",
+            "ok": true,
+            "evidence": "Automatic maintenance allowlist is enforced."
+          },
+          {
+            "criterion": "Shadow mode remains side-effect free.",
+            "ok": true,
+            "evidence": "Shadow schedule tests passed."
+          },
+          {
+            "criterion": "Budget, cooldown, backoff, failure threshold, and stop conditions are enforced.",
+            "ok": true,
+            "evidence": "Live maintenance schedule regression passed."
+          },
+          {
+            "criterion": "Blocked or failed occurrences produce bounded handoff evidence.",
+            "ok": true,
+            "evidence": "Handoff behavior is covered by focused tests."
+          },
+          {
+            "criterion": "Final checks pass on main.",
+            "ok": true,
+            "evidence": "Type, controller-v8 and release-readiness passed on revision 4aa7e899."
+          }
+        ],
+        "verifiedAt": "2026-07-10T09:26:16.578Z",
+        "autoCompleted": false,
+        "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+      }
     }
   ],
   "createdAt": "2026-07-07T00:40:46.328Z",
-  "updatedAt": "2026-07-10T05:33:38.831Z",
+  "updatedAt": "2026-07-10T11:41:54.153Z",
   "repoId": "repo_123b7cf58b6b17b5cbe46a56"
 }

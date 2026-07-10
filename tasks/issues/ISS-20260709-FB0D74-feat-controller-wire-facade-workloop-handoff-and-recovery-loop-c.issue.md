@@ -2,7 +2,8 @@
 id: "ISS-20260709-FB0D74"
 kind: "feature"
 status: "done"
-updated_at: "2026-07-09T12:00:00.000Z"
+updated_at: "2026-07-10T11:44:39.527Z"
+archived_at: "2026-07-10T11:44:39.527Z"
 source: "repo-harness-controller-v8"
 ---
 
@@ -32,19 +33,19 @@ source: "repo-harness-controller-v8"
 
 ## Acceptance Criteria
 
-- [x] 小任务选择 direct_control，不创建 WorkContract
-- [x] 长任务选择 goal_workloop 并创建 WorkContract
-- [x] 高风险/缺授权任务创建 handoff_only
-- [x] Handoff item 支持 list/get/ack/resolve
-- [x] suggested_next_actions 只引用真实 registered check/tool/evidence/handoff/work id
-- [x] invalid check id 不污染为 acceptance failure
-- [x] infrastructure failure 不等同 acceptance failure
-- [x] Codex unavailable 生成 handoff/recovery suggestion
-- [x] self-healing diagnose 默认 dry_run
-- [x] facade result 默认 bounded
-- [x] typecheck pass
-- [x] bun test targeted files pass
-- [x] clean worktree after merge
+- [ ] 小任务选择 direct_control，不创建 WorkContract
+- [ ] 长任务选择 goal_workloop 并创建 WorkContract
+- [ ] 高风险/缺授权任务创建 handoff_only
+- [ ] Handoff item 支持 list/get/ack/resolve
+- [ ] suggested_next_actions 只引用真实 registered check/tool/evidence/handoff/work id
+- [ ] invalid check id 不污染为 acceptance failure
+- [ ] infrastructure failure 不等同 acceptance failure
+- [ ] Codex unavailable 生成 handoff/recovery suggestion
+- [ ] self-healing diagnose 默认 dry_run
+- [ ] facade result 默认 bounded
+- [ ] typecheck pass
+- [ ] bun test targeted files pass
+- [ ] clean worktree after merge
 
 ## GitHub
 

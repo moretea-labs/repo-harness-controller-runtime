@@ -4,7 +4,7 @@
   "title": "Harden MCP tool surface and open-source readiness",
   "slug": "harden-mcp-tool-surface-and-open-source-readiness",
   "kind": "investigation",
-  "status": "planned",
+  "status": "done",
   "summary": "Default tool-surface allowlist, facade integration validation, open-source configuration audit and release hardening.",
   "goals": [
     "Inspect and modify repo-harness-controller-runtime to complete release-preparation hardening. Implement a minimal default MCP tools/list surface centered on rh_status, rh_inbox, rh_context, and rh_work, plus only any strictly necessary minimal repository bootstrap/list entry. Preserve all old tool implementations behind explicit advanced/compatibility configuration and do not delete them. Add targeted tests proving default vs advanced/compatibility exposure and facade coverage for status/context/inbox/work lifecycle paths. Audit tracked files and configuration for personal bindings and open-source risks: /Users/greyson, fixed repo_id/checkout_id, Tailscale hostnames, personal GitHub mappings, OAuth/token/runtime files, _ops/controller-home and .ai/harness runtime data. Fix ignore rules, examples, defaults and docs where needed without exposing secrets. Run focused checks and an available release gate or equivalent. Commit all intended changes. If using an isolated worktree/branch, integrate to the main checkout and clean the worktree/branch before finishing. Avoid broad test expansion and do not touch generated dependencies/build outputs."
@@ -147,7 +147,7 @@
       "id": "T3",
       "title": "Implement precise MCP facade exposure and release audit",
       "objective": "Replace the zero-change auth-blocked broad-scope T2. Modify only the concrete MCP tool-definition/profile files, dedicated facade contract tests, release-surface audit scripts and public packaging/docs files. Default tools/list must expose rh_status, rh_inbox, rh_context, rh_work and only indispensable repository selection/bootstrap entries. Legacy tools remain callable only under explicit advanced/compatibility profiles. Add focused tests and a bounded tracked-file release audit without reading secret contents. Run typecheck and focused controller checks, commit in an isolated branch, do not push.",
-      "status": "blocked",
+      "status": "superseded",
       "dependsOn": [],
       "allowedPaths": [
         "src/cli/mcp/tools.ts",
@@ -207,11 +207,123 @@
         "RUN-iss-20260710-57bb3c-t3-1783654837091-f9df006d"
       ],
       "createdAt": "2026-07-10T03:38:30.310Z",
-      "updatedAt": "2026-07-10T05:33:37.706Z",
-      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+      "updatedAt": "2026-07-10T09:06:02.989Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+      "supersededBy": [
+        "T4"
+      ]
+    },
+    {
+      "id": "T4",
+      "title": "Close verified MCP release surface work",
+      "objective": "Record the reviewed Grok implementation, compatibility fixes, public export audit, and final release verification without rewriting cancelled or failed Agent Runs.",
+      "status": "done",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src/cli/mcp/**",
+        "scripts/**",
+        "docs/**",
+        "README.md",
+        "README.en.md",
+        "package.json",
+        ".npmignore"
+      ],
+      "forbiddenPaths": [],
+      "checks": [
+        "package:check:type",
+        "package:check:controller-v8",
+        "package:check:open-source-surface",
+        "package:check:release-readiness"
+      ],
+      "acceptanceCriteria": [
+        "Minimal default MCP tool surface is integrated on main.",
+        "Full compatibility surface remains explicit.",
+        "Open-source and release readiness gates pass.",
+        "Old failed and cancelled Runs remain historical evidence."
+      ],
+      "risk": "medium",
+      "recommendedAgent": "codex",
+      "notes": [
+        "Verification evidence is incomplete or failed: Required named checks or equivalent command evidence are missing or failed.",
+        "Verification evidence passed and medium_risk_change policy auto-completed the Task."
+      ],
+      "runIds": [],
+      "createdAt": "2026-07-10T08:59:21.578Z",
+      "updatedAt": "2026-07-10T09:23:46.679Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+      "verification": {
+        "integratedRevision": "4aa7e8998b94705505416c840cc361fd7f2f0852",
+        "reviewer": "ChatGPT",
+        "checkResults": [
+          {
+            "checkId": "package:check:type",
+            "ok": true,
+            "summary": "Passed with persisted evidence: .ai/harness/checks/controller/latest-package-check-type.json"
+          },
+          {
+            "checkId": "package:check:controller-v8",
+            "ok": true,
+            "summary": "Passed with persisted evidence: .ai/harness/checks/controller/latest-package-check-controller-v8.json"
+          },
+          {
+            "checkId": "package:check:open-source-surface",
+            "ok": true,
+            "summary": "Passed with persisted evidence: .ai/harness/checks/controller/latest-package-check-open-source-surface.json"
+          },
+          {
+            "checkId": "package:check:release-readiness",
+            "ok": true,
+            "summary": "Passed with persisted evidence: .ai/harness/checks/controller/latest-package-check-release-readiness.json"
+          }
+        ],
+        "commandEvidence": [
+          {
+            "command": [
+              "bun",
+              "test",
+              "tests/cli/mcp-tool-exposure-profiles.test.ts",
+              "tests/runtime/facade-mcp-surface.test.ts",
+              "tests/cli/connector-freshness.test.ts"
+            ],
+            "cwd": ".",
+            "ok": true,
+            "exitCode": 0,
+            "stdout": "25 tests passed within final release readiness.",
+            "reportedBy": "ChatGPT",
+            "executedAt": "2026-07-10T09:23:46.676Z",
+            "source": "reported"
+          }
+        ],
+        "acceptanceResults": [
+          {
+            "criterion": "Minimal default MCP tool surface is integrated on main.",
+            "ok": true,
+            "evidence": "Commit 644bfee and final revision 4aa7e899."
+          },
+          {
+            "criterion": "Full compatibility surface remains explicit.",
+            "ok": true,
+            "evidence": "MCP compatibility fingerprint check passed."
+          },
+          {
+            "criterion": "Open-source and release readiness gates pass.",
+            "ok": true,
+            "evidence": "Final package:check:release-readiness passed."
+          },
+          {
+            "criterion": "Old failed and cancelled Runs remain historical evidence.",
+            "ok": true,
+            "evidence": "No historical Run state was rewritten; T4 supersedes implementation Task T3."
+          }
+        ],
+        "verifiedAt": "2026-07-10T09:23:46.676Z",
+        "autoCompleted": true,
+        "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+      }
     }
   ],
   "createdAt": "2026-07-10T02:40:20.270Z",
-  "updatedAt": "2026-07-10T05:33:37.706Z",
-  "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+  "updatedAt": "2026-07-10T11:43:43.279Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+  "archivedAt": "2026-07-10T11:43:43.279Z"
 }

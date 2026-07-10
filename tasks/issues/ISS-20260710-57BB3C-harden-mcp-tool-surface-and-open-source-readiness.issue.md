@@ -1,8 +1,9 @@
 ---
 id: "ISS-20260710-57BB3C"
 kind: "investigation"
-status: "planned"
-updated_at: "2026-07-10T05:33:37.706Z"
+status: "done"
+updated_at: "2026-07-10T11:43:43.279Z"
+archived_at: "2026-07-10T11:43:43.279Z"
 source: "repo-harness-controller-v8"
 ---
 
@@ -53,11 +54,21 @@ Default tool-surface allowlist, facade integration validation, open-source confi
 
 ### T3 — Implement precise MCP facade exposure and release audit
 
-- Status: `blocked`
+- Status: `superseded`
 - Objective: Replace the zero-change auth-blocked broad-scope T2. Modify only the concrete MCP tool-definition/profile files, dedicated facade contract tests, release-surface audit scripts and public packaging/docs files. Default tools/list must expose rh_status, rh_inbox, rh_context, rh_work and only indispensable repository selection/bootstrap entries. Legacy tools remain callable only under explicit advanced/compatibility profiles. Add focused tests and a bounded tracked-file release audit without reading secret contents. Run typecheck and focused controller checks, commit in an isolated branch, do not push.
 - Depends on: none
 - Allowed paths: `src/cli/mcp/tools.ts`, `src/cli/mcp/legacy-tool-service.ts`, `src/cli/mcp/policy.ts`, `src/cli/mcp/types.ts`, `src/cli/mcp/facade-tool-service.ts`, `src/runtime/facade/**`, `tests/cli/mcp-tool-surface.test.ts`, `tests/cli/mcp-controller.test.ts`, `tests/runtime/facade-contracts.test.ts`, `scripts/check-release-surface.ts`, `scripts/check-release-surface.sh`, `scripts/public-export.ts`, `.gitignore`, `.npmignore`, `package.json`, `README.md`, `README.en.md`, `docs/open-source-release.md`, `docs/chatgpt-controller.md`
 - Checks: `package:check:type`, `package:check:controller-v8`
+- Execution hint: agent / codex
+- Superseded by: `T4`
+
+### T4 — Close verified MCP release surface work
+
+- Status: `done`
+- Objective: Record the reviewed Grok implementation, compatibility fixes, public export audit, and final release verification without rewriting cancelled or failed Agent Runs.
+- Depends on: none
+- Allowed paths: `src/cli/mcp/**`, `scripts/**`, `docs/**`, `README.md`, `README.en.md`, `package.json`, `.npmignore`
+- Checks: `package:check:type`, `package:check:controller-v8`, `package:check:open-source-surface`, `package:check:release-readiness`
 - Execution hint: agent / codex
 
 ## Related Artifacts

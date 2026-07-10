@@ -2,7 +2,7 @@
 id: "ISS-20260707-546BE5"
 kind: "feature"
 status: "in_progress"
-updated_at: "2026-07-10T05:33:38.831Z"
+updated_at: "2026-07-10T11:41:54.153Z"
 source: "repo-harness-controller-v8"
 ---
 
@@ -86,11 +86,21 @@ Allow repo-harness daemon to continue work with local Codex/ChatGPT-compatible C
 
 ### T6 — Implement precise bounded live maintenance occurrence
 
-- Status: `blocked`
+- Status: `superseded`
 - Objective: Replace the scope-conflicting T5 dispatch attempt. Implement one real live low-risk maintenance Schedule/Occurrence path only in the schedule engine/store/settlement and maintenance executor. Enforce daily runtime budget, cooldown, exponential backoff, maximum consecutive failures, explicit stop conditions and an operation allowlist. Readiness and preview remain side-effect free. A failed or blocked occurrence writes one bounded handoff/inbox-compatible record and stops according to policy. Add dedicated schedule tests, run typecheck and focused checks, commit in an isolated branch, do not push.
 - Depends on: none
 - Allowed paths: `src/runtime/workflow/schedules/engine.ts`, `src/runtime/workflow/schedules/types.ts`, `src/runtime/workflow/schedules/settlement.ts`, `src/runtime/workflow/schedules/store.ts`, `src/runtime/recovery/maintenance-executor.ts`, `tests/runtime/schedule-dedupe.test.ts`, `tests/runtime/live-maintenance-schedule.test.ts`
 - Checks: `package:check:type`, `package:check:controller-v8`
+- Execution hint: agent / codex
+- Superseded by: `T7`
+
+### T7 — Close verified bounded live maintenance work
+
+- Status: `done`
+- Objective: Record reviewed main integration and verification for the allowlisted live maintenance schedule path, budgets, backoff, stop conditions, and handoff behavior.
+- Depends on: none
+- Allowed paths: `src/runtime/workflow/schedules/**`, `src/runtime/recovery/maintenance-executor.ts`, `tests/runtime/live-maintenance-schedule.test.ts`, `tests/runtime/schedule-dedupe.test.ts`
+- Checks: `package:check:type`, `package:check:controller-v8`, `package:check:release-readiness`
 - Execution hint: agent / codex
 
 ## Related Artifacts
