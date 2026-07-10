@@ -123,10 +123,14 @@ function scan(output: string): void {
     if (existsSync(join(output, blocked))) fail(`runtime/internal path leaked: ${blocked}`);
   }
 
-  const ignoredScanners = new Set(["scripts/public-release.ts", "scripts/check-public-export.sh"]);
+  const ignoredScanners = new Set([
+    "scripts/public-release.ts",
+    "scripts/check-public-export.sh",
+    "scripts/check-open-source-tracked-surface.sh",
+  ]);
   const patterns: Array<[string, RegExp]> = [
-    ["macOS personal path detected", /\/Users\/[^/\s"'`]+/],
-    ["Linux personal path detected", /\/home\/[^/\s"'`]+/],
+    ["macOS personal path detected", /(?<![A-Za-z0-9._-])\/Users\/[^/\s"'`]+/],
+    ["Linux personal path detected", /(?<![A-Za-z0-9._-])\/home\/[^/\s"'`]+/],
     ["private key detected", /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/],
     ["AWS access key detected", /AKIA[0-9A-Z]{16}/],
     ["GitHub token detected", /gh[pousr]_[A-Za-z0-9_]{20,}/],

@@ -2,7 +2,7 @@
 
 > **Date**: 2026-06-13
 > **Status**: Applied as docs polish
-> **Source**: `/Users/chris/Projects/Trellis/README.md`, repo-harness `README.md`, `docs/reference-configs/harness-overview.md`
+> **Source**: Trellis upstream `README.md`, repo-harness `README.md`, `docs/reference-configs/harness-overview.md`
 
 ## Judgment
 

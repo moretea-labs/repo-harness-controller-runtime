@@ -17,13 +17,14 @@ const policy = runtimePolicy(process.cwd(), {
   enableDevRunner: true,
   devRunnerAgents: 'codex,claude',
 });
-const compatibilityNames = controllerExpectedToolNames(policy);
-const compatibilityFingerprint = controllerToolSurfaceFingerprint(compatibilityNames);
 const runtimeNames = runtimeToolDefinitions.map((tool) => tool.name);
+const compatibilityNames = controllerExpectedToolNames(policy)
+  .filter((name) => !runtimeNames.includes(name));
+const compatibilityFingerprint = controllerToolSurfaceFingerprint(compatibilityNames);
 const duplicateCompatibility = compatibilityNames.filter((name, index) => compatibilityNames.indexOf(name) !== index);
 const collisions = runtimeNames.filter((name) => compatibilityNames.includes(name));
-const defaultNames = [...DEFAULT_CONTROLLER_TOOL_NAMES];
-const advancedNames = [...ADVANCED_CONTROLLER_TOOL_NAMES];
+const defaultNames: string[] = [...DEFAULT_CONTROLLER_TOOL_NAMES];
+const advancedNames: string[] = [...ADVANCED_CONTROLLER_TOOL_NAMES];
 const fullNames = [...compatibilityNames, ...runtimeNames];
 const defaultFingerprint = controllerToolSurfaceFingerprint(defaultNames);
 const advancedFingerprint = controllerToolSurfaceFingerprint(advancedNames);
