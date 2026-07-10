@@ -658,7 +658,26 @@ function runningJobTimedOut(job: LocalBridgeJob, configuredTimeoutMs: number): b
 }
 
 function runningJobOrphaned(job: LocalBridgeJob): boolean {
-  return job.ownerPid !== undefined && job.ownerPid !== process.pid && !isPidAlive(job.ownerPid);
+  if (job.ownerPid === undefined || job.ownerPid === process.pid) return false;
+  if (isPidAlive(job.ownerPid)) return false;
+  // Owner died, but a still-live detached worker means the job is not lost —
+  // controller restart must reattach rather than incorrectly orphan it.
+  if (isPidAlive(job.workerPid)) return false;
+  return true;
+}
+
+function reattachLiveDetachedWorker(repoRoot: string, job: LocalBridgeJob): LocalBridgeJob | undefined {
+  if (job.ownerPid === undefined || job.ownerPid === process.pid) return undefined;
+  if (isPidAlive(job.ownerPid)) return undefined;
+  if (!isPidAlive(job.workerPid)) return undefined;
+  job.ownerPid = process.pid;
+  job.heartbeatAt = now();
+  appendEvent(repoRoot, job.jobId, {
+    type: "job_progress",
+    message: `Reattached still-live detached worker ${String(job.workerPid)} after Controller restart.`,
+    data: { workerPid: job.workerPid, reattachedOwnerPid: process.pid },
+  });
+  return saveJob(repoRoot, job);
 }
 
 function markJobTerminal(
@@ -817,6 +836,8 @@ function refreshLongRunningJob(repoRoot: string, job: LocalBridgeJob): LocalBrid
       { timedOut: true },
     );
   }
+  const reattached = reattachLiveDetachedWorker(repoRoot, job);
+  if (reattached) return reattached;
   if (runningJobOrphaned(job)) {
     return markJobTerminal(
       repoRoot,

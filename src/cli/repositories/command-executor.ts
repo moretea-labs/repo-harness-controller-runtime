@@ -3,6 +3,7 @@ import { spawn, spawnSync } from 'child_process';
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync } from 'fs';
 import { dirname, join, resolve } from 'path';
 import { capProcessOutput, redactProcessOutput } from '../../effects/process-runner';
+import { MAX_AGENT_TIMEOUT_MS, MIN_AGENT_TIMEOUT_MS } from '../controller/runtime-config';
 import { repositoryControllerRoot } from './controller-home';
 import {
   classifyRepositoryCommand,
@@ -91,10 +92,20 @@ export interface RepositoryCommandAsyncHooks {
   onStderr?: (chunk: string) => void;
 }
 
+/** Sensible interactive default for ordinary repository commands. */
 const DEFAULT_TIMEOUT_MS = 120_000;
-const MAX_TIMEOUT_MS = 15 * 60_000;
+/**
+ * Explicit repository-command timeouts share agent bounds so Local Job
+ * deadline resolution and process kill agree (min 5s, max 12h, no silent clamp).
+ */
+const MIN_TIMEOUT_MS = MIN_AGENT_TIMEOUT_MS;
+const MAX_TIMEOUT_MS = MAX_AGENT_TIMEOUT_MS;
 const DEFAULT_MAX_OUTPUT_BYTES = 128 * 1024;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
+
+export const REPOSITORY_COMMAND_DEFAULT_TIMEOUT_MS = DEFAULT_TIMEOUT_MS;
+export const REPOSITORY_COMMAND_MIN_TIMEOUT_MS = MIN_TIMEOUT_MS;
+export const REPOSITORY_COMMAND_MAX_TIMEOUT_MS = MAX_TIMEOUT_MS;
 
 function boundedInteger(value: number | undefined, fallback: number, minimum: number, maximum: number): number {
   if (value === undefined) return fallback;
@@ -372,7 +383,7 @@ function prepareRepositoryCommandExecution(
     root,
     cwd,
     command,
-    timeoutMs: boundedInteger(input.timeoutMs, DEFAULT_TIMEOUT_MS, 1_000, MAX_TIMEOUT_MS),
+    timeoutMs: boundedInteger(input.timeoutMs, DEFAULT_TIMEOUT_MS, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS),
     maxOutputBytes: boundedInteger(input.maxOutputBytes, DEFAULT_MAX_OUTPUT_BYTES, 1_024, MAX_OUTPUT_BYTES),
     before,
     execution,

@@ -18,6 +18,7 @@ import { isAssistantPluginError } from '../../plugins/errors';
 
 async function settleLegacyLocalJob(repoRoot: string, jobId: string, timeoutMs = 15 * 60_000) {
   const started = Date.now();
+  const boundedTimeoutMs = Math.max(1_000, Math.trunc(timeoutMs));
   let current = getLocalBridgeJob(repoRoot, jobId);
   const projectedExecutionPending = current.result
     && typeof current.result.executionJobId === 'string'
@@ -26,11 +27,31 @@ async function settleLegacyLocalJob(repoRoot: string, jobId: string, timeoutMs =
     current = executeLocalBridgeJobInline(repoRoot, jobId);
   }
   while (['approved', 'dispatched', 'running'].includes(current.status)) {
-    if (Date.now() - started >= timeoutMs) throw new Error(`LEGACY_JOB_TIMEOUT: ${jobId}`);
+    if (Date.now() - started >= boundedTimeoutMs) throw new Error(`LEGACY_JOB_TIMEOUT: ${jobId}`);
     await new Promise((resolve) => setTimeout(resolve, 250));
     current = getLocalBridgeJob(repoRoot, jobId);
   }
   return current;
+}
+
+function settlementTimeoutMsForJob(job: ExecutionJob, record?: Record<string, unknown>): number {
+  const args = job.payload.arguments ?? {};
+  const candidates = [
+    job.payload.timeoutMs,
+    typeof args.timeout_ms === 'number' ? args.timeout_ms : undefined,
+    typeof args.timeoutMs === 'number' ? args.timeoutMs : undefined,
+    typeof record?.timeoutMs === 'number' ? record.timeoutMs : undefined,
+  ];
+  for (const value of candidates) {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+      return Math.max(1_000, Math.trunc(value));
+    }
+  }
+  if (job.deadlineAt) {
+    const remaining = Date.parse(job.deadlineAt) - Date.now();
+    if (Number.isFinite(remaining) && remaining > 0) return Math.max(1_000, Math.trunc(remaining));
+  }
+  return 15 * 60_000;
 }
 
 function legacyJobIdFromResult(record: Record<string, unknown>): string | undefined {
@@ -73,10 +94,66 @@ export async function executeExecutionJob(controllerHome: string, job: Execution
     if (job.payload.target === 'repository-tool') {
       const output = await callRepositoryTool(controllerHome, job.payload.operation, job.payload.arguments ?? {});
       if (!output) throw new Error(`UNKNOWN_REPOSITORY_TOOL: ${job.payload.operation}`);
-      const record = toolResultRecord(output);
-      return output.isError
-        ? { ok: false, error: { code: 'REPOSITORY_TOOL_FAILED', message: JSON.stringify(record), retryable: false }, repoRoot: controllerHome }
-        : { ok: true, result: record, repoRoot: controllerHome };
+      let record = toolResultRecord(output);
+      if (output.isError) {
+        return {
+          ok: false,
+          error: { code: 'REPOSITORY_TOOL_FAILED', message: JSON.stringify(record), retryable: false },
+          repoRoot: controllerHome,
+        };
+      }
+
+      // repository_command_execute (and similar Local Job handoffs) must not let
+      // the outer durable Execution Job report succeeded while the child is still
+      // queued/running. Follow the Local Job to a true terminal state.
+      const legacyJobId = legacyJobIdFromResult(record);
+      if (legacyJobId && job.repoId !== '__controller__') {
+        try {
+          const repository = selectRepositoryCheckout(
+            getRepository(job.repoId, controllerHome, { includeRemoved: true }),
+            job.checkoutId,
+          );
+          const repoRoot = repository.canonicalRoot;
+          const localJob = await settleLegacyLocalJob(
+            repoRoot,
+            legacyJobId,
+            settlementTimeoutMsForJob(job, record),
+          );
+          record = {
+            ...record,
+            status: localJob.status,
+            localJob,
+          };
+          if (localJob.status !== 'succeeded') {
+            return {
+              ok: false,
+              result: record,
+              outcome: localJob.outcome,
+              error: {
+                code: 'LEGACY_JOB_FAILED',
+                message: localJob.error ?? `Local Job ended as ${localJob.status}`,
+                retryable: false,
+                details: { localJob },
+              },
+              repoRoot,
+            };
+          }
+          return { ok: true, result: record, outcome: localJob.outcome, repoRoot };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (message.startsWith('LEGACY_JOB_TIMEOUT:')) {
+            return {
+              ok: false,
+              result: record,
+              error: { code: 'LEGACY_JOB_TIMEOUT', message, retryable: false, details: { localJobId: legacyJobId } },
+              repoRoot: controllerHome,
+            };
+          }
+          // Not every job-shaped repository-tool response is a Local Bridge job.
+        }
+      }
+
+      return { ok: true, result: record, repoRoot: controllerHome };
     }
 
     const repository = selectRepositoryCheckout(
@@ -111,7 +188,11 @@ export async function executeExecutionJob(controllerHome: string, job: Execution
     if (job.payload.target === 'runtime' && job.payload.operation === 'legacy-local-job') {
       const localJobId = String(job.payload.arguments?.localJobId ?? '').trim();
       if (!localJobId) throw new Error('LEGACY_JOB_ID_REQUIRED');
-      const localJob = await settleLegacyLocalJob(repoRoot, localJobId, typeof job.payload.timeoutMs === 'number' ? job.payload.timeoutMs : undefined);
+      const localJob = await settleLegacyLocalJob(
+        repoRoot,
+        localJobId,
+        settlementTimeoutMsForJob(job),
+      );
       return localJob.status === 'succeeded'
         ? { ok: true, result: { localJob }, outcome: localJob.outcome, repoRoot }
         : { ok: false, outcome: localJob.outcome, error: { code: 'LEGACY_JOB_FAILED', message: localJob.error ?? `Local Job ended as ${localJob.status}`, retryable: false, details: { localJob } }, repoRoot };
@@ -196,7 +277,11 @@ export async function executeExecutionJob(controllerHome: string, job: Execution
     const legacyJobId = legacyJobIdFromResult(record);
     if (legacyJobId) {
       try {
-        const localJob = await settleLegacyLocalJob(repoRoot, legacyJobId, typeof job.payload.timeoutMs === 'number' ? job.payload.timeoutMs : undefined);
+        const localJob = await settleLegacyLocalJob(
+          repoRoot,
+          legacyJobId,
+          settlementTimeoutMsForJob(job, record),
+        );
         record = { ...record, localJob };
         outcome = localJob.outcome;
         if (localJob.status !== 'succeeded') {
