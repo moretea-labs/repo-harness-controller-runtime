@@ -134,11 +134,20 @@ var lastOperation=null; // {phase,statusLabel,summary,errorMessage,at}
 var pluginActionResult=null;
 var busy=false;
 var pollTimer=null;
+var refreshInFlight=false;
 var lastRefreshedAt='';
 var pageVisible=!document.hidden;
 var workExtras={}; // workId -> {changedFiles, error, summary}
 
-document.addEventListener('visibilitychange',function(){pageVisible=!document.hidden});
+document.addEventListener('visibilitychange',function(){
+  pageVisible=!document.hidden;
+  if(!pageVisible){
+    if(pollTimer){clearInterval(pollTimer);pollTimer=null}
+    return;
+  }
+  ensurePoll();
+  if(shouldPoll())refreshAll({silent:true});
+});
 
 function repoQuery(){return selectedRepoId?'?repoId='+encodeURIComponent(selectedRepoId):''}
 function rememberRepo(id){selectedRepoId=id||'';safeSet('repoHarnessSelectedRepoId',selectedRepoId);setQueryRepoId(selectedRepoId)}
@@ -224,20 +233,21 @@ function renderChangedFiles(summary){
   '</div>';
 }
 function shouldPoll(){
-  if(!pageVisible)return false;
+  if(!pageVisible||refreshInFlight)return false;
   var work=obj(commandCenter&&commandCenter.currentWork);
-  var handoffs=arr(commandCenter&&commandCenter.handoffs);
-  if(handoffs.length)return true;
   if(!work||!work.id)return false;
   var phase=work.phase||'';
-  return phase==='running'||phase==='queued'||phase==='waiting'||work.tone==='blue'||work.statusLabel==='进行中'||work.statusLabel==='待开始';
+  return phase==='running'||phase==='queued'||phase==='waiting'||phase==='submitting'||work.tone==='blue'||work.statusLabel==='进行中'||work.statusLabel==='待开始';
 }
 function ensurePoll(){
-  if(pollTimer)return;
+  if(!pageVisible||pollTimer)return;
   pollTimer=setInterval(function(){
-    if(!shouldPoll())return;
+    if(!shouldPoll()){
+      if(pollTimer){clearInterval(pollTimer);pollTimer=null}
+      return;
+    }
     refreshAll({silent:true});
-  }, pageVisible?3500:12000);
+  },3500);
 }
 
 function switchView(name){
@@ -782,7 +792,7 @@ function providerCardHtml(p){
         '<p class="muted">'+esc(p.explanation||p.summary||'')+'</p>'+
         '<div class="evidence">'+(arr(p.capabilities).slice(0,8).map(function(c){return '<span>'+esc(c)+'</span>'}).join(''))+'</div>'+
         '<p class="faint" style="margin-top:6px">文件直接改动：'+(p.safety&&p.safety.canMutateFilesDirectly?'是':'否')+
-          ' · harness apply：'+(p.safety&&p.safety.requiresRepoHarnessApply?'是':'是')+
+          ' · harness apply：'+(p.safety&&p.safety.requiresRepoHarnessApply?'是':'否')+
           ' · 外部副作用：'+esc((p.safety&&p.safety.externalSideEffects)||'approval_required')+'</p>'+
         (p.lastErrorSummary?'<p class="faint">最近错误码：'+esc(p.lastErrorSummary)+'</p>':'')+
         (handoff?'<div class="setup" style="margin-top:8px"><strong>Direct dispatch：不支持</strong><p class="muted" style="margin:6px 0 0">'+esc(p.explanation||'')+'</p></div>':'')+
@@ -1174,6 +1184,8 @@ function loadAdvanced(){
 
 function refreshAll(opts){
   opts=opts||{};
+  if(refreshInFlight)return Promise.resolve();
+  refreshInFlight=true;
   return api('/api/console/command-center'+repoQuery()).then(function(res){
     commandCenter=res;
     lastRefreshedAt=new Date().toLocaleTimeString();
@@ -1208,7 +1220,7 @@ function refreshAll(opts){
     setLastOp({phase:'failed',statusLabel:'读取失败',summary:e.message||'本地 API 暂时不可用',error:{title:'控制器暂不可用',explanation:e.message||'本地 API 暂时不可用',nextActions:['刷新页面','重启 controller']}},e.message);
     renderAll();
     toast(e.message||'读取失败');
-  });
+  }).finally(function(){refreshInFlight=false});
 }
 
 window.onerror=function(message){toast(String(message));return false};

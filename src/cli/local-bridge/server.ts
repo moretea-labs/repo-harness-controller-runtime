@@ -351,8 +351,11 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
   const runtime = runtimeControllerSnapshot(repoRoot);
   const executionJobs = "executionJobs" in runtime ? (runtime.executionJobs ?? []) : [];
   const controllerHome = resolveControllerHome();
-  const assistantRepository = registerRepository({ path: repoRoot, controllerHome });
-  const assistantPlugins = listAssistantPluginManifests(controllerHome, assistantRepository).map((plugin) => ({
+  const normalizedAssistantRoot = repoRoot.replace(/\\/g, '/');
+  const assistantRepository = loadRepositoryRegistry(controllerHome).repositories.find(
+    (entry) => entry.canonicalRoot.replace(/\\/g, '/') === normalizedAssistantRoot,
+  );
+  const assistantPlugins = (assistantRepository ? listAssistantPluginManifests(controllerHome, assistantRepository) : []).map((plugin) => ({
     pluginId: plugin.pluginId,
     provider: plugin.provider,
     displayName: plugin.displayName,
