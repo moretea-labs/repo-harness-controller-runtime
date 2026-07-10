@@ -1,6 +1,72 @@
 import type { ExecutionJob } from '../../execution/jobs/types';
-import { getOccurrence, getSchedule, saveOccurrence, saveSchedule } from './store';
+import type { ScheduleDecisionType, ScheduleOccurrence } from './types';
+import {
+  getOccurrence,
+  getSchedule,
+  recordScheduleOccurrenceHandoff,
+  saveOccurrence,
+  saveSchedule,
+  type ScheduleOccurrenceHandoffInput,
+} from './store';
 
+const TERMINAL_OCCURRENCE_STATUSES = new Set<ScheduleOccurrence['status']>(['succeeded', 'failed', 'shadowed', 'skipped']);
+
+function computeScheduleFailureState(schedule: ReturnType<typeof getSchedule>, nextFailures: number): Pick<ReturnType<typeof getSchedule>, 'consecutiveFailures' | 'nextEligibleAt' | 'enabled' | 'pausedReason'> {
+  const shouldPause = nextFailures >= schedule.policy.maxFailures;
+  const backoffBase = Math.max(1, schedule.policy.backoffBaseMinutes ?? schedule.policy.cooldownMinutes ?? 1);
+  const backoffMax = Math.max(backoffBase, schedule.policy.backoffMaxMinutes ?? 24 * 60);
+  const backoffMinutes = Math.min(backoffMax, backoffBase * (2 ** Math.max(0, nextFailures - 1)));
+  return {
+    consecutiveFailures: nextFailures,
+    nextEligibleAt: new Date(Date.now() + backoffMinutes * 60_000).toISOString(),
+    enabled: shouldPause ? false : schedule.enabled,
+    pausedReason: shouldPause ? 'Maximum consecutive failures reached.' : undefined,
+  };
+}
+
+export function applyScheduleFailure(
+  controllerHome: string,
+  scheduleId: string,
+  repoId: string,
+  occurrenceId: string,
+  options: {
+    outcome: 'failed' | 'skipped';
+    decision?: ScheduleDecisionType;
+    reason: string;
+    countFailure?: boolean;
+    pauseReason?: string;
+    handoff?: ScheduleOccurrenceHandoffInput;
+  },
+): { schedule: ReturnType<typeof getSchedule>; occurrence?: ScheduleOccurrence } {
+  const schedule = getSchedule(controllerHome, repoId, scheduleId);
+  const occurrence = getOccurrence(controllerHome, repoId, occurrenceId);
+  let nextOccurrence = occurrence;
+  if (occurrence && !TERMINAL_OCCURRENCE_STATUSES.has(occurrence.status)) {
+    nextOccurrence = saveOccurrence(controllerHome, {
+      ...occurrence,
+      status: options.outcome,
+      decision: options.decision ?? occurrence.decision,
+      reason: options.reason,
+    });
+  }
+  if (nextOccurrence && options.handoff) {
+    nextOccurrence = recordScheduleOccurrenceHandoff(controllerHome, schedule, nextOccurrence, options.handoff);
+  }
+
+  const countFailure = options.countFailure !== false;
+  const nextSchedule = options.pauseReason
+    ? saveSchedule(controllerHome, {
+      ...schedule,
+      enabled: false,
+      pausedReason: options.pauseReason,
+      nextEligibleAt: undefined,
+      consecutiveFailures: countFailure ? schedule.consecutiveFailures + 1 : schedule.consecutiveFailures,
+    })
+    : countFailure
+      ? saveSchedule(controllerHome, { ...schedule, ...computeScheduleFailureState(schedule, schedule.consecutiveFailures + 1) })
+      : schedule;
+  return { schedule: nextSchedule, occurrence: nextOccurrence };
+}
 
 export function markScheduledExecutionRunning(controllerHome: string, job: ExecutionJob): void {
   if (job.type !== 'scheduled-occurrence') return;
@@ -42,18 +108,34 @@ export function settleScheduledExecution(
         reason,
       });
     }
-    const failed = outcome === 'failed';
-    const nextFailures = failed ? schedule.consecutiveFailures + 1 : 0;
-    const shouldPause = failed && nextFailures >= schedule.policy.maxFailures;
-    const backoffBase = Math.max(1, schedule.policy.backoffBaseMinutes ?? schedule.policy.cooldownMinutes ?? 1);
-    const backoffMax = Math.max(backoffBase, schedule.policy.backoffMaxMinutes ?? 24 * 60);
-    const backoffMinutes = failed ? Math.min(backoffMax, backoffBase * (2 ** Math.max(0, nextFailures - 1))) : 0;
+    if (outcome === 'failed') {
+      applyScheduleFailure(controllerHome, scheduleId, job.repoId, occurrenceId, {
+        outcome,
+        decision: 'execute',
+        reason,
+        handoff: {
+          title: `Scheduled maintenance occurrence ${occurrenceId} failed`,
+          summary: 'A bounded live maintenance occurrence failed and requires review before the schedule continues unattended.',
+          reason,
+          creationReason: 'repeated_infrastructure_failure',
+          blockingDecision: 'Review the failed maintenance occurrence and decide whether the schedule should continue automatically.',
+          recommendedDecision: 'Inspect the failed occurrence, fix the runtime blocker, then re-enable or retrigger the schedule intentionally.',
+          recommendedPrompt: `Review schedule occurrence ${occurrenceId} for ${scheduleId}, inspect the failed runtime maintenance action, and decide whether to resume automatic maintenance.`,
+          statusSummary: 'Scheduled maintenance execution failed.',
+          blockedBy: ['scheduled_execution_failed'],
+          attemptedActions: [
+            `job:${job.jobId}`,
+            `operation:${String(job.payload.operation ?? 'unknown')}`,
+          ],
+        },
+      });
+      return;
+    }
     saveSchedule(controllerHome, {
       ...schedule,
-      consecutiveFailures: nextFailures,
-      nextEligibleAt: failed ? new Date(Date.now() + backoffMinutes * 60_000).toISOString() : undefined,
-      enabled: shouldPause ? false : schedule.enabled,
-      pausedReason: shouldPause ? 'Maximum consecutive failures reached.' : undefined,
+      consecutiveFailures: 0,
+      nextEligibleAt: undefined,
+      pausedReason: undefined,
     });
   } catch {
     // Job terminal state remains authoritative even if an old schedule record

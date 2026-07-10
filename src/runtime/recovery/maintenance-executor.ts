@@ -42,6 +42,17 @@ export interface RuntimeMaintenanceApplyOptions extends RuntimeMaintenanceOption
   confirmMaintenance?: boolean;
 }
 
+export interface AutomaticRuntimeMaintenancePreview {
+  actionId?: RuntimeMaintenanceActionId;
+  allowed: boolean;
+  noOp: boolean;
+  blockedReason?: string;
+  blockedPermanently: boolean;
+  selectedCandidateIds: string[];
+  selectedTypedCandidateIds: string[];
+  status: RuntimeMaintenanceStatus;
+}
+
 export interface RuntimeMaintenanceCandidate {
   kind: RuntimeMaintenanceCandidateKind;
   id: string;
@@ -150,6 +161,7 @@ interface LocalJobState {
 }
 
 const VALID_MAINTENANCE_ACTIONS = new Set<RuntimeMaintenanceActionId>(['local_jobs_reconcile', 'quarantine_unreadable_local_jobs', 'runtime_storage_finalize_relocation', 'rebuild_projection', 'full_maintenance_pass']);
+export const AUTOMATIC_RUNTIME_MAINTENANCE_ACTION_ALLOWLIST = new Set<RuntimeMaintenanceActionId>(['local_jobs_reconcile']);
 const ACTIVE_LOCAL_JOB_STATUSES = new Set(['pending_approval', 'approved', 'dispatched', 'running']);
 const TERMINAL_LOCAL_JOB_STATUSES = new Set(['succeeded', 'failed', 'cancelled', 'timed_out', 'orphaned', 'stale', 'rejected']);
 const DEFAULT_MIN_AGE_MINUTES = 10;
@@ -361,6 +373,24 @@ function normalizedOptions(options: RuntimeMaintenanceOptions = {}): Required<Ru
   };
 }
 
+function readBoolean(input: Record<string, unknown>, snake: string, camel: string): boolean | undefined {
+  if (typeof input[snake] === 'boolean') return input[snake] as boolean;
+  if (typeof input[camel] === 'boolean') return input[camel] as boolean;
+  return undefined;
+}
+
+function readNumber(input: Record<string, unknown>, snake: string, camel: string): number | undefined {
+  if (typeof input[snake] === 'number' && Number.isFinite(input[snake])) return input[snake] as number;
+  if (typeof input[camel] === 'number' && Number.isFinite(input[camel])) return input[camel] as number;
+  return undefined;
+}
+
+function readString(input: Record<string, unknown>, snake: string, camel: string): string | undefined {
+  if (typeof input[snake] === 'string' && input[snake].trim()) return String(input[snake]).trim();
+  if (typeof input[camel] === 'string' && input[camel].trim()) return String(input[camel]).trim();
+  return undefined;
+}
+
 function coerceRepository(repository: RuntimeMaintenanceRepository): RepositoryRecord {
   return repository as RepositoryRecord;
 }
@@ -469,6 +499,112 @@ export function buildRuntimeMaintenanceStatus(
       'Pending approvals are not cancelled unless cancel_pending_approvals is explicitly enabled.',
       'Source repair should be delegated to ChatGPT/Codex/DeepSeek only after local maintenance and restart fallbacks fail.',
     ],
+  };
+}
+
+export function previewAutomaticRuntimeMaintenance(
+  repository: RuntimeMaintenanceRepository,
+  controllerHome: string,
+  rawArguments: Record<string, unknown> = {},
+): AutomaticRuntimeMaintenancePreview {
+  const actionId = readString(rawArguments, 'action_id', 'actionId') as RuntimeMaintenanceActionId | undefined;
+  const confirmMaintenance = readBoolean(rawArguments, 'confirm_maintenance', 'confirmMaintenance') === true;
+  const authorization = readString(rawArguments, 'authorization', 'authorization');
+  const cancelPendingApprovals = readBoolean(rawArguments, 'cancel_pending_approvals', 'cancelPendingApprovals') === true;
+  const status = buildRuntimeMaintenanceStatus(repository, controllerHome, {
+    minAgeMinutes: readNumber(rawArguments, 'min_age_minutes', 'minAgeMinutes'),
+    maxCandidates: readNumber(rawArguments, 'max_candidates', 'maxCandidates'),
+    cancelPendingApprovals,
+  });
+
+  if (!actionId) {
+    return {
+      allowed: false,
+      noOp: false,
+      blockedReason: 'Automatic maintenance Schedule is missing action_id.',
+      blockedPermanently: true,
+      selectedCandidateIds: [],
+      selectedTypedCandidateIds: [],
+      status,
+    };
+  }
+  if (!AUTOMATIC_RUNTIME_MAINTENANCE_ACTION_ALLOWLIST.has(actionId)) {
+    return {
+      actionId,
+      allowed: false,
+      noOp: false,
+      blockedReason: `Automatic maintenance Schedule may only run allowlisted actions. Received ${actionId}.`,
+      blockedPermanently: true,
+      selectedCandidateIds: [],
+      selectedTypedCandidateIds: [],
+      status,
+    };
+  }
+  if (!confirmMaintenance || authorization !== actionId) {
+    return {
+      actionId,
+      allowed: false,
+      noOp: false,
+      blockedReason: 'Automatic maintenance Schedule is missing confirm_maintenance=true and matching authorization.',
+      blockedPermanently: true,
+      selectedCandidateIds: [],
+      selectedTypedCandidateIds: [],
+      status,
+    };
+  }
+  if (cancelPendingApprovals) {
+    return {
+      actionId,
+      allowed: false,
+      noOp: false,
+      blockedReason: 'Automatic maintenance Schedule may not cancel pending approvals.',
+      blockedPermanently: true,
+      selectedCandidateIds: [],
+      selectedTypedCandidateIds: [],
+      status,
+    };
+  }
+
+  const selectedCandidateIds = status.candidates
+    .filter((candidate) => shouldApply(actionId, candidate))
+    .map((candidate) => candidate.id);
+  const selectedTypedCandidateIds = selectedTypedRepairCandidateIds(actionId, status.runtimeStorageRepair);
+  const totalSelected = selectedCandidateIds.length + selectedTypedCandidateIds.length;
+  if (totalSelected > 0) {
+    return {
+      actionId,
+      allowed: true,
+      noOp: false,
+      blockedPermanently: false,
+      selectedCandidateIds,
+      selectedTypedCandidateIds,
+      status,
+    };
+  }
+
+  if (status.readyForExecution) {
+    return {
+      actionId,
+      allowed: true,
+      noOp: true,
+      blockedPermanently: false,
+      selectedCandidateIds,
+      selectedTypedCandidateIds,
+      status,
+    };
+  }
+
+  return {
+    actionId,
+    allowed: false,
+    noOp: false,
+    blockedReason: status.runtimeStorageError
+      ? `Automatic maintenance preview could not inspect runtime storage safely: ${status.runtimeStorageError}`
+      : 'Automatic maintenance preview found no safe allowlisted candidates and requires human review.',
+    blockedPermanently: false,
+    selectedCandidateIds,
+    selectedTypedCandidateIds,
+    status,
   };
 }
 

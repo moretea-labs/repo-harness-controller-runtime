@@ -80,6 +80,8 @@ export type ScheduleDecisionType =
   | 'budget_exhausted'
   | 'active_occurrence'
   | 'stopped'
+  | 'operation_blocked'
+  | 'maintenance_not_ready'
   | 'trigger_not_due'
   | 'condition_not_met'
   | 'dependency_not_ready'
@@ -114,5 +116,6 @@ export interface ScheduleOccurrence {
   createdAt: string;
   updatedAt: string;
   jobId?: string;
+  handoffId?: string;
   reason?: string;
 }

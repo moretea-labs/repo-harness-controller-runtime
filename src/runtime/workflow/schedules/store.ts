@@ -3,6 +3,7 @@ import { existsSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { repositoryControllerRoot } from '../../../cli/repositories/controller-home';
 import { withControllerLock } from '../../../cli/repositories/locks';
+import { createHandoffItem, getHandoffItem } from '../../control-plane/facade/handoff-inbox-store';
 import { readJsonFile, writeJsonAtomic } from '../../shared/json-files';
 import { appendRuntimeEvent } from '../../evidence/event-ledger';
 import type { RepositorySchedule, ScheduleDecision, ScheduleOccurrence } from './types';
@@ -22,6 +23,20 @@ interface ScheduleRequestRecord {
   createdAt: string;
 }
 type CreateScheduleInput = Omit<RepositorySchedule, 'schemaVersion' | 'revision' | 'scheduleId' | 'createdAt' | 'updatedAt' | 'consecutiveFailures'>;
+
+export interface ScheduleOccurrenceHandoffInput {
+  title: string;
+  summary: string;
+  reason: string;
+  creationReason: 'ambiguous_outcome' | 'missing_authorization' | 'repeated_infrastructure_failure';
+  blockingDecision: string;
+  recommendedDecision: string;
+  recommendedPrompt: string;
+  statusSummary: string;
+  blockedBy?: string[];
+  attemptedActions?: string[];
+  evidenceRefs?: Array<{ title: string; summary?: string; detailLevel?: 'summary' | 'detail' | 'raw' }>;
+}
 
 function schedulesRoot(controllerHome: string, repoId: string): string {
   return join(repositoryControllerRoot(controllerHome, repoId), 'schedules');
@@ -160,6 +175,61 @@ export function saveOccurrence(controllerHome: string, occurrence: ScheduleOccur
 export function getOccurrence(controllerHome: string, repoId: string, occurrenceId: string): ScheduleOccurrence | undefined {
   const path = occurrencePath(controllerHome, repoId, occurrenceId);
   return existsSync(path) ? readJsonFile<ScheduleOccurrence>(path) : undefined;
+}
+
+export function recordScheduleOccurrenceHandoff(
+  controllerHome: string,
+  schedule: RepositorySchedule,
+  occurrence: ScheduleOccurrence,
+  input: ScheduleOccurrenceHandoffInput,
+): ScheduleOccurrence {
+  if (occurrence.handoffId) return occurrence;
+  const handoffId = `schedule-${occurrence.occurrenceId}`;
+  const evidenceRefs: NonNullable<ScheduleOccurrenceHandoffInput['evidenceRefs']> = [
+    { title: `Occurrence ${occurrence.occurrenceId}`, summary: occurrence.reason ?? input.reason, detailLevel: 'summary' as const },
+  ];
+  for (const ref of input.evidenceRefs ?? []) {
+    evidenceRefs.push(ref);
+    if (evidenceRefs.length >= 20) break;
+  }
+  const existing = getHandoffItem({ controllerHome, repoId: occurrence.repoId }, handoffId);
+  const item = existing ?? createHandoffItem(
+    { controllerHome, repoId: occurrence.repoId },
+    {
+      id: handoffId,
+      repoId: occurrence.repoId,
+      title: input.title,
+      severity: 'blocked',
+      reason: input.reason,
+      creationReason: input.creationReason,
+      summary: input.summary,
+      currentState: {
+        repoId: occurrence.repoId,
+        taskId: schedule.scheduleId,
+        statusSummary: input.statusSummary,
+        blockedBy: input.blockedBy,
+      },
+      attemptedActions: [
+        `schedule:${schedule.scheduleId}`,
+        `occurrence:${occurrence.occurrenceId}`,
+        ...(input.attemptedActions ?? []),
+      ].slice(0, 20),
+      evidenceRefs,
+      blockingDecision: input.blockingDecision,
+      recommendedDecision: input.recommendedDecision,
+      recommendedPrompt: input.recommendedPrompt,
+      suggestedNextActions: [{
+        label: 'Review handoff',
+        tool: 'rh_inbox',
+        operation: 'get',
+        payload: { handoff_id: handoffId },
+        risk: 'readonly',
+        confidence: 'high',
+        reason: 'Review the bounded occurrence handoff before resuming automatic maintenance.',
+      }],
+    },
+  );
+  return saveOccurrence(controllerHome, { ...occurrence, handoffId: item.id });
 }
 
 export function listActiveOccurrences(controllerHome: string, repoId: string, scheduleId?: string): ScheduleOccurrence[] {
