@@ -22,14 +22,14 @@ HOME_DIR="${HOME:-}"
 [ -n "$HOME_DIR" ] || die "HOME is not set"
 BUN_INSTALL_DIR="${BUN_INSTALL:-$HOME_DIR/.bun}"
 
-node_major() {
-  node -p "Number(process.versions.node.split('.')[0])" 2>/dev/null || printf '0'
+ensure_git() {
+  has_command git || die "Git is required. Install Git and reopen the terminal."
 }
 
 ensure_node() {
-  has_command node || die "Node.js 20+ is required when Bun is not available. Install Node.js or set REPO_HARNESS_INSTALL_RUNTIME=bun."
-  major="$(node_major)"
-  [ "$major" -ge 20 ] || die "Node.js 20+ is required for Node fallback; found major version $major"
+  has_command node || die "Node.js 20.10 or newer is required because the published repo-harness launcher uses Node."
+  node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 20 || (major === 20 && minor >= 10) ? 0 : 1)' \
+    || die "Node.js 20.10 or newer is required; found $(node --version 2>/dev/null || printf unknown)"
 }
 
 install_bun() {
@@ -40,10 +40,10 @@ install_bun() {
   has_command bash || die "bash is required to install Bun automatically"
 
   if has_command curl; then
-    log "Installing Bun runtime..."
+    printf '%s\n' "Installing Bun runtime..." >&2
     curl -fsSL https://bun.sh/install | bash
   elif has_command wget; then
-    log "Installing Bun runtime..."
+    printf '%s\n' "Installing Bun runtime..." >&2
     wget -qO- https://bun.sh/install | bash
   else
     die "curl or wget is required to install Bun automatically"
@@ -60,7 +60,6 @@ choose_runtime() {
       printf 'bun\n'
       ;;
     node)
-      ensure_node
       has_command npm || die "npm is required for REPO_HARNESS_INSTALL_RUNTIME=node"
       printf 'node\n'
       ;;
@@ -68,7 +67,6 @@ choose_runtime() {
       if has_command bun; then
         printf 'bun\n'
       else
-        ensure_node
         has_command npm || die "npm is required when Bun is unavailable"
         printf 'node\n'
       fi
@@ -93,22 +91,26 @@ install_repo_harness() {
 
 verify_repo_harness() {
   export PATH="$BUN_INSTALL_DIR/bin:$PATH"
-  has_command repo-harness || die "repo-harness is not on PATH after installation"
+  has_command repo-harness || die "repo-harness is not on PATH after installation. Reopen the terminal or add the package-manager global bin directory to PATH."
   version="$(repo-harness --version 2>/dev/null || true)"
   [ -n "$version" ] || die "repo-harness installed, but version readback failed"
+  repo-harness doctor --help >/dev/null 2>&1 || die "repo-harness installed, but the doctor command could not be loaded"
   log "repo-harness ${version} installed."
 }
 
 if [ "${REPO_HARNESS_DRY_RUN:-0}" = "1" ]; then
-  log "DRY RUN: would choose runtime (${INSTALL_RUNTIME}), install ${PACKAGE_NAME}@${PACKAGE_VERSION}, and verify repo-harness --version."
+  log "DRY RUN: would require Git and Node.js 20.10+, choose runtime (${INSTALL_RUNTIME}), install ${PACKAGE_NAME}@${PACKAGE_VERSION}, and verify the CLI."
   exit 0
 fi
 
+ensure_git
+ensure_node
 runtime="$(choose_runtime)"
 install_repo_harness "$runtime"
 verify_repo_harness
 
 log ""
 log "Next:"
-log "  repo-harness init"
-log "  repo-harness adopt --dry-run"
+log "  repo-harness install --no-cli"
+log "  repo-harness doctor"
+log "  repo-harness adopt --repo /path/to/your-project --dry-run"

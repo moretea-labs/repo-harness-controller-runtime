@@ -45,28 +45,32 @@ The project is designed for real repositories rather than disposable chat sessio
 
 ## Quick start
 
-### 1. Prerequisites
+### 1. Prerequisites and platform choice
 
 - Git
-- Bun 1.0 or newer
-- macOS or Linux for the primary local workflow
-- Recommended stable public endpoint: Tailscale CLI / macOS app, or your own domain with `cloudflared`
+- Node.js 20.10 or newer
+- npm or Bun 1.0+; Bun is recommended for development
+- macOS and modern Linux are supported; use WSL2 for the complete Windows workflow
+- native Windows PowerShell is a preview path for installation, doctor, repository registration/inspection, and portable controller operations
 
-### 2. Run from source
+See [Platform Support](docs/operations/platform-support.md), [Features and Setup Levels](docs/operations/features.md), and the complete [installation tutorial](docs/tutorials/01-install-and-start.md).
+
+### 2. Install or run from source
 
 ```bash
-git clone https://github.com/greysonOuyang/repo-harness-controller-runtime.git
+npm install -g repo-harness
+# or: bun add -g repo-harness
+repo-harness install --no-cli
+repo-harness doctor
+```
+
+From source:
+
+```bash
+git clone https://github.com/moretea-labs/repo-harness-controller-runtime.git
 cd repo-harness-controller-runtime
 bun install
 bun run src/cli/index.ts doctor
-```
-
-After the npm package is published, the installed command is:
-
-```bash
-bun add -g repo-harness
-repo-harness install
-repo-harness doctor
 ```
 
 ### 3. Adopt an existing repository

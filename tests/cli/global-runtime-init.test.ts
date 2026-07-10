@@ -301,6 +301,40 @@ describe('init command global runtime bootstrap', () => {
     }
   }, 15000);
 
+  test('native Windows keeps the runtime bootstrap usable without Bash or automatic CodeGraph setup', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'repo-harness-global-init-windows-'));
+    const source = join(tmp, 'node_modules', 'repo-harness');
+    const home = join(tmp, 'home');
+    const repo = join(tmp, 'repo');
+    try {
+      mkdirSync(source, { recursive: true });
+      mkdirSync(home, { recursive: true });
+      mkdirSync(repo, { recursive: true });
+      setupFakeSource(source);
+
+      const result = runGlobalRuntimeSetup({
+        sourceRoot: source,
+        cwd: repo,
+        platform: 'win32',
+        installCli: false,
+        hostAdapters: false,
+        externalSkills: false,
+        env: { ...process.env, HOME: home },
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.steps.find((step) => step.step === 'sync repo-harness skill runtime')).toMatchObject({
+        status: 'skipped',
+      });
+      expect(result.steps.find((step) => step.step === 'ensure CodeGraph CLI')).toMatchObject({
+        status: 'skipped',
+      });
+      expect(result.stdout).toContain('use WSL2');
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   test('CLI exposes update help for user-level refresh', () => {
     const res = spawnSync('bun', [CLI, 'update', '--help'], {
       cwd: ROOT,

@@ -24,6 +24,10 @@ bun scripts/smoke-mcp-tool-surface.ts
 echo "[release-readiness] public documentation"
 bash scripts/check-public-docs.sh
 
+echo "[release-readiness] cross-platform install contract"
+node scripts/check-platform-support.mjs
+bun test tests/install-scripts.test.ts tests/cli/global-runtime-init.test.ts
+
 echo "[release-readiness] open-source tracked-file audit"
 bash scripts/check-open-source-tracked-surface.sh
 

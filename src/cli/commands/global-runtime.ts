@@ -19,6 +19,7 @@ export interface GlobalRuntimeOptions {
   externalSkills?: boolean;
   codegraph?: boolean;
   brainRoot?: string;
+  platform?: NodeJS.Platform;
 }
 
 export interface GlobalRuntimeStep {
@@ -113,9 +114,20 @@ function packageVersion(sourceRoot: string): string | null {
   }
 }
 
+function commandAvailable(command: string, cwd: string, env?: NodeJS.ProcessEnv): boolean {
+  return runBoundedProcess(command, ["--version"], {
+    cwd,
+    env,
+    timeoutMs: 5_000,
+    maxOutputBytes: 2_000,
+  }).ok;
+}
+
 function installCli(sourceRoot: string, cwd: string, env?: NodeJS.ProcessEnv, installSpec?: string): GlobalRuntimeStep {
   const spec = installSpec ?? (existsSync(join(sourceRoot, "package.json")) ? sourceRoot : "repo-harness");
-  const step = runProcess("bun", ["add", "-g", spec], cwd, env);
+  const step = commandAvailable("bun", cwd, env)
+    ? runProcess("bun", ["add", "-g", spec], cwd, env)
+    : runProcess("npm", ["install", "-g", spec, "--omit=optional", "--no-audit", "--no-fund"], cwd, env);
   const version = packageVersion(sourceRoot);
   return withStepName(
     step,
@@ -124,13 +136,20 @@ function installCli(sourceRoot: string, cwd: string, env?: NodeJS.ProcessEnv, in
   );
 }
 
-function syncRuntimeSkill(sourceRoot: string, env?: NodeJS.ProcessEnv): GlobalRuntimeStep {
+function syncRuntimeSkill(sourceRoot: string, env?: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): GlobalRuntimeStep {
   const script = join(sourceRoot, "scripts", "sync-codex-installed-copies.sh");
   if (!existsSync(script)) {
     return {
       step: "sync repo-harness skill runtime",
       status: "skipped",
       detail: `script not found: ${script}`,
+    };
+  }
+  if (platform === "win32") {
+    return {
+      step: "sync repo-harness skill runtime",
+      status: "skipped",
+      detail: "native Windows skips the Bash-owned skill sync; use WSL2 for the complete shell workflow",
     };
   }
   return withStepName(
@@ -215,7 +234,9 @@ function configureBrain(root: string | undefined, env?: NodeJS.ProcessEnv): Glob
 function ensureCodegraphCli(cwd: string, env?: NodeJS.ProcessEnv): GlobalRuntimeStep {
   const check = runProcess("codegraph", ["--version"], cwd, env);
   if (check.status === "ok") return withStepName(check, "ensure CodeGraph CLI", "present");
-  const install = runProcess("bun", ["add", "-g", CODEGRAPH_PACKAGE], cwd, env);
+  const install = commandAvailable("bun", cwd, env)
+    ? runProcess("bun", ["add", "-g", CODEGRAPH_PACKAGE], cwd, env)
+    : runProcess("npm", ["install", "-g", CODEGRAPH_PACKAGE, "--omit=optional", "--no-audit", "--no-fund"], cwd, env);
   if (install.status !== "ok") return withStepName(install, "ensure CodeGraph CLI", CODEGRAPH_PACKAGE);
   const recheck = runProcess("codegraph", ["--version"], cwd, env);
   if (recheck.status === "ok") return withStepName(recheck, "ensure CodeGraph CLI", "installed");
@@ -249,12 +270,13 @@ export function runGlobalRuntimeSetup(opts: GlobalRuntimeOptions = {}): GlobalRu
   const cwd = opts.cwd ?? process.cwd();
   const target = opts.target ?? "both";
   const env = commandEnv(sourceRoot, opts.env);
+  const platform = opts.platform ?? process.platform;
   const steps: GlobalRuntimeStep[] = [];
 
   if (opts.installCli !== false) steps.push(installCli(sourceRoot, cwd, env, opts.installSpec));
   else steps.push({ step: "install repo-harness CLI", status: "skipped", detail: "disabled" });
 
-  if (opts.syncSkill !== false) steps.push(syncRuntimeSkill(sourceRoot, env));
+  if (opts.syncSkill !== false) steps.push(syncRuntimeSkill(sourceRoot, env, platform));
   else steps.push({ step: "sync repo-harness skill runtime", status: "skipped", detail: "disabled" });
 
   if (opts.hostAdapters !== false) steps.push(installHostAdapters(target, env));
@@ -272,7 +294,14 @@ export function runGlobalRuntimeSetup(opts: GlobalRuntimeOptions = {}): GlobalRu
 
   steps.push(configureBrain(opts.brainRoot, env));
 
-  if (opts.codegraph !== false) {
+  if (platform === "win32" && opts.codegraph !== false) {
+    steps.push({
+      step: "ensure CodeGraph CLI",
+      status: "skipped",
+      detail: "native Windows automatic CodeGraph setup is not release-validated; use WSL2 or configure it manually",
+    });
+    steps.push({ step: "configure CodeGraph MCP", status: "skipped", detail: "native Windows default" });
+  } else if (opts.codegraph !== false) {
     const ensure = ensureCodegraphCli(cwd, env);
     steps.push(ensure);
     if (ensure.status === "ok") steps.push(configureCodegraphMcp(cwd, target, env));

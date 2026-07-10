@@ -70,28 +70,32 @@ self_healing_loop_plan
 
 ## 快速开始
 
-### 1. 前置环境
+### 1. 前置环境与平台选择
 
 - Git
-- Bun 1.0 或更高版本
-- 主要本地工作流面向 macOS / Linux
-- 推荐稳定公网入口：Tailscale CLI / macOS App，或自有域名 + `cloudflared`
+- Node.js 20.10 或更高版本
+- npm 或 Bun 1.0+；源码开发推荐 Bun
+- macOS 和现代 Linux 完整支持；Windows 完整工作流推荐 WSL2
+- Windows 原生 PowerShell 当前为预览路径，覆盖安装、doctor、仓库注册/读取和可移植 Controller 操作
 
-### 2. 从源码运行
+详细范围见[平台支持说明](docs/operations/platform-support.zh-CN.md)、[功能与配置层级](docs/operations/features.zh-CN.md)和[完整安装教程](docs/tutorials/01-install-and-start.zh-CN.md)。
+
+### 2. 安装或从源码运行
+
+```bash
+npm install -g repo-harness
+# 或：bun add -g repo-harness
+repo-harness install --no-cli
+repo-harness doctor
+```
+
+从源码运行：
 
 ```bash
 git clone https://github.com/moretea-labs/repo-harness-controller-runtime.git
 cd repo-harness-controller-runtime
 bun install
 bun run src/cli/index.ts doctor
-```
-
-npm package 正式发布后，可以使用：
-
-```bash
-bun add -g repo-harness
-repo-harness install
-repo-harness doctor
 ```
 
 ### 3. 接入已有仓库
