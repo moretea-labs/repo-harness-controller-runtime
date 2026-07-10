@@ -363,8 +363,8 @@ function mockTasksProvider(): TasksProvider {
   };
 }
 
-function liveTasksProvider(config: GoogleTasksPluginConfig): TasksProvider {
-  const auth = resolveGoogleAuth('tasks', config);
+function liveTasksProvider(config: GoogleTasksPluginConfig, repoRoot?: string): TasksProvider {
+  const auth = resolveGoogleAuth('tasks', config, { repoRoot });
   if (!auth.ready || !auth.accessToken) {
     throw new AssistantPluginError('PLUGIN_AUTH_REQUIRED', auth.errors[0] ?? 'Google Tasks access token is required.', {
       retryable: false,
@@ -450,13 +450,14 @@ function liveTasksProvider(config: GoogleTasksPluginConfig): TasksProvider {
   };
 }
 
-function tasksProvider(config: GoogleTasksPluginConfig): TasksProvider {
-  return config.provider === 'mock' ? mockTasksProvider() : liveTasksProvider(config);
+function tasksProvider(config: GoogleTasksPluginConfig, repoRoot?: string): TasksProvider {
+  return config.provider === 'mock' ? mockTasksProvider() : liveTasksProvider(config, repoRoot);
 }
 
 export function buildGoogleTasksPluginManifest(previousRevision = 0, previousUpdatedAt?: string, repoRoot?: string): AssistantPluginManifest {
-  const config = loadGoogleTasksPluginConfig(repoRoot ?? process.cwd());
-  const auth = resolveGoogleAuth('tasks', config);
+  const root = repoRoot ?? process.cwd();
+  const config = loadGoogleTasksPluginConfig(root);
+  const auth = resolveGoogleAuth('tasks', config, { repoRoot: root });
   const state = pluginStateFromGoogleAuth(config, auth);
   return {
     schemaVersion: 1,
@@ -503,23 +504,23 @@ export async function executeGoogleTasksPluginAction(input: AssistantPluginActio
       });
       return {
         config,
-        auth: resolveGoogleAuth('tasks', config),
+        auth: resolveGoogleAuth('tasks', config, { repoRoot: input.repoRoot }),
       };
     }
     case 'list_tasklists':
-      return tasksProvider(current).listTaskLists(current);
+      return tasksProvider(current, input.repoRoot).listTaskLists(current);
     case 'list_tasks':
-      return tasksProvider(current).listTasks(input.args, current);
+      return tasksProvider(current, input.repoRoot).listTasks(input.args, current);
     case 'create_task':
-      return tasksProvider(current).createTask(input.args, current);
+      return tasksProvider(current, input.repoRoot).createTask(input.args, current);
     case 'update_task':
-      return tasksProvider(current).updateTask(input.args, current);
+      return tasksProvider(current, input.repoRoot).updateTask(input.args, current);
     case 'reschedule_task':
-      return tasksProvider(current).rescheduleTask(input.args, current);
+      return tasksProvider(current, input.repoRoot).rescheduleTask(input.args, current);
     case 'complete_task':
-      return tasksProvider(current).completeTask(input.args, current);
+      return tasksProvider(current, input.repoRoot).completeTask(input.args, current);
     case 'delete_task':
-      return tasksProvider(current).deleteTask(input.args, current);
+      return tasksProvider(current, input.repoRoot).deleteTask(input.args, current);
     default:
       throw new AssistantPluginError('PLUGIN_ACTION_NOT_SUPPORTED', `google_tasks/${input.actionId} is not supported.`, {
         retryable: false,

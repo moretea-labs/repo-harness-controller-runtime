@@ -3,6 +3,7 @@ import { writeFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { ensureControllerHome } from '../../cli/repositories/controller-home';
 import { writeJsonAtomic } from '../shared/json-files';
+import { bootstrapManagedRuntimeEnv } from '../shared/managed-env';
 import { GlobalScheduler } from './global-scheduler/scheduler';
 
 function option(name: string): string | undefined {
@@ -10,6 +11,7 @@ function option(name: string): string | undefined {
   return index >= 0 ? process.argv[index + 1] : undefined;
 }
 const controllerHome = ensureControllerHome(option('--controller-home'));
+bootstrapManagedRuntimeEnv({ controllerHome });
 const statePath = join(controllerHome, 'daemon', 'state.json');
 const pidPath = join(controllerHome, 'daemon', 'controller.pid');
 const abort = new AbortController();

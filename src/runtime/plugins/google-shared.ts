@@ -7,6 +7,7 @@ import type {
   AssistantPluginPermissionScope,
 } from './types';
 import { AssistantPluginError, toAssistantPluginError } from './errors';
+import { bootstrapManagedRuntimeEnv } from '../shared/managed-env';
 
 export type GoogleProviderKind = 'mock' | 'google-workspace';
 export type GoogleService = 'gmail' | 'calendar' | 'tasks';
@@ -215,7 +216,12 @@ function tokenEnvNames(service: GoogleService): string[] {
   }
 }
 
-export function resolveGoogleAuth(service: GoogleService, config: GooglePluginConfig): GoogleAuthState {
+export function resolveGoogleAuth(
+  service: GoogleService,
+  config: GooglePluginConfig,
+  options: { repoRoot?: string } = {},
+): GoogleAuthState {
+  bootstrapManagedRuntimeEnv({ repoRoot: options.repoRoot });
   if (config.provider === 'mock') {
     return {
       provider: 'mock',

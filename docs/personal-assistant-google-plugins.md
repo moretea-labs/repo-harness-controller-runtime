@@ -35,6 +35,19 @@ environment variables:
 - Calendar: `REPO_HARNESS_GOOGLE_CALENDAR_ACCESS_TOKEN`, `REPO_HARNESS_GOOGLE_WORKSPACE_ACCESS_TOKEN`, `REPO_HARNESS_GOOGLE_ACCESS_TOKEN`
 - Tasks: `REPO_HARNESS_GOOGLE_TASKS_ACCESS_TOKEN`, `REPO_HARNESS_GOOGLE_WORKSPACE_ACCESS_TOKEN`, `REPO_HARNESS_GOOGLE_ACCESS_TOKEN`
 
+To avoid depending on shell/window startup environment injection, repo-harness
+also bootstraps these variables into `process.env` from ignored local files when
+they are present and the same variable is not already exported by the parent
+process:
+
+- `_ops/secrets/repo-harness.env`
+- `_ops/secrets/controller.env`
+- `_ops/env/.env.local`
+
+Only repo-harness and Google-related variable names are imported from those
+files, and an explicit parent-process environment variable still takes
+precedence.
+
 For local development and contract tests, each plugin also supports
 `provider: "mock"` with deterministic mock responses and no credential
 requirements.

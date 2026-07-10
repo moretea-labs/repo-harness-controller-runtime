@@ -1,5 +1,6 @@
 import { URLSearchParams } from 'url';
 import type { AssistantPluginManifest } from '../plugins/types';
+import { bootstrapManagedRuntimeEnv } from '../shared/managed-env';
 
 export type WorkspaceAuthService = 'gmail' | 'calendar' | 'tasks' | 'google-workspace';
 
@@ -80,6 +81,7 @@ export function buildWorkspaceAuthStatus(manifests: AssistantPluginManifest[]): 
 }
 
 export function prepareWorkspaceAuthLogin(input: WorkspaceAuthLoginInput = {}): Record<string, unknown> {
+  bootstrapManagedRuntimeEnv();
   const service = normalizeService(input.service);
   const clientId = process.env.REPO_HARNESS_GOOGLE_CLIENT_ID?.trim() || process.env.GOOGLE_CLIENT_ID?.trim();
   const redirectUri = input.redirectUri || process.env.REPO_HARNESS_GOOGLE_REDIRECT_URI || 'http://127.0.0.1:8766/oauth/google/callback';

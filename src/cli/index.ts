@@ -34,6 +34,9 @@ import { rollbackAdoptionTransaction } from '../effects/fs-transaction';
 import type { Location } from './installer/types';
 import type { HookEvent, RouteId } from './hook/route-registry';
 import type { AdoptionMode } from '../core/adoption/modes';
+import { bootstrapManagedRuntimeEnv } from '../runtime/shared/managed-env';
+
+bootstrapManagedRuntimeEnv();
 
 export const SUBCOMMANDS = [
   'init',

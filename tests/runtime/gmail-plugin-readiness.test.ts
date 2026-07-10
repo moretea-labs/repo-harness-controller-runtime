@@ -17,6 +17,7 @@ afterEach(() => {
   delete process.env.REPO_HARNESS_CONTROLLER_HOME;
   delete process.env.REPO_HARNESS_GMAIL_ACCESS_TOKEN;
   delete process.env.REPO_HARNESS_GOOGLE_ACCESS_TOKEN;
+  delete process.env.REPO_HARNESS_GOOGLE_WORKSPACE_ACCESS_TOKEN;
 });
 
 function fixture() {
@@ -118,6 +119,25 @@ describe('gmail plugin readiness and gates', () => {
     const execution = await executeExecutionJob(controllerHome, submitted.job);
     expect(execution.ok).toBe(false);
     expect(execution.error?.code).toBe('PLUGIN_AUTH_REQUIRED');
+  });
+
+  test('live mode reads token from _ops/env/.env.local when shell env is absent', async () => {
+    const { repoRoot, controllerHome, repository } = fixture();
+    mkdirSync(join(repoRoot, '_ops/env'), { recursive: true });
+    writeFileSync(join(repoRoot, '_ops/env/.env.local'), 'REPO_HARNESS_GMAIL_ACCESS_TOKEN=local-managed-token\n');
+    await executeGmailPluginAction({
+      controllerHome, repoId: repository.repoId, repoRoot, pluginId: 'gmail', actionId: 'configure', requestId: 'c2-local-env',
+      args: { enabled: true, provider: 'google-workspace' },
+      origin: { surface: 'local-ui', actor: 'test' },
+    });
+
+    const manifest = buildGmailPluginManifest(0, undefined, repoRoot);
+    expect(manifest.health.ready).toBe(true);
+    expect(manifest.health.details).toMatchObject({
+      credentialSource: 'env:REPO_HARNESS_GMAIL_ACCESS_TOKEN',
+      readinessMode: 'live_provider_ready',
+      userFacingStatus: 'ready',
+    });
   });
 
   test('send and trash require strong confirmation text', async () => {

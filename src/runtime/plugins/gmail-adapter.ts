@@ -458,8 +458,8 @@ function mockGmailProvider(): GmailProvider {
   };
 }
 
-function liveGmailProvider(config: GmailPluginConfig): GmailProvider {
-  const auth = resolveGoogleAuth('gmail', config);
+function liveGmailProvider(config: GmailPluginConfig, repoRoot?: string): GmailProvider {
+  const auth = resolveGoogleAuth('gmail', config, { repoRoot });
   if (!auth.ready || !auth.accessToken) {
     throw new AssistantPluginError('PLUGIN_AUTH_REQUIRED', auth.errors[0] ?? 'Gmail access token is required.', {
       retryable: false,
@@ -567,13 +567,14 @@ function liveGmailProvider(config: GmailPluginConfig): GmailProvider {
   };
 }
 
-function gmailProvider(config: GmailPluginConfig): GmailProvider {
-  return config.provider === 'mock' ? mockGmailProvider() : liveGmailProvider(config);
+function gmailProvider(config: GmailPluginConfig, repoRoot?: string): GmailProvider {
+  return config.provider === 'mock' ? mockGmailProvider() : liveGmailProvider(config, repoRoot);
 }
 
 export function buildGmailPluginManifest(previousRevision = 0, previousUpdatedAt?: string, repoRoot?: string): AssistantPluginManifest {
-  const config = loadGmailPluginConfig(repoRoot ?? process.cwd());
-  const auth = resolveGoogleAuth('gmail', config);
+  const root = repoRoot ?? process.cwd();
+  const config = loadGmailPluginConfig(root);
+  const auth = resolveGoogleAuth('gmail', config, { repoRoot: root });
   const state = pluginStateFromGoogleAuth(config, auth);
   return {
     schemaVersion: 1,
@@ -619,29 +620,29 @@ export async function executeGmailPluginAction(input: AssistantPluginActionExecu
       });
       return {
         config,
-        auth: resolveGoogleAuth('gmail', config),
+        auth: resolveGoogleAuth('gmail', config, { repoRoot: input.repoRoot }),
       };
     }
     case 'list_messages':
-      return gmailProvider(current).listMessages(input.args, current);
+      return gmailProvider(current, input.repoRoot).listMessages(input.args, current);
     case 'get_message':
-      return gmailProvider(current).getMessage(input.args, current);
+      return gmailProvider(current, input.repoRoot).getMessage(input.args, current);
     case 'list_labels':
-      return gmailProvider(current).listLabels(input.args, current);
+      return gmailProvider(current, input.repoRoot).listLabels(input.args, current);
     case 'create_draft':
-      return gmailProvider(current).createDraft(input.args, current);
+      return gmailProvider(current, input.repoRoot).createDraft(input.args, current);
     case 'send_message':
-      return gmailProvider(current).sendMessage(input.args, current);
+      return gmailProvider(current, input.repoRoot).sendMessage(input.args, current);
     case 'modify_message_labels':
-      return gmailProvider(current).modifyMessageLabels(input.args, current);
+      return gmailProvider(current, input.repoRoot).modifyMessageLabels(input.args, current);
     case 'archive_message':
-      return gmailProvider(current).archiveMessage(input.args, current);
+      return gmailProvider(current, input.repoRoot).archiveMessage(input.args, current);
     case 'mark_message_read':
-      return gmailProvider(current).markMessageRead(input.args, current);
+      return gmailProvider(current, input.repoRoot).markMessageRead(input.args, current);
     case 'mark_message_unread':
-      return gmailProvider(current).markMessageUnread(input.args, current);
+      return gmailProvider(current, input.repoRoot).markMessageUnread(input.args, current);
     case 'trash_message':
-      return gmailProvider(current).trashMessage(input.args, current);
+      return gmailProvider(current, input.repoRoot).trashMessage(input.args, current);
     default:
       throw new AssistantPluginError('PLUGIN_ACTION_NOT_SUPPORTED', `gmail/${input.actionId} is not supported.`, {
         retryable: false,

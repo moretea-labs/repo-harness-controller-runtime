@@ -316,8 +316,8 @@ function mockCalendarProvider(): CalendarProvider {
   };
 }
 
-function liveCalendarProvider(config: GoogleCalendarPluginConfig): CalendarProvider {
-  const auth = resolveGoogleAuth('calendar', config);
+function liveCalendarProvider(config: GoogleCalendarPluginConfig, repoRoot?: string): CalendarProvider {
+  const auth = resolveGoogleAuth('calendar', config, { repoRoot });
   if (!auth.ready || !auth.accessToken) {
     throw new AssistantPluginError('PLUGIN_AUTH_REQUIRED', auth.errors[0] ?? 'Calendar access token is required.', {
       retryable: false,
@@ -387,13 +387,14 @@ function liveCalendarProvider(config: GoogleCalendarPluginConfig): CalendarProvi
   };
 }
 
-function calendarProvider(config: GoogleCalendarPluginConfig): CalendarProvider {
-  return config.provider === 'mock' ? mockCalendarProvider() : liveCalendarProvider(config);
+function calendarProvider(config: GoogleCalendarPluginConfig, repoRoot?: string): CalendarProvider {
+  return config.provider === 'mock' ? mockCalendarProvider() : liveCalendarProvider(config, repoRoot);
 }
 
 export function buildGoogleCalendarPluginManifest(previousRevision = 0, previousUpdatedAt?: string, repoRoot?: string): AssistantPluginManifest {
-  const config = loadGoogleCalendarPluginConfig(repoRoot ?? process.cwd());
-  const auth = resolveGoogleAuth('calendar', config);
+  const root = repoRoot ?? process.cwd();
+  const config = loadGoogleCalendarPluginConfig(root);
+  const auth = resolveGoogleAuth('calendar', config, { repoRoot: root });
   const state = pluginStateFromGoogleAuth(config, auth);
   return {
     schemaVersion: 1,
@@ -440,19 +441,19 @@ export async function executeGoogleCalendarPluginAction(input: AssistantPluginAc
       });
       return {
         config,
-        auth: resolveGoogleAuth('calendar', config),
+        auth: resolveGoogleAuth('calendar', config, { repoRoot: input.repoRoot }),
       };
     }
     case 'list_events':
-      return calendarProvider(current).listEvents(input.args, current);
+      return calendarProvider(current, input.repoRoot).listEvents(input.args, current);
     case 'get_event':
-      return calendarProvider(current).getEvent(input.args, current);
+      return calendarProvider(current, input.repoRoot).getEvent(input.args, current);
     case 'create_event':
-      return calendarProvider(current).createEvent(input.args, current);
+      return calendarProvider(current, input.repoRoot).createEvent(input.args, current);
     case 'reschedule_event':
-      return calendarProvider(current).rescheduleEvent(input.args, current);
+      return calendarProvider(current, input.repoRoot).rescheduleEvent(input.args, current);
     case 'cancel_event':
-      return calendarProvider(current).cancelEvent(input.args, current);
+      return calendarProvider(current, input.repoRoot).cancelEvent(input.args, current);
     default:
       throw new AssistantPluginError('PLUGIN_ACTION_NOT_SUPPORTED', `google_calendar/${input.actionId} is not supported.`, {
         retryable: false,
