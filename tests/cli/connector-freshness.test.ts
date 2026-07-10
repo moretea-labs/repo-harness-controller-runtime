@@ -25,6 +25,7 @@ import {
 import type { MultiRepositoryMcpToolContext } from '../../src/cli/mcp/multi-repository';
 import { ensureControllerHome } from '../../src/cli/repositories/controller-home';
 import { registerRepository } from '../../src/cli/repositories/registry';
+import { createSchedule } from '../../src/runtime/workflow/schedules/store';
 import {
   CONTROLLER_SCHEMA_VERSION,
   CONTROLLER_TOOL_SURFACE,
@@ -216,6 +217,33 @@ describe('connector freshness diagnostics', () => {
     });
     expect(ok.status).toBe('local_mcp_updated');
     expect(ok.severity).toBe('ok');
+  });
+
+  test('console readiness distinguishes shadow schedules from live autonomous execution', async () => {
+    const { ctx, repository } = fixture();
+    createSchedule(ctx.controllerHome, {
+      requestId: 'shadow-readiness-test',
+      repoId: repository.repoId,
+      name: 'Shadow readiness probe',
+      enabled: true,
+      trigger: { type: 'interval', everyMinutes: 60 },
+      policy: {
+        maxActiveOccurrences: 1,
+        maxFailures: 3,
+        cooldownMinutes: 5,
+        dailyBudgetMinutes: 30,
+        shadowMode: true,
+      },
+      action: { operation: 'controller_ready' },
+      stopConditions: [],
+    });
+
+    const readiness = await buildSystemReadiness(ctx);
+    const automation = readiness.sections.find((section) => section.id === 'automation');
+    expect(automation).toBeTruthy();
+    expect(automation?.statusLabel).toContain('影子计划');
+    expect(automation?.detail).toContain('shadow mode');
+    expect(automation?.detail).toContain('不会排队或启动 Execution Job');
   });
 
   test('dead runtime file is ignored and does not report stale_fingerprint', () => {

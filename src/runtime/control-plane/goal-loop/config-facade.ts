@@ -288,7 +288,7 @@ function buildOverview(
   } else {
     parts.push(
       directReady.length
-        ? `Autonomous mode can currently use ${directReady.map((c) => c.displayName).slice(0, 4).join(' and ')}.`
+        ? `Autonomous goal loop is configured to use ${directReady.map((c) => c.displayName).slice(0, 4).join(' and ')} when a live goal or live schedule needs direct dispatch.`
         : 'Autonomous mode has no direct-invokable providers ready.',
     );
   }

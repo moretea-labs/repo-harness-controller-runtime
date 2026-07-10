@@ -376,6 +376,7 @@ describe('policy and facade view model', () => {
     expect(view.schemaVersion).toBe(1);
     expect(view.providers.some((p) => p.providerId === 'chatgpt_handoff' && p.handoffOnly && !p.canEnableDirectDispatch)).toBe(true);
     expect(view.overview.plainLanguageSummary.toLowerCase()).toContain('chatgpt');
+    expect(view.overview.plainLanguageSummary).toContain('when a live goal or live schedule needs direct dispatch');
   });
 
   test('GUI view model maps statuses correctly', () => {
