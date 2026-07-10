@@ -34,13 +34,20 @@ Each daemon tick performs **at most one** bounded transition per active goal.
 | providerId | kind | Notes |
 | --- | --- | --- |
 | `direct_edit` | direct_edit | Deterministic small edits applied by harness |
-| `codex_cli` | local_cli | Prefer for normal implementation when ready |
-| `grok_cli` | local_cli | Local Grok Build TUI (`grok` on PATH); no live-API flag required |
-| `claude_cli` | local_cli | When Claude CLI is on PATH |
-| `github_copilot_cloud` | cloud_agent | When `gh` / cloud agent available |
-| `grok_api` | remote_api | When `XAI_API_KEY` or `REPO_HARNESS_XAI_API_KEY` is set + live mode |
-| `deepseek_api` | remote_api | When DeepSeek key configured |
-| `openai_api` | remote_api | When `OPENAI_API_KEY` configured |
+| `codex_cli` | local_cli | Agent CLI: **may edit files and run commands**; policy/verify still harness-owned |
+| `grok_cli` | local_cli | Local Grok Build TUI; may edit files/run commands; no live-API flag |
+| `claude_cli` | local_cli | Agent CLI: may edit files and run commands |
+| `github_copilot_cloud` | cloud_agent | Cloud agent may mutate worktree; external publish needs approval |
+| `grok_api` | remote_api | Proposal-only remote API; repo-harness applies patches (+ live mode) |
+| `deepseek_api` | remote_api | Proposal-only when DeepSeek key configured |
+| `openai_api` | remote_api | Proposal-only when OpenAI key configured |
+
+**Agent CLI vs remote API**
+
+- **local_cli / cloud_agent**: `mayMutateFiles=true`, `mayRunCommands=true`, `requiresApplyByRepoHarness=false` — agents are not artificially blocked from writing source.
+- **remote_api**: proposals only; harness applies and verifies.
+- External side effects (push, publish, email, etc.) still require approval for all providers.
+
 
 ### Handoff-only supervisors
 

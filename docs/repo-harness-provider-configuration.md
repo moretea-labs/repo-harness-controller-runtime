@@ -16,8 +16,12 @@ repo-harness remains the owner of apply, verify, policy, and finalization. Model
 
 | Kind | Examples | Direct dispatch? |
 | --- | --- | --- |
-| Direct / local CLI / remote API / cloud agent | `direct_edit`, `codex_cli`, `grok_cli`, `grok_api`, … | Yes when ready + enabled; remote APIs also need live mode |
+| Local agent CLI | `codex_cli`, `grok_cli`, `claude_cli` | Yes when ready; **may edit files and run commands** |
+| Remote API | `grok_api`, `openai_api`, `deepseek_api` | Yes when ready + live mode; **proposal-only** (harness applies) |
+| Cloud agent | `github_copilot_cloud` | Yes when ready; may mutate worktree |
 | Handoff-only | `chatgpt_handoff` | **Never** |
+
+Agent CLIs are intentionally lightly restricted on local file mutation so tools like Grok/Codex/Claude can implement features normally. repo-harness still owns policy gates for external/destructive effects and verification closeout.
 
 ChatGPT current conversation always shows:
 

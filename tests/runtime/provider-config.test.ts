@@ -254,6 +254,29 @@ describe('credentials and live mode', () => {
     expect(grokCli?.status).toBe('ready');
   });
 
+  test('agent CLIs may mutate files; remote APIs require harness apply', () => {
+    const providers = listProviders({
+      env: {},
+      skipExecutableProbe: true,
+      overrides: {
+        codex_cli: { status: 'ready', directDispatch: true },
+        claude_cli: { status: 'ready', directDispatch: true },
+        grok_cli: { status: 'ready', directDispatch: true },
+        grok_api: { status: 'ready', directDispatch: true, authPresent: true },
+      },
+    });
+    for (const id of ['codex_cli', 'claude_cli', 'grok_cli'] as const) {
+      const p = providers.find((x) => x.providerId === id);
+      expect(p?.safety.mayMutateFiles).toBe(true);
+      expect(p?.safety.mayRunCommands).toBe(true);
+      expect(p?.safety.requiresApplyByRepoHarness).toBe(false);
+      expect(p?.capabilities).toContain('local_file_mutation');
+    }
+    const api = providers.find((x) => x.providerId === 'grok_api');
+    expect(api?.safety.mayMutateFiles).toBe(false);
+    expect(api?.safety.requiresApplyByRepoHarness).toBe(true);
+  });
+
   test('Grok missing auth shown as missing_auth', () => {
     const providers = listProviders({ env: {}, skipExecutableProbe: true });
     const grok = providers.find((p) => p.providerId === 'grok_api');

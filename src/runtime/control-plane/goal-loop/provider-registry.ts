@@ -48,6 +48,22 @@ const DEFAULT_LIMITS: ProviderLimits = {
   maxChangedLines: 2_000,
 };
 
+/** Local/cloud agent CLIs are full executors: they may edit files and run commands. */
+const AGENT_CLI_LIMITS: ProviderLimits = {
+  maxContextChars: 200_000,
+  maxRuntimeMs: 1_800_000,
+  maxPatchFiles: 500,
+  maxChangedLines: 50_000,
+};
+
+const AGENT_CLI_SAFETY: ProviderSafety = {
+  mayMutateFiles: true,
+  mayRunCommands: true,
+  requiresApplyByRepoHarness: false,
+  requiresApprovalForExternalEffects: true,
+};
+
+/** Remote model APIs only return proposals; repo-harness applies patches. */
 const APPLY_BY_HARNESS: ProviderSafety = {
   mayMutateFiles: false,
   mayRunCommands: false,
@@ -205,16 +221,18 @@ export function listProviders(options: ProviderRegistryEnv = {}): ProviderDescri
       'local_cli',
       'codex',
       !codexToolEnabled ? 'disabled' : codexReady ? 'ready' : 'unavailable',
-      ['code_patch', 'code_review', 'test_failure_repair', 'structured_output', 'tool_calling'],
+      ['code_patch', 'code_review', 'test_failure_repair', 'structured_output', 'tool_calling', 'local_file_mutation'],
       !codexToolEnabled
         ? 'Codex CLI disabled in local tool configuration.'
         : codexReady
-          ? 'Local Codex CLI executor; patches applied and verified by repo-harness.'
+          ? 'Local Codex CLI agent: may edit files and run commands; repo-harness still owns policy, verification, and external side effects.'
           : 'Codex CLI not found on PATH.',
       {
         configured: codexReady,
         authPresent: codexReady,
         directDispatch: codexToolEnabled && codexReady,
+        safety: AGENT_CLI_SAFETY,
+        limits: AGENT_CLI_LIMITS,
         lastErrorCode: !codexToolEnabled ? 'TOOL_DISABLED' : codexReady ? undefined : 'CODEX_CLI_UNAVAILABLE',
       },
     ),
@@ -223,16 +241,18 @@ export function listProviders(options: ProviderRegistryEnv = {}): ProviderDescri
       'local_cli',
       'claude',
       !claudeToolEnabled ? 'disabled' : claudeReady ? 'ready' : 'unavailable',
-      ['code_patch', 'code_review', 'test_failure_repair', 'long_context', 'structured_output', 'tool_calling'],
+      ['code_patch', 'code_review', 'test_failure_repair', 'long_context', 'structured_output', 'tool_calling', 'local_file_mutation'],
       !claudeToolEnabled
         ? 'Claude CLI disabled in local tool configuration.'
         : claudeReady
-          ? 'Local Claude CLI executor when configured.'
+          ? 'Local Claude CLI agent: may edit files and run commands; repo-harness still owns policy, verification, and external side effects.'
           : 'Claude CLI not found on PATH.',
       {
         configured: claudeReady,
         authPresent: claudeReady,
         directDispatch: claudeToolEnabled && claudeReady,
+        safety: AGENT_CLI_SAFETY,
+        limits: AGENT_CLI_LIMITS,
         lastErrorCode: !claudeToolEnabled ? 'TOOL_DISABLED' : claudeReady ? undefined : 'CLAUDE_CLI_UNAVAILABLE',
       },
     ),
@@ -241,16 +261,18 @@ export function listProviders(options: ProviderRegistryEnv = {}): ProviderDescri
       'local_cli',
       'grok',
       !grokCliToolEnabled ? 'disabled' : grokCliReady ? 'ready' : 'unavailable',
-      ['code_patch', 'code_review', 'test_failure_repair', 'architecture_planning', 'structured_output', 'tool_calling', 'long_context'],
+      ['code_patch', 'code_review', 'test_failure_repair', 'architecture_planning', 'structured_output', 'tool_calling', 'long_context', 'local_file_mutation'],
       !grokCliToolEnabled
         ? 'Grok CLI disabled in local tool configuration.'
         : grokCliReady
-          ? 'Local Grok CLI (grok) executor; patches applied and verified by repo-harness. Does not require live remote API flag.'
+          ? 'Local Grok CLI agent: may edit files and run commands (no live remote API flag required); repo-harness still owns policy and verification.'
           : 'Grok CLI not found on PATH (install Grok Build TUI `grok` binary).',
       {
         configured: grokCliReady,
         authPresent: grokCliReady,
         directDispatch: grokCliToolEnabled && grokCliReady,
+        safety: AGENT_CLI_SAFETY,
+        limits: AGENT_CLI_LIMITS,
         lastErrorCode: !grokCliToolEnabled ? 'TOOL_DISABLED' : grokCliReady ? undefined : 'GROK_CLI_UNAVAILABLE',
       },
     ),
@@ -259,13 +281,15 @@ export function listProviders(options: ProviderRegistryEnv = {}): ProviderDescri
       'cloud_agent',
       'github_copilot',
       ghReady ? 'ready' : 'unavailable',
-      ['code_patch', 'code_review', 'remote_side_effects'],
+      ['code_patch', 'code_review', 'remote_side_effects', 'local_file_mutation'],
       ghReady
-        ? 'GitHub Copilot cloud agent via gh when cloud sessions are enabled.'
+        ? 'GitHub Copilot cloud agent may mutate its worktree/files; external publish still needs approval.'
         : 'GitHub CLI (gh) unavailable for Copilot cloud sessions.',
       {
         configured: ghReady,
         authPresent: ghReady,
+        safety: AGENT_CLI_SAFETY,
+        limits: AGENT_CLI_LIMITS,
         lastErrorCode: ghReady ? undefined : 'GITHUB_CLI_UNAVAILABLE',
       },
     ),
@@ -276,13 +300,14 @@ export function listProviders(options: ProviderRegistryEnv = {}): ProviderDescri
       grokRemote.status,
       ['code_patch', 'code_review', 'architecture_planning', 'test_failure_repair', 'structured_output', 'long_context'],
       (grokAuth
-        ? 'Grok/xAI API credential present.'
-        : 'Grok/xAI API missing auth (set XAI_API_KEY or REPO_HARNESS_XAI_API_KEY).')
+        ? 'Grok/xAI API credential present (proposal-only; repo-harness applies patches).'
+        : 'Grok/xAI API missing auth (set XAI_API_KEY or configure in GUI).')
         + grokRemote.summarySuffix,
       {
         configured: grokAuth,
         authPresent: grokAuth,
         directDispatch: grokRemote.directDispatch,
+        safety: APPLY_BY_HARNESS,
         lastErrorCode: grokAuth ? grokRemote.lastErrorCode : 'MISSING_XAI_API_KEY',
       },
     ),
@@ -293,13 +318,14 @@ export function listProviders(options: ProviderRegistryEnv = {}): ProviderDescri
       deepseekRemote.status,
       ['code_patch', 'code_review', 'architecture_planning', 'structured_output', 'tool_calling'],
       (deepseekAuth
-        ? 'DeepSeek API credential present.'
-        : 'DeepSeek API missing auth (set DEEPSEEK_API_KEY or REPO_HARNESS_DEEPSEEK_API_KEY).')
+        ? 'DeepSeek API credential present (proposal-only; repo-harness applies patches).'
+        : 'DeepSeek API missing auth (set DEEPSEEK_API_KEY or configure in GUI).')
         + deepseekRemote.summarySuffix,
       {
         configured: deepseekAuth,
         authPresent: deepseekAuth,
         directDispatch: deepseekRemote.directDispatch,
+        safety: APPLY_BY_HARNESS,
         lastErrorCode: deepseekAuth ? deepseekRemote.lastErrorCode : 'MISSING_DEEPSEEK_API_KEY',
       },
     ),
@@ -310,13 +336,14 @@ export function listProviders(options: ProviderRegistryEnv = {}): ProviderDescri
       openaiRemote.status,
       ['code_patch', 'code_review', 'architecture_planning', 'structured_output', 'long_context'],
       (openaiAuth
-        ? 'OpenAI API credential present.'
-        : 'OpenAI API missing auth (set OPENAI_API_KEY or REPO_HARNESS_OPENAI_API_KEY).')
+        ? 'OpenAI API credential present (proposal-only; repo-harness applies patches).'
+        : 'OpenAI API missing auth (set OPENAI_API_KEY or configure in GUI).')
         + openaiRemote.summarySuffix,
       {
         configured: openaiAuth,
         authPresent: openaiAuth,
         directDispatch: openaiRemote.directDispatch,
+        safety: APPLY_BY_HARNESS,
         lastErrorCode: openaiAuth ? openaiRemote.lastErrorCode : 'MISSING_OPENAI_API_KEY',
       },
     ),
