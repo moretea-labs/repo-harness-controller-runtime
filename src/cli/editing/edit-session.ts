@@ -18,6 +18,7 @@ export type EditSessionStatus =
   | 'checked'
   | 'check_failed'
   | 'finalized'
+  | 'superseded'
   | 'rolled_back';
 
 export interface EditSessionOperationRecord {
@@ -81,6 +82,8 @@ export interface EditSession {
   appliedAt?: string;
   verifiedAt?: string;
   finalizedAt?: string;
+  supersededAt?: string;
+  supersededPaths?: string[];
   rolledBackAt?: string;
 }
 
@@ -201,7 +204,7 @@ function normalizeLegacyStatus(value: unknown): EditSessionStatus {
   if (value === 'applied') return 'dirty';
   if (value === 'verified') return 'checked';
   if (value === 'verification_failed') return 'check_failed';
-  if (['open', 'dirty', 'checked', 'check_failed', 'finalized', 'rolled_back'].includes(String(value))) {
+  if (['open', 'dirty', 'checked', 'check_failed', 'finalized', 'superseded', 'rolled_back'].includes(String(value))) {
     return String(value) as EditSessionStatus;
   }
   return 'open';
@@ -376,19 +379,27 @@ function patchError(
   });
 }
 
-function assertCurrentHashes(repoRoot: string, session: EditSession): void {
+function currentHashMismatches(repoRoot: string, session: EditSession): string[] {
+  const mismatches: string[] = [];
   for (const operation of latestOperations(session).values()) {
     const absolute = join(repoRoot, operation.path);
     if (operation.type === 'delete') {
-      if (existsSync(absolute)) throw new Error(`deleted file was recreated after edit revision ${operation.revision}: ${operation.path}`);
+      if (existsSync(absolute)) mismatches.push(operation.path);
       continue;
     }
-    if (!existsSync(absolute)) throw new Error(`edited file is missing: ${operation.path}`);
-    const current = readFileSync(absolute, 'utf-8');
-    if (operation.afterSha256 && hash(current) !== operation.afterSha256) {
-      throw new Error(`edited file changed outside the session after revision ${operation.revision}: ${operation.path}`);
+    if (!existsSync(absolute)) {
+      mismatches.push(operation.path);
+      continue;
     }
+    const current = readFileSync(absolute, 'utf-8');
+    if (operation.afterSha256 && hash(current) !== operation.afterSha256) mismatches.push(operation.path);
   }
+  return mismatches;
+}
+
+function assertCurrentHashes(repoRoot: string, session: EditSession): void {
+  const [path] = currentHashMismatches(repoRoot, session);
+  if (path) throw new Error(`edited file changed outside the session after revision ${latestOperations(session).get(path)?.revision ?? session.currentRevision}: ${path}`);
 }
 
 interface PatchItem {
@@ -1146,11 +1157,31 @@ export function finalizeEditSession(repoRoot: string, sessionId: string, input: 
   if (!emptyOpenSession && !['dirty', 'checked', 'check_failed'].includes(session.status)) {
     throw new Error(`edit session cannot be finalized from ${session.status}`);
   }
+  const supersededPaths = emptyOpenSession ? [] : currentHashMismatches(repoRoot, session);
+  if (supersededPaths.length > 0) {
+    session.status = 'superseded';
+    session.reviewer = input.reviewer?.trim() || session.reviewer || 'chatgpt-controller';
+    session.reviewNote = input.note?.trim() || session.reviewNote || 'Closed because newer workspace changes superseded this edit session.';
+    session.supersededAt = now();
+    session.supersededPaths = supersededPaths;
+    session.updatedAt = session.supersededAt;
+    writeSession(repoRoot, session);
+    tryAppendControllerWorklogEvent(repoRoot, {
+      category: 'edit',
+      action: 'edit_session_superseded',
+      summary: `${session.purpose}: superseded by newer changes in ${supersededPaths.length} file(s)`,
+      actor: session.reviewer,
+      issueId: session.issueId,
+      taskId: session.taskId,
+      editSessionId: session.sessionId,
+      details: { files: supersededPaths, note: session.reviewNote },
+    });
+    return session;
+  }
   if (!emptyOpenSession && session.requestedChecks.length > 0) {
     const allRequestedPassed = session.requestedChecks.every((checkId) => session.checkResults.some((result) => result.checkId === checkId && result.ok));
     if (!allRequestedPassed) throw new Error('configured checks must pass before finalization');
   }
-  assertCurrentHashes(repoRoot, session);
   session.status = 'finalized';
   session.reviewer = input.reviewer?.trim() || session.reviewer || 'chatgpt-controller';
   session.reviewNote = input.note?.trim() || session.reviewNote;

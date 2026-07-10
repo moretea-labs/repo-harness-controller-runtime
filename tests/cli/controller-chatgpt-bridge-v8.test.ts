@@ -128,6 +128,28 @@ describe("Controller V8 ChatGPT execution bridge", () => {
     expect(readFileSync(path, "utf-8")).toContain("line690 = 6900");
   });
 
+  test("closes stale Direct Edit sessions as superseded without overwriting newer content", () => {
+    const { root, ctx } = repo();
+    const path = join(root, "src/example.ts");
+    const initial = readFileSync(path, "utf-8");
+    const session = beginEditSession(root, { purpose: "Superseded edit", allowedPaths: ["src/**"] });
+    applyEditOperations(root, ctx.policy, session.sessionId, [{
+      type: "replace",
+      path: "src/example.ts",
+      expectedSha256: sha(initial),
+      replacements: [{ oldText: "value = 1", newText: "value = 2" }],
+    }]);
+    const newerContent = "export const value = 3;\nexport const stable = true;\n";
+    writeFileSync(path, newerContent);
+
+    const closed = finalizeEditSession(root, session.sessionId, { reviewer: "test" });
+
+    expect(closed.status).toBe("superseded");
+    expect(closed.supersededPaths).toEqual(["src/example.ts"]);
+    expect(readFileSync(path, "utf-8")).toBe(newerContent);
+    expect(listEditSessions(root).find((entry) => entry.sessionId === session.sessionId)?.status).toBe("superseded");
+  });
+
   test("closes zero-change Direct Edit sessions without fabricating revisions or running checks", () => {
     const { root } = repo();
     const finalizedSession = beginEditSession(root, { purpose: "No-op finalized", checks: ["package:test"] });
