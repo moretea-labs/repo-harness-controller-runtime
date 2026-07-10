@@ -22,7 +22,7 @@ button,input,textarea{font:inherit}button{cursor:pointer}.mono{font-family:ui-mo
 .side{border-right:1px solid var(--line);padding:16px 12px;background:rgba(8,12,18,.55)}
 .nav{display:grid;gap:6px}.nav button{text-align:left;width:100%;padding:11px 12px;border-radius:12px;border:1px solid transparent;background:transparent;color:var(--text)}.nav button.active,.nav button:hover{background:rgba(255,255,255,.05);border-color:var(--line)}
 .nav .count{margin-left:6px;display:inline-grid;place-items:center;min-width:20px;height:20px;border-radius:999px;background:rgba(248,113,113,.18);color:#fecaca;font-size:12px;font-weight:700}
-.main{padding:18px;overflow:auto}
+.main{padding:24px 28px 48px;overflow:auto}.main>.view{width:min(1240px,100%);margin:0 auto}
 .view{display:none}.view.active{display:block}
 .page-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:16px}.page-head h1{margin:0 0 4px;font-size:24px}.page-head p{margin:0;color:var(--muted)}
 .grid{display:grid;gap:14px}.grid.two{grid-template-columns:1.4fr .9fr}.grid.cards{grid-template-columns:repeat(3,1fr)}.grid.stats{grid-template-columns:repeat(4,minmax(0,1fr))}
@@ -309,44 +309,33 @@ function renderHome(){
     '<div id="opBar"></div>'+
     warnings+
     setupHtml+
-    '<div class="page-head"><div><h1>指挥中心</h1><p>从这里开始一个小开发任务：描述目标 → 预览模式 → 开始 → 看进度与改动。</p></div>'+
+    '<div class="page-head"><div><h1>指挥中心</h1><p>描述目标，开始执行，然后只关注当前进度和需要你决定的事项。</p></div>'+
       '<div class="muted">当前仓库：<strong>'+esc(repo.name||'未选择')+'</strong>'+(repo.branchLabel?' · '+esc(repo.branchLabel):'')+(repo.dirtyLabel?' · '+esc(repo.dirtyLabel):'')+'</div></div>'+
-    '<div class="grid two">'+
-      '<div class="panel composer">'+
-        '<h2>开始一个小任务</h2>'+
-        '<p class="hint">用一句话说清你想改什么。路径和验收标准可选，先点“预览模式”再开始更安心。</p>'+
-        '<textarea id="taskObjective" placeholder="例如：优化会员购买页信息密度，保持现有业务逻辑不变。"></textarea>'+
-        '<details class="advanced" style="margin-top:10px"><summary>可选：验收标准与路径</summary>'+
-          '<div class="row" style="margin-top:10px"><input class="input" id="taskAcceptance" placeholder="验收标准（可选，用分号分隔）" style="flex:1"></div>'+
-          '<div class="row"><input class="input" id="taskPaths" placeholder="允许修改的路径（可选，逗号分隔）" style="flex:1"><input class="input" id="taskFiles" type="number" min="0" placeholder="预计文件数" style="width:140px"></div>'+
-        '</details>'+
-        '<div class="row" style="margin-top:12px">'+
-          '<button class="btn primary" id="btnStart" onclick="startTask()">开始</button>'+
-          '<button class="btn" id="btnPreview" onclick="previewMode()">预览模式</button>'+
-          '<button class="btn" onclick="diagnoseFirst()">先诊断</button>'+
-        '</div>'+
-        '<div class="mode-card" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">'+
-          '<div class="muted">建议模式（白话）</div>'+
-          '<div class="label">'+esc(mode.label||'直接执行')+'</div>'+
-          '<div class="muted">'+esc(mode.explanation||'小范围、目标清晰时会直接执行；复杂或需恢复的任务会创建可继续的后台任务。')+'</div>'+
-        '</div>'+
-      '</div>'+
-      '<div class="panel">'+
-        '<div class="section-title"><h2>系统是否可用</h2>'+pill(ready.state==='ready'?'green':ready.state==='needs_setup'?'amber':'red', ready.label||'未知')+'</div>'+
-        '<p class="muted">'+esc(ready.headline||'')+'</p>'+
-        '<p class="faint">'+esc(ready.description||'')+'</p>'+
-        '<div style="margin-top:10px">'+pill(ready.connectorTone||'gray', ready.connectorLabel||'连接')+' '+
-          pill(arr(cc.handoffs).length?'amber':'green', (arr(cc.handoffs).length||0)+' 项待决定')+'</div>'+
-        '<div class="actions">'+btn('系统状态','data-nav="readiness"')+btn('待决定','data-nav="inbox"')+btn('模型与工具','data-nav="automation"')+btn('切换仓库','data-nav="repositories"')+'</div>'+
+    '<div class="panel composer">'+
+      '<div class="section-title"><div><h2>你想让它完成什么？</h2><p class="hint">直接描述目标。路径、验收标准和执行模式由系统先判断，你仍可在开始前预览。</p></div>'+pill(ready.state==='ready'?'green':ready.state==='needs_setup'?'amber':'red',ready.label||'未知')+'</div>'+
+      '<textarea id="taskObjective" placeholder="例如：优化 Controller 首页的信息层级，让当前任务和待决定事项更容易找到，不改变后端行为。"></textarea>'+
+      '<details class="advanced" style="margin-top:10px"><summary>补充验收标准和允许修改的路径</summary>'+
+        '<div class="row" style="margin-top:10px"><input class="input" id="taskAcceptance" placeholder="验收标准（可选，用分号分隔）" style="flex:1"></div>'+
+        '<div class="row"><input class="input" id="taskPaths" placeholder="允许修改的路径（可选，逗号分隔）" style="flex:1"><input class="input" id="taskFiles" type="number" min="0" placeholder="预计文件数" style="width:140px"></div>'+
+      '</details>'+
+      '<div class="row" style="margin-top:14px">'+
+        '<button class="btn primary" id="btnStart" onclick="startTask()">开始执行</button>'+
+        '<button class="btn" id="btnPreview" onclick="previewMode()">预览执行方式</button>'+
+        '<button class="btn ghost" onclick="diagnoseFirst()">只做诊断</button>'+
+        '<span class="muted" style="margin-left:auto">建议：<strong>'+esc(mode.label||'直接执行')+'</strong></span>'+
       '</div>'+
     '</div>'+
-    renderGoalLoopPanel(cc.goalLoop)+
-    '<div class="grid two" style="margin-top:14px">'+
+    '<div class="grid two" style="margin-top:16px">'+
       renderWorkCard(work, '当前任务')+
-      '<div class="panel"><div class="section-title"><h2>待我决定</h2>'+btn('全部','data-nav="inbox"','ghost')+'</div>'+
-        (handoffs.length?handoffs.map(function(h){return handoffMini(h)}).join(''):'<div class="empty">没有需要你拍板的事项</div>')+
+      '<div class="panel"><div class="section-title"><h2>待我决定</h2>'+btn('查看全部','data-nav="inbox"','ghost')+'</div>'+
+        (handoffs.length?handoffs.map(function(h){return handoffMini(h)}).join(''):'<div class="empty">目前没有需要你拍板的事项</div>')+
       '</div>'+
-    '</div>';
+    '</div>'+
+    '<div class="panel" style="margin-top:16px">'+
+      '<div class="section-title"><div><h2>运行状态</h2><p class="muted" style="margin:0">'+esc(ready.headline||ready.description||'系统状态可用')+'</p></div>'+pill(ready.connectorTone||'gray',ready.connectorLabel||'连接')+'</div>'+
+      '<div class="actions">'+btn('系统状态','data-nav="readiness"')+btn('能力与插件','data-nav="capabilities"')+btn('模型与工具','data-nav="automation"')+btn('切换仓库','data-nav="repositories"')+'</div>'+
+    '</div>'+
+    renderGoalLoopPanel(cc.goalLoop);
   bindNav(el);
   renderOpBar();
 }
@@ -356,27 +345,26 @@ function renderGoalLoopPanel(gl){
   var goals=arr(gl.goals);
   var inv=arr(gl.invokableProviders);
   var handoff=arr(gl.handoffOnlyProviders);
-  return '<div class="panel" style="margin-top:14px">'+
-    '<div class="section-title"><h2>目标循环 · Goal Loop</h2>'+btn('打开配置','data-nav="automation"','primary')+'</div>'+
-    (gl.automationSummary?'<p class="muted">'+esc(gl.automationSummary)+'</p>':'')+
-    '<div class="grid stats" style="margin-top:10px">'+
-      '<div class="stat"><span>活跃目标</span><strong>'+esc(String(gl.activeCount||goals.length||0))+'</strong></div>'+
-      '<div class="stat"><span>可直接调用</span><strong>'+esc(String(inv.length))+'</strong></div>'+
-      '<div class="stat"><span>仅 Handoff</span><strong>'+esc(String(handoff.length))+'</strong></div>'+
-      '<div class="stat"><span>Live API</span><strong>'+(gl.liveModelProvidersEffective?'开':'关')+'</strong></div>'+
+  var active=gl.activeCount||goals.length||0;
+  return '<details class="panel advanced" style="margin-top:16px">'+
+    '<summary style="display:flex;align-items:center;gap:10px;list-style:none">'+
+      '<strong>自动化目标</strong>'+pill(active?'blue':'gray',active+' 个活跃目标')+
+      '<span class="muted">'+inv.length+' 个提供方可直接调用 · '+handoff.length+' 个仅支持 Handoff</span>'+
+      '<span class="muted" style="margin-left:auto">展开查看</span>'+
+    '</summary>'+
+    '<div style="margin-top:14px">'+
+      (gl.automationSummary?'<p class="muted">'+esc(gl.automationSummary)+'</p>':'')+
+      (goals.length?goals.slice(0,3).map(function(g){
+        return '<div class="card-row" style="margin-top:10px"><div>'+
+          '<h3>'+esc(g.title||'目标')+'</h3>'+
+          '<p class="muted">阶段：'+esc(g.stage)+' · 提供方：'+esc(g.providerSelected||'—')+'</p>'+
+          (g.whatIsBlocked?'<p class="muted">阻塞：'+esc(g.whatIsBlocked)+'</p>':'')+
+          (g.whatHappensNext?'<p class="faint">下一步：'+esc(g.whatHappensNext)+'</p>':'')+
+        '</div>'+pill(g.approvalRequired?'amber':g.handoffPacketAvailable?'blue':'green',g.handoffPacketAvailable?'有 Handoff 包':g.stage)+'</div>';
+      }).join(''):'<div class="empty">暂无活跃自动化目标</div>')+
+      '<div class="actions">'+btn('打开模型与工具','data-nav="automation"')+'</div>'+
     '</div>'+
-    (goals.length?goals.slice(0,3).map(function(g){
-      return '<div class="card-row" style="margin-top:10px"><div>'+
-        '<h3>'+esc(g.title||'目标')+'</h3>'+
-        '<p class="muted">阶段：'+esc(g.stage)+' · 提供方：'+esc(g.providerSelected||'—')+'</p>'+
-        (g.whatIsBlocked?'<p class="muted">阻塞：'+esc(g.whatIsBlocked)+'</p>':'')+
-        (g.whatHappensNext?'<p class="faint">下一步：'+esc(g.whatHappensNext)+'</p>':'')+
-        (g.whyThisProvider?'<p class="faint">'+esc(g.whyThisProvider)+'</p>':'')+
-      '</div>'+pill(g.approvalRequired?'amber':g.handoffPacketAvailable?'blue':'green', g.handoffPacketAvailable?'有 Handoff 包':g.stage)+
-      '</div>';
-    }).join(''):'<div class="empty" style="margin-top:10px">暂无活跃 GoalContract。可在「模型与工具」配置提供方优先级。</div>')+
-    (gl.nextTickHint?'<p class="faint" style="margin-top:8px">'+esc(gl.nextTickHint)+'</p>':'')+
-  '</div>';
+  '</details>';
 }
 
 function mergeWorkExtras(work){
