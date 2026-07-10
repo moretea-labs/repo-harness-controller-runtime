@@ -58,11 +58,13 @@ See [Platform Support](docs/operations/platform-support.md), [Features and Setup
 ### 2. Install or run from source
 
 ```bash
-npm install -g repo-harness
-# or: bun add -g repo-harness
+npm install -g @moretea-labs/repo-harness-controller@next
+# or: bun add -g @moretea-labs/repo-harness-controller@next
 repo-harness install --no-cli
 repo-harness doctor
 ```
+
+The npm package is `@moretea-labs/repo-harness-controller`; it still installs the `repo-harness` and `repo-harness-hook` CLI commands. Release candidates use the `next` tag and do not claim the stable `latest` tag.
 
 From source:
 

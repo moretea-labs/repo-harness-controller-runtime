@@ -10,6 +10,9 @@ NPM_RELEASE_REGISTRY="${NPM_RELEASE_REGISTRY:-https://registry.npmjs.org/}"
 LOOKUP_STDERR="$(mktemp)"
 trap 'rm -f "$LOOKUP_STDERR"' EXIT
 
+node scripts/check-package-identity.mjs
+node scripts/check-third-party-notices.mjs
+
 echo "[release] package: ${PACKAGE_NAME}@${PACKAGE_VERSION}"
 echo "[release] registry: ${NPM_RELEASE_REGISTRY}"
 if npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version --json --registry "$NPM_RELEASE_REGISTRY" >/dev/null 2>"$LOOKUP_STDERR"; then
@@ -24,6 +27,6 @@ if ! grep -Eq 'E404|404 Not Found|No match found|not in this registry' "$LOOKUP_
   exit 1
 fi
 
-bash scripts/check-ci.sh
+bash scripts/check-release-readiness.sh
 
 echo "[release] OK: npm package gate passed."

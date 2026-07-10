@@ -116,7 +116,7 @@ function walk(directory: string): string[] {
 }
 
 function scan(output: string): void {
-  for (const required of ["LICENSE", "NOTICE", "package.json", "README.md", "src", "scripts"]) {
+  for (const required of ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", "package.json", "package-lock.json", "README.md", "README.en.md", "src", "scripts"]) {
     if (!existsSync(join(output, required))) fail(`required public file missing: ${required}`);
   }
   for (const blocked of [".git", ".ai", ".claude", ".codex", ".repo-harness", "tasks", "coverage", "artifacts", "autoresearch"]) {

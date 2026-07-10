@@ -32,10 +32,12 @@ npm --version
 From the package registry, use either installer:
 
 ```bash
-npm install -g repo-harness
+npm install -g @moretea-labs/repo-harness-controller@next
 # or
-bun add -g repo-harness
+bun add -g @moretea-labs/repo-harness-controller@next
 ```
+
+The registry package is `@moretea-labs/repo-harness-controller`; it installs the `repo-harness` and `repo-harness-hook` commands. Release candidates use the `next` dist-tag.
 
 From source on macOS, Linux, or WSL2:
 

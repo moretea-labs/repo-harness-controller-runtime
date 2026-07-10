@@ -83,11 +83,13 @@ self_healing_loop_plan
 ### 2. 安装或从源码运行
 
 ```bash
-npm install -g repo-harness
-# 或：bun add -g repo-harness
+npm install -g @moretea-labs/repo-harness-controller@next
+# 或：bun add -g @moretea-labs/repo-harness-controller@next
 repo-harness install --no-cli
 repo-harness doctor
 ```
+
+npm 包名是 `@moretea-labs/repo-harness-controller`，安装后仍提供 `repo-harness` 和 `repo-harness-hook` 两个 CLI。当前 RC 使用 `next` 标签，不会占用稳定版 `latest`。
 
 从源码运行：
 

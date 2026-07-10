@@ -9,6 +9,15 @@ cd "$ROOT"
 echo "[release-readiness] typecheck"
 bun run check:type
 
+echo "[release-readiness] package identity"
+node scripts/check-package-identity.mjs
+
+echo "[release-readiness] third-party notices"
+node scripts/check-third-party-notices.mjs
+
+echo "[release-readiness] focused package contract"
+bun test tests/release/package-release.test.ts tests/skill-version.test.ts
+
 echo "[release-readiness] MCP tool exposure + facade coverage"
 bun test --timeout 60000 \
   tests/cli/mcp-tool-exposure-profiles.test.ts \
@@ -33,5 +42,11 @@ bash scripts/check-open-source-tracked-surface.sh
 
 echo "[release-readiness] public export surface"
 bun run check:public-export
+
+echo "[release-readiness] npm pack dry-run"
+npm pack --dry-run --json >/dev/null
+
+echo "[release-readiness] tarball install smoke"
+bash scripts/check-tarball-install-smoke.sh
 
 echo "[release-readiness] OK"

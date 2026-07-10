@@ -7,7 +7,9 @@ AGENTS.md
 CLAUDE.md
 LICENSE
 NOTICE
+THIRD_PARTY_NOTICES.md
 README.md
+README.en.md
 README.zh-CN.md
 README.ja.md
 README.es.md
@@ -19,6 +21,11 @@ bun.lock
 install.ps1
 install.sh
 package.json
+package-lock.json
+docs/README.md
+docs/tutorials/
+docs/operations/releasing.md
+docs/operations/releasing.zh-CN.md
 scripts/
 src/
 tsconfig.json

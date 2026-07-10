@@ -30,10 +30,12 @@ npm --version
 从 package registry 安装，可二选一：
 
 ```bash
-npm install -g repo-harness
+npm install -g @moretea-labs/repo-harness-controller@next
 # 或
-bun add -g repo-harness
+bun add -g @moretea-labs/repo-harness-controller@next
 ```
+
+Registry 包名是 `@moretea-labs/repo-harness-controller`，安装后提供 `repo-harness` 和 `repo-harness-hook` 两个命令；RC 阶段使用 `next` dist-tag。
 
 macOS、Linux 或 WSL2 从源码安装：
 

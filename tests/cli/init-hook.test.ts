@@ -182,14 +182,14 @@ describe('init-hook command', () => {
             id: 'cli-update',
             describe: 'repo-harness latest version advisory',
             status: 'warn',
-            detail: 'current=0.4.2; latest=99.0.0; agent_action=bun add -g repo-harness@latest && repo-harness init',
+            detail: 'current=0.4.2; latest=99.0.0; agent_action=bun add -g @moretea-labs/repo-harness-controller@latest && repo-harness init',
           },
         ]),
         toolingReport: baseToolingReport(),
       });
 
       const action = report.agent_actions.find((entry) => entry.id === 'cli.update');
-      expect(action?.command).toBe('bun add -g repo-harness@latest && repo-harness init');
+      expect(action?.command).toBe('bun add -g @moretea-labs/repo-harness-controller@latest && repo-harness init');
       expect(action?.verification).toBe('repo-harness setup check --target codex --check-updates --json');
     });
   });

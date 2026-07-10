@@ -18,7 +18,7 @@ import { isOptIn, resolveHooksDir, resolveRepoRoot } from '../hook/runtime';
 import { ROUTES } from '../hook/route-registry';
 
 const TRUST_STATE_LINE = /^\[hooks\.state\."[^"]+\/\.codex\/hooks\.json:/;
-const PACKAGE_NAME = 'repo-harness';
+const PACKAGE_NAME = '@moretea-labs/repo-harness-controller';
 const UPDATE_CHECK_ENV = 'REPO_HARNESS_CHECK_UPDATES';
 const LATEST_VERSION_ENV = 'REPO_HARNESS_LATEST_VERSION';
 
@@ -423,7 +423,7 @@ function checkHookScriptDrift(cwd: string): DoctorCheckResult {
 
   const remediation =
     resolved.source === 'packaged'
-      ? 'bun add -g repo-harness@latest'
+      ? 'bun add -g @moretea-labs/repo-harness-controller@latest'
       : `repo-harness adopt --repo ${repoRoot}`;
   return {
     id,

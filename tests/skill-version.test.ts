@@ -10,9 +10,9 @@ describe("Skill Version Consistency", () => {
   test("package, skill, and template versions share the release line", () => {
     const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf-8"));
     const sv = JSON.parse(readFileSync(join(REPO_ROOT, "assets", "skill-version.json"), "utf-8"));
-    expect(pkg.version).toMatch(/^\d+\.\d+\.\d+$/);
-    expect(pkg.version).toBe(sv.version);
-    expect(pkg.version).toBe(sv.templateVersion);
+    expect(pkg.version).toMatch(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/);
+    expect(pkg.version.split("-", 1)[0]).toBe(sv.version);
+    expect(pkg.version.split("-", 1)[0]).toBe(sv.templateVersion);
   });
 
   test("SKILL.md frontmatter follows the new skill-creator contract", () => {

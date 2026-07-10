@@ -71,14 +71,18 @@ export function checkConsistency(repoRoot: string = REPO_ROOT): ConsistencyResul
   const templateVersionJsonVersion = sv.templateVersion as string;
   const usingLocalSkillManifest = svPath === localSvPath;
 
+  const packageCoreVersion = packageJsonVersion?.split("-", 1)[0] ?? null;
+  const isRepoHarnessPackage =
+    pkg.name === "repo-harness" || pkg.name === "@moretea-labs/repo-harness-controller";
+
   if (
     usingLocalSkillManifest &&
-    pkg.name === "repo-harness" &&
-    packageJsonVersion !== null &&
-    packageJsonVersion !== skillVersionJsonVersion
+    isRepoHarnessPackage &&
+    packageCoreVersion !== null &&
+    packageCoreVersion !== skillVersionJsonVersion
   ) {
     errors.push(
-      `package.json.version (${packageJsonVersion}) must match assets/skill-version.json version (${skillVersionJsonVersion})`
+      `package.json core version (${packageCoreVersion}) must match assets/skill-version.json version (${skillVersionJsonVersion})`
     );
   }
 

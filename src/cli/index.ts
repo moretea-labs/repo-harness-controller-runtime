@@ -192,10 +192,10 @@ export function buildProgram(): Command {
         process.exit(report.status === 'blocked' ? 1 : 0);
       }
       const installSpec = rawOpts.version
-        ? `repo-harness@${rawOpts.version}`
+        ? `@moretea-labs/repo-harness-controller@${rawOpts.version}`
         : rawOpts.channel
-          ? `repo-harness@${rawOpts.channel}`
-          : 'repo-harness@latest';
+          ? `@moretea-labs/repo-harness-controller@${rawOpts.channel}`
+          : '@moretea-labs/repo-harness-controller@latest';
       const result = runGlobalRuntimeSetup({
         target: rawOpts.target as InstallTargetSpec,
         installCli: rawOpts.cli !== false,

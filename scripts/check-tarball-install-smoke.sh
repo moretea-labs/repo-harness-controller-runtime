@@ -55,4 +55,4 @@ if ! "$CLI" run check-task-workflow --help >/dev/null; then
 fi
 printf '{"prompt":"review release readiness"}\n' | "$HOOK" prompt-guard-decide >/dev/null
 
-echo "[tarball-smoke] OK: ${PACKAGE_NAME}-${PACKAGE_VERSION}.tgz installs and packaged CLI bins start."
+echo "[tarball-smoke] OK: ${TARBALL} installs and packaged CLI bins start."

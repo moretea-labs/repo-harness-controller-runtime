@@ -211,7 +211,7 @@ describe('init command global runtime bootstrap', () => {
 
       expect(res.status).toBe(0);
       const result = JSON.parse(res.stdout);
-      expect(readFileSync(bunLog, 'utf-8')).toContain('add -g repo-harness@latest');
+      expect(readFileSync(bunLog, 'utf-8')).toContain('add -g @moretea-labs/repo-harness-controller@latest');
       expect(result.steps.find((step: { step: string }) => step.step === 'configure brain root')?.status).toBe('ok');
       expect(existsSync(join(home, '.repo-harness', 'config.json'))).toBe(true);
       expect(existsSync(join(repo, '.ai'))).toBe(false);
@@ -256,9 +256,9 @@ describe('init command global runtime bootstrap', () => {
 
       expect(res.status).toBe(0);
       expect(JSON.parse(res.stdout).steps.find((step: { step: string }) => step.step === 'install repo-harness CLI')?.detail).toBe(
-        'spec=repo-harness@9.9.9',
+        'spec=@moretea-labs/repo-harness-controller@9.9.9',
       );
-      expect(readFileSync(bunLog, 'utf-8')).toContain('add -g repo-harness@9.9.9');
+      expect(readFileSync(bunLog, 'utf-8')).toContain('add -g @moretea-labs/repo-harness-controller@9.9.9');
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
@@ -271,7 +271,7 @@ describe('init command global runtime bootstrap', () => {
     });
 
     expect(res.status).toBe(0);
-    expect(res.stdout.trim()).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(res.stdout.trim()).toMatch(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/);
   });
 
   test('CLI update --check is read-only setup readiness output', () => {

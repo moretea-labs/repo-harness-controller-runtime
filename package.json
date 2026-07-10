@@ -1,9 +1,9 @@
 {
-  "name": "repo-harness",
-  "version": "1.4.0",
+  "name": "@moretea-labs/repo-harness-controller",
+  "version": "1.4.0-rc.1",
   "description": "Installs, migrates, audits, and repairs repo-local agentic development harnesses",
   "license": "MIT",
-  "author": "greysonOuyang",
+  "author": "Moretea Labs contributors",
   "homepage": "https://github.com/moretea-labs/repo-harness-controller-runtime#readme",
   "repository": {
     "type": "git",
@@ -13,8 +13,15 @@
     "url": "https://github.com/moretea-labs/repo-harness-controller-runtime/issues"
   },
   "type": "module",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "tag": "next"
+  },
   "files": [
+    "LICENSE",
     "NOTICE",
+    "THIRD_PARTY_NOTICES.md",
     ".agents/skills/repo-harness-chatgpt-browser/",
     "scripts/verify-controller-v8.sh",
     ".agents/skills/repo-harness-chatgpt-bridge/",
@@ -36,6 +43,7 @@
     "docs/repo-harness-runtime-self-healing-loop.md",
     "docs/repo-harness-autonomous-goal-loop.md",
     "docs/repo-harness-provider-configuration.md",
+    "README.en.md",
     "README.zh-CN.md",
     "install.sh",
     "install.ps1",
@@ -73,11 +81,14 @@
     "check:release-readiness": "bash scripts/check-release-readiness.sh",
     "check:open-source-surface": "bash scripts/check-open-source-tracked-surface.sh",
     "check:public-docs": "bash scripts/check-public-docs.sh",
+    "check:package-identity": "node scripts/check-package-identity.mjs",
+    "check:third-party-notices": "node scripts/check-third-party-notices.mjs",
     "check:platform-support": "node scripts/check-platform-support.mjs",
     "check:public-export": "bun scripts/public-release.ts",
     "package:source-zip": "bash scripts/package-source-archive.sh",
     "check:release-published": "bash scripts/check-release-published.sh",
     "smoke:tarball-install": "bash scripts/check-tarball-install-smoke.sh",
+    "release:rc": "npm publish --tag next --access public --provenance",
     "check:brain-manifest": "repo-harness run check-brain-manifest",
     "check:context-files": "repo-harness run check-context-files",
     "check:deploy-sql": "repo-harness run check-deploy-sql-order",
