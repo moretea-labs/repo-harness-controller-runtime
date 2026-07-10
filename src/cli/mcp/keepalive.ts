@@ -72,6 +72,13 @@ export function shouldRestartMcpServer(
   return now - unhealthySinceAt >= unhealthyRestartWindowMs;
 }
 
+export function mcpServerRestartDelayMs(
+  childRunning: boolean,
+  restartDelayMs = DEFAULT_RESTART_DELAY_MS,
+): number {
+  return childRunning ? restartDelayMs : 0;
+}
+
 export function shouldRestartMcpTunnel(
   localHealthy: boolean,
   childRunning: boolean,
@@ -635,6 +642,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
   };
 
   const restartServer = async (reason: string): Promise<void> => {
+    const restartDelay = mcpServerRestartDelayMs(isRunning(serverChild), restartDelayMs);
     recordError('server', reason);
     // Keep the tunnel process and public URL alive while the local Gateway is
     // replaced. cloudflared will reconnect to the same local port, avoiding a
@@ -643,7 +651,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
     serverChild = undefined;
     runtime.server.running = false;
     runtime.server.healthy = false;
-    await sleep(restartDelayMs);
+    if (restartDelay > 0) await sleep(restartDelay);
     spawnServer(true);
     await warmServerHealth();
   };

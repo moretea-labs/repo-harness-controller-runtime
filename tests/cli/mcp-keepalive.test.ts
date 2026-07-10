@@ -5,6 +5,7 @@ import {
   DEFAULT_MCP_UNHEALTHY_RESTART_WINDOW_MS,
   DEFAULT_MCP_TUNNEL_UNHEALTHY_RESTART_WINDOW_MS,
   isExpectedLocalControllerHealth,
+  mcpServerRestartDelayMs,
   normalizeKeepalivePublicEndpoint,
   shouldRestartMcpServer,
   shouldRestartMcpTunnel,
@@ -54,6 +55,8 @@ describe('mcp keepalive helpers', () => {
 
   test('restarts immediately when the gateway process has exited', () => {
     expect(shouldRestartMcpServer(false, 0, undefined, Date.now())).toBe(true);
+    expect(mcpServerRestartDelayMs(false, 2_000)).toBe(0);
+    expect(mcpServerRestartDelayMs(true, 2_000)).toBe(2_000);
   });
 
   test('restarts a live gateway only after the continuous unhealthy window', () => {
@@ -69,6 +72,20 @@ describe('mcp keepalive helpers', () => {
       2,
       unhealthySinceAt,
       unhealthySinceAt + DEFAULT_MCP_UNHEALTHY_RESTART_WINDOW_MS,
+    )).toBe(true);
+    expect(shouldRestartMcpServer(
+      true,
+      2,
+      unhealthySinceAt,
+      unhealthySinceAt + 4_999,
+      5_000,
+    )).toBe(false);
+    expect(shouldRestartMcpServer(
+      true,
+      2,
+      unhealthySinceAt,
+      unhealthySinceAt + 5_000,
+      5_000,
     )).toBe(true);
   });
 

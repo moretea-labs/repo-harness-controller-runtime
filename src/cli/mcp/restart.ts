@@ -52,6 +52,7 @@ interface McpDoctorReport {
 }
 
 interface ResolvedMcpRestartConfig {
+  controllerHome?: string;
   repoRoot: string;
   host: string;
   port: number;
@@ -151,6 +152,16 @@ export function buildMcpRestartKeepaliveArgs(config: ResolvedMcpRestartConfig): 
   }
 
   return args;
+}
+
+export function buildMcpRestartKeepaliveEnv(
+  config: { controllerHome: string },
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  return {
+    ...baseEnv,
+    REPO_HARNESS_CONTROLLER_HOME: config.controllerHome,
+  };
 }
 
 function localHealthUrl(host: string, port: number): string {
@@ -327,6 +338,7 @@ function resolveRestartConfig(repoRoot: string, explicitLogFile?: string): Resol
   }
 
   return {
+    controllerHome,
     repoRoot,
     host: localConfig?.server?.host ?? '127.0.0.1',
     port: localConfig?.server?.port ?? 8765,
@@ -505,7 +517,14 @@ function bootstrapRepoLaunchAgents(agents: RepoLaunchAgent[]): string[] {
   return lines;
 }
 
-function spawnDetached(command: string, args: string[], cwd: string, stdoutPath: string, stderrPath: string): number {
+function spawnDetached(
+  command: string,
+  args: string[],
+  cwd: string,
+  stdoutPath: string,
+  stderrPath: string,
+  env: NodeJS.ProcessEnv,
+): number {
   mkdirSync(dirname(stdoutPath), { recursive: true });
   mkdirSync(dirname(stderrPath), { recursive: true });
   const stdoutFd = openSync(stdoutPath, 'a');
@@ -514,7 +533,7 @@ function spawnDetached(command: string, args: string[], cwd: string, stdoutPath:
     const child = spawn(command, args, {
       cwd,
       detached: true,
-      env: process.env,
+      env,
       stdio: ['ignore', stdoutFd, stderrFd],
     });
     child.unref();
@@ -792,7 +811,14 @@ export async function runMcpRestart(opts: McpRestartOptions): Promise<McpSetupRe
   } else {
     const cli = resolveSelfCliInvocation();
     const keepaliveArgs = [...cli.args, ...buildMcpRestartKeepaliveArgs(config)];
-    keepalivePid = spawnDetached(cli.command, keepaliveArgs, repoRoot, config.stdoutLogPath, config.stderrLogPath);
+    keepalivePid = spawnDetached(
+      cli.command,
+      keepaliveArgs,
+      repoRoot,
+      config.stdoutLogPath,
+      config.stderrLogPath,
+      buildMcpRestartKeepaliveEnv({ controllerHome: config.controllerHome ?? ensureControllerHome() }),
+    );
     lines.push(`[repo-harness restart] keepalive_pid=${keepalivePid}`);
   }
 

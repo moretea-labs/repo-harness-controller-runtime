@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  buildMcpRestartKeepaliveEnv,
   isPeerMcpProcessForBinding,
   isStaleControllerDaemonForRestart,
   type McpProcessBindingConfig,
@@ -41,5 +42,16 @@ describe('mcp restart process ownership', () => {
   test('does not detect the current controller home as stale', () => {
     const command = '/usr/bin/bun /repos/current/src/runtime/control-plane/daemon-entry.ts --controller-home /repos/current/_ops/controller-home';
     expect(isStaleControllerDaemonForRestart(command, '/repos/current')).toBe(false);
+  });
+
+  test('passes the resolved controller home to detached keepalive restarts', () => {
+    expect(buildMcpRestartKeepaliveEnv(
+      { controllerHome: '/controller/home' },
+      { PATH: '/usr/bin', LANG: 'en_US.UTF-8' },
+    )).toEqual({
+      PATH: '/usr/bin',
+      LANG: 'en_US.UTF-8',
+      REPO_HARNESS_CONTROLLER_HOME: '/controller/home',
+    });
   });
 });
