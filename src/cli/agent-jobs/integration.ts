@@ -6,7 +6,10 @@ import { join, relative } from "path";
 import {
   applyEditOperations,
   beginEditSession,
+  EditSessionPatchError,
+  finalizeEditSession,
   getEditSession,
+  rollbackEditSession,
   type EditOperation,
   type EditSession,
 } from "../editing/edit-session";
@@ -15,7 +18,56 @@ import { readTaskRunEvidence } from "../controller/run-evidence";
 import { resolveEffectiveTaskState } from "../controller/task-status-resolver";
 import { resolveMcpPath } from "../mcp/paths";
 import type { McpPolicy } from "../mcp/types";
-import { getAgentJob, markAgentJobIntegrated } from "./job-manager";
+import { getAgentJob, markAgentJobIntegrated, markAgentJobIntegrationReview } from "./job-manager";
+import type { AgentJobMeta } from "./types";
+
+type IntegrationChangeOutcome = "changed" | "already_integrated";
+
+interface IntegrationPlan {
+  changedPaths: string[];
+  operations: EditOperation[];
+  conflicts: IntegrationReviewConflict[];
+}
+
+interface IntegrationReviewConflict {
+  path: string;
+  reason: string;
+  baseExists: boolean;
+  mainExists: boolean;
+  worktreeExists: boolean;
+  baseSha256?: string;
+  mainSha256?: string;
+  worktreeSha256?: string;
+  mainPreview?: string;
+  worktreePreview?: string;
+  mergePreview?: string;
+}
+
+interface IntegrationReviewPacket {
+  schemaVersion: 1;
+  kind: "concurrent_main_conflict";
+  createdAt: string;
+  runId: string;
+  issueId: string;
+  taskId: string;
+  baseRevision: string;
+  repoHead?: string;
+  worktreeHead?: string;
+  changedPaths: string[];
+  conflicts: IntegrationReviewConflict[];
+}
+
+export class IntegrationReviewRequiredError extends Error {
+  readonly packet: IntegrationReviewPacket;
+  readonly reviewPath: string;
+
+  constructor(message: string, reviewPath: string, packet: IntegrationReviewPacket) {
+    super(message);
+    this.name = "IntegrationReviewRequiredError";
+    this.reviewPath = reviewPath;
+    this.packet = packet;
+  }
+}
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -43,9 +95,61 @@ function gitBuffer(
   };
 }
 
-function changedPaths(
+function gitRevision(cwd: string): string | undefined {
+  const result = gitBuffer(cwd, ["rev-parse", "HEAD"]);
+  if (!result.ok) return undefined;
+  const revision = result.stdout.toString("utf-8").trim();
+  return revision || undefined;
+}
+
+function preview(value: string, maxChars = 400): string | undefined {
+  const normalized = value.trim();
+  if (!normalized) return undefined;
+  return normalized.length <= maxChars
+    ? normalized
+    : `${normalized.slice(0, Math.max(0, maxChars - 1))}…`;
+}
+
+function plannedChangePaths(
   worktree: string,
-): Array<{ status: string; path: string }> {
+  baseRevision: string,
+): string[] {
+  const diff = gitBuffer(worktree, [
+    "diff",
+    "--name-status",
+    "-z",
+    "--find-renames",
+    "--find-copies",
+    baseRevision,
+    "--",
+  ]);
+  if (!diff.ok)
+    throw new Error(`failed to inspect task worktree delta: ${diff.stderr}`);
+  const diffChunks = diff.stdout.toString("utf-8").split("\0").filter(Boolean);
+  const paths: string[] = [];
+  for (let index = 0; index < diffChunks.length;) {
+    const status = diffChunks[index++] ?? "";
+    const code = status[0] ?? "";
+    if (code === "R" || code === "C") {
+      const fromPath = diffChunks[index++] ?? "";
+      const toPath = diffChunks[index++] ?? "";
+      throw new Error(
+        `rename or copy status is not supported for integration: ${status} ${fromPath} ${toPath}`.trim(),
+      );
+    }
+    const path = diffChunks[index++] ?? "";
+    if (!path) throw new Error("unexpected git diff entry");
+    if ("UTXB".includes(code))
+      throw new Error(
+        `unsupported git diff status for integration: ${status} ${path}`,
+      );
+    if (!"ADM".includes(code))
+      throw new Error(
+        `unsupported git diff status for integration: ${status} ${path}`,
+      );
+    paths.push(path);
+  }
+
   const result = gitBuffer(worktree, [
     "status",
     "--porcelain=v1",
@@ -55,7 +159,6 @@ function changedPaths(
   if (!result.ok)
     throw new Error(`failed to inspect task worktree: ${result.stderr}`);
   const chunks = result.stdout.toString("utf-8").split("\0").filter(Boolean);
-  const changes: Array<{ status: string; path: string }> = [];
   for (let index = 0; index < chunks.length; index += 1) {
     const chunk = chunks[index];
     if (chunk.length < 4) throw new Error("unexpected git status entry");
@@ -64,9 +167,12 @@ function changedPaths(
       throw new Error(
         `rename, copy, or unresolved merge status is not supported for integration: ${status}`,
       );
-    changes.push({ status, path: chunk.slice(3) });
+    if (status === "??") paths.push(chunk.slice(3));
   }
-  return changes;
+
+  return Array.from(new Set(paths)).sort((left, right) =>
+    left.localeCompare(right)
+  );
 }
 
 function baseContent(
@@ -86,7 +192,7 @@ function threeWayMergeText(input: {
   current: string;
   incoming: string;
   path: string;
-}): string {
+}): { ok: boolean; output: string; stderr: string } {
   const dir = mkdtempSync(join(tmpdir(), "repo-harness-merge-"));
   try {
     const currentPath = join(dir, "current");
@@ -100,22 +206,291 @@ function threeWayMergeText(input: {
       stdio: ["ignore", "pipe", "pipe"],
       maxBuffer: 8 * 1024 * 1024,
     });
-    if (result.status === 0 && !result.error) return String(result.stdout ?? "");
+    if (![0, 1].includes(result.status ?? 0) || result.error) {
+      const stderr = typeof result.stderr === "string" ? result.stderr.trim() : "";
+      throw new Error(
+        `failed to 3-way merge ${input.path}${stderr ? `: ${stderr}` : ""}`,
+      );
+    }
     const stderr = typeof result.stderr === "string" ? result.stderr.trim() : "";
-    throw new Error(
-      `main working tree changed since Task dispatch and automatic 3-way merge failed: ${input.path}${stderr ? `: ${stderr}` : ""}`,
-    );
+    return {
+      ok: result.status === 0,
+      output: String(result.stdout ?? ""),
+      stderr,
+    };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
+function conflictEntry(input: {
+  path: string;
+  reason: string;
+  baseExists: boolean;
+  baseText?: string;
+  mainExists: boolean;
+  mainText?: string;
+  worktreeExists: boolean;
+  worktreeText?: string;
+  mergePreview?: string;
+}): IntegrationReviewConflict {
+  return {
+    path: input.path,
+    reason: input.reason,
+    baseExists: input.baseExists,
+    mainExists: input.mainExists,
+    worktreeExists: input.worktreeExists,
+    baseSha256: input.baseExists ? sha256(input.baseText ?? "") : undefined,
+    mainSha256: input.mainExists ? sha256(input.mainText ?? "") : undefined,
+    worktreeSha256: input.worktreeExists
+      ? sha256(input.worktreeText ?? "")
+      : undefined,
+    mainPreview: input.mainExists ? preview(input.mainText ?? "") : undefined,
+    worktreePreview: input.worktreeExists
+      ? preview(input.worktreeText ?? "")
+      : undefined,
+    mergePreview: input.mergePreview
+      ? preview(input.mergePreview, 1200)
+      : undefined,
+  };
+}
+
+function createReviewPacket(
+  repoRoot: string,
+  run: AgentJobMeta,
+  changedPaths: string[],
+  conflicts: IntegrationReviewConflict[],
+): IntegrationReviewRequiredError {
+  const packet: IntegrationReviewPacket = {
+    schemaVersion: 1,
+    kind: "concurrent_main_conflict",
+    createdAt: new Date().toISOString(),
+    runId: run.runId,
+    issueId: run.issueId,
+    taskId: run.taskId,
+    baseRevision: run.baseRevision ?? "",
+    repoHead: gitRevision(repoRoot),
+    worktreeHead: gitRevision(run.worktree),
+    changedPaths,
+    conflicts,
+  };
+  const absolutePath = join(
+    repoRoot,
+    ".ai/harness/jobs",
+    run.runId,
+    "integration-review.json",
+  );
+  writeFileSync(absolutePath, `${JSON.stringify(packet, null, 2)}\n`, "utf-8");
+  const reviewPath = relative(repoRoot, absolutePath).replace(/\\/g, "/");
+  markAgentJobIntegrationReview(repoRoot, run.runId, reviewPath);
+  return new IntegrationReviewRequiredError(
+    `main changed concurrently; preserved the isolated worktree and wrote a review packet at ${reviewPath}`,
+    reviewPath,
+    packet,
+  );
+}
+
+function buildIntegrationPlan(
+  repoRoot: string,
+  worktreeRoot: string,
+  baseRevision: string,
+  policy: McpPolicy,
+  changedPaths: string[],
+): IntegrationPlan {
+  const operations: EditOperation[] = [];
+  const conflicts: IntegrationReviewConflict[] = [];
+  const normalizedPaths: string[] = [];
+  for (const changedPath of changedPaths) {
+    const decision = resolveMcpPath(repoRoot, changedPath, policy, "write");
+    if (!decision.ok || !decision.absolutePath || !decision.relativePath)
+      throw new Error(decision.reason ?? `path denied: ${changedPath}`);
+    normalizedPaths.push(decision.relativePath);
+    const worktreePath = join(worktreeRoot, decision.relativePath);
+    const base = baseContent(
+      worktreeRoot,
+      baseRevision,
+      decision.relativePath,
+    );
+    const rootExists = existsSync(decision.absolutePath);
+    const rootContent = rootExists
+      ? readFileSync(decision.absolutePath)
+      : Buffer.alloc(0);
+    if (binary(rootContent))
+      throw new Error(
+        `binary file integration is not supported: ${decision.relativePath}`,
+      );
+    const rootText = rootContent.toString("utf-8");
+    const rootChangedFromDispatch = base.exists
+      ? !rootExists || sha256(rootText) !== sha256(base.content)
+      : rootExists;
+
+    const workerExists =
+      existsSync(worktreePath) && statSync(worktreePath).isFile();
+    if (!workerExists) {
+      if (!base.exists)
+        throw new Error(
+          `cannot integrate missing untracked file: ${decision.relativePath}`,
+        );
+      if (rootChangedFromDispatch) {
+        conflicts.push(conflictEntry({
+          path: decision.relativePath,
+          reason: "main_changed_during_delete",
+          baseExists: base.exists,
+          baseText: base.content,
+          mainExists: rootExists,
+          mainText: rootText,
+          worktreeExists: false,
+        }));
+        continue;
+      }
+      operations.push({
+        type: "delete",
+        path: decision.relativePath,
+        expectedSha256: sha256(rootText),
+      });
+      continue;
+    }
+
+    const workerBytes = readFileSync(worktreePath);
+    if (binary(workerBytes))
+      throw new Error(
+        `binary file integration is not supported: ${decision.relativePath}`,
+      );
+    const workerText = workerBytes.toString("utf-8");
+    if (base.exists) {
+      if (!rootExists) {
+        conflicts.push(conflictEntry({
+          path: decision.relativePath,
+          reason: "main_missing",
+          baseExists: base.exists,
+          baseText: base.content,
+          mainExists: false,
+          worktreeExists: true,
+          worktreeText: workerText,
+        }));
+        continue;
+      }
+      if (workerText === rootText) continue;
+      if (rootChangedFromDispatch) {
+        const merge = threeWayMergeText({
+          base: base.content,
+          current: rootText,
+          incoming: workerText,
+          path: decision.relativePath,
+        });
+        if (!merge.ok) {
+          conflicts.push(conflictEntry({
+            path: decision.relativePath,
+            reason: "merge_conflict",
+            baseExists: base.exists,
+            baseText: base.content,
+            mainExists: true,
+            mainText: rootText,
+            worktreeExists: true,
+            worktreeText: workerText,
+            mergePreview: merge.output,
+          }));
+          continue;
+        }
+        operations.push({
+          type: "write",
+          path: decision.relativePath,
+          expectedSha256: sha256(rootText),
+          content: merge.output,
+        });
+        continue;
+      }
+      operations.push({
+        type: "write",
+        path: decision.relativePath,
+        expectedSha256: sha256(rootText),
+        content: workerText,
+      });
+      continue;
+    }
+
+    if (rootExists) {
+      if (rootText === workerText) continue;
+      conflicts.push(conflictEntry({
+        path: decision.relativePath,
+        reason: "main_created_different_content",
+        baseExists: false,
+        mainExists: true,
+        mainText: rootText,
+        worktreeExists: true,
+        worktreeText: workerText,
+      }));
+      continue;
+    }
+    operations.push({
+      type: "create",
+      path: decision.relativePath,
+      content: workerText,
+    });
+  }
+  return {
+    changedPaths: Array.from(new Set(normalizedPaths)),
+    operations,
+    conflicts,
+  };
+}
+
+function finalizeAlreadyIntegratedSession(
+  repoRoot: string,
+  run: AgentJobMeta,
+  allowedPaths: string[],
+): EditSession {
+  const session = beginEditSession(repoRoot, {
+    purpose: `Record ${run.runId} as already integrated from isolated Task worktree`,
+    issueId: run.issueId,
+    taskId: run.taskId,
+    allowedPaths,
+    maxFiles: Math.max(allowedPaths.length, 1),
+    maxChangedLines: 1,
+  });
+  return finalizeEditSession(repoRoot, session.sessionId, {
+    reviewer: "repo-harness-controller",
+    note: `Equivalent Task Run changes were already present in the main workspace for ${run.runId}.`,
+  });
+}
+
+function planFromCurrentWorkspace(
+  repoRoot: string,
+  run: AgentJobMeta,
+  policy: McpPolicy,
+): IntegrationPlan {
+  if (!run.baseRevision)
+    throw new Error("isolated Task Run is missing a base revision");
+  const changedPaths = plannedChangePaths(run.worktree, run.baseRevision);
+  return buildIntegrationPlan(
+    repoRoot,
+    run.worktree,
+    run.baseRevision,
+    policy,
+    changedPaths,
+  );
+}
+
+function concurrentPatchError(error: unknown): boolean {
+  if (!(error instanceof EditSessionPatchError)) return false;
+  if (error.code === "EDIT_SESSION_FINGERPRINT_STALE") return true;
+  if (error.code !== "EDIT_PATCH_PRECONDITION_FAILED") return false;
+  return error.details.failures.some((failure) =>
+    ["STALE_FILE_SHA", "TARGET_MISSING", "CREATE_TARGET_EXISTS"].includes(
+      failure.code,
+    )
+  );
+}
 
 export function integrateAgentJob(
   repoRoot: string,
   policy: McpPolicy,
   runId: string,
-): { session: EditSession; changedPaths: string[] } {
+): {
+  session: EditSession;
+  changedPaths: string[];
+  changeOutcome: IntegrationChangeOutcome;
+} {
   const run = getAgentJob(repoRoot, runId);
   const autoFinalizing = run.status === "running" &&
     run.autoIntegrate === true &&
@@ -141,7 +516,10 @@ export function integrateAgentJob(
     const existing = getEditSession(repoRoot, run.integratedSessionId);
     return {
       session: existing,
-      changedPaths: existing.operations.map((operation) => operation.path),
+      changedPaths: run.changedFiles ?? existing.operations.map((operation) => operation.path),
+      changeOutcome: run.changeOutcome === "already_integrated"
+        ? "already_integrated"
+        : "changed",
     };
   }
   if (!existsSync(run.worktree))
@@ -159,119 +537,116 @@ export function integrateAgentJob(
       `task must be active and in review before integration (declared: ${task.status}, effective: ${state.effectiveStatus})`,
     );
 
-  const changes = changedPaths(run.worktree);
-  if (changes.length === 0)
+  const initialPlan = planFromCurrentWorkspace(repoRoot, run, policy);
+  if (initialPlan.changedPaths.length === 0)
     throw new Error("task worktree has no changes to integrate");
-  if (changes.length > 25)
+  if (initialPlan.changedPaths.length > 25)
     throw new Error(
-      `task changed ${changes.length} files; split or manually integrate work larger than 25 files`,
+      `task changed ${initialPlan.changedPaths.length} files; split or manually integrate work larger than 25 files`,
     );
-
-  const operations: EditOperation[] = [];
-  for (const change of changes) {
-    const decision = resolveMcpPath(repoRoot, change.path, policy, "write");
-    if (!decision.ok || !decision.absolutePath || !decision.relativePath)
-      throw new Error(decision.reason ?? `path denied: ${change.path}`);
-    const worktreePath = `${run.worktree}/${decision.relativePath}`;
-    const base = baseContent(
-      run.worktree,
-      run.baseRevision,
-      decision.relativePath,
+  if (initialPlan.conflicts.length > 0)
+    throw createReviewPacket(
+      repoRoot,
+      run,
+      initialPlan.changedPaths,
+      initialPlan.conflicts,
     );
-    const rootExists = existsSync(decision.absolutePath);
-    const rootContent = rootExists
-      ? readFileSync(decision.absolutePath)
-      : Buffer.alloc(0);
-    if (binary(rootContent))
-      throw new Error(
-        `binary file integration is not supported: ${decision.relativePath}`,
-      );
-    const rootText = rootContent.toString("utf-8");
-    const rootChangedFromDispatch = base.exists
-      ? !rootExists || sha256(rootText) !== sha256(base.content)
-      : rootExists;
-
-    const workerExists =
-      existsSync(worktreePath) && statSync(worktreePath).isFile();
-    if (!workerExists) {
-      if (!base.exists)
-        throw new Error(
-          `cannot integrate missing untracked file: ${decision.relativePath}`,
-        );
-      if (rootChangedFromDispatch)
-        throw new Error(
-          `main working tree changed since Task dispatch and deletion cannot be merged automatically: ${decision.relativePath}`,
-        );
-      operations.push({
-        type: "delete",
-        path: decision.relativePath,
-        expectedSha256: sha256(rootText),
-      });
-      continue;
-    }
-    const workerBytes = readFileSync(worktreePath);
-    if (binary(workerBytes))
-      throw new Error(
-        `binary file integration is not supported: ${decision.relativePath}`,
-      );
-    const workerText = workerBytes.toString("utf-8");
-    if (base.exists) {
-      if (!rootExists)
-        throw new Error(
-          `main working tree changed since Task dispatch and no longer contains ${decision.relativePath}`,
-        );
-      if (workerText === rootText) continue;
-      const content = rootChangedFromDispatch
-        ? threeWayMergeText({
-          base: base.content,
-          current: rootText,
-          incoming: workerText,
-          path: decision.relativePath,
-        })
-        : workerText;
-      operations.push({
-        type: "write",
-        path: decision.relativePath,
-        expectedSha256: sha256(rootText),
-        content,
-      });
-    } else {
-      if (rootExists) {
-        if (rootText === workerText) continue;
-        throw new Error(
-          `integration would overwrite a new main-tree file: ${decision.relativePath}`,
-        );
-      }
-      operations.push({
-        type: "create",
-        path: decision.relativePath,
-        content: workerText,
-      });
-    }
-  }
-
-  if (operations.length === 0) {
-    throw new Error("task worktree changes are already present in the main working tree");
-  }
 
   const allowedPaths =
     task.allowedPaths.length > 0
       ? task.allowedPaths
-      : operations.map((operation) => operation.path);
+      : initialPlan.changedPaths;
+  if (initialPlan.operations.length === 0) {
+    const applied = finalizeAlreadyIntegratedSession(
+      repoRoot,
+      run,
+      allowedPaths,
+    );
+    markAgentJobIntegrated(repoRoot, runId, applied.sessionId);
+    updateTask(repoRoot, run.issueId, run.taskId, {
+      status: "integrated",
+      note: `${runId} already matched the main workspace and was recorded through edit session ${applied.sessionId}; run focused checks and record verification before acceptance.`,
+    });
+    return {
+      session: applied,
+      changedPaths: initialPlan.changedPaths,
+      changeOutcome: "already_integrated",
+    };
+  }
+
   const session = beginEditSession(repoRoot, {
     purpose: `Integrate ${runId} from isolated Task worktree`,
     issueId: run.issueId,
     taskId: run.taskId,
     allowedPaths,
-    maxFiles: operations.length,
+    maxFiles: initialPlan.operations.length,
     maxChangedLines: 5000,
   });
-  const applied = applyEditOperations(
-    repoRoot,
-    policy,
-    session.sessionId,
-    operations,
-  );
+  let applied: EditSession;
+  try {
+    applied = applyEditOperations(
+      repoRoot,
+      policy,
+      session.sessionId,
+      initialPlan.operations,
+    );
+  } catch (error) {
+    try {
+      rollbackEditSession(repoRoot, session.sessionId);
+    } catch (_rollbackError) {
+      /* best effort */
+    }
+    if (concurrentPatchError(error)) {
+      const refreshedPlan = planFromCurrentWorkspace(repoRoot, run, policy);
+      if (refreshedPlan.conflicts.length > 0)
+        throw createReviewPacket(
+          repoRoot,
+          run,
+          refreshedPlan.changedPaths,
+          refreshedPlan.conflicts,
+        );
+      if (refreshedPlan.operations.length === 0) {
+        const alreadyIntegrated = finalizeAlreadyIntegratedSession(
+          repoRoot,
+          run,
+          allowedPaths,
+        );
+        markAgentJobIntegrated(repoRoot, runId, alreadyIntegrated.sessionId);
+        updateTask(repoRoot, run.issueId, run.taskId, {
+          status: "integrated",
+          note: `${runId} became already integrated while finish was running and was recorded through edit session ${alreadyIntegrated.sessionId}; run focused checks and record verification before acceptance.`,
+        });
+        return {
+          session: alreadyIntegrated,
+          changedPaths: refreshedPlan.changedPaths,
+          changeOutcome: "already_integrated",
+        };
+      }
+      throw createReviewPacket(
+        repoRoot,
+        run,
+        refreshedPlan.changedPaths,
+        refreshedPlan.conflicts.length > 0
+          ? refreshedPlan.conflicts
+          : refreshedPlan.changedPaths.map((path) =>
+              conflictEntry({
+                path,
+                reason: "main_changed_during_apply",
+                baseExists: false,
+                mainExists: existsSync(join(repoRoot, path)),
+                mainText: existsSync(join(repoRoot, path))
+                  ? readFileSync(join(repoRoot, path), "utf-8")
+                  : undefined,
+                worktreeExists: existsSync(join(run.worktree, path)),
+                worktreeText: existsSync(join(run.worktree, path))
+                  ? readFileSync(join(run.worktree, path), "utf-8")
+                  : undefined,
+              }),
+            ),
+      );
+    }
+    throw error;
+  }
   markAgentJobIntegrated(repoRoot, runId, applied.sessionId);
   updateTask(repoRoot, run.issueId, run.taskId, {
     status: "integrated",
@@ -279,7 +654,8 @@ export function integrateAgentJob(
   });
   return {
     session: applied,
-    changedPaths: operations.map((operation) => operation.path),
+    changedPaths: initialPlan.operations.map((operation) => operation.path),
+    changeOutcome: "changed",
   };
 }
 

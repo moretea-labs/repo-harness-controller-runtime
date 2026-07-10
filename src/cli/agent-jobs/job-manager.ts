@@ -1938,6 +1938,7 @@ export function markAgentJobReviewedCompletion(
     activityCount: (meta.progress?.activityCount ?? 0) + 1,
   };
   delete meta.autoIntegrationError;
+  delete meta.integrationReviewPath;
   writeAgentMeta(repoRoot, metaPath(repoRoot, runId), meta);
   appendAgentJobEvent(repoRoot, runId, {
     type: "run_succeeded",
@@ -1960,10 +1961,29 @@ export function markAgentJobIntegrated(
   const { stdoutTail: _stdout, stderrTail: _stderr, ...meta } = current;
   meta.integratedSessionId = sessionId;
   meta.integratedAt = new Date().toISOString();
+  delete meta.integrationReviewPath;
   writeAgentMeta(repoRoot, metaPath(repoRoot, runId), meta);
   appendAgentJobEvent(repoRoot, runId, {
     type: "run_integrated",
     message: `Integrated through edit session ${sessionId}.`,
+  });
+  return meta;
+}
+
+export function markAgentJobIntegrationReview(
+  repoRoot: string,
+  runId: string,
+  reviewPath: string,
+): AgentJobMeta {
+  const current = getAgentJob(repoRoot, runId);
+  if (current.provider !== "local") return current;
+  const { stdoutTail: _stdout, stderrTail: _stderr, ...meta } = current;
+  meta.integrationReviewPath = reviewPath;
+  writeAgentMeta(repoRoot, metaPath(repoRoot, runId), meta);
+  appendAgentJobEvent(repoRoot, runId, {
+    type: "run_activity",
+    message: `Integration review packet recorded at ${reviewPath}.`,
+    data: { reviewPath },
   });
   return meta;
 }

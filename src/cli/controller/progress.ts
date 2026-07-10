@@ -180,8 +180,12 @@ function summarizeRun(run: AgentJobMeta) {
     createdAt: run.createdAt,
     startedAt: run.startedAt,
     finishedAt: run.finishedAt,
+    changeOutcome: run.changeOutcome,
+    changedFiles: run.changedFiles,
     integratedSessionId: run.integratedSessionId,
     integratedAt: run.integratedAt,
+    integrationReviewPath: run.integrationReviewPath,
+    worktreeCleanedAt: run.worktreeCleanedAt,
     timing: run.timing,
     github: run.github
       ? {

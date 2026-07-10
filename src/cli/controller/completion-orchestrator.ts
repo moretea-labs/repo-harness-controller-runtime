@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { getAgentJob, markAgentJobReviewedCompletion } from '../agent-jobs/job-manager';
 import type { AgentJobMeta } from '../agent-jobs/types';
-import { cleanupIntegratedWorktree, cleanupNoChangeWorktree, integrateAgentJob, taskRunDiff } from '../agent-jobs/integration';
+import { cleanupIntegratedWorktree, cleanupNoChangeWorktree, integrateAgentJob, IntegrationReviewRequiredError, taskRunDiff } from '../agent-jobs/integration';
 import { getMcpPolicy } from '../mcp/policy';
 import { acceptVerifiedTask, getIssue, projectIssueEffectiveView, recordTaskVerification, updateTask } from './issue-store';
 import { taskExecutionPolicy } from './execution-policy';
@@ -38,6 +38,8 @@ export interface FinishTaskRunResult {
   cleaned?: boolean;
   branchDeleted?: boolean;
   changedPaths?: string[];
+  changeOutcome?: AgentJobMeta['changeOutcome'];
+  integrationReviewPath?: string;
   reason?: string;
   commitSha?: string;
   commitError?: string;
@@ -59,6 +61,9 @@ function safeCommitChangedPaths(repoRoot: string, input: { issueId: string; task
   const staged = gitText(repoRoot, ['diff', '--cached', '--name-only']);
   if (!staged.ok) return { error: staged.stderr || 'failed to inspect staged changes' };
   if (staged.stdout.trim()) return { error: 'index already has staged changes; refusing to mix completion commit with unrelated staged work' };
+  const pending = gitText(repoRoot, ['status', '--porcelain', '--', ...paths]);
+  if (!pending.ok) return { error: pending.stderr || 'failed to inspect selected-path changes' };
+  if (!pending.stdout.trim()) return {};
   const add = gitText(repoRoot, ['add', '--', ...paths]);
   if (!add.ok) return { error: add.stderr || 'failed to stage changed paths' };
   const commit = gitText(repoRoot, [
@@ -70,6 +75,8 @@ function safeCommitChangedPaths(repoRoot: string, input: { issueId: string; task
   ]);
   if (!commit.ok) {
     gitText(repoRoot, ['reset', '--', ...paths]);
+    const output = `${commit.stderr}\n${commit.stdout}`.trim();
+    if (/\bnothing to commit\b/i.test(output)) return {};
     return { error: commit.stderr || commit.stdout || 'failed to create completion commit' };
   }
   const rev = gitText(repoRoot, ['rev-parse', 'HEAD']);
@@ -263,6 +270,7 @@ export function finishTaskRun(repoRoot: string, options: FinishTaskRunOptions): 
   let cleaned = Boolean(run.worktreeCleanedAt);
   let branchDeleted = false;
   let changedPaths = run.changedFiles;
+  let changeOutcome = run.changeOutcome;
   let commitSha: string | undefined;
   let commitError: string | undefined;
 
@@ -276,6 +284,7 @@ export function finishTaskRun(repoRoot: string, options: FinishTaskRunOptions): 
         changedFiles: [],
         worktreeCleaned: cleanupResult.removed,
       });
+      changeOutcome = 'no_change';
       cleaned = cleanupResult.removed;
       branchDeleted = cleanupResult.branchDeleted;
       const final = verifyAndMaybeAccept({ repoRoot, run: currentRun, task, decision, reviewer, note: options.note });
@@ -290,20 +299,40 @@ export function finishTaskRun(repoRoot: string, options: FinishTaskRunOptions): 
         cleaned,
         branchDeleted,
         changedPaths: [],
+        changeOutcome,
       });
     }
 
-    const integratedSession = integrateAgentJob(repoRoot, getMcpPolicy('controller', { repoRoot }), run.runId);
-    const cleanupResult = cleanup ? cleanupIntegratedWorktree(repoRoot, run.runId) : { removed: false, branchDeleted: false };
-    currentRun = markAgentJobReviewedCompletion(repoRoot, run.runId, {
-      changeOutcome: 'changed',
-      changedFiles: integratedSession.changedPaths,
-      worktreeCleaned: cleanupResult.removed,
-    });
-    integrated = true;
-    cleaned = cleanupResult.removed;
-    branchDeleted = cleanupResult.branchDeleted;
-    changedPaths = integratedSession.changedPaths;
+    try {
+      const integratedSession = integrateAgentJob(repoRoot, getMcpPolicy('controller', { repoRoot }), run.runId);
+      integrated = true;
+      changedPaths = integratedSession.changedPaths;
+      changeOutcome = integratedSession.changeOutcome;
+      currentRun = getAgentJob(repoRoot, run.runId);
+    } catch (error) {
+      if (error instanceof IntegrationReviewRequiredError) {
+        const updated = updateTask(repoRoot, issue.id, task.id, {
+          status: 'review',
+          note: options.note ?? `Integration review is required for ${run.runId}: ${error.reviewPath}`,
+        });
+        return result(repoRoot, {
+          action: 'blocked',
+          runId: run.runId,
+          issueId: issue.id,
+          taskId: task.id,
+          decision,
+          taskStatus: taskForRun(updated, task.id).status,
+          integrated: false,
+          cleaned: false,
+          branchDeleted: false,
+          changedPaths: error.packet.changedPaths,
+          changeOutcome,
+          integrationReviewPath: error.reviewPath,
+          reason: error.message,
+        });
+      }
+      throw error;
+    }
   }
 
   if (task.status === 'integrated' || task.status === 'review' || task.status === 'verified' || currentRun.status === 'succeeded') {
@@ -320,6 +349,22 @@ export function finishTaskRun(repoRoot: string, options: FinishTaskRunOptions): 
       commitSha = committed.commitSha;
       commitError = committed.error;
     }
+    if (
+      cleanup &&
+      integrated &&
+      run.provider === 'local' &&
+      run.executionMode === 'worktree' &&
+      !(shouldCommit && final.taskStatus === 'done' && commitError)
+    ) {
+      const cleanupResult = cleanupIntegratedWorktree(repoRoot, run.runId);
+      cleaned = cleanupResult.removed;
+      branchDeleted = cleanupResult.branchDeleted;
+    }
+    currentRun = markAgentJobReviewedCompletion(repoRoot, run.runId, {
+      changeOutcome,
+      changedFiles: changedPaths,
+      worktreeCleaned: cleaned,
+    });
     return result(repoRoot, {
       action: final.taskStatus === 'done' ? 'finished' : 'needs_decision',
       runId: run.runId,
@@ -331,6 +376,7 @@ export function finishTaskRun(repoRoot: string, options: FinishTaskRunOptions): 
       cleaned,
       branchDeleted,
       changedPaths,
+      changeOutcome,
       commitSha,
       commitError,
     });
