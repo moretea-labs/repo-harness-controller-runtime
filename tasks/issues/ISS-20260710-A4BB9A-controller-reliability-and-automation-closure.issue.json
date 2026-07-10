@@ -1,0 +1,303 @@
+{
+  "schemaVersion": 5,
+  "id": "ISS-20260710-A4BB9A",
+  "title": "Controller reliability and automation closure",
+  "slug": "controller-reliability-and-automation-closure",
+  "kind": "governance",
+  "status": "done",
+  "summary": "Closed the gap between process readiness and trustworthy automation reporting, added reliability operations guidance, fixed bounded job summary behavior, integrated managed Google runtime credentials and Local Bridge reliability changes, and verified the committed controller surface.",
+  "goals": [
+    "Make automation status distinguish shadow observations from live maintenance/execution.",
+    "Surface degraded execution readiness separately from process-level readiness.",
+    "Improve resource and stale runtime cleanup guidance for multi-repository operation.",
+    "Keep the repository clean and verify targeted controller checks."
+  ],
+  "nonGoals": [
+    "No broad test expansion.",
+    "No unrelated GUI redesign.",
+    "No destructive cleanup without explicit safe preview."
+  ],
+  "acceptanceCriteria": [
+    "Controller readiness or docs clearly distinguish runtime readiness, delivery readiness, and automation readiness.",
+    "Shadow schedules and maintenance schedules are documented or configured so users understand what actually runs.",
+    "Resource diagnostics for high-CPU peer MCP processes and stale temp entries are actionable.",
+    "Targeted checks pass and worktree is clean after commit."
+  ],
+  "relatedArtifacts": [],
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Harden automation readiness reporting",
+      "objective": "Inspect schedule/readiness code and update user-facing reporting or documentation so shadow schedules are not mistaken for active autonomous execution.",
+      "status": "superseded",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src/",
+        "docs/",
+        "README.md",
+        "tasks/"
+      ],
+      "forbiddenPaths": [],
+      "checks": [
+        "package:check:type",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "Readiness/reporting distinguishes shadow mode from live execution.",
+        "No broad unrelated changes."
+      ],
+      "risk": "medium",
+      "recommendedAgent": "codex",
+      "notes": [
+        "Accepted RUN-iss-20260710-a4bb9a-t1-1783647663444-337d7ff4 for asynchronous launch.",
+        "Dispatched RUN-iss-20260710-a4bb9a-t1-1783647663444-337d7ff4 to codex.",
+        "RUN-iss-20260710-a4bb9a-t1-1783647663444-337d7ff4 finished successfully. Automatic integration is starting.",
+        "Automatic integration failed for RUN-iss-20260710-a4bb9a-t1-1783647663444-337d7ff4: 5 edit operations failed precondition checks",
+        "Auto-integration preconditions failed because main changed concurrently. Reviewed the isolated diff, committed it on the task branch, merged it into main, and validated the merged result.",
+        "Manual closeout after branch merge: focused tests passed 28/28, package:check:type passed, and package:check:controller-v8 passed on merged main. The original Run cannot be re-finished because its worktree is clean and already merged."
+      ],
+      "runIds": [
+        "RUN-iss-20260710-a4bb9a-t1-1783647663444-337d7ff4"
+      ],
+      "createdAt": "2026-07-09T23:49:24.232Z",
+      "updatedAt": "2026-07-10T02:14:38.483Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+      "supersededBy": [
+        "T4"
+      ]
+    },
+    {
+      "id": "T2",
+      "title": "Document reliability operations runbook",
+      "objective": "Add or update docs for runtime maintenance, projection rebuild, high-CPU peer MCP handling, plugin degraded states, and board governance cleanup.",
+      "status": "done",
+      "dependsOn": [],
+      "allowedPaths": [
+        "docs/",
+        "README.md",
+        "tasks/"
+      ],
+      "forbiddenPaths": [],
+      "checks": [
+        "package:check:type"
+      ],
+      "acceptanceCriteria": [
+        "Runbook gives concrete steps for the defects found in this inspection.",
+        "Docs mention multi-repository resource isolation and plugin auth states."
+      ],
+      "risk": "low",
+      "recommendedAgent": "codex",
+      "notes": [
+        "Added and merged docs/operations/controller-reliability-runbook.md with readiness layers, schedule diagnosis, maintenance, resource isolation, cleanup, plugin states, and board governance.",
+        "Verification evidence passed and low_risk_change policy auto-completed the Task."
+      ],
+      "runIds": [],
+      "createdAt": "2026-07-09T23:49:24.232Z",
+      "updatedAt": "2026-07-10T02:11:45.838Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+      "verification": {
+        "integratedRevision": "2e35d07ced92b2fbbe1549c0232db5c46e5cf3c4",
+        "reviewer": "ChatGPT",
+        "checkResults": [
+          {
+            "checkId": "package:check:type",
+            "ok": true,
+            "summary": "Passed with persisted evidence: .ai/harness/checks/controller/latest-package-check-type.json"
+          }
+        ],
+        "commandEvidence": [],
+        "acceptanceResults": [
+          {
+            "criterion": "Runbook gives concrete steps for the defects found in this inspection.",
+            "ok": true,
+            "evidence": "The runbook documents layered readiness, maintenance sequencing, schedule diagnosis, failure classification, cleanup, and board closeout."
+          },
+          {
+            "criterion": "Docs mention multi-repository resource isolation and plugin auth states.",
+            "ok": true,
+            "evidence": "Dedicated sections cover peer repository process ownership, no cross-repository termination, and enabled/ready/degraded/disabled/not-applicable plugin states."
+          }
+        ],
+        "verifiedAt": "2026-07-10T02:11:45.835Z",
+        "autoCompleted": true,
+        "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+      }
+    },
+    {
+      "id": "T3",
+      "title": "Add automation readiness regression coverage",
+      "objective": "Cover shadow-only readiness and conditional live dispatch wording without expanding the broader test suite.",
+      "status": "done",
+      "dependsOn": [],
+      "allowedPaths": [
+        "tests/"
+      ],
+      "forbiddenPaths": [
+        "src/",
+        "docs/",
+        "README.md"
+      ],
+      "checks": [
+        "package:check:type",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "A focused test proves an enabled shadow schedule is not reported as live autonomous execution.",
+        "Provider readiness wording is asserted as conditional on a live goal or live schedule."
+      ],
+      "risk": "low",
+      "recommendedAgent": "codex",
+      "notes": [
+        "Merged focused readiness regression coverage for shadow-only schedules and conditional live dispatch wording.",
+        "Verification evidence passed and low_risk_change policy auto-completed the Task."
+      ],
+      "runIds": [],
+      "createdAt": "2026-07-10T01:50:08.755Z",
+      "updatedAt": "2026-07-10T02:12:46.620Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+      "verification": {
+        "integratedRevision": "2e35d07ced92b2fbbe1549c0232db5c46e5cf3c4",
+        "reviewer": "ChatGPT",
+        "checkResults": [
+          {
+            "checkId": "package:check:type",
+            "ok": true,
+            "summary": "Passed with persisted evidence: .ai/harness/checks/controller/latest-package-check-type.json"
+          },
+          {
+            "checkId": "package:check:controller-v8",
+            "ok": true,
+            "summary": "Passed with persisted evidence: .ai/harness/checks/controller/latest-package-check-controller-v8.json"
+          }
+        ],
+        "commandEvidence": [
+          {
+            "command": [
+              "bun",
+              "test",
+              "tests/cli/connector-freshness.test.ts",
+              "tests/runtime/provider-config.test.ts"
+            ],
+            "cwd": ".",
+            "ok": true,
+            "exitCode": 0,
+            "stdout": "28 pass, 0 fail",
+            "reportedBy": "ChatGPT",
+            "executedAt": "2026-07-10T02:12:46.611Z",
+            "source": "reported"
+          }
+        ],
+        "acceptanceResults": [
+          {
+            "criterion": "A focused test proves an enabled shadow schedule is not reported as live autonomous execution.",
+            "ok": true,
+            "evidence": "connector-freshness test creates an enabled shadow schedule and asserts shadow status plus no Execution Job wording."
+          },
+          {
+            "criterion": "Provider readiness wording is asserted as conditional on a live goal or live schedule.",
+            "ok": true,
+            "evidence": "provider-config test asserts conditional direct dispatch wording."
+          }
+        ],
+        "verifiedAt": "2026-07-10T02:12:46.611Z",
+        "autoCompleted": true,
+        "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+      }
+    },
+    {
+      "id": "T4",
+      "title": "Close manually integrated automation readiness work",
+      "objective": "Record verification and acceptance for the already-reviewed readiness changes after the original Run remained waiting_for_user following a failed automatic integration precondition.",
+      "status": "done",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src/",
+        "docs/",
+        "README.md",
+        "tests/",
+        "tasks/"
+      ],
+      "forbiddenPaths": [],
+      "checks": [
+        "package:check:type",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "Merged readiness behavior distinguishes shadow and live automation.",
+        "Merged controller checks pass.",
+        "Original run lifecycle anomaly remains documented rather than rewritten."
+      ],
+      "risk": "low",
+      "recommendedAgent": "codex",
+      "notes": [
+        "Replacement closeout task for the already-merged readiness changes. Original T1 remains superseded with its waiting_for_user run history preserved.",
+        "Verification evidence is incomplete or failed: Required named checks or equivalent command evidence are missing or failed.",
+        "Retry verification because all controller-v8 tests passed but evidence was marked stale when an unrelated Dashboard source revision changed during the check.",
+        "Verification evidence is incomplete or failed: Required named checks or equivalent command evidence are missing or failed.",
+        "Dashboard concurrent work is now reviewed and committed separately at 6348403, so final reliability verification can run against a stable source revision.",
+        "Verification evidence passed and low_risk_change policy auto-completed the Task."
+      ],
+      "runIds": [],
+      "createdAt": "2026-07-10T02:14:15.298Z",
+      "updatedAt": "2026-07-10T02:21:52.159Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+      "verification": {
+        "integratedRevision": "634840327248d6880015873159ce0b6d4a344916",
+        "reviewer": "ChatGPT",
+        "checkResults": [
+          {
+            "checkId": "package:check:type",
+            "ok": true,
+            "summary": "Passed with persisted evidence: .ai/harness/checks/controller/latest-package-check-type.json"
+          },
+          {
+            "checkId": "package:check:controller-v8",
+            "ok": true,
+            "summary": "Passed with persisted evidence: .ai/harness/checks/controller/latest-package-check-controller-v8.json"
+          }
+        ],
+        "commandEvidence": [
+          {
+            "command": [
+              "bun",
+              "test",
+              "tests/cli/connector-freshness.test.ts",
+              "tests/runtime/provider-config.test.ts"
+            ],
+            "cwd": ".",
+            "ok": true,
+            "exitCode": 0,
+            "stdout": "28 pass, 0 fail",
+            "reportedBy": "ChatGPT",
+            "executedAt": "2026-07-10T02:21:52.152Z",
+            "source": "reported"
+          }
+        ],
+        "acceptanceResults": [
+          {
+            "criterion": "Merged readiness behavior distinguishes shadow and live automation.",
+            "ok": true,
+            "evidence": "Readiness reports unconfigured, shadow-only, live-idle, and live-active automation states."
+          },
+          {
+            "criterion": "Merged controller checks pass.",
+            "ok": true,
+            "evidence": "package:check:type and package:check:controller-v8 pass after all source and GUI commits."
+          },
+          {
+            "criterion": "Original run lifecycle anomaly remains documented rather than rewritten.",
+            "ok": true,
+            "evidence": "T1 remains superseded with its waiting_for_user history and failed auto-integration notes."
+          }
+        ],
+        "verifiedAt": "2026-07-10T02:21:52.152Z",
+        "autoCompleted": true,
+        "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+      }
+    }
+  ],
+  "createdAt": "2026-07-09T23:49:24.232Z",
+  "updatedAt": "2026-07-10T02:22:29.209Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+  "archivedAt": "2026-07-10T02:22:29.209Z"
+}
