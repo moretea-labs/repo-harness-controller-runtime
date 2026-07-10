@@ -4,6 +4,7 @@ import { join } from 'path';
 import { ensureControllerHome } from '../../cli/repositories/controller-home';
 import { writeJsonAtomic } from '../shared/json-files';
 import { bootstrapManagedRuntimeEnv } from '../shared/managed-env';
+import { controllerDaemonOwnsPidFile } from './daemon-ownership';
 import { GlobalScheduler } from './global-scheduler/scheduler';
 
 function option(name: string): string | undefined {
@@ -33,10 +34,13 @@ const scheduler = new GlobalScheduler(controllerHome, {}, {
 });
 scheduler.run(abort.signal)
   .catch((error) => {
-    writeJsonAtomic(statePath, { schemaVersion: 1, status: 'failed', pid: process.pid, error: error instanceof Error ? error.message : String(error), updatedAt: new Date().toISOString() });
+    if (controllerDaemonOwnsPidFile(pidPath, process.pid)) {
+      writeJsonAtomic(statePath, { schemaVersion: 1, status: 'failed', pid: process.pid, error: error instanceof Error ? error.message : String(error), updatedAt: new Date().toISOString() });
+    }
     process.exitCode = 1;
   })
   .finally(() => {
+    if (!controllerDaemonOwnsPidFile(pidPath, process.pid)) return;
     rmSync(pidPath, { force: true });
     writeJsonAtomic(statePath, { schemaVersion: 1, status: 'stopped', pid: process.pid, stoppedAt: new Date().toISOString() });
   });
