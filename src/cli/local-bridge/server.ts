@@ -812,10 +812,10 @@ function buildUserControllerExperienceSnapshot(repoRoot: string, controllerHome 
       label: readinessState === 'ready' ? '系统就绪' : readinessState === 'needs_setup' ? '需要设置' : '系统阻塞',
       title: readinessState === 'ready' ? '系统可用' : readinessState === 'needs_setup' ? '需要完成设置' : '系统暂不可用',
       description: currentRepository
-        ? `仓库 ${currentRepository.name} ${readinessState === 'ready' ? '已就绪，助手随时为你执行任务' : '需要处理后才能执行任务'}`
+        ? `仓库 ${currentRepository.name} ${readinessState === 'ready' ? '已就绪，可接受任务与调度检查' : '需要处理后才能执行任务'}`
         : '请先添加一个本地仓库。',
       chips: [
-        { label: snapshot.execution.defaultMode === 'direct-edit' ? '自动执行' : '执行模式已设置', tone: 'green' },
+        { label: snapshot.execution.defaultMode === 'direct-edit' ? '直接执行模式' : '执行模式已设置', tone: 'green' },
         { label: snapshot.runtime.registered ? '环境就绪' : '仓库未注册', tone: snapshot.runtime.registered ? 'green' : 'amber' },
         { label: snapshot.connector.healthy ? '权限充足' : '连接需检查', tone: snapshot.connector.healthy ? 'green' : 'amber' },
         { label: '安全防护已启用', tone: 'green' },

@@ -97,6 +97,7 @@ import {
   type ConfigFacadeContext,
   type GoalLoopContext,
 } from '../../runtime/control-plane/goal-loop';
+import { listActiveOccurrences, listSchedules } from '../../runtime/workflow/schedules/store';
 
 export type ConsoleFacadeContext = {
   controllerHome: string;
@@ -553,6 +554,7 @@ export async function buildSystemReadiness(
   const freshness = await evaluateConsoleConnectorFreshness(ctx, opts);
   const pendingHandoffs = listHandoffItems({ ...store(ctx), status: 'pending', limit: 50 });
   const checks = listControllerChecks(ctx.repository.canonicalRoot);
+  const automation = buildAutomationReadinessSection(ctx);
   const sections: SystemReadinessViewModel['sections'] = [
     {
       id: 'controller',
@@ -596,6 +598,7 @@ export async function buildSystemReadiness(
       tone: pendingHandoffs.length ? 'amber' : 'green',
       detail: pendingHandoffs.length ? '有事项需要你的判断后才能继续。' : '没有待处理决策。',
     },
+    automation,
   ];
   const blocked = daemon.status !== 'ready';
   const needsSetup = ctx.repository.enabled === false;
@@ -614,6 +617,53 @@ export async function buildSystemReadiness(
     connectorFreshness: mapConnectorFreshnessView(freshness),
     pendingHandoffCount: pendingHandoffs.length,
     sections,
+  };
+}
+
+function buildAutomationReadinessSection(
+  ctx: ConsoleFacadeContext,
+): SystemReadinessViewModel['sections'][number] {
+  const schedules = listSchedules(ctx.controllerHome, ctx.repository.repoId).filter((schedule) => schedule.enabled);
+  const shadowSchedules = schedules.filter((schedule) => schedule.policy.shadowMode);
+  const liveSchedules = schedules.filter((schedule) => !schedule.policy.shadowMode);
+  const liveScheduleIds = new Set(liveSchedules.map((schedule) => schedule.scheduleId));
+  const activeLiveOccurrences = listActiveOccurrences(ctx.controllerHome, ctx.repository.repoId)
+    .filter((occurrence) => liveScheduleIds.has(occurrence.scheduleId)
+      && ['created', 'queued', 'running'].includes(occurrence.status))
+    .length;
+
+  if (schedules.length === 0) {
+    return {
+      id: 'automation',
+      title: '自治调度',
+      statusLabel: '未配置',
+      tone: 'gray',
+      detail: '当前“就绪”只表示控制器可以接受任务；没有启用中的 live schedule 在后台自治执行。',
+    };
+  }
+
+  if (liveSchedules.length === 0) {
+    return {
+      id: 'automation',
+      title: '自治调度',
+      statusLabel: `${shadowSchedules.length} 个影子计划`,
+      tone: 'amber',
+      detail: '已启用的 schedule 全部处于 shadow mode：它们只记录 would_execute / shadowed 结果，不会排队或启动 Execution Job。',
+    };
+  }
+
+  const liveLabel = shadowSchedules.length > 0
+    ? `live ${liveSchedules.length} / shadow ${shadowSchedules.length}`
+    : `${liveSchedules.length} 个 live 计划`;
+  const liveDetail = activeLiveOccurrences > 0
+    ? `当前有 ${activeLiveOccurrences} 个 live occurrence 正在 created/queued/running。`
+    : '当前没有 live occurrence 在 created/queued/running。';
+  return {
+    id: 'automation',
+    title: '自治调度',
+    statusLabel: liveLabel,
+    tone: 'green',
+    detail: `只有 live schedule 在触发条件满足时才会排队 bounded execution。${shadowSchedules.length > 0 ? ' shadow schedule 仍然只做记录。' : ''} ${liveDetail}`,
   };
 }
 
@@ -1352,4 +1402,3 @@ export async function buildAdvancedDiagnosticsEnvelope(rawSnapshot: unknown, ctx
     raw: rawSnapshot,
   };
 }
-
