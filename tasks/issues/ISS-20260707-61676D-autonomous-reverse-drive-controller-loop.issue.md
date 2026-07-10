@@ -2,7 +2,8 @@
 id: "ISS-20260707-61676D"
 kind: "feature"
 status: "done"
-updated_at: "2026-07-09T18:00:00.000Z"
+updated_at: "2026-07-10T12:26:25.540Z"
+archived_at: "2026-07-10T12:26:25.540Z"
 source: "repo-harness-controller-v8"
 ---
 
@@ -28,21 +29,11 @@ Make repo-harness a self-driving local assistant that can monitor work, produce 
 
 ## Acceptance Criteria
 
-- [x] repo-harness can generate a continuation packet for ChatGPT after any blocked or failed task.
-- [x] local daemon can monitor queued/running jobs and produce actionable findings without a user prompt.
-- [x] DeepSeek fallback can prepare a local packet when configured state is missing or ChatGPT handoff tools are blocked.
-- [x] Restart/rescan guidance is represented as a structured local action and user-facing instruction, not a raw blocked command only.
-- [x] Blocked iOS/check tools create repair findings with next safe actions.
-
-## Implementation notes (2026-07-09)
-
-Completed via autonomous GoalContract loop (`src/runtime/control-plane/goal-loop/`):
-
-- Durable GoalContract + handoff packets in controller-home storage
-- Daemon tick from `GlobalScheduler` (`tickGoalLoopsForController`)
-- Provider registry distinguishes invokable vs `chatgpt_handoff` handoff-only
-- Executor router + policy gates + repair taxonomy
-- Docs: `docs/repo-harness-autonomous-goal-loop.md`
+- [ ] repo-harness can generate a continuation packet for ChatGPT after any blocked or failed task.
+- [ ] local daemon can monitor queued/running jobs and produce actionable findings without a user prompt.
+- [ ] DeepSeek fallback can prepare a local packet when configured state is missing or ChatGPT handoff tools are blocked.
+- [ ] Restart/rescan guidance is represented as a structured local action and user-facing instruction, not a raw blocked command only.
+- [ ] Blocked iOS/check tools create repair findings with next safe actions.
 
 ## GitHub
 

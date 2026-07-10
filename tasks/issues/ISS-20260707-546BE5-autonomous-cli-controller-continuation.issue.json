@@ -4,7 +4,7 @@
   "title": "Autonomous CLI controller continuation",
   "slug": "autonomous-cli-controller-continuation",
   "kind": "feature",
-  "status": "in_progress",
+  "status": "cancelled",
   "summary": "Allow repo-harness daemon to continue work with local Codex/ChatGPT-compatible CLI controllers from durable continuation packets, reducing user intervention while keeping repo-harness as policy and audit authority.",
   "goals": [
     "Support a durable continuation packet that can be consumed by a local CLI controller process such as Codex CLI or future ChatGPT CLI.",
@@ -352,6 +352,7 @@
     }
   ],
   "createdAt": "2026-07-07T00:40:46.328Z",
-  "updatedAt": "2026-07-10T11:41:54.153Z",
-  "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+  "updatedAt": "2026-07-10T13:33:04.233Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+  "archivedAt": "2026-07-10T13:33:04.233Z"
 }

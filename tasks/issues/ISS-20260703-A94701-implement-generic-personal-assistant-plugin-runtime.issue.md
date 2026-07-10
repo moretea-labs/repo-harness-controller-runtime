@@ -1,8 +1,9 @@
 ---
 id: "ISS-20260703-A94701"
 kind: "investigation"
-status: "in_progress"
-updated_at: "2026-07-03T14:28:47.356Z"
+status: "cancelled"
+updated_at: "2026-07-10T13:40:28.071Z"
+archived_at: "2026-07-10T13:40:28.071Z"
 source: "repo-harness-controller-v8"
 ---
 

@@ -4,7 +4,7 @@
   "title": "Controller worker 生命周期与性能硬保护",
   "slug": "controller-worker",
   "kind": "bug",
-  "status": "in_progress",
+  "status": "cancelled",
   "summary": "系统性消除重复 worker、空闲 CPU 空转、孤儿进程、租约失效、并发失控和临时状态泄漏。所有修复直接在当前 main 工作区完成，每个独立修复单独提交，不创建分支或 worktree。",
   "goals": [
     "同一 jobId 只能存在一个活跃 worker",
@@ -488,6 +488,7 @@
     }
   ],
   "createdAt": "2026-06-26T15:05:42.497Z",
-  "updatedAt": "2026-07-08T23:52:31.558Z",
-  "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+  "updatedAt": "2026-07-10T13:34:34.975Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+  "archivedAt": "2026-07-10T13:34:34.975Z"
 }

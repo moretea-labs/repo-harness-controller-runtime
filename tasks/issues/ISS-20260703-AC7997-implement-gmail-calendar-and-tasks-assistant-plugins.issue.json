@@ -4,7 +4,7 @@
   "title": "Implement Gmail Calendar and Tasks assistant plugins",
   "slug": "implement-gmail-calendar-and-tasks-assistant-plugins",
   "kind": "investigation",
-  "status": "in_progress",
+  "status": "cancelled",
   "summary": "Build production-shaped Gmail, Google Calendar and Google Tasks/reminder plugins on the generic runtime. Reuse connector/auth abstractions and never persist credentials. Separate read/write scopes; gate send/delete/reschedule and other consequential writes. Add mock providers, contract tests, structured auth/rate-limit/error handling, configuration docs, run checks, and commit.",
   "goals": [
     "Build production-shaped Gmail, Google Calendar and Google Tasks/reminder plugins on the generic runtime. Reuse connector/auth abstractions and never persist credentials. Separate read/write scopes; gate send/delete/reschedule and other consequential writes. Add mock providers, contract tests, structured auth/rate-limit/error handling, configuration docs, run checks, and commit."
@@ -138,6 +138,7 @@
     "tests/cli/mcp-controller.test.ts"
   ],
   "createdAt": "2026-07-03T14:38:52.253Z",
-  "updatedAt": "2026-07-07T08:40:22.556Z",
-  "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+  "updatedAt": "2026-07-10T13:35:30.998Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+  "archivedAt": "2026-07-10T13:35:30.998Z"
 }

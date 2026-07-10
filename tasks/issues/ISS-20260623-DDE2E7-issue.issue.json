@@ -4,7 +4,7 @@
   "title": "开源发布治理、版本线与分支整理",
   "slug": "issue",
   "kind": "governance",
-  "status": "planned",
+  "status": "cancelled",
   "summary": "将当前 repo-harness-controller-runtime 从内部演进工作区整理为可公开发布的 MIT 衍生项目：审计本地/远程分支和标签，区分产品版本与 Controller 协议版本，确认上游许可与代码来源，清理私有信息，完善中英文使用/部署/ChatGPT 连接文档与品牌素材，最后形成安全的 GitHub 开源发布路径。",
   "goals": [
     "建立本地与远程分支、标签、提交差异的可审计清单",
@@ -643,7 +643,7 @@
     }
   ],
   "createdAt": "2026-06-23T08:46:30.234Z",
-  "updatedAt": "2026-06-24T08:34:32.845Z",
+  "updatedAt": "2026-07-10T13:41:58.927Z",
   "repoId": "repo_123b7cf58b6b17b5cbe46a56",
   "github": {
     "owner": "greysonOuyang",
@@ -651,5 +651,6 @@
     "number": 9,
     "url": "https://github.com/greysonOuyang/repo-harness-controller-runtime/issues/9",
     "syncedAt": "2026-06-23T08:48:42.865Z"
-  }
+  },
+  "archivedAt": "2026-07-10T13:41:58.927Z"
 }

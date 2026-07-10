@@ -1,8 +1,9 @@
 ---
 id: "ISS-20260706-6E690D"
 kind: "investigation"
-status: "in_progress"
-updated_at: "2026-07-06T14:42:44.624Z"
+status: "cancelled"
+updated_at: "2026-07-10T13:38:07.642Z"
+archived_at: "2026-07-10T13:38:07.642Z"
 source: "repo-harness-controller-v8"
 ---
 

@@ -1,8 +1,9 @@
 ---
 id: "ISS-20260707-1DEF39"
 kind: "investigation"
-status: "planned"
-updated_at: "2026-07-07T00:21:02.341Z"
+status: "cancelled"
+updated_at: "2026-07-10T13:36:29.902Z"
+archived_at: "2026-07-10T13:36:29.902Z"
 source: "repo-harness-controller-v8"
 ---
 

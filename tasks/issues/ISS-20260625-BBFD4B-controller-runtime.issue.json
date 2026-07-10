@@ -4,7 +4,7 @@
   "title": "建立 Controller Runtime 当前架构事实源与文档治理",
   "slug": "controller-runtime",
   "kind": "governance",
-  "status": "in_progress",
+  "status": "cancelled",
   "summary": "基于已确认的 Thin Gateway + Global Scheduler + Per-Repository Actor + Durable Job + Isolated Worker + Evidence Plane 目标架构，建立 repo-harness 唯一当前架构事实源，明确实体、职责、并发、冲突、Schedule、恢复、验证和发布规则；将 V5-V8 等代际设计降级为历史说明，并以自动检查防止后续文档漂移。",
   "goals": [
     "建立 docs/architecture/current/ 作为 Controller Runtime 唯一当前架构事实源",
@@ -566,6 +566,7 @@
     }
   ],
   "createdAt": "2026-06-25T08:37:40.704Z",
-  "updatedAt": "2026-06-25T10:05:14.243Z",
-  "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+  "updatedAt": "2026-07-10T13:41:30.226Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+  "archivedAt": "2026-07-10T13:41:30.226Z"
 }

@@ -1,8 +1,9 @@
 ---
 id: "ISS-20260624-6732EE"
 kind: "bug"
-status: "in_progress"
-updated_at: "2026-07-09T02:36:03.486Z"
+status: "cancelled"
+updated_at: "2026-07-10T13:34:05.607Z"
+archived_at: "2026-07-10T13:34:05.607Z"
 source: "repo-harness-controller-v8"
 ---
 

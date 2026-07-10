@@ -4,7 +4,7 @@
   "title": "Multi-model MCP host controllers",
   "slug": "multi-model-mcp-host-controllers",
   "kind": "feature",
-  "status": "in_progress",
+  "status": "cancelled",
   "summary": "Allow repo-harness to support DeepSeek and future models as MCP-host-style controllers, not only API-key fallback adapters. ChatGPT should not be the only primary controller; repo-harness should expose a policy-gated tool surface to multiple controller clients.",
   "goals": [
     "Define a model-controller abstraction where ChatGPT, DeepSeek, Codex CLI, Claude, and future models can act as primary or backup controllers.",
@@ -141,6 +141,7 @@
     }
   ],
   "createdAt": "2026-07-07T00:55:58.849Z",
-  "updatedAt": "2026-07-07T01:08:49.048Z",
-  "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+  "updatedAt": "2026-07-10T13:36:01.599Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+  "archivedAt": "2026-07-10T13:36:01.599Z"
 }

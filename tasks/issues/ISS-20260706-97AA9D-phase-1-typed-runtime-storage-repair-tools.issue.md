@@ -2,7 +2,8 @@
 id: "ISS-20260706-97AA9D"
 kind: "feature"
 status: "done"
-updated_at: "2026-07-08T03:50:34.000Z"
+updated_at: "2026-07-10T12:26:05.807Z"
+archived_at: "2026-07-10T12:26:05.807Z"
 source: "repo-harness-controller-v8"
 ---
 

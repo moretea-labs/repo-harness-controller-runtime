@@ -4,7 +4,7 @@
   "title": "Self-healing capability recovery",
   "slug": "self-healing-capability-recovery",
   "kind": "feature",
-  "status": "planned",
+  "status": "cancelled",
   "summary": "Add a structured recovery system for repo-harness capability degradation. It must distinguish local recoverable failures from client-side platform blocks, run safe capability probes, expose explicit recovery actions, support sandbox patch handoff, and create bounded source-fix tasks when repo-harness itself has a defect.",
   "goals": [
     "Provide a capability health matrix that explains what is working, degraded, blocked, or unavailable.",
@@ -207,6 +207,7 @@
     }
   ],
   "createdAt": "2026-07-05T09:39:05.185Z",
-  "updatedAt": "2026-07-08T07:09:29.749Z",
-  "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+  "updatedAt": "2026-07-10T13:35:04.629Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+  "archivedAt": "2026-07-10T13:35:04.629Z"
 }

@@ -1,8 +1,9 @@
 ---
 id: "ISS-20260623-DDE2E7"
 kind: "governance"
-status: "planned"
-updated_at: "2026-06-25T11:07:08Z"
+status: "cancelled"
+updated_at: "2026-07-10T13:41:58.927Z"
+archived_at: "2026-07-10T13:41:58.927Z"
 source: "repo-harness-controller-v8"
 ---
 
@@ -33,7 +34,7 @@ source: "repo-harness-controller-v8"
 - [ ] 产出分支/标签/远程差异报告并标明可保留、可归档、候选删除项
 - [ ] 版本策略文档明确 package 版本、Controller tool-surface 版本和兼容性规则
 - [ ] LICENSE 保留原作者 MIT 声明并增加本项目修改归属说明或 NOTICE
-- [x] 秘密与隐私扫描无阻断项，内部绝对路径/令牌/审计日志不进入公开包
+- [ ] 秘密与隐私扫描无阻断项，内部绝对路径/令牌/审计日志不进入公开包
 - [ ] README 与 docs 覆盖从安装到 ChatGPT 使用的完整闭环
 - [ ] README 展示可复用 banner/架构图，资源文件可在 GitHub 正常渲染
 - [ ] 所有发布检查通过，并形成公开发布前最终核对清单
@@ -124,7 +125,6 @@ source: "repo-harness-controller-v8"
 - Allowed paths: `.gitignore`, `.npmignore`, `.ai/harness/mcp/audit.log`, `.ai/harness/repository.json`, `.ai/harness/**`, `tasks/reports/**`, `docs/**`, `.github/**`
 - Checks: `check:ci`, `check:release`
 - Execution hint: agent / codex
-- Blocker: 当前交付输入是无 `.git` 的源码归档，已清除归档内运行态和凭据，但无法审计或修改真实 branch、tag、Worktree 与远程提交拓扑。
 
 ## Related Artifacts
 

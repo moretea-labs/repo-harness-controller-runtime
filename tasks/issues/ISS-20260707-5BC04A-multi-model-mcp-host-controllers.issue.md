@@ -1,8 +1,9 @@
 ---
 id: "ISS-20260707-5BC04A"
 kind: "feature"
-status: "in_progress"
-updated_at: "2026-07-07T01:08:49.048Z"
+status: "cancelled"
+updated_at: "2026-07-10T13:36:01.599Z"
+archived_at: "2026-07-10T13:36:01.599Z"
 source: "repo-harness-controller-v8"
 ---
 

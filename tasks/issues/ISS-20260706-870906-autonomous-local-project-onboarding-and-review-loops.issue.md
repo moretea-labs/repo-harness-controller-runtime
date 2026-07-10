@@ -1,8 +1,9 @@
 ---
 id: "ISS-20260706-870906"
 kind: "feature"
-status: "planned"
-updated_at: "2026-07-06T14:29:31.602Z"
+status: "cancelled"
+updated_at: "2026-07-10T13:38:36.733Z"
+archived_at: "2026-07-10T13:38:36.733Z"
 source: "repo-harness-controller-v8"
 ---
 

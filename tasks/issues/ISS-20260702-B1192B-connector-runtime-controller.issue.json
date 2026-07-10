@@ -4,7 +4,7 @@
   "title": "重构 Connector 稳定性、Runtime 存储与 Controller 核心工作流",
   "slug": "connector-runtime-controller",
   "kind": "feature",
-  "status": "planned",
+  "status": "cancelled",
   "summary": "按分阶段迁移方式收缩 repo-harness 控制面：先稳定 Gateway/Daemon/Tunnel 边界和断线恢复，再降低 Execution Job 高频文件写放大，随后统一核心工作接口与默认 MCP 工具面。兼容层保留到新路径完成验证后再删除。",
   "goals": [
     "Gateway、Daemon、Tunnel 和 UI 具备独立生命周期与故障边界",
@@ -221,6 +221,7 @@
     }
   ],
   "createdAt": "2026-07-02T03:56:51.306Z",
-  "updatedAt": "2026-07-02T03:56:51.306Z",
-  "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+  "updatedAt": "2026-07-10T13:41:04.280Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+  "archivedAt": "2026-07-10T13:41:04.280Z"
 }

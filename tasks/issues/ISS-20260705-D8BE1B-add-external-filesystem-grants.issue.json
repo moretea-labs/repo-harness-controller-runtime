@@ -4,7 +4,7 @@
   "title": "Add external filesystem grants",
   "slug": "add-external-filesystem-grants",
   "kind": "feature",
-  "status": "planned",
+  "status": "cancelled",
   "summary": "Implement explicit grants for trusted local assistant filesystem reads and import-into-workspace flows, with runtime enforcement and tests.",
   "goals": [
     "Add an ExternalPathGrant data model and authorization action.",
@@ -51,6 +51,7 @@
     }
   ],
   "createdAt": "2026-07-05T08:37:14.781Z",
-  "updatedAt": "2026-07-05T08:37:14.781Z",
-  "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+  "updatedAt": "2026-07-10T13:39:20.861Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+  "archivedAt": "2026-07-10T13:39:20.861Z"
 }

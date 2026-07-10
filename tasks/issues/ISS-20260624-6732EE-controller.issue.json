@@ -4,7 +4,7 @@
   "title": "修复 Controller 重连崩溃与执行链路性能瓶颈",
   "slug": "controller",
   "kind": "bug",
-  "status": "in_progress",
+  "status": "cancelled",
   "summary": "修复 ChatGPT Connector/Controller 频繁重连或挂掉、Local Bridge run-check 僵尸状态与超时失效、历史 Job 全量扫描和重型检查重复并发，并减少状态接口负载和日常任务编排开销。实施时优先使用 bounded Direct Edit，不启动 Agent。",
   "goals": [
     "Controller/Connector 在大状态量和历史任务存在时保持稳定，不因单次状态查询产生 502 或频繁重连",
@@ -1164,6 +1164,7 @@
     }
   ],
   "createdAt": "2026-06-24T08:57:01.690Z",
-  "updatedAt": "2026-07-09T02:36:03.486Z",
-  "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+  "updatedAt": "2026-07-10T13:34:05.607Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+  "archivedAt": "2026-07-10T13:34:05.607Z"
 }

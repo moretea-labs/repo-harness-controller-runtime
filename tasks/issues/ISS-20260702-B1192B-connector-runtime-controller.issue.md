@@ -1,8 +1,9 @@
 ---
 id: "ISS-20260702-B1192B"
 kind: "feature"
-status: "planned"
-updated_at: "2026-07-02T03:56:51.306Z"
+status: "cancelled"
+updated_at: "2026-07-10T13:41:04.280Z"
+archived_at: "2026-07-10T13:41:04.280Z"
 source: "repo-harness-controller-v8"
 ---
 

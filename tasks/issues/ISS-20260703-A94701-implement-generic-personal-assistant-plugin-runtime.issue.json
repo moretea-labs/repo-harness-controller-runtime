@@ -4,7 +4,7 @@
   "title": "Implement generic personal assistant plugin runtime",
   "slug": "implement-generic-personal-assistant-plugin-runtime",
   "kind": "investigation",
-  "status": "in_progress",
+  "status": "cancelled",
   "summary": "Implement the generic plugin runtime described by T1. Use one canonical state model integrated with existing MCP, Local Controller and Execution Job layers. Include versioned manifests, registry/discovery, lifecycle/health, typed action schemas, permission scopes, risk/confirmation policies, idempotency, cancellation/timeouts, structured results and audit events. Add focused unit/integration tests, update docs, run checks, and commit.",
   "goals": [
     "Implement the generic plugin runtime described by T1. Use one canonical state model integrated with existing MCP, Local Controller and Execution Job layers. Include versioned manifests, registry/discovery, lifecycle/health, typed action schemas, permission scopes, risk/confirmation policies, idempotency, cancellation/timeouts, structured results and audit events. Add focused unit/integration tests, update docs, run checks, and commit."
@@ -58,6 +58,7 @@
     }
   ],
   "createdAt": "2026-07-03T13:55:12.892Z",
-  "updatedAt": "2026-07-03T14:28:47.356Z",
-  "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+  "updatedAt": "2026-07-10T13:40:28.071Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+  "archivedAt": "2026-07-10T13:40:28.071Z"
 }

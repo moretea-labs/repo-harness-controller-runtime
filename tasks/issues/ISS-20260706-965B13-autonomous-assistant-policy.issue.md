@@ -2,7 +2,8 @@
 id: "ISS-20260706-965B13"
 kind: "investigation"
 status: "done"
-updated_at: "2026-07-08T06:33:59.823Z"
+updated_at: "2026-07-10T12:25:44.244Z"
+archived_at: "2026-07-10T12:25:44.244Z"
 source: "repo-harness-controller-v8"
 ---
 
