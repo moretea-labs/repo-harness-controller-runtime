@@ -9,7 +9,7 @@ on:
       - main
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   patch-and-verify:
@@ -37,17 +37,17 @@ jobs:
             echo "Focused tests reported failures"
             exit 1
           fi
-      - name: Commit verified source changes
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/cli/mcp/toolset-names.ts \
-                  src/cli/mcp/toolset.ts \
-                  src/cli/local-bridge/connector-freshness.ts \
-                  src/cli/local-bridge/console-view-models.ts \
-                  src/cli/local-bridge/facade-api.ts \
-                  src/cli/local-bridge/server.ts \
-                  src/cli/local-bridge/dashboard.ts \
-                  tests/cli/local-bridge-access-mode.test.ts
-          git commit -m "feat(console): add Request and Full Access selector"
-          git push origin HEAD:feature/access-mode-console-ui
+      - name: Upload verified source files
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-access-mode-console-source
+          path: |
+            src/cli/mcp/toolset-names.ts
+            src/cli/mcp/toolset.ts
+            src/cli/local-bridge/connector-freshness.ts
+            src/cli/local-bridge/console-view-models.ts
+            src/cli/local-bridge/facade-api.ts
+            src/cli/local-bridge/server.ts
+            src/cli/local-bridge/dashboard.ts
+            tests/cli/local-bridge-access-mode.test.ts
+            focused-test-output.txt
