@@ -14,7 +14,7 @@ import type { McpServerOptions } from './server';
 import { loadLocalBridgeConfig } from '../local-bridge/job-store';
 import { startLocalBridgeServer, type LocalBridgeServerHandle } from '../local-bridge/server';
 import { runtimePolicy } from './multi-repository';
-import { ensureControllerHome } from '../repositories/controller-home';
+import { ensureRepoPreferredControllerHome } from '../repositories/controller-home';
 import { resolveMcpRepoRoot } from './repo';
 import {
   CONTROLLER_SCHEMA_VERSION,
@@ -386,7 +386,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
   applyDirectNetworkProxyBypass(process.env);
 
   const repoRoot = resolveMcpRepoRoot(rawOpts.repo ?? '.');
-  const controllerHome = ensureControllerHome(rawOpts.controllerHome);
+  const controllerHome = ensureRepoPreferredControllerHome(repoRoot, rawOpts.controllerHome);
   const serviceConfig = loadMcpServiceLocalConfig(controllerHome, repoRoot);
   const profile = rawOpts.profile ?? serviceConfig?.profile ?? 'controller';
   const localConfig = serviceConfig;

@@ -5,7 +5,7 @@ import {
   writeRepositoryAccessPolicy,
 } from '../../runtime/control-plane/governance/access-policy';
 import type { MultiRepositoryMcpToolContext } from './multi-repository';
-import { resolveRepositorySelection } from '../repositories/registry';
+import { loadRepositoryRegistry, resolveRepositorySelection } from '../repositories/registry';
 import type { CallToolResult, McpToolDefinition } from './tools';
 
 function definition(
@@ -32,7 +32,7 @@ function definition(
   };
 }
 
-const repoId = { type: 'string', description: 'Stable repository id. Omit when exactly one repository is selected.' };
+const repoId = { type: 'string', description: 'Stable repository id. Omit when exactly one repository is selected. Cannot be combined with all_repositories.' };
 
 export const accessToolDefinitions: McpToolDefinition[] = [
   definition(
@@ -42,9 +42,13 @@ export const accessToolDefinitions: McpToolDefinition[] = [
   ),
   definition(
     'repository_access_set',
-    'Set the selected repository permission level. Full Access covers local repository work only; remote, destructive, outside-repository, and secret access remain gated.',
+    'Set one or all enabled repository permission levels. Full Access covers local repository work only; remote, destructive, outside-repository, and secret access remain gated.',
     {
       repo_id: repoId,
+      all_repositories: {
+        type: 'boolean',
+        description: 'When true, apply the mode to every enabled registered repository. Cannot be combined with repo_id.',
+      },
       mode: {
         type: 'string',
         enum: ['request', 'full_access'],
@@ -52,11 +56,11 @@ export const accessToolDefinitions: McpToolDefinition[] = [
       },
       confirm_authorization: {
         type: 'boolean',
-        description: 'Must be true to change the repository permission level.',
+        description: 'Must be true to change repository permission levels.',
       },
       confirmation_text: {
         type: 'string',
-        description: 'Required when enabling Full Access; must equal enable-full-access.',
+        description: 'Required when enabling Full Access: enable-full-access for one repository or enable-full-access-all for all enabled repositories.',
       },
     },
     ['mode', 'confirm_authorization'],
@@ -90,8 +94,8 @@ export function callAccessTool(
 ): CallToolResult | null {
   if (!accessToolNames.includes(name)) return null;
   try {
-    const repository = selected(ctx, args);
     if (name === 'repository_access_get') {
+      const repository = selected(ctx, args);
       const policy = readRepositoryAccessPolicy(ctx.controllerHome, repository.repoId);
       return result({
         repository: {
@@ -122,15 +126,51 @@ export function callAccessTool(
         },
       }, true);
     }
-    if (mode === 'full_access' && args.confirmation_text !== 'enable-full-access') {
+
+    const applyAll = args.all_repositories === true;
+    if (applyAll && typeof args.repo_id === 'string' && args.repo_id.trim()) {
       return result({
         error: {
-          code: 'FULL_ACCESS_STRONG_CONFIRMATION_REQUIRED',
-          message: 'confirmation_text must equal enable-full-access.',
+          code: 'ACCESS_MODE_SCOPE_INVALID',
+          message: 'repo_id cannot be combined with all_repositories.',
         },
       }, true);
     }
 
+    const requiredConfirmation = applyAll ? 'enable-full-access-all' : 'enable-full-access';
+    if (mode === 'full_access' && args.confirmation_text !== requiredConfirmation) {
+      return result({
+        error: {
+          code: 'FULL_ACCESS_STRONG_CONFIRMATION_REQUIRED',
+          message: `confirmation_text must equal ${requiredConfirmation}.`,
+        },
+      }, true);
+    }
+
+    if (applyAll) {
+      const repositories = loadRepositoryRegistry(ctx.controllerHome).repositories
+        .filter((repository) => repository.enabled !== false);
+      const updated = repositories.map((repository) => ({
+        repository: {
+          repoId: repository.repoId,
+          name: repository.displayName,
+        },
+        policy: writeRepositoryAccessPolicy(ctx.controllerHome, repository.repoId, mode, 'user'),
+      }));
+      return result({
+        mode,
+        descriptor: accessModeDescriptor(mode),
+        scope: 'all_enabled_repositories',
+        storage: 'controllerHome',
+        updatedCount: updated.length,
+        repositories: updated,
+        warning: mode === 'full_access'
+          ? 'Full Access applies only to local work in each enabled repository. Remote writes, destructive actions, outside-repository paths, and raw secrets remain gated.'
+          : 'Request mode is active for every enabled repository; elevated local effects will ask for approval.',
+      });
+    }
+
+    const repository = selected(ctx, args);
     const policy = writeRepositoryAccessPolicy(ctx.controllerHome, repository.repoId, mode, 'user');
     return result({
       repository: {

@@ -3,7 +3,7 @@ import { getMcpPolicy, parseMcpProfile } from './policy';
 import { buildMcpToolDefinitions, callMcpTool, type CallToolResult, type McpToolContext, type McpToolDefinition } from './tools';
 import { DEFAULT_AGENT_TIMEOUT_MS, MAX_AGENT_TIMEOUT_MS, normalizeAgentTimeoutMs } from '../controller/runtime-config';
 import type { McpAgentRunnerName, McpToolset } from './types';
-import { ensureControllerHome } from '../repositories/controller-home';
+import { ensureRepoPreferredControllerHome } from '../repositories/controller-home';
 import { bindRepositoryEntities } from '../repositories/entity-migration';
 import { withControllerLockAsync } from '../repositories/locks';
 import { registerRepository, repositorySummary, resolveRepositorySelection } from '../repositories/registry';
@@ -220,7 +220,7 @@ export function repositoryScopedToolArgs(
 }
 
 export function createMcpToolContext(opts: McpServerOptions): MultiRepositoryMcpToolContext {
-  const controllerHome = ensureControllerHome(opts.controllerHome);
+  const controllerHome = ensureRepoPreferredControllerHome(opts.repo, opts.controllerHome);
   const explicitRepository = opts.repo?.trim()
     ? registerRepository({ path: opts.repo, controllerHome })
     : undefined;

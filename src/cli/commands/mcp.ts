@@ -16,6 +16,7 @@ import {
 
 export interface McpServeOptions {
   repo?: string;
+  controllerHome?: string;
   transport: string;
   host: string;
   port: string;
@@ -45,6 +46,7 @@ interface McpKeepaliveOptions extends McpServeOptions {
 
 interface McpRestartOptions {
   repo?: string;
+  controllerHome?: string;
   logFile?: string;
   skipCodexSetup?: boolean;
   skipPublicCheck?: boolean;
@@ -149,6 +151,7 @@ export function buildMcpCommand(): Command {
     .command('serve')
     .description('Start the repo-harness MCP server')
     .option('--repo <path>', 'Repository root to expose through the selected MCP profile', '.')
+    .option('--controller-home <path>', 'Controller state root; defaults to repo _ops/controller-home when present')
     .option('--transport <transport>', 'Transport: stdio|http', 'stdio')
     .option('--host <host>', 'HTTP bind host', '127.0.0.1')
     .option('--port <port>', 'HTTP bind port', '8765')
@@ -167,6 +170,7 @@ export function buildMcpCommand(): Command {
         if (rawOpts.transport === 'stdio') {
           await startMcpStdio({
             repo: rawOpts.repo,
+            controllerHome: rawOpts.controllerHome,
             profile: rawOpts.profile,
             toolset: rawOpts.toolset,
             enableChatgptBrowser: rawOpts.enableChatgptBrowser === true,
@@ -180,6 +184,7 @@ export function buildMcpCommand(): Command {
         if (rawOpts.transport === 'http') {
           await startMcpHttp({
             repo: rawOpts.repo,
+            controllerHome: rawOpts.controllerHome,
             profile: rawOpts.profile,
             toolset: rawOpts.toolset,
             host: rawOpts.host,
@@ -201,6 +206,7 @@ export function buildMcpCommand(): Command {
     .command('keepalive')
     .description('Supervise local MCP HTTP service and optional Cloudflare tunnel with health checks and auto-restart')
     .option('--repo <path>', 'Repository root to expose through the selected MCP profile', '.')
+    .option('--controller-home <path>', 'Controller state root; defaults to repo _ops/controller-home when present')
     .option('--host <host>', 'HTTP bind host', '127.0.0.1')
     .option('--port <port>', 'HTTP bind port', '8765')
     .option('--profile <profile>', 'MCP profile: planner|executor|orchestrator|controller', 'controller')
@@ -231,6 +237,7 @@ export function buildMcpCommand(): Command {
         const restartDelayMs = parsePositiveIntegerOption('restart-delay-ms', rawOpts.restartDelayMs);
         await runMcpKeepalive({
           repo: rawOpts.repo,
+          controllerHome: rawOpts.controllerHome,
           host: rawOpts.host,
           port: parsePort(rawOpts.port),
           profile: rawOpts.profile,
@@ -260,6 +267,7 @@ export function buildMcpCommand(): Command {
     .command('restart')
     .description('Refresh MCP config, stop old repo-local MCP processes, start the latest keepalive, and verify the local/public surface')
     .option('--repo <path>', 'Repository root to restart', '.')
+    .option('--controller-home <path>', 'Controller state root; defaults to repo _ops/controller-home when present')
     .option('--log-file <path>', 'Combined keepalive stdout/stderr log file')
     .option('--skip-codex-setup', 'Skip repo-harness mcp setup codex')
     .option('--skip-public-check', 'Skip public endpoint tool-surface verification')
@@ -276,6 +284,7 @@ export function buildMcpCommand(): Command {
         }
         const result = await runMcpRestart({
           repo: rawOpts.repo,
+          controllerHome: rawOpts.controllerHome,
           logFile: rawOpts.logFile,
           skipCodexSetup: rawOpts.skipCodexSetup === true,
           skipPublicCheck: rawOpts.skipPublicCheck === true,

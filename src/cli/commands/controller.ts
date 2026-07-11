@@ -629,15 +629,17 @@ export function buildControllerCommand(): Command {
   command.command('ui')
     .description('Start the localhost-only visual Issue, Task, Run, approval, and Agent-session control surface')
     .option('--repo <path>', 'Repository root')
+    .option('--controller-home <path>', 'Controller state root; defaults to repo _ops/controller-home when present')
     .option('--host <host>', 'Loopback bind host, or 0.0.0.0 only with --mobile-lan', '127.0.0.1')
     .option('--port <port>', 'Local UI port')
     .option('--mobile-lan', 'Allow /mobile/intent on LAN while keeping UI and /api loopback-gated')
     .option('--no-open', 'Do not open the browser automatically')
-    .action(async (opts: { repo?: string; host?: string; port?: string; open?: boolean; mobileLan?: boolean }) => {
+    .action(async (opts: { repo?: string; controllerHome?: string; host?: string; port?: string; open?: boolean; mobileLan?: boolean }) => {
       const root = repoRoot(opts.repo);
       const config = loadLocalBridgeConfig(root);
       const handle = await startLocalBridgeServer({
         repoRoot: root,
+        controllerHome: opts.controllerHome,
         host: opts.host ?? config.host ?? '127.0.0.1',
         port: opts.port ? Number(opts.port) : config.port ?? 8766,
         openBrowser: opts.open !== false,
@@ -659,48 +661,54 @@ export function buildControllerCommand(): Command {
 
   service.command('start')
     .option('--repo <path>', 'Repository root')
+    .option('--controller-home <path>', 'Controller state root; defaults to repo _ops/controller-home when present')
     .option('--log-file <path>', 'Combined supervisor log file')
     .option('--json', 'Output JSON')
-    .action(async (opts: { repo?: string; logFile?: string; json?: boolean }) => {
-      const result = await startControllerService({ repo: opts.repo, logFile: opts.logFile });
+    .action(async (opts: { repo?: string; controllerHome?: string; logFile?: string; json?: boolean }) => {
+      const result = await startControllerService({ repo: opts.repo, controllerHome: opts.controllerHome, logFile: opts.logFile });
       output(opts.json ? result : formatControllerServiceStatus(result.status), opts.json === true);
     });
 
   service.command('stop')
     .option('--repo <path>', 'Repository root')
+    .option('--controller-home <path>', 'Controller state root; defaults to repo _ops/controller-home when present')
     .option('--log-file <path>', 'Combined supervisor log file')
     .option('--json', 'Output JSON')
-    .action(async (opts: { repo?: string; logFile?: string; json?: boolean }) => {
-      const result = await stopControllerService({ repo: opts.repo, logFile: opts.logFile });
+    .action(async (opts: { repo?: string; controllerHome?: string; logFile?: string; json?: boolean }) => {
+      const result = await stopControllerService({ repo: opts.repo, controllerHome: opts.controllerHome, logFile: opts.logFile });
       output(opts.json ? result : formatControllerServiceStatus(result.status), opts.json === true);
     });
 
   service.command('status')
     .option('--repo <path>', 'Repository root')
+    .option('--controller-home <path>', 'Controller state root; defaults to repo _ops/controller-home when present')
     .option('--log-file <path>', 'Combined supervisor log file')
     .option('--json', 'Output JSON')
-    .action(async (opts: { repo?: string; logFile?: string; json?: boolean }) => {
-      const result = await controllerServiceStatus({ repo: opts.repo, logFile: opts.logFile });
+    .action(async (opts: { repo?: string; controllerHome?: string; logFile?: string; json?: boolean }) => {
+      const result = await controllerServiceStatus({ repo: opts.repo, controllerHome: opts.controllerHome, logFile: opts.logFile });
       output(opts.json ? result : formatControllerServiceStatus(result), opts.json === true);
     });
 
   service.command('restart')
     .option('--repo <path>', 'Repository root')
+    .option('--controller-home <path>', 'Controller state root; defaults to repo _ops/controller-home when present')
     .option('--log-file <path>', 'Combined supervisor log file')
     .option('--json', 'Output JSON')
-    .action(async (opts: { repo?: string; logFile?: string; json?: boolean }) => {
-      const result = await restartControllerService({ repo: opts.repo, logFile: opts.logFile });
+    .action(async (opts: { repo?: string; controllerHome?: string; logFile?: string; json?: boolean }) => {
+      const result = await restartControllerService({ repo: opts.repo, controllerHome: opts.controllerHome, logFile: opts.logFile });
       output(opts.json ? result : formatControllerServiceStatus(result.status), opts.json === true);
     });
 
   service.command('logs')
     .option('--repo <path>', 'Repository root')
+    .option('--controller-home <path>', 'Controller state root; defaults to repo _ops/controller-home when present')
     .option('--log-file <path>', 'Combined supervisor log file')
     .option('--tail <lines>', 'Approximate number of recent log lines', '200')
     .option('--json', 'Output JSON')
-    .action(async (opts: { repo?: string; logFile?: string; tail?: string; json?: boolean }) => {
+    .action(async (opts: { repo?: string; controllerHome?: string; logFile?: string; tail?: string; json?: boolean }) => {
       const result = await controllerServiceLogs({
         repo: opts.repo,
+        controllerHome: opts.controllerHome,
         logFile: opts.logFile,
         tail: Math.max(1, Number(opts.tail ?? 200)),
       });

@@ -62,7 +62,9 @@ if [ "$#" -eq 0 ]; then
 fi
 
 run_controller_service() {
-  "$LOCAL_CLI" controller service "$@"
+  local action="${1:?controller service action is required}"
+  shift
+  "$LOCAL_CLI" controller service "$action" --repo "$ROOT" --controller-home "$REPO_HARNESS_CONTROLLER_HOME" "$@"
 }
 
 maybe_manage_external_tunnel() {
@@ -141,9 +143,9 @@ case "$COMMAND" in
       fi
       exec "$LEGACY_NGROK_MANAGER" logs --repo "$ROOT" --config "$TUNNEL_CONFIG" "$@"
     fi
-    exec "$LOCAL_CLI" controller service logs "$@"
+    exec "$LOCAL_CLI" controller service logs --repo "$ROOT" --controller-home "$REPO_HARNESS_CONTROLLER_HOME" "$@"
     ;;
   *)
-    exec "$LOCAL_CLI" controller service "$COMMAND" "$@"
+    exec "$LOCAL_CLI" controller service "$COMMAND" --repo "$ROOT" --controller-home "$REPO_HARNESS_CONTROLLER_HOME" "$@"
     ;;
 esac

@@ -9,6 +9,7 @@ import { exposedControllerToolDefinitions } from '../../src/cli/mcp/toolset';
 import type { MultiRepositoryMcpToolContext } from '../../src/cli/mcp/multi-repository';
 import { ensureControllerHome } from '../../src/cli/repositories/controller-home';
 import { registerRepository } from '../../src/cli/repositories/registry';
+import { readRepositoryAccessPolicy } from '../../src/runtime/control-plane/governance/access-policy';
 
 const roots: string[] = [];
 
@@ -97,6 +98,51 @@ describe('repository access MCP tools', () => {
     expect(payload(callAccessTool(ctx, 'repository_access_get', { repo_id: repository.repoId }))).toMatchObject({
       policy: { mode: 'full_access' },
     });
+  });
+
+  test('bulk Full Access requires all-repository confirmation and updates every enabled repository', () => {
+    const { ctx, repository } = fixture();
+    const secondRoot = mkdtempSync(join(tmpdir(), 'repo-harness-access-mcp-repo-'));
+    roots.push(secondRoot);
+    spawnSync('git', ['init', '-b', 'main'], { cwd: secondRoot, stdio: 'ignore' });
+    writeFileSync(join(secondRoot, 'README.md'), '# second fixture\n');
+    spawnSync('git', ['add', 'README.md'], { cwd: secondRoot, stdio: 'ignore' });
+    spawnSync('git', ['-c', 'user.email=test@example.com', '-c', 'user.name=Test', 'commit', '-m', 'init'], {
+      cwd: secondRoot,
+      stdio: 'ignore',
+    });
+    const second = registerRepository({
+      path: secondRoot,
+      controllerHome: ctx.controllerHome,
+      displayName: 'second permission fixture',
+      repoIdOverride: 'repo-permissions-second',
+    });
+
+    const weakConfirmation = callAccessTool(ctx, 'repository_access_set', {
+      all_repositories: true,
+      mode: 'full_access',
+      confirm_authorization: true,
+      confirmation_text: 'enable-full-access',
+    });
+    expect(weakConfirmation?.isError).toBe(true);
+    expect(payload(weakConfirmation)).toMatchObject({
+      error: { code: 'FULL_ACCESS_STRONG_CONFIRMATION_REQUIRED' },
+    });
+
+    const enabled = callAccessTool(ctx, 'repository_access_set', {
+      all_repositories: true,
+      mode: 'full_access',
+      confirm_authorization: true,
+      confirmation_text: 'enable-full-access-all',
+    });
+    expect(enabled?.isError).not.toBe(true);
+    expect(payload(enabled)).toMatchObject({
+      mode: 'full_access',
+      scope: 'all_enabled_repositories',
+      updatedCount: 2,
+    });
+    expect(readRepositoryAccessPolicy(ctx.controllerHome, repository.repoId).mode).toBe('full_access');
+    expect(readRepositoryAccessPolicy(ctx.controllerHome, second.repoId).mode).toBe('full_access');
   });
 
   test('downgrading to Request remains an explicit write action', () => {

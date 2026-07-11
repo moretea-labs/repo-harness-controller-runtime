@@ -132,6 +132,7 @@ describe('access-aware work routing', () => {
   test('request mode creates an approval handoff for explicitly approval-gated work', () => {
     const home = controllerHome();
     const ctx = workloopContext(home);
+    writeRepositoryAccessPolicy(home, 'repo-test', 'request');
     const result = routeWorkStart(ctx, {
       objective: 'Update several local repository files',
       modeInput: {
@@ -175,6 +176,7 @@ describe('access-aware work routing', () => {
   test('rh_work constraints may override the repository default for one task', () => {
     const home = controllerHome();
     const ctx = workloopContext(home);
+    writeRepositoryAccessPolicy(home, 'repo-test', 'request');
 
     const result = runGoalWorkloop(ctx, 'start', {
       objective: 'Update several local repository files',

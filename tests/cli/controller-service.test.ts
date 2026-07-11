@@ -145,7 +145,7 @@ describe("controller service lifecycle", () => {
     const { repoRoot, controllerHome } = await createFixture();
 
     const start = runCli(controllerHome, ["start", "--repo", repoRoot, "--json"], { useScript: true });
-    expect(start.status).toBe(0);
+    expect(start.status, start.stderr || start.stdout).toBe(0);
     const firstStart = parseJsonPrefix<{
       action: string;
       status: { running: boolean; serviceStatePath: string; supervisor: { pid?: number } };

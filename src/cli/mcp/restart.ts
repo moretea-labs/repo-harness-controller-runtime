@@ -43,6 +43,7 @@ export function requiredRestartSmokeTools(toolset: 'core' | 'advanced' | 'full')
 
 export interface McpRestartOptions {
   repo?: string;
+  controllerHome?: string;
   logFile?: string;
   skipCodexSetup?: boolean;
   skipPublicCheck?: boolean;
@@ -181,8 +182,8 @@ export function buildMcpRestartKeepaliveEnv(
  * Prefer an explicit env home, then the repo-local self-host layout used by
  * `bun run controller:restart` (`_ops/controller-home`), then the user home default.
  */
-export function resolveMcpRestartControllerHome(repoRoot: string): string {
-  return ensureRepoPreferredControllerHome(repoRoot);
+export function resolveMcpRestartControllerHome(repoRoot: string, explicitControllerHome?: string): string {
+  return ensureRepoPreferredControllerHome(repoRoot, explicitControllerHome);
 }
 
 function localHealthUrl(host: string, port: number): string {
@@ -339,8 +340,8 @@ function resolveLogPaths(repoRoot: string, explicitLogFile?: string): { stdoutPa
   return { stdoutPath: combined, stderrPath: combined };
 }
 
-function resolveRestartConfig(repoRoot: string, explicitLogFile?: string): ResolvedMcpRestartConfig {
-  const controllerHome = resolveMcpRestartControllerHome(repoRoot);
+function resolveRestartConfig(repoRoot: string, explicitLogFile?: string, explicitControllerHome?: string): ResolvedMcpRestartConfig {
+  const controllerHome = resolveMcpRestartControllerHome(repoRoot, explicitControllerHome);
   const doctor = parseDoctorReport(runMcpDoctor({ repo: repoRoot, json: true }));
   const localConfig = loadMcpServiceLocalConfig(controllerHome, repoRoot);
   const runtime = loadMcpServiceRuntimeState(controllerHome, repoRoot);
@@ -795,7 +796,7 @@ function configureGitHubPlugin(
 
 export async function runMcpRestart(opts: McpRestartOptions): Promise<McpSetupResult> {
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? '.');
-  const controllerHome = resolveMcpRestartControllerHome(repoRoot);
+  const controllerHome = resolveMcpRestartControllerHome(repoRoot, opts.controllerHome);
   // Pin home for setup/doctor/load paths and bypass local proxies for Funnel health.
   process.env.REPO_HARNESS_CONTROLLER_HOME = controllerHome;
   applyDirectNetworkProxyBypass(process.env);
@@ -804,7 +805,7 @@ export async function runMcpRestart(opts: McpRestartOptions): Promise<McpSetupRe
   const launchAgents = findRepoLaunchAgents(repoRoot);
 
   const chatgptSetup = runMcpSetupChatgpt({ repo: repoRoot });
-  const config = resolveRestartConfig(repoRoot, opts.logFile);
+  const config = resolveRestartConfig(repoRoot, opts.logFile, controllerHome);
   const changed = [...chatgptSetup.changed];
   const lines: string[] = [
     `[repo-harness restart] repo=${repoRoot}`,

@@ -9,7 +9,7 @@ import { loadMcpLocalConfig, loadMcpRuntimeState, loadMcpServiceLocalConfig, loa
 import { inferMcpTunnelMode, isExpectedLocalControllerHealth, normalizeKeepalivePublicEndpoint, resolveSelfCliInvocation } from "../mcp/keepalive";
 import { withDirectNetworkProxyBypass } from "../mcp/proxy-env";
 import { resolveMcpRepoRoot } from "../mcp/repo";
-import { resolveControllerHome } from "../repositories/controller-home";
+import { resolveRepoPreferredControllerHome } from "../repositories/controller-home";
 import { runProcess } from "../../effects/process-runner";
 import { ensureControllerDaemon, readControllerDaemonStatus, type ControllerDaemonStatus } from "../../runtime/control-plane/daemon-client";
 import { isProcessAlive, terminateProcessTree } from "../../runtime/shared/process-tree";
@@ -114,6 +114,7 @@ export interface ControllerServiceLogsResult {
 
 export interface ControllerServiceOptions {
   repo?: string;
+  controllerHome?: string;
   logFile?: string;
   startTimeoutMs?: number;
   stopTimeoutMs?: number;
@@ -314,7 +315,7 @@ function collectControllerServiceProcesses(repoRoot: string, state: ControllerSe
   return Array.from(seen.values()).sort((a, b) => a.pid - b.pid);
 }
 
-function resolveServiceConfig(repoRoot: string, explicitLogFile?: string): {
+function resolveServiceConfig(repoRoot: string, explicitLogFile?: string, explicitControllerHome?: string): {
   repoRoot: string;
   controllerHome: string;
   packageVersion: string;
@@ -333,7 +334,7 @@ function resolveServiceConfig(repoRoot: string, explicitLogFile?: string): {
   devRunnerMaxTimeoutMs?: number;
   logPath: string;
 } {
-  const controllerHome = resolveControllerHome();
+  const controllerHome = resolveRepoPreferredControllerHome(repoRoot, explicitControllerHome);
   const localConfig = loadMcpServiceLocalConfig(controllerHome, repoRoot) ?? loadMcpLocalConfig(repoRoot);
   const runtime = loadMcpServiceRuntimeState(controllerHome, repoRoot) ?? loadMcpRuntimeState(repoRoot);
   const publicEndpoint = normalizeKeepalivePublicEndpoint(localConfig?.chatgpt?.endpoint);
@@ -403,7 +404,7 @@ function adoptedRepo(repoRoot: string): boolean {
 
 export async function controllerServiceStatus(opts: ControllerServiceOptions = {}): Promise<ControllerServiceStatus> {
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? ".");
-  const config = resolveServiceConfig(repoRoot, opts.logFile);
+  const config = resolveServiceConfig(repoRoot, opts.logFile, opts.controllerHome);
   const state = loadControllerServiceState(repoRoot);
   const runtime = loadMcpRuntimeState(repoRoot);
   const supervisorAlive = isPidAlive(state?.supervisor.pid);
@@ -470,13 +471,13 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
   };
 }
 
-async function waitForHealthyStart(repoRoot: string, timeoutMs: number, logPath: string): Promise<ControllerServiceStatus> {
+async function waitForHealthyStart(repoRoot: string, timeoutMs: number, logPath: string, controllerHome: string): Promise<ControllerServiceStatus> {
   const deadline = Date.now() + Math.max(2_000, timeoutMs);
-  let latest = await controllerServiceStatus({ repo: repoRoot, logFile: logPath });
+  let latest = await controllerServiceStatus({ repo: repoRoot, logFile: logPath, controllerHome });
   while (Date.now() < deadline) {
     if (latest.health.mcp && latest.health.localController && latest.supervisor.alive) return latest;
     await sleep(HEALTH_POLL_INTERVAL_MS);
-    latest = await controllerServiceStatus({ repo: repoRoot, logFile: logPath });
+    latest = await controllerServiceStatus({ repo: repoRoot, logFile: logPath, controllerHome });
   }
   const tail = readLogTail(logPath);
   const lines = [
@@ -542,8 +543,8 @@ async function stopProcesses(processes: ControllerServiceProcess[], timeoutMs: n
 export async function startControllerService(opts: ControllerServiceOptions = {}): Promise<ControllerServiceActionResult> {
   if (!process.versions.bun) throw new Error("Bun is required to start the Controller stack.");
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? ".");
-  const config = resolveServiceConfig(repoRoot, opts.logFile);
-  let status = await controllerServiceStatus({ repo: repoRoot, logFile: config.logPath });
+  const config = resolveServiceConfig(repoRoot, opts.logFile, opts.controllerHome);
+  let status = await controllerServiceStatus({ repo: repoRoot, logFile: config.logPath, controllerHome: config.controllerHome });
   if (status.running && status.supervisor.alive) {
     return { action: "already_running", cleanedPids: [], status };
   }
@@ -552,10 +553,11 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
   if (status.supervisor.alive || status.health.mcp || status.health.localController || status.orphanedProcesses.length > 0) {
     cleaned = (await stopControllerService({
       repo: repoRoot,
+      controllerHome: config.controllerHome,
       logFile: config.logPath,
       stopTimeoutMs: opts.stopTimeoutMs,
     })).cleanedPids;
-    status = await controllerServiceStatus({ repo: repoRoot, logFile: config.logPath });
+    status = await controllerServiceStatus({ repo: repoRoot, logFile: config.logPath, controllerHome: config.controllerHome });
   }
 
   ensureStartableStatus(status);
@@ -573,6 +575,8 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
       "ui",
       "--repo",
       repoRoot,
+      "--controller-home",
+      config.controllerHome,
       "--host",
       config.localControllerHost,
       "--port",
@@ -591,6 +595,8 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
       "keepalive",
       "--repo",
       repoRoot,
+      "--controller-home",
+      config.controllerHome,
       "--host",
       config.mcpHost,
       "--port",
@@ -656,15 +662,15 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
     },
   });
 
-  status = await waitForHealthyStart(repoRoot, opts.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS, config.logPath);
+  status = await waitForHealthyStart(repoRoot, opts.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS, config.logPath, config.controllerHome);
   return { action: "started", cleanedPids: cleaned, status };
 }
 
 export async function stopControllerService(opts: ControllerServiceOptions = {}): Promise<ControllerServiceActionResult> {
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? ".");
-  const config = resolveServiceConfig(repoRoot, opts.logFile);
+  const config = resolveServiceConfig(repoRoot, opts.logFile, opts.controllerHome);
   const state = loadControllerServiceState(repoRoot);
-  const status = await controllerServiceStatus({ repo: repoRoot, logFile: config.logPath });
+  const status = await controllerServiceStatus({ repo: repoRoot, logFile: config.logPath, controllerHome: config.controllerHome });
   const processes = collectControllerServiceProcesses(repoRoot, state, config.controllerHome);
   const stoppable = processes.filter((entry) => entry.kind !== "unknown" || entry.command.includes(repoRoot));
   if (stoppable.length === 0) {
@@ -709,7 +715,7 @@ export async function stopControllerService(opts: ControllerServiceOptions = {})
   return {
     action: "stopped",
     cleanedPids: cleaned,
-    status: await controllerServiceStatus({ repo: repoRoot, logFile: config.logPath }),
+    status: await controllerServiceStatus({ repo: repoRoot, logFile: config.logPath, controllerHome: config.controllerHome }),
   };
 }
 
@@ -725,7 +731,7 @@ export async function restartControllerService(opts: ControllerServiceOptions = 
 
 export async function controllerServiceLogs(opts: ControllerServiceOptions & { tail?: number } = {}): Promise<ControllerServiceLogsResult> {
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? ".");
-  const logPath = resolveServiceConfig(repoRoot, opts.logFile).logPath;
+  const logPath = resolveServiceConfig(repoRoot, opts.logFile, opts.controllerHome).logPath;
   return {
     logPath,
     text: readLogTail(logPath, Math.max(1_000, (opts.tail ?? 200) * 200)),
