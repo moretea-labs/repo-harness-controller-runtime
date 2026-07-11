@@ -10,6 +10,13 @@ import { dirname, join, resolve } from 'path';
 export const ACCESS_MODES = ['request', 'full_access'] as const;
 export type AccessMode = (typeof ACCESS_MODES)[number];
 
+declare module '../facade/types' {
+  interface WorkContractConstraints {
+    /** Permission snapshot captured when the work starts. Defaults to request. */
+    accessMode?: AccessMode;
+  }
+}
+
 export type AccessEffect =
   | 'read'
   | 'local_repo_write'
