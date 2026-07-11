@@ -4,31 +4,11 @@ import { buildMultiRepositoryToolDefinitions } from './multi-repository';
 import { accessToolDefinitions } from './access-tools';
 import { repositoryToolDefinitions } from './repository-tools';
 import { runtimeToolDefinitions } from '../../runtime/gateway/mcp/runtime-tools';
-import { FACADE_TOOLS } from '../../runtime/control-plane/facade/types';
+import { DEFAULT_CONTROLLER_TOOL_NAMES, PREFERRED_FACADE_TOOL_NAMES } from './toolset-names';
+export { DEFAULT_CONTROLLER_TOOL_NAMES, PREFERRED_FACADE_TOOL_NAMES } from './toolset-names';
 import type { McpToolset } from './types';
 
-/** Preferred ChatGPT-facing facade tools. Must stay small and stable. */
-export const PREFERRED_FACADE_TOOL_NAMES = [...FACADE_TOOLS] as const;
-
 export type ToolExposureClass = 'facade' | 'advanced' | 'internal' | 'compatibility';
-
-/**
- * Default tools/list for controller profile (`--toolset core`).
- * Facade entrypoints plus only indispensable repository bootstrap/selection tools.
- */
-export const DEFAULT_CONTROLLER_TOOL_NAMES = [
-  'rh_status',
-  'rh_inbox',
-  'rh_context',
-  'rh_work',
-  'repository_access_get',
-  'repository_access_set',
-  'repository_list',
-  'repository_get',
-  'repository_register',
-  'repository_latest_source_diagnose',
-  'repository_bootstrap_local_project',
-] as const;
 
 /**
  * Explicit advanced/supervised controller surface (`--toolset advanced`).

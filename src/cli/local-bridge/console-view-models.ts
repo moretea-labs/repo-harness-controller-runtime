@@ -104,6 +104,8 @@ export interface WorkSummaryViewModel {
   objective: string;
   modeLabel: string;
   mode: ModePreviewViewModel['mode'];
+  accessMode: 'request' | 'full_access';
+  accessModeLabel: string;
   statusLabel: string;
   tone: PlainStatusTone;
   /** Machine phase for UI feedback: running | waiting | succeeded | failed | blocked | ... */
@@ -269,6 +271,9 @@ export interface GoalLoopStatusViewModel {
 export interface CommandCenterViewModel {
   schemaVersion: 1;
   generatedAt: string;
+  accessMode: 'request' | 'full_access';
+  accessModeLabel: string;
+  accessModeDescription: string;
   readiness: SystemReadinessViewModel;
   currentRepository?: RepositoryCardViewModel;
   repositories: RepositoryCardViewModel[];

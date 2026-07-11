@@ -107,6 +107,7 @@ import {
   consoleRoutingUpdate,
   evaluateConsoleConnectorFreshness,
   getAutomationSettings,
+  getConsoleAccessPolicy,
   getConsolePlugin,
   listConsolePlugins,
   toConsoleOperationFeedback,
@@ -122,6 +123,7 @@ import {
   previewExecutionMode,
   repairConsole,
   resolveConsoleHandoff,
+  setConsoleAccessPolicy,
   startConsoleWork,
   stopConsoleWork,
   verifyConsoleWork,
@@ -1407,6 +1409,29 @@ export async function startLocalBridgeServer(
     }
   });
 
+  app.get("/api/console/access-policy", (request, response) => {
+    try {
+      response.json(getConsoleAccessPolicy(consoleCtx(request)));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.post("/api/console/access-policy", (request, response) => {
+    try {
+      const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
+        ? request.body as Record<string, unknown>
+        : {};
+      response.json(setConsoleAccessPolicy(consoleCtx(request), {
+        mode: body.mode,
+        confirmAuthorization: body.confirmAuthorization === true,
+        confirmationText: queryString(body.confirmationText),
+      }));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
   app.post("/api/console/mode-preview", (request, response) => {
     try {
       const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
@@ -1556,6 +1581,7 @@ export async function startLocalBridgeServer(
         requiresWorker: body.requiresWorker === true,
         requiresApproval: body.requiresApproval === true,
         destructive: body.destructive === true,
+        accessMode: body.accessMode === 'full_access' ? 'full_access' : body.accessMode === 'request' ? 'request' : undefined,
         approvalConfirmed: body.approvalConfirmed === true,
         forceMode: body.forceMode === "direct_control" || body.forceMode === "goal_workloop" || body.forceMode === "handoff_only"
           ? body.forceMode

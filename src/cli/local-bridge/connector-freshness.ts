@@ -16,7 +16,7 @@ import {
   controllerToolSurfaceFingerprint,
 } from '../controller/runtime-config';
 import { loadMcpLocalConfig, loadMcpRuntimeState, writeMcpRuntimeState } from '../mcp/auth';
-import { PREFERRED_FACADE_TOOL_NAMES, DEFAULT_CONTROLLER_TOOL_NAMES } from '../mcp/toolset';
+import { PREFERRED_FACADE_TOOL_NAMES, DEFAULT_CONTROLLER_TOOL_NAMES } from '../mcp/toolset-names';
 import type { PlainStatusTone } from './console-view-models';
 
 export const EXPECTED_FACADE_TOOLS = [...PREFERRED_FACADE_TOOL_NAMES] as const;

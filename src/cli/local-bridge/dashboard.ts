@@ -36,6 +36,7 @@ button,input,textarea{font:inherit}button{cursor:pointer}.mono{font-family:ui-mo
 .composer textarea{min-height:120px;resize:vertical}
 .composer .row{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:center}
 .mode-card{display:grid;gap:6px}.mode-card .label{font-weight:800;font-size:16px}
+.access-panel{margin-top:12px;padding:12px;border:1px solid var(--line);border-radius:14px;background:rgba(255,255,255,.025)}.access-picker{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px}.access-option{display:grid;gap:3px;text-align:left;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:rgba(255,255,255,.025);color:var(--text)}.access-option strong{font-size:14px}.access-option span{font-size:12px;color:var(--muted)}.access-option.active{border-color:rgba(52,211,153,.5);background:rgba(52,211,153,.1)}.access-option.full.active{border-color:rgba(251,191,36,.55);background:rgba(251,191,36,.09)}
 .pill{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;font-size:12px;font-weight:700;border-radius:999px}
 .pill.green{background:rgba(52,211,153,.12);color:#a7f3d0;border-color:rgba(52,211,153,.28)}
 .pill.amber{background:rgba(251,191,36,.12);color:#fde68a;border-color:rgba(251,191,36,.28)}
@@ -76,6 +77,7 @@ details.advanced{margin-top:12px;border-top:1px dashed var(--line);padding-top:1
   <header class="top">
     <div class="brand"><span class="logo">∞</span><span>执行助手控制台</span></div>
     <button class="chip" id="repoChip" onclick="switchView('repositories')">仓库 · <strong id="topRepo">—</strong></button>
+    <button class="chip" id="accessChip" onclick="focusAccessMode()">权限 · <strong id="topAccessMode">Request</strong></button>
     <span class="chip"><span class="dot" id="readyDot"></span><strong id="topReady">检查中</strong></span>
     <span class="chip"><span class="dot" id="connectorDot"></span><span id="topConnector">连接</span></span>
     <button class="chip" onclick="switchView('capabilities')">插件 <strong id="topPlugins">—</strong></button>
@@ -124,6 +126,7 @@ function pill(tone,label){return '<span class="pill '+esc(tone||'gray')+'">'+esc
 function setDot(id,tone){document.getElementById(id).className='dot '+(tone&&tone!=='green'?tone:'')}
 
 var selectedRepoId=queryRepoId()||safeGet('repoHarnessSelectedRepoId')||'';
+var selectedAccessMode='request';
 var commandCenter=null;
 var automationSettings=null;
 var selectedWorkId=safeGet('repoHarnessSelectedWorkId')||'';
@@ -280,6 +283,7 @@ function renderChrome(){
   var cc=obj(commandCenter), ready=obj(cc.readiness), repo=obj(cc.currentRepository);
   var plug=obj(cc.pluginSummary);
   document.getElementById('topRepo').textContent=repo.name||'未选择';
+  document.getElementById('topAccessMode').textContent=cc.accessModeLabel||(selectedAccessMode==='full_access'?'Full Access':'Request');
   document.getElementById('topReady').textContent=ready.label||'未知';
   setDot('readyDot', ready.state==='blocked'?'red':ready.state==='needs_setup'?'amber':'green');
   document.getElementById('topConnector').textContent=ready.connectorLabel||'连接';
@@ -303,6 +307,11 @@ function renderHome(){
   var setup=obj(cc.setupGuide);
   var warnings=arr(cc.warnings).map(function(w){return '<div class="warn">'+esc(w)+'</div>'}).join('');
   var mode=obj(modePreview||cc.modePreviewDefault);
+  var accessMode=selectedAccessMode||cc.accessMode||'request';
+  var accessLabel=accessMode==='full_access'?'Full Access':'Request';
+  var accessDescription=accessMode==='full_access'
+    ? '允许当前仓库内文件修改、命令、依赖和本地 Git；远程、破坏性、仓库外路径和密钥仍需确认或保持禁止。'
+    : '在安全边界内执行；需要命令、依赖、本地 Git 或更高权限时向你请求。';
   var el=document.getElementById('view-home');
   var setupHtml=setup.needed
     ? '<div class="setup"><strong>'+esc(setup.title||'需要先设置仓库')+'</strong><p class="muted" style="margin:6px 0 10px">'+esc(setup.body||'')+'</p>'+btn(setup.actionLabel||'去设置仓库','data-nav="repositories"','primary')+'</div>'
@@ -316,6 +325,11 @@ function renderHome(){
     '<div class="panel composer">'+
       '<div class="section-title"><div><h2>你想让它完成什么？</h2><p class="hint">直接描述目标。路径、验收标准和执行模式由系统先判断，你仍可在开始前预览。</p></div>'+pill(ready.state==='ready'?'green':ready.state==='needs_setup'?'amber':'red',ready.label||'未知')+'</div>'+
       '<textarea id="taskObjective" placeholder="例如：优化 Controller 首页的信息层级，让当前任务和待决定事项更容易找到，不改变后端行为。"></textarea>'+
+      '<div class="access-panel" id="accessModePanel"><div class="section-title" style="margin:0"><div><strong>权限等级</strong><div class="faint">本设置对当前仓库的新任务生效</div></div>'+pill(accessMode==='full_access'?'amber':'green',accessLabel)+'</div>'+
+        '<div class="access-picker">'+
+          '<button class="access-option '+(accessMode==='request'?'active':'')+'" onclick="setAccessMode(\'request\')"><strong>Request</strong><span>需要提升权限时请求确认</span></button>'+
+          '<button class="access-option full '+(accessMode==='full_access'?'active':'')+'" onclick="setAccessMode(\'full_access\')"><strong>Full Access</strong><span>当前仓库内正常开发不再反复询问</span></button>'+
+        '</div><p class="muted" style="margin:9px 0 0">'+esc(accessDescription)+'</p></div>'+
       '<details class="advanced" style="margin-top:10px"><summary>补充验收标准和允许修改的路径</summary>'+
         '<div class="row" style="margin-top:10px"><input class="input" id="taskAcceptance" placeholder="验收标准（可选，用分号分隔）" style="flex:1"></div>'+
         '<div class="row"><input class="input" id="taskPaths" placeholder="允许修改的路径（可选，逗号分隔）" style="flex:1"><input class="input" id="taskFiles" type="number" min="0" placeholder="预计文件数" style="width:140px"></div>'+
@@ -392,7 +406,7 @@ function renderWorkCard(work, title){
   return '<div class="panel work-card" data-work-id="'+id+'">'+
     '<div class="section-title"><h2>'+esc(title||'当前任务')+'</h2>'+pill(work.tone, work.statusLabel||work.phaseLabel||'状态')+'</div>'+
     '<h3 style="margin:0 0 6px">'+esc(work.title||work.objective||'未命名任务')+'</h3>'+
-    '<div class="muted">模式：'+esc(work.modeLabel||'—')+' · 阶段：'+esc(work.phaseLabel||work.statusLabel||'—')+'</div>'+
+    '<div class="muted">模式：'+esc(work.modeLabel||'—')+' · 权限：'+esc(work.accessModeLabel||(work.accessMode==='full_access'?'Full Access':'Request'))+' · 阶段：'+esc(work.phaseLabel||work.statusLabel||'—')+'</div>'+
     '<div class="muted" style="margin-top:4px">最近动作：'+esc(work.latestAction||primary)+'</div>'+
     (work.latestSummary?'<p class="muted" style="margin:8px 0 0">'+esc(work.latestSummary)+'</p>':'')+
     stepsHtml(work.progressSteps)+
@@ -1048,6 +1062,22 @@ function runPluginAction(pluginId, actionId){
 function copyText(text){if(!text){toast('没有可复制内容');return}navigator.clipboard.writeText(text).then(function(){toast('已复制')}).catch(function(){toast('复制失败')})}
 function toggleAddRepo(){var el=document.getElementById('repoAdd');if(el)el.style.display=el.style.display==='none'?'block':'none'}
 
+function focusAccessMode(){var el=document.getElementById('accessModePanel');if(el)el.scrollIntoView({behavior:'smooth',block:'center'})}
+function setAccessMode(mode){
+  if(busy||mode===selectedAccessMode)return;
+  if(mode==='full_access'){
+    var ok=confirm('启用 Full Access？\n\n允许：当前仓库内文件修改、命令、依赖和本地 Git。\n仍需确认：远程写入、破坏性操作、仓库外路径。\n始终禁止：原始密钥和凭据。');
+    if(!ok)return;
+  }
+  setBusy(true,'更新权限等级…');
+  api('/api/console/access-policy'+repoQuery(),{method:'POST',body:JSON.stringify({mode:mode,confirmAuthorization:true,confirmationText:mode==='full_access'?'enable-full-access':undefined})}).then(function(res){
+    var policy=obj(res.policy);var descriptor=obj(res.descriptor);
+    selectedAccessMode=policy.mode==='full_access'?'full_access':'request';
+    commandCenter=commandCenter||{};commandCenter.accessMode=selectedAccessMode;commandCenter.accessModeLabel=descriptor.shortLabel||(selectedAccessMode==='full_access'?'Full Access':'Request');commandCenter.accessModeDescription=descriptor.description||'';
+    toast('权限已切换为 '+commandCenter.accessModeLabel);renderChrome();renderHome();
+  }).catch(function(e){toast(e.message||'权限更新失败')}).finally(function(){setBusy(false)});
+}
+
 function taskPayload(){
   var objective=(document.getElementById('taskObjective')||{}).value||'';
   var acceptance=((document.getElementById('taskAcceptance')||{}).value||'').split(/[;；\\n]/).map(function(s){return s.trim()}).filter(Boolean);
@@ -1058,6 +1088,7 @@ function taskPayload(){
     acceptanceCriteria:acceptance,
     allowedPaths:paths,
     expectedFiles:files,
+    accessMode:selectedAccessMode,
     scopeClear:true
   };
 }
@@ -1209,6 +1240,7 @@ function refreshAll(opts){
   refreshInFlight=true;
   return api('/api/console/command-center'+repoQuery()).then(function(res){
     commandCenter=res;
+    selectedAccessMode=res.accessMode==='full_access'?'full_access':'request';
     lastRefreshedAt=new Date().toLocaleTimeString();
     var repo=obj(res.currentRepository);
     if(repo.id)rememberRepo(repo.id);

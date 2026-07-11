@@ -1,4 +1,11 @@
 import type { RepositoryRecord } from '../repositories/types';
+import {
+  accessModeDescriptor,
+  isAccessMode,
+  readRepositoryAccessPolicy,
+  writeRepositoryAccessPolicy,
+  type AccessMode,
+} from '../../runtime/control-plane/governance/access-policy';
 import { listControllerChecks, runControllerCheck } from '../controller/check-runner';
 import { controllerExpectedToolNames } from '../mcp/tools';
 import { runtimePolicy } from '../mcp/multi-repository';
@@ -394,6 +401,8 @@ export function mapWorkSummary(
     objective: work.objective,
     modeLabel: mode.label,
     mode: mode.mode,
+    accessMode: work.constraints.accessMode ?? 'request',
+    accessModeLabel: accessModeDescriptor(work.constraints.accessMode ?? 'request').shortLabel,
     statusLabel: status.label,
     tone: status.tone,
     phase: status.phase,
@@ -884,6 +893,8 @@ export async function buildCommandCenter(
   const plugins = listConsolePlugins(ctx);
   const pluginSummary = buildPluginSummary(plugins);
   const goalLoop = buildGoalLoopStatusView(ctx);
+  const accessPolicy = readRepositoryAccessPolicy(ctx.controllerHome, ctx.repository.repoId);
+  const accessDescriptor = accessModeDescriptor(accessPolicy.mode);
   const banner = readiness.connectorFreshness?.severity === 'warning' || readiness.connectorFreshness?.severity === 'error'
     ? readiness.connectorFreshness.summary
     : undefined;
@@ -891,6 +902,9 @@ export async function buildCommandCenter(
   return {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
+    accessMode: accessPolicy.mode,
+    accessModeLabel: accessDescriptor.shortLabel,
+    accessModeDescription: accessDescriptor.description,
     readiness,
     currentRepository,
     repositories,
@@ -1100,6 +1114,26 @@ export function consoleGoalLoopPolicyUpdate(ctx: ConsoleFacadeContext, body: Rec
   return goalLoopPolicyUpdate(configCtx(ctx), body as unknown as Parameters<typeof goalLoopPolicyUpdate>[1]);
 }
 
+export function getConsoleAccessPolicy(ctx: ConsoleFacadeContext) {
+  const policy = readRepositoryAccessPolicy(ctx.controllerHome, ctx.repository.repoId);
+  return { policy, descriptor: accessModeDescriptor(policy.mode) };
+}
+
+export function setConsoleAccessPolicy(
+  ctx: ConsoleFacadeContext,
+  input: { mode: unknown; confirmAuthorization?: boolean; confirmationText?: string },
+) {
+  if (!isAccessMode(input.mode)) throw new Error('ACCESS_MODE_INVALID: mode must be request or full_access');
+  if (input.confirmAuthorization !== true) {
+    throw new Error('ACCESS_MODE_AUTHORIZATION_REQUIRED: changing repository access requires explicit confirmation');
+  }
+  if (input.mode === 'full_access' && input.confirmationText !== 'enable-full-access') {
+    throw new Error('FULL_ACCESS_STRONG_CONFIRMATION_REQUIRED: confirmation text must equal enable-full-access');
+  }
+  const policy = writeRepositoryAccessPolicy(ctx.controllerHome, ctx.repository.repoId, input.mode, 'user');
+  return { policy, descriptor: accessModeDescriptor(policy.mode) };
+}
+
 export function startConsoleWork(
   ctx: ConsoleFacadeContext,
   input: {
@@ -1115,6 +1149,7 @@ export function startConsoleWork(
     requiresWorker?: boolean;
     requiresApproval?: boolean;
     destructive?: boolean;
+    accessMode?: AccessMode;
     approvalConfirmed?: boolean;
     forceMode?: 'direct_control' | 'goal_workloop' | 'handoff_only';
     checkIds?: string[];
@@ -1134,6 +1169,7 @@ export function startConsoleWork(
       allowedPaths: input.allowedPaths,
       forbiddenPaths: input.forbiddenPaths,
       checks: input.checkIds,
+      constraints: input.accessMode ? { accessMode: input.accessMode } : undefined,
       modeInput: {
         objective: input.objective,
         expectedFiles: input.expectedFiles,
