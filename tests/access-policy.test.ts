@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import {
@@ -49,7 +49,7 @@ describe('repository access policy', () => {
     const home = controllerHome();
     writeRepositoryAccessPolicy(home, 'repo-test', 'full_access');
     const path = repositoryAccessPolicyPath(home, 'repo-test');
-    Bun.write(path, '{invalid-json');
+    writeFileSync(path, '{invalid-json', 'utf-8');
 
     expect(readRepositoryAccessPolicy(home, 'repo-test').mode).toBe('request');
   });
