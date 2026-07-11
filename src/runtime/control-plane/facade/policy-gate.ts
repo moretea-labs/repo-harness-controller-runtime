@@ -1,3 +1,9 @@
+import {
+  evaluateAccessMode,
+  normalizeAccessMode,
+  type AccessEffect,
+  type AccessMode,
+} from '../governance/access-policy';
 import type { CapabilityDescriptor, CapabilityRisk, PolicyDecision, SuggestedNextAction } from './types';
 
 export type PolicySideEffect =
@@ -20,6 +26,7 @@ export interface PolicyGateInput {
   capabilityId?: string;
   risk?: CapabilityRisk;
   sideEffect?: PolicySideEffect;
+  accessMode?: AccessMode;
   approvalConfirmed?: boolean;
   dryRun?: boolean;
   directEditBoundary?: DirectEditBoundary;
@@ -46,6 +53,15 @@ function sideEffectFromRisk(risk: CapabilityRisk | undefined): PolicySideEffect 
   return 'workspace_write';
 }
 
+function accessEffectFromSideEffect(sideEffect: PolicySideEffect): AccessEffect {
+  if (sideEffect === 'none') return 'read';
+  if (sideEffect === 'local_repo_write') return 'local_repo_write';
+  if (sideEffect === 'workspace_write') return 'workspace_write';
+  if (sideEffect === 'remote_write') return 'remote_write';
+  if (sideEffect === 'destructive_remote') return 'destructive';
+  return 'secret_access';
+}
+
 function directEditWithinBoundary(boundary: DirectEditBoundary | undefined): boolean {
   if (!boundary) return false;
   return boundary.scopeClear && boundary.pathsExplicit === true && (boundary.maxChangedFiles ?? 99) <= 3 && (boundary.maxChangedLines ?? 9999) <= 200;
@@ -55,6 +71,7 @@ export function evaluatePolicyGate(input: PolicyGateInput): PolicyDecision {
   const capabilityId = input.capability?.capabilityId ?? input.capabilityId;
   const risk = input.risk ?? input.capability?.risk;
   const sideEffect = input.sideEffect ?? sideEffectFromRisk(risk);
+  const accessMode = normalizeAccessMode(input.accessMode);
   const warnings: string[] = [];
 
   if (input.dryRun) {
@@ -79,6 +96,16 @@ export function evaluatePolicyGate(input: PolicyGateInput): PolicyDecision {
 
   if (sideEffect === 'none') {
     return { decision: 'allowed', reason: 'Readonly bounded facade operation.', capabilityId, warnings, suggestedNextActions: [] };
+  }
+
+  if (evaluateAccessMode(accessMode, accessEffectFromSideEffect(sideEffect)) === 'allow') {
+    return {
+      decision: 'allowed',
+      reason: 'Full Access permits this local repository operation without another approval prompt.',
+      capabilityId,
+      warnings: ['Remote writes, destructive actions, outside-repository access, and raw secrets remain separately gated.'],
+      suggestedNextActions: [],
+    };
   }
 
   if (sideEffect === 'local_repo_write' && directEditWithinBoundary(input.directEditBoundary)) {
@@ -114,7 +141,9 @@ export function evaluatePolicyGate(input: PolicyGateInput): PolicyDecision {
 
   return {
     decision: 'approval_required',
-    reason: 'Side-effecting operations require policy-gate approval unless they fit the bounded Direct Control path.',
+    reason: accessMode === 'request'
+      ? 'Request mode requires approval for side effects outside the bounded Direct Control path.'
+      : 'This operation is outside the local repository permissions granted by Full Access.',
     capabilityId,
     warnings,
     suggestedNextActions: [approvalAction('Approval is required before execution.', capabilityId)],
