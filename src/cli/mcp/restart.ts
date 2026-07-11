@@ -347,8 +347,11 @@ function resolveRestartConfig(repoRoot: string, explicitLogFile?: string, explic
   const localConfig = loadMcpServiceLocalConfig(controllerHome, repoRoot);
   const runtime = loadMcpServiceRuntimeState(controllerHome, repoRoot);
   const publicEndpoint = normalizeKeepalivePublicEndpoint(localConfig?.chatgpt?.endpoint);
+  const previousManagedTunnelMode = runtime?.tunnelMode && runtime.tunnelMode !== 'none'
+    ? runtime.tunnelMode
+    : undefined;
   const tunnelMode = inferMcpTunnelMode(
-    runtime?.tunnelMode,
+    previousManagedTunnelMode,
     publicEndpoint,
     runtime?.tunnel?.name,
   );

@@ -216,6 +216,7 @@ export function inferMcpTunnelMode(
   const normalized = requested?.trim().toLowerCase();
   if (normalized === undefined || normalized.length === 0 || normalized === 'auto') {
     if (publicEndpoint && tunnelName) return 'named';
+    if (publicEndpoint && new URL(publicEndpoint).hostname.endsWith('.ts.net')) return 'tailscale';
     if (publicEndpoint) return 'none';
     return 'quick';
   }

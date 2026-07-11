@@ -17,7 +17,8 @@ This snapshot is a read model, not an execution gate.
 - 默认 core 保留统一 `rh_access` 和 `repository_access_get`；`repository_access_preview` / `repository_access_set` 仅在 advanced/full 暴露。
 - `toolsetLocked` 对缺省测试/诊断 context 采用兼容默认值，避免 advanced 误降级为 request/core。
 - HTTP smoke 不再硬编码过期工具数和 fingerprint，改为从实际工具面常量与 `runtimePolicy` 计算预期。
-- 已重启 live MCP，当前 endpoint: `https://greysons-macbook-air.tail95bb5c.ts.net/mcp`。
+- 修复 Tailscale Funnel 固定 endpoint 的 restart 推断：`*.ts.net` endpoint 在 auto 模式下归类为 `tailscale`，并且 restart 不再复用历史 `tunnelMode=none`。
+- 已 reset/recreate Tailscale Funnel，并重启 live MCP；当前 endpoint: `https://greysons-macbook-air.tail95bb5c.ts.net/mcp`。
 
 ## Validation Completed
 
@@ -27,9 +28,11 @@ This snapshot is a read model, not an execution gate.
 - `bun test tests/cli/mcp-http.test.ts`
 - `bun run smoke:mcp-http-runtime`
 - `repo-harness mcp restart --repo .`
-- `repo-harness mcp doctor --repo .`
+- `repo-harness mcp doctor --repo .` -> `Runtime: running (local=ok, public=ok via tailscale)`
 - `curl http://127.0.0.1:8765/health` -> `toolset=advanced`, `toolCount=78`, `status=ok`
 - `curl https://greysons-macbook-air.tail95bb5c.ts.net/.well-known/oauth-protected-resource/mcp` -> OAuth resource metadata ok
+- `curl --noproxy '*' https://greysons-macbook-air.tail95bb5c.ts.net/.well-known/oauth-protected-resource/mcp` -> public Funnel path ok
+- `curl --noproxy '*' https://greysons-macbook-air.tail95bb5c.ts.net/mcp` -> expected 401 with MCP OAuth metadata headers
 
 ## Remaining Before Delivery
 
