@@ -5,24 +5,33 @@
 
 > **Status**: Ready for Delivery
 > **Updated At**: 2026-07-11
-> **Source**: Local-bridge GUI repository registry management
-> **Target**: Support soft-removing registered repositories from the console without deleting disk files
+> **Source**: MCP controller connectivity repair
+> **Target**: Restore stable ChatGPT Connector tool scanning and live MCP health
 > **Stale After**: 24h
 
 This snapshot is a read model, not an execution gate.
 
 ## Current Focus
 
-- GUI 仓库页支持「删除注册」：调用 soft-remove，保留审计历史，不删磁盘文件。
-- Local-bridge 暴露 `POST /api/repositories/:repoId/remove`。
-- 列表默认隐藏已 soft-remove 的仓库；当前选中被删时自动切到剩余仓库。
-- 自我保护：不能删除当前进程所在仓库的注册。
+- 修复近期 access-mode/toolset 改动导致的 MCP 工具面膨胀：默认 core 回到 11 个工具，advanced 回到 78 个工具，full 保留兼容全集。
+- 默认 core 保留统一 `rh_access` 和 `repository_access_get`；`repository_access_preview` / `repository_access_set` 仅在 advanced/full 暴露。
+- `toolsetLocked` 对缺省测试/诊断 context 采用兼容默认值，避免 advanced 误降级为 request/core。
+- HTTP smoke 不再硬编码过期工具数和 fingerprint，改为从实际工具面常量与 `runtimePolicy` 计算预期。
+- 已重启 live MCP，当前 endpoint: `https://greysons-macbook-air.tail95bb5c.ts.net/mcp`。
 
 ## Validation Completed
 
-- `bun test tests/cli/local-bridge.test.ts --test-name-pattern "registers and soft-removes|hardened localhost"`
+- `bun run check:mcp-compatibility`
+- `bun test tests/cli/mcp-tool-exposure-profiles.test.ts tests/cli/connector-freshness.test.ts`
+- `bun scripts/smoke-mcp-tool-surface.ts`
+- `bun test tests/cli/mcp-http.test.ts`
+- `bun run smoke:mcp-http-runtime`
+- `repo-harness mcp restart --repo .`
+- `repo-harness mcp doctor --repo .`
+- `curl http://127.0.0.1:8765/health` -> `toolset=advanced`, `toolCount=78`, `status=ok`
+- `curl https://greysons-macbook-air.tail95bb5c.ts.net/.well-known/oauth-protected-resource/mcp` -> OAuth resource metadata ok
 
 ## Remaining Before Delivery
 
-- Optional: deeper routing drag-and-drop editor (current shows ordered lists + API updates).
-- Live HTTP adapters for remote APIs remain gated.
+- ChatGPT side must recreate or rescan the Connector named `repo-harness-controller-runtime`, then call `controller_capabilities`.
+- Existing unrelated local MCP/local-bridge edits remain in the worktree and were not reverted.

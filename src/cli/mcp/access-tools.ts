@@ -4,6 +4,11 @@ import {
   readRepositoryAccessPolicy,
   writeRepositoryAccessPolicy,
 } from '../../runtime/control-plane/governance/access-policy';
+import {
+  legacyToolsetForAccessMode,
+  persistControllerAccessMode,
+  resolveControllerAccessState,
+} from './access-mode';
 import type { MultiRepositoryMcpToolContext } from './multi-repository';
 import { loadRepositoryRegistry, resolveRepositorySelection } from '../repositories/registry';
 import type { CallToolResult, McpToolDefinition } from './tools';
@@ -36,9 +41,56 @@ const repoId = { type: 'string', description: 'Stable repository id. Omit when e
 
 export const accessToolDefinitions: McpToolDefinition[] = [
   definition(
+    'rh_access',
+    'Always-exposed controller access control plane. Get, preview, or set Request vs Full Access for the current connector and repository defaults.',
+    {
+      operation: {
+        type: 'string',
+        enum: ['get', 'preview', 'set'],
+        description: 'Defaults to get.',
+      },
+      repo_id: repoId,
+      all_repositories: {
+        type: 'boolean',
+        description: 'When setting access, also update every enabled repository policy to the selected mode.',
+      },
+      mode: {
+        type: 'string',
+        enum: ['request', 'full_access'],
+        description: 'Target mode for preview or set.',
+      },
+      confirm_authorization: {
+        type: 'boolean',
+        description: 'Must be true to change access mode.',
+      },
+      confirmation_text: {
+        type: 'string',
+        description: 'Required when enabling Full Access: enable-full-access or enable-full-access-all.',
+      },
+    },
+    [],
+    false,
+  ),
+  definition(
     'repository_access_get',
     'Read the Request or Full Access permission level for the selected repository.',
     { repo_id: repoId },
+  ),
+  definition(
+    'repository_access_preview',
+    'Preview how Request or Full Access would affect the connector exposure and selected repository policy.',
+    {
+      repo_id: repoId,
+      all_repositories: {
+        type: 'boolean',
+        description: 'Preview the selected mode for every enabled repository policy.',
+      },
+      mode: {
+        type: 'string',
+        enum: ['request', 'full_access'],
+        description: 'Target access mode.',
+      },
+    },
   ),
   definition(
     'repository_access_set',
@@ -87,6 +139,118 @@ function result(value: Record<string, unknown>, isError = false): CallToolResult
   };
 }
 
+function accessToolGroups(mode: 'request' | 'full_access'): string[] {
+  return mode === 'full_access'
+    ? [
+      'status_and_readiness',
+      'repository_selection',
+      'approval_and_handoffs',
+      'access_control_plane',
+      'repository_reads',
+      'repository_writes_and_patches',
+      'commands_and_checks',
+      'git_and_branches',
+      'worktrees_and_task_runs',
+      'direct_edit_sessions',
+      'ios_xcode_and_simulator',
+      'screenshots_and_review_artifacts',
+    ]
+    : [
+      'status_and_readiness',
+      'repository_selection',
+      'approval_and_handoffs',
+      'access_control_plane',
+      'safe_request_entrypoints',
+    ];
+}
+
+function accessStatePayload(
+  ctx: MultiRepositoryMcpToolContext,
+  repository: ReturnType<typeof selected>,
+  configured = resolveControllerAccessState({
+    controllerHome: ctx.controllerHome,
+    repoRoot: ctx.explicitRepository?.canonicalRoot,
+  }),
+  effective = resolveControllerAccessState({
+    controllerHome: ctx.controllerHome,
+    repoRoot: ctx.explicitRepository?.canonicalRoot,
+    toolsetOverride: ctx.toolset,
+    toolsetLocked: ctx.toolsetLocked,
+  }),
+) {
+  const repositoryPolicy = readRepositoryAccessPolicy(ctx.controllerHome, repository.repoId);
+  return {
+    configuredAccessMode: configured.configuredAccessMode,
+    effectiveAccessMode: effective.effectiveAccessMode,
+    effectiveToolset: effective.effectiveToolset,
+    exposureRevision: configured.exposureRevision,
+    lastAppliedAt: configured.lastAppliedAt,
+    source: effective.source,
+    reconnectRequired: configured.configuredAccessMode !== effective.effectiveAccessMode,
+    schemaRefreshRequired: configured.configuredAccessMode !== effective.effectiveAccessMode,
+    restartRequired: false,
+    repository: {
+      repoId: repository.repoId,
+      name: repository.displayName,
+    },
+    repositoryPolicy,
+    repositoryPolicyDescriptor: accessModeDescriptor(repositoryPolicy.mode),
+    toolGroups: accessToolGroups(effective.effectiveAccessMode),
+  };
+}
+
+function previewPayload(
+  ctx: MultiRepositoryMcpToolContext,
+  repository: ReturnType<typeof selected>,
+  mode: 'request' | 'full_access',
+  applyAll: boolean,
+) {
+  const currentConfigured = resolveControllerAccessState({
+    controllerHome: ctx.controllerHome,
+    repoRoot: ctx.explicitRepository?.canonicalRoot,
+  });
+  const currentEffective = resolveControllerAccessState({
+    controllerHome: ctx.controllerHome,
+    repoRoot: ctx.explicitRepository?.canonicalRoot,
+    toolsetOverride: ctx.toolset,
+    toolsetLocked: ctx.toolsetLocked,
+  });
+  const currentPolicy = readRepositoryAccessPolicy(ctx.controllerHome, repository.repoId);
+  const nextToolset = legacyToolsetForAccessMode(mode);
+  const currentGroups = accessToolGroups(currentEffective.effectiveAccessMode);
+  const nextGroups = accessToolGroups(mode);
+  return {
+    current: {
+      ...accessStatePayload(ctx, repository, currentConfigured, currentEffective),
+      toolGroups: currentGroups,
+    },
+    target: {
+      configuredAccessMode: mode,
+      effectiveAccessMode: ctx.toolsetLocked ? currentEffective.effectiveAccessMode : mode,
+      effectiveToolset: ctx.toolsetLocked ? currentEffective.effectiveToolset : nextToolset,
+      exposureRevision: currentConfigured.exposureRevision + (currentConfigured.configuredAccessMode === mode ? 0 : 1),
+      source: ctx.toolsetLocked ? currentEffective.source : 'controller_home.access_mode',
+      toolGroups: nextGroups,
+      repositoryPolicyMode: mode,
+      repositoryPolicyDescriptor: accessModeDescriptor(mode),
+    },
+    changes: {
+      modeChanged: currentConfigured.configuredAccessMode !== mode,
+      toolsetChanged: currentEffective.effectiveToolset !== (ctx.toolsetLocked ? currentEffective.effectiveToolset : nextToolset),
+      repositoryPolicyWillChange: currentPolicy.mode !== mode,
+      addedToolGroups: nextGroups.filter((group) => !currentGroups.includes(group)),
+      removedToolGroups: currentGroups.filter((group) => !nextGroups.includes(group)),
+      scope: applyAll ? 'all_enabled_repositories' : 'repository',
+    },
+    reconnectRequired: !ctx.toolsetLocked && currentEffective.effectiveAccessMode !== mode,
+    schemaRefreshRequired: !ctx.toolsetLocked && currentEffective.effectiveAccessMode !== mode,
+    restartRequired: false,
+    warning: ctx.toolsetLocked
+      ? 'This MCP process was started with an explicit toolset override, so changing controllerHome access mode will not change the live effective mode until the override is removed.'
+      : undefined,
+  };
+}
+
 export function callAccessTool(
   ctx: MultiRepositoryMcpToolContext,
   name: string,
@@ -94,6 +258,67 @@ export function callAccessTool(
 ): CallToolResult | null {
   if (!accessToolNames.includes(name)) return null;
   try {
+    if (name === 'rh_access') {
+      const operation = args.operation === 'preview' || args.operation === 'set' ? args.operation : 'get';
+      const repository = selected(ctx, args);
+      if (operation === 'get') return result(accessStatePayload(ctx, repository));
+
+      const mode = args.mode;
+      if (!isAccessMode(mode)) {
+        return result({
+          error: {
+            code: 'ACCESS_MODE_INVALID',
+            message: 'mode must be request or full_access',
+          },
+        }, true);
+      }
+
+      const applyAll = args.all_repositories === true;
+      if (operation === 'preview') return result(previewPayload(ctx, repository, mode, applyAll));
+
+      if (args.confirm_authorization !== true) {
+        return result({
+          error: {
+            code: 'ACCESS_MODE_AUTHORIZATION_REQUIRED',
+            message: 'confirm_authorization must be true before changing access mode.',
+          },
+        }, true);
+      }
+      const requiredConfirmation = applyAll ? 'enable-full-access-all' : 'enable-full-access';
+      if (mode === 'full_access' && args.confirmation_text !== requiredConfirmation) {
+        return result({
+          error: {
+            code: 'FULL_ACCESS_STRONG_CONFIRMATION_REQUIRED',
+            message: `confirmation_text must equal ${requiredConfirmation}.`,
+          },
+        }, true);
+      }
+
+      const persisted = persistControllerAccessMode(ctx.controllerHome, mode, ctx.explicitRepository?.canonicalRoot);
+      if (applyAll) {
+        const repositories = loadRepositoryRegistry(ctx.controllerHome).repositories
+          .filter((entry) => entry.enabled !== false);
+        for (const entry of repositories) writeRepositoryAccessPolicy(ctx.controllerHome, entry.repoId, mode, 'user');
+      } else {
+        writeRepositoryAccessPolicy(ctx.controllerHome, repository.repoId, mode, 'user');
+      }
+      const configured = persisted.state;
+      const effective = resolveControllerAccessState({
+        controllerHome: ctx.controllerHome,
+        repoRoot: ctx.explicitRepository?.canonicalRoot,
+        toolsetOverride: ctx.toolset,
+        toolsetLocked: ctx.toolsetLocked,
+      });
+      return result({
+        ...accessStatePayload(ctx, repository, configured, effective),
+        updatedConfigPath: persisted.configPath,
+        scope: applyAll ? 'all_enabled_repositories' : 'repository',
+        warning: ctx.toolsetLocked
+          ? 'Access mode was saved, but this MCP process still has an explicit toolset override. Effective mode will not change until that override is removed.'
+          : 'The live MCP process now reports the new access mode. Reconnect or refresh the Connector tool schema before relying on the new tool surface.',
+      });
+    }
+
     if (name === 'repository_access_get') {
       const repository = selected(ctx, args);
       const policy = readRepositoryAccessPolicy(ctx.controllerHome, repository.repoId);
@@ -107,6 +332,12 @@ export function callAccessTool(
         scope: 'repository',
         storage: 'controllerHome',
       });
+    }
+
+    if (name === 'repository_access_preview') {
+      const repository = selected(ctx, args);
+      const mode = isAccessMode(args.mode) ? args.mode : readRepositoryAccessPolicy(ctx.controllerHome, repository.repoId).mode;
+      return result(previewPayload(ctx, repository, mode, args.all_repositories === true));
     }
 
     const mode = args.mode;

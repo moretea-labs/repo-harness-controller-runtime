@@ -5,6 +5,10 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { registerRepository } from '../src/cli/repositories/registry';
 import { readControllerDaemonStatus } from '../src/runtime/control-plane/daemon-client';
+import { CONTROLLER_TOOL_SURFACE, controllerToolSurfaceFingerprint } from '../src/cli/controller/runtime-config';
+import { DEFAULT_CONTROLLER_TOOL_NAMES } from '../src/cli/mcp/toolset';
+import { buildMcpToolDefinitions } from '../src/cli/mcp/tools';
+import { runtimePolicy } from '../src/cli/mcp/multi-repository';
 
 const root = mkdtempSync(join(tmpdir(), 'repo-harness-mcp-http-smoke-'));
 const repoRoot = join(root, 'repo');
@@ -70,10 +74,18 @@ try {
   const health = await waitJson(`http://127.0.0.1:${port}/health`, 20_000);
   if (health.status !== 200 || health.body.status !== 'ok') throw new Error(`HEALTH_FAILED: ${JSON.stringify(health)} ${stderr}`);
   if (health.body.toolset !== 'core') throw new Error(`TOOLSET_CHANGED: ${String(health.body.toolset)}`);
-  // Core toolset includes preferred rh_* facade tools plus interactive development tools (safe patch/git/work_wait).
-  if (health.body.toolCount !== 70) throw new Error(`TOOL_COUNT_CHANGED: ${String(health.body.toolCount)}`);
-  if (health.body.compatibilityToolCount !== 86) throw new Error(`LEGACY_MCP_TOOL_COUNT_CHANGED: ${String(health.body.compatibilityToolCount)}`);
-  if (health.body.toolSurfaceFingerprint !== '7966e1035c4bad51') throw new Error(`FINGERPRINT_CHANGED: ${String(health.body.toolSurfaceFingerprint)}`);
+  if (health.body.toolSurface !== CONTROLLER_TOOL_SURFACE) throw new Error(`TOOL_SURFACE_CHANGED: ${String(health.body.toolSurface)}`);
+  const expectedCoreFingerprint = controllerToolSurfaceFingerprint([...DEFAULT_CONTROLLER_TOOL_NAMES]);
+  const expectedCompatibilityToolCount = buildMcpToolDefinitions(runtimePolicy(repoRoot, {
+    repo: repoRoot,
+    controllerHome,
+    profile: 'controller',
+    enableDevRunner: true,
+    devRunnerAgents: 'codex,claude',
+  })).length;
+  if (health.body.toolCount !== DEFAULT_CONTROLLER_TOOL_NAMES.length) throw new Error(`TOOL_COUNT_CHANGED: ${String(health.body.toolCount)}`);
+  if (health.body.compatibilityToolCount !== expectedCompatibilityToolCount) throw new Error(`LEGACY_MCP_TOOL_COUNT_CHANGED: ${String(health.body.compatibilityToolCount)}`);
+  if (health.body.toolSurfaceFingerprint !== expectedCoreFingerprint) throw new Error(`FINGERPRINT_CHANGED: ${String(health.body.toolSurfaceFingerprint)}`);
 
   let ready = await waitJson(`http://127.0.0.1:${port}/ready`, 20_000);
   const readyDeadline = Date.now() + 20_000;

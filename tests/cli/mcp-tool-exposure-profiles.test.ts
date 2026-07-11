@@ -30,8 +30,8 @@ describe('MCP tool exposure profiles', () => {
       'rh_inbox',
       'rh_context',
       'rh_work',
+      'rh_access',
       'repository_access_get',
-      'repository_access_set',
       'repository_list',
       'repository_get',
       'repository_register',
@@ -48,12 +48,16 @@ describe('MCP tool exposure profiles', () => {
     expect(exposed).not.toContain('create_campaign');
     expect(exposed).not.toContain('work_submit');
     expect(exposed).not.toContain('dispatch_task');
+    expect(exposed).not.toContain('repository_access_preview');
+    expect(exposed).not.toContain('repository_access_set');
     expect(isControllerToolExposed(stubCtx('core'), 'rh_work')).toBe(true);
     expect(isControllerToolExposed(stubCtx('core'), 'create_campaign')).toBe(false);
   });
 
   test('advanced surface includes former supervised tools; full is compatibility', () => {
     expect(ADVANCED_CONTROLLER_TOOL_NAMES.length).toBeGreaterThan(DEFAULT_CONTROLLER_TOOL_NAMES.length);
+    expect(ADVANCED_CONTROLLER_TOOL_NAMES).toContain('repository_access_preview');
+    expect(ADVANCED_CONTROLLER_TOOL_NAMES).toContain('repository_access_set');
     expect(ADVANCED_CONTROLLER_TOOL_NAMES).toContain('create_campaign');
     expect(ADVANCED_CONTROLLER_TOOL_NAMES).toContain('work_submit');
     expect(controllerToolNamesForToolset('advanced')).toEqual(ADVANCED_CONTROLLER_TOOL_NAMES);

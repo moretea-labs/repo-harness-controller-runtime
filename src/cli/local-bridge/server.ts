@@ -141,15 +141,14 @@ import { finishTaskRun } from "../controller/completion-orchestrator";
 import { prepareCodexContinuation } from "../controller/codex-continuation";
 import { applyStuckStateMigration, inspectStuckControllerStates } from "../controller/stuck-state-migration";
 import { getMcpPolicy } from "../mcp/policy";
-import { runtimePolicy } from "../mcp/multi-repository";
-import { controllerExpectedToolNames } from "../mcp/tools";
-import { loadMcpLocalConfig, loadMcpRuntimeState } from "../mcp/auth";
+import type { MultiRepositoryMcpToolContext } from "../mcp/multi-repository";
+import { createMcpToolContext as createControllerMcpToolContext } from "../mcp/server";
+import { loadMcpLocalConfig, loadMcpServiceLocalConfig, loadMcpServiceRuntimeState } from "../mcp/auth";
 import { loadRepositoryRegistry, registerRepository, removeRepository, resolveRepositorySelection } from "../repositories/registry";
 import { resolveControllerHome } from "../repositories/controller-home";
 import { ensureControllerDaemon, readControllerDaemonStatus } from "../../runtime/control-plane/daemon-client";
 import { findExecutionJob, listExecutionJobs } from "../../runtime/execution/jobs/store";
 import { rebuildRepositoryProjection, readRepositoryProjectionSnapshot } from "../../runtime/projections/materialized-view";
-import { runtimeToolDefinitions } from "../../runtime/gateway/mcp/runtime-tools";
 import { getAssistantPluginManifest, listAssistantPluginManifests, submitAssistantPluginAction } from "../../runtime/plugins/store";
 import {
   createMobileIntentDevice,
@@ -158,7 +157,7 @@ import {
   revokeMobileIntentDevice,
   verifyMobileIntentRequest,
 } from "./mobile-intents";
-import { controllerToolNamesForToolset, normalizeMcpToolset } from "../mcp/toolset";
+import { controllerExposureSnapshot } from "../mcp/toolset";
 import { submitAssistantIntent, runAssistantRoutineNow } from "../../runtime/assistant/intent";
 import { assistantOpenApiSchema } from "../../runtime/assistant/openapi";
 import { buildAssistantReadinessReport } from "../../runtime/assistant/readiness";
@@ -426,23 +425,23 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
         .map((job) => ({ kind: "work", id: job.jobId, title: String(job.payload.operation ?? job.type), status: job.status, updatedAt: job.updatedAt })),
     ].sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? ""))).slice(0, 12),
   };
-  const mcpConfig = loadMcpLocalConfig(repoRoot);
-  const mcpRuntime = loadMcpRuntimeState(repoRoot);
-  const expectedPolicy = runtimePolicy(repoRoot, { profile: "controller" });
-  const expectedToolNames = controllerExpectedToolNames(expectedPolicy);
+  const mcpRuntime = loadMcpServiceRuntimeState(controllerHome, repoRoot);
+  const mcpConfig = loadMcpServiceLocalConfig(controllerHome, repoRoot);
+  const mcpExposureContext = createControllerMcpToolContext({
+    repo: repoRoot,
+    controllerHome,
+    profile: "controller",
+  }) as MultiRepositoryMcpToolContext;
+  const exposure = controllerExposureSnapshot(mcpExposureContext);
+  const expectedToolNames = exposure.toolNames;
   const runtimeSurface = mcpRuntime?.server?.toolSurface;
   const runtimeSchemaVersion = mcpRuntime?.server?.schemaVersion;
   const runtimeSurfaceVersion = mcpRuntime?.server?.toolSurfaceVersion;
   const runtimeFingerprint = mcpRuntime?.server?.toolSurfaceFingerprint;
   const runtimeToolset = mcpRuntime?.server?.toolset;
-  const configuredToolset = normalizeMcpToolset(mcpConfig?.toolset);
   const runtimeToolFingerprint = mcpRuntime?.server?.runtimeToolSurfaceFingerprint;
   const expectedFingerprint = controllerToolSurfaceFingerprint(expectedToolNames);
-  const restrictedRuntimeNames = controllerToolNamesForToolset(configuredToolset);
-  const expectedRuntimeNames = restrictedRuntimeNames === null
-    ? [...expectedToolNames, ...runtimeToolDefinitions.map((tool) => tool.name)]
-    : [...restrictedRuntimeNames];
-  const expectedRuntimeFingerprint = controllerToolSurfaceFingerprint(expectedRuntimeNames);
+  const expectedRuntimeFingerprint = expectedFingerprint;
   const runtimeProfile = mcpRuntime?.server?.profile;
   const connectorHealthy =
     mcpRuntime?.server?.healthy === true &&
@@ -451,7 +450,7 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
     runtimeSurfaceVersion === CONTROLLER_TOOL_SURFACE_VERSION &&
     runtimeFingerprint === expectedFingerprint &&
     runtimeToolFingerprint === expectedRuntimeFingerprint &&
-    runtimeToolset === configuredToolset &&
+    runtimeToolset === exposure.access.effectiveToolset &&
     runtimeProfile === "controller";
   const runtimeProjection = "projection" in runtime ? runtime.projection : undefined;
   const recovery = buildCapabilityRecoverySnapshot({
@@ -510,7 +509,10 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
       runtimeFingerprint,
       expectedFingerprint,
       runtimeToolset,
-      configuredToolset,
+      configuredToolset: exposure.access.effectiveToolset,
+      configuredAccessMode: exposure.access.configuredAccessMode,
+      effectiveAccessMode: exposure.access.effectiveAccessMode,
+      exposureRevision: exposure.access.exposureRevision,
       runtimeToolFingerprint,
       expectedRuntimeFingerprint,
       toolCount: mcpRuntime?.server?.toolCount,
@@ -519,7 +521,7 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
       mismatch:
         mcpRuntime?.server?.healthMismatch ??
         (mcpRuntime && !connectorHealthy
-          ? `expected controller / ${CONTROLLER_TOOL_SURFACE} / schema ${CONTROLLER_SCHEMA_VERSION} / surface ${CONTROLLER_TOOL_SURFACE_VERSION} / ${configuredToolset} / ${expectedRuntimeFingerprint}`
+          ? `expected controller / ${CONTROLLER_TOOL_SURFACE} / schema ${CONTROLLER_SCHEMA_VERSION} / surface ${CONTROLLER_TOOL_SURFACE_VERSION} / ${exposure.access.effectiveToolset} / ${expectedRuntimeFingerprint}`
           : undefined),
     },
     timeoutPolicy: localBridgeTimeoutPolicy(repoRoot),
@@ -861,6 +863,11 @@ export async function startLocalBridgeServer(
   const host = options.host ?? "127.0.0.1";
   const requestedPort = options.port ?? 8766;
   const controllerHome = resolveControllerHome(options.controllerHome);
+  const mcpExposureContext = createControllerMcpToolContext({
+    repo: options.repoRoot,
+    controllerHome,
+    profile: "controller",
+  }) as MultiRepositoryMcpToolContext;
   assertAllowedBindHost(host, options.allowLanMobileIntents === true);
   reconcileAgentJobs(options.repoRoot);
   reconcileLocalBridgeJobs(options.repoRoot);
@@ -956,22 +963,24 @@ export async function startLocalBridgeServer(
     response.send(localBridgeDashboardHtml());
   });
   app.get("/health", (_request, response) => {
-    const toolNames = controllerExpectedToolNames(runtimePolicy(options.repoRoot, { profile: "controller" }));
-    const configuredToolset = normalizeMcpToolset(loadMcpLocalConfig(options.repoRoot)?.toolset);
-    const restrictedRuntimeNames = controllerToolNamesForToolset(configuredToolset);
-    const runtimeNames = restrictedRuntimeNames === null
-      ? [...toolNames, ...runtimeToolDefinitions.map((tool) => tool.name)]
-      : [...restrictedRuntimeNames];
+    const exposure = controllerExposureSnapshot(mcpExposureContext);
+    const fingerprint = controllerToolSurfaceFingerprint(exposure.toolNames);
     response.json({
       status: "ok",
       localOnly: true,
       toolSurface: CONTROLLER_TOOL_SURFACE,
       schemaVersion: CONTROLLER_SCHEMA_VERSION,
       toolSurfaceVersion: CONTROLLER_TOOL_SURFACE_VERSION,
-      toolSurfaceFingerprint: controllerToolSurfaceFingerprint(toolNames),
-      runtimeToolSurfaceFingerprint: controllerToolSurfaceFingerprint(runtimeNames),
-      toolset: configuredToolset,
-      toolCount: runtimeNames.length,
+      toolSurfaceFingerprint: fingerprint,
+      runtimeToolSurfaceFingerprint: fingerprint,
+      toolset: exposure.access.effectiveToolset,
+      configuredAccessMode: exposure.access.configuredAccessMode,
+      effectiveAccessMode: exposure.access.effectiveAccessMode,
+      effectiveToolset: exposure.access.effectiveToolset,
+      accessModeSource: exposure.access.source,
+      accessModeLastAppliedAt: exposure.access.lastAppliedAt,
+      exposureRevision: exposure.access.exposureRevision,
+      toolCount: exposure.toolNames.length,
     });
   });
 

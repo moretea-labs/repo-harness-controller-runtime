@@ -6,9 +6,12 @@ import {
   writeRepositoryAccessPolicy,
   type AccessMode,
 } from '../../runtime/control-plane/governance/access-policy';
+import {
+  persistControllerAccessMode,
+  resolveControllerAccessState,
+} from '../mcp/access-mode';
 import { listControllerChecks, runControllerCheck } from '../controller/check-runner';
-import { controllerExpectedToolNames } from '../mcp/tools';
-import { runtimePolicy } from '../mcp/multi-repository';
+import { createMcpToolContext, type MultiRepositoryMcpToolContext } from '../mcp/multi-repository';
 import { readControllerDaemonStatus } from '../../runtime/control-plane/daemon-client';
 import {
   getAssistantPluginManifest,
@@ -52,6 +55,7 @@ import {
   EXPECTED_FACADE_TOOLS,
   type ConnectorFreshnessReport,
 } from './connector-freshness';
+import { controllerExposedToolNames } from '../mcp/toolset';
 import {
   statusLabelForPhase,
   type UserFacingErrorClass,
@@ -69,6 +73,7 @@ import type {
   ModePreviewViewModel,
   PlainStatusTone,
   PluginActionViewModel,
+  AccessStateViewModel,
   PluginCardViewModel,
   PluginSummaryViewModel,
   RepositoryCardViewModel,
@@ -618,6 +623,66 @@ function mapConnectorFreshnessView(report: ConnectorFreshnessReport): ConnectorF
   };
 }
 
+function accessToolGroups(mode: AccessMode): string[] {
+  return mode === 'full_access'
+    ? [
+      'status_and_readiness',
+      'repository_selection',
+      'approval_and_handoffs',
+      'access_control_plane',
+      'repository_reads',
+      'repository_writes_and_patches',
+      'commands_and_checks',
+      'git_and_branches',
+      'worktrees_and_task_runs',
+      'direct_edit_sessions',
+      'ios_xcode_and_simulator',
+      'screenshots_and_review_artifacts',
+    ]
+    : [
+      'status_and_readiness',
+      'repository_selection',
+      'approval_and_handoffs',
+      'access_control_plane',
+      'safe_request_entrypoints',
+    ];
+}
+
+function controllerAccessStateView(ctx: ConsoleFacadeContext): AccessStateViewModel {
+  const configured = resolveControllerAccessState({
+    controllerHome: ctx.controllerHome,
+    repoRoot: ctx.repository.canonicalRoot,
+  });
+  const toolCtx = createMcpToolContext({
+    repo: ctx.repository.canonicalRoot,
+    controllerHome: ctx.controllerHome,
+    profile: 'controller',
+  }) as MultiRepositoryMcpToolContext;
+  const effective = resolveControllerAccessState({
+    controllerHome: ctx.controllerHome,
+    repoRoot: ctx.repository.canonicalRoot,
+    toolsetOverride: toolCtx.toolset,
+    toolsetLocked: toolCtx.toolsetLocked,
+  });
+  const repositoryPolicy = readRepositoryAccessPolicy(ctx.controllerHome, ctx.repository.repoId);
+  return {
+    configuredAccessMode: configured.configuredAccessMode,
+    configuredAccessModeLabel: accessModeDescriptor(configured.configuredAccessMode).shortLabel,
+    effectiveAccessMode: effective.effectiveAccessMode,
+    effectiveAccessModeLabel: accessModeDescriptor(effective.effectiveAccessMode).shortLabel,
+    effectiveToolset: effective.effectiveToolset,
+    exposureRevision: configured.exposureRevision,
+    lastAppliedAt: configured.lastAppliedAt,
+    source: effective.source,
+    reconnectRequired: configured.configuredAccessMode !== effective.effectiveAccessMode,
+    schemaRefreshRequired: configured.configuredAccessMode !== effective.effectiveAccessMode,
+    restartRequired: false,
+    repositoryPolicyMode: repositoryPolicy.mode,
+    repositoryPolicyLabel: accessModeDescriptor(repositoryPolicy.mode).shortLabel,
+    toolGroups: accessToolGroups(effective.effectiveAccessMode),
+  };
+}
+
 /**
  * Evaluate local MCP tool-surface freshness for the console.
  * Probes live MCP /health; does not invent ChatGPT connector tool names.
@@ -626,9 +691,12 @@ export async function evaluateConsoleConnectorFreshness(
   ctx: ConsoleFacadeContext,
   opts: { connectorToolNames?: readonly string[] | null; refreshRuntimeFile?: boolean } = {},
 ): Promise<ConnectorFreshnessReport> {
-  const expected = controllerExpectedToolNames(
-    runtimePolicy(ctx.repository.canonicalRoot, { profile: 'controller' }),
-  );
+  const toolCtx = createMcpToolContext({
+    repo: ctx.repository.canonicalRoot,
+    controllerHome: ctx.controllerHome,
+    profile: 'controller',
+  }) as MultiRepositoryMcpToolContext;
+  const expected = controllerExposedToolNames(toolCtx);
   return buildLocalConnectorStatusForRepo({
     repoRoot: ctx.repository.canonicalRoot,
     expectedTools: expected,
@@ -893,8 +961,7 @@ export async function buildCommandCenter(
   const plugins = listConsolePlugins(ctx);
   const pluginSummary = buildPluginSummary(plugins);
   const goalLoop = buildGoalLoopStatusView(ctx);
-  const accessPolicy = readRepositoryAccessPolicy(ctx.controllerHome, ctx.repository.repoId);
-  const accessDescriptor = accessModeDescriptor(accessPolicy.mode);
+  const access = controllerAccessStateView(ctx);
   const banner = readiness.connectorFreshness?.severity === 'warning' || readiness.connectorFreshness?.severity === 'error'
     ? readiness.connectorFreshness.summary
     : undefined;
@@ -902,9 +969,10 @@ export async function buildCommandCenter(
   return {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
-    accessMode: accessPolicy.mode,
-    accessModeLabel: accessDescriptor.shortLabel,
-    accessModeDescription: accessDescriptor.description,
+    accessMode: access.configuredAccessMode,
+    accessModeLabel: access.configuredAccessModeLabel,
+    accessModeDescription: accessModeDescriptor(access.configuredAccessMode).description,
+    access,
     readiness,
     currentRepository,
     repositories,
@@ -1116,7 +1184,11 @@ export function consoleGoalLoopPolicyUpdate(ctx: ConsoleFacadeContext, body: Rec
 
 export function getConsoleAccessPolicy(ctx: ConsoleFacadeContext) {
   const policy = readRepositoryAccessPolicy(ctx.controllerHome, ctx.repository.repoId);
-  return { policy, descriptor: accessModeDescriptor(policy.mode) };
+  return {
+    policy,
+    descriptor: accessModeDescriptor(policy.mode),
+    access: controllerAccessStateView(ctx),
+  };
 }
 
 export function setConsoleAccessPolicy(
@@ -1130,8 +1202,13 @@ export function setConsoleAccessPolicy(
   if (input.mode === 'full_access' && input.confirmationText !== 'enable-full-access') {
     throw new Error('FULL_ACCESS_STRONG_CONFIRMATION_REQUIRED: confirmation text must equal enable-full-access');
   }
+  persistControllerAccessMode(ctx.controllerHome, input.mode, ctx.repository.canonicalRoot);
   const policy = writeRepositoryAccessPolicy(ctx.controllerHome, ctx.repository.repoId, input.mode, 'user');
-  return { policy, descriptor: accessModeDescriptor(policy.mode) };
+  return {
+    policy,
+    descriptor: accessModeDescriptor(policy.mode),
+    access: controllerAccessStateView(ctx),
+  };
 }
 
 export function startConsoleWork(

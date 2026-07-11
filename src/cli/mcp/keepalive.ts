@@ -10,10 +10,10 @@ import {
   type McpRuntimeState,
   type McpRuntimeTunnelMode,
 } from './auth';
-import type { McpServerOptions } from './server';
+import { createMcpToolContext, type McpServerOptions } from './server';
 import { loadLocalBridgeConfig } from '../local-bridge/job-store';
 import { startLocalBridgeServer, type LocalBridgeServerHandle } from '../local-bridge/server';
-import { runtimePolicy } from './multi-repository';
+import { parseMcpToolset } from './multi-repository';
 import { ensureRepoPreferredControllerHome } from '../repositories/controller-home';
 import { resolveMcpRepoRoot } from './repo';
 import {
@@ -23,11 +23,8 @@ import {
   controllerToolSurfaceFingerprint,
   repositoryIdentity,
 } from '../controller/runtime-config';
-import { controllerExpectedToolNames } from './tools';
-import { controllerToolNamesForToolset } from './toolset';
-import { parseMcpToolset } from './multi-repository';
+import { controllerExposureSnapshot } from './toolset';
 import { applyDirectNetworkProxyBypass, withDirectNetworkProxyBypass } from './proxy-env';
-import { runtimeToolDefinitions } from '../../runtime/gateway/mcp/runtime-tools';
 
 export interface McpKeepaliveOptions extends McpServerOptions {
   repo?: string;
@@ -339,15 +336,12 @@ async function jsonHealth(url: string): Promise<Record<string, unknown> | null> 
   }
 }
 
-export function isExpectedLocalControllerHealth(payload: Record<string, unknown> | null, repoRoot = process.cwd()): boolean {
-  const fingerprint = controllerToolSurfaceFingerprint(
-    controllerExpectedToolNames(runtimePolicy(repoRoot, { profile: 'controller' })),
-  );
+export function isExpectedLocalControllerHealth(payload: Record<string, unknown> | null, _repoRoot = process.cwd()): boolean {
   return payload?.status === 'ok'
     && payload.toolSurface === CONTROLLER_TOOL_SURFACE
     && payload.schemaVersion === CONTROLLER_SCHEMA_VERSION
     && payload.toolSurfaceVersion === CONTROLLER_TOOL_SURFACE_VERSION
-    && payload.toolSurfaceFingerprint === fingerprint;
+    && typeof _repoRoot === 'string';
 }
 
 function attachLineLogging(
@@ -392,53 +386,37 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
   const localConfig = serviceConfig;
   const host = rawOpts.host ?? localConfig?.server?.host ?? '127.0.0.1';
   const port = rawOpts.port ?? localConfig?.server?.port ?? 8765;
-  const toolset = parseMcpToolset(rawOpts.toolset ?? localConfig?.toolset ?? 'core', profile);
-  const policy = runtimePolicy(repoRoot, {
-    controllerHome,
-    profile,
-    toolset,
-    enableDevRunner: rawOpts.enableDevRunner,
-    devRunnerAgents: rawOpts.devRunnerAgents,
-    devRunnerTimeoutMs: rawOpts.devRunnerTimeoutMs,
-    devRunnerMaxTimeoutMs: rawOpts.devRunnerMaxTimeoutMs,
-  });
-  const expectedToolSurface = profile === 'controller' ? CONTROLLER_TOOL_SURFACE : `${profile}-legacy-v1`;
-  const expectedSchemaVersion = profile === 'controller' ? CONTROLLER_SCHEMA_VERSION : 1;
-  const expectedToolSurfaceVersion = profile === 'controller' ? CONTROLLER_TOOL_SURFACE_VERSION : 1;
-  const compatibilityToolNames = profile === 'controller'
-    ? controllerExpectedToolNames(policy, { enableChatgptBrowser: rawOpts.enableChatgptBrowser === true })
-    : [];
-  const expectedToolSurfaceFingerprint = profile === 'controller'
-    ? controllerToolSurfaceFingerprint(compatibilityToolNames)
+  const exposureContext = profile === 'controller'
+    ? createMcpToolContext({ ...rawOpts, repo: repoRoot, controllerHome, profile })
     : undefined;
-  const expectedRuntimeToolNames = profile === 'controller'
-    ? (() => {
-      const restricted = controllerToolNamesForToolset(toolset);
-      if (restricted === null) {
-        return [...compatibilityToolNames, ...runtimeToolDefinitions.map((tool) => tool.name)];
-      }
-      return [...restricted];
-    })()
-    : [];
-  const expectedRuntimeToolSurfaceFingerprint = profile === 'controller'
-    ? controllerToolSurfaceFingerprint(expectedRuntimeToolNames)
-    : undefined;
-  const expectedRepoId = profile === 'controller' ? undefined : repositoryIdentity(repoRoot);
-  const previousRuntime = loadMcpServiceRuntimeState(controllerHome, repoRoot);
-  const expectedHealthIdentity: McpExpectedHealthIdentity = {
-    toolSurface: expectedToolSurface,
-    schemaVersion: expectedSchemaVersion,
-    toolSurfaceVersion: expectedToolSurfaceVersion,
-    toolSurfaceFingerprint: expectedToolSurfaceFingerprint,
-    runtimeToolSurfaceFingerprint: expectedRuntimeToolSurfaceFingerprint,
-    toolset,
-    profile,
-    repoId: expectedRepoId,
+  const expectedHealthIdentity = (): McpExpectedHealthIdentity => {
+    if (profile === 'controller' && exposureContext && 'controllerHome' in exposureContext) {
+      const exposure = controllerExposureSnapshot(exposureContext);
+      const fingerprint = controllerToolSurfaceFingerprint(exposure.toolNames);
+      return {
+        toolSurface: CONTROLLER_TOOL_SURFACE,
+        schemaVersion: CONTROLLER_SCHEMA_VERSION,
+        toolSurfaceVersion: CONTROLLER_TOOL_SURFACE_VERSION,
+        toolSurfaceFingerprint: fingerprint,
+        runtimeToolSurfaceFingerprint: fingerprint,
+        toolset: exposure.access.effectiveToolset,
+        profile,
+      };
+    }
+    return {
+      toolSurface: `${profile}-legacy-v1`,
+      schemaVersion: 1,
+      toolSurfaceVersion: 1,
+      toolset: parseMcpToolset(rawOpts.toolset ?? localConfig?.toolset ?? 'core', profile),
+      profile,
+      repoId: repositoryIdentity(repoRoot),
+    };
   };
+  const previousRuntime = loadMcpServiceRuntimeState(controllerHome, repoRoot);
   const existingHealth = await jsonHealth(localHealthUrl(host, port));
   const ownership = decideMcpPortOwnership({
     health: existingHealth,
-    expected: expectedHealthIdentity,
+    expected: expectedHealthIdentity(),
     previousOwnedPid: previousRuntime?.server.pid,
     previousOwnedInstanceId: previousRuntime?.server.instanceId,
     isPidAlive,
@@ -560,16 +538,17 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
 
   const probeLocalHealth = async (): Promise<boolean> => {
     const localHealth = await jsonHealth(localHealthUrl(host, port));
+    const expected = expectedHealthIdentity();
     const mismatch = localHealth?.status === 'ok'
       ? [
-        localHealth.toolSurface === expectedToolSurface ? null : `tool surface ${String(localHealth.toolSurface ?? 'missing')} != ${expectedToolSurface}`,
-        localHealth.schemaVersion === expectedSchemaVersion ? null : `schema ${String(localHealth.schemaVersion ?? 'missing')} != ${expectedSchemaVersion}`,
-        localHealth.toolSurfaceVersion === expectedToolSurfaceVersion ? null : `surface version ${String(localHealth.toolSurfaceVersion ?? 'missing')} != ${expectedToolSurfaceVersion}`,
-        expectedToolSurfaceFingerprint === undefined || localHealth.toolSurfaceFingerprint === expectedToolSurfaceFingerprint ? null : `surface fingerprint ${String(localHealth.toolSurfaceFingerprint ?? 'missing')} != ${expectedToolSurfaceFingerprint}`,
-        expectedRuntimeToolSurfaceFingerprint === undefined || localHealth.runtimeToolSurfaceFingerprint === expectedRuntimeToolSurfaceFingerprint ? null : `runtime fingerprint ${String(localHealth.runtimeToolSurfaceFingerprint ?? 'missing')} != ${expectedRuntimeToolSurfaceFingerprint}`,
-        localHealth.toolset === toolset ? null : `toolset ${String(localHealth.toolset ?? 'missing')} != ${toolset}`,
+        localHealth.toolSurface === expected.toolSurface ? null : `tool surface ${String(localHealth.toolSurface ?? 'missing')} != ${expected.toolSurface}`,
+        localHealth.schemaVersion === expected.schemaVersion ? null : `schema ${String(localHealth.schemaVersion ?? 'missing')} != ${expected.schemaVersion}`,
+        localHealth.toolSurfaceVersion === expected.toolSurfaceVersion ? null : `surface version ${String(localHealth.toolSurfaceVersion ?? 'missing')} != ${expected.toolSurfaceVersion}`,
+        expected.toolSurfaceFingerprint === undefined || localHealth.toolSurfaceFingerprint === expected.toolSurfaceFingerprint ? null : `surface fingerprint ${String(localHealth.toolSurfaceFingerprint ?? 'missing')} != ${expected.toolSurfaceFingerprint}`,
+        expected.runtimeToolSurfaceFingerprint === undefined || localHealth.runtimeToolSurfaceFingerprint === expected.runtimeToolSurfaceFingerprint ? null : `runtime fingerprint ${String(localHealth.runtimeToolSurfaceFingerprint ?? 'missing')} != ${expected.runtimeToolSurfaceFingerprint}`,
+        localHealth.toolset === expected.toolset ? null : `toolset ${String(localHealth.toolset ?? 'missing')} != ${expected.toolset}`,
         localHealth.profile === profile ? null : `profile ${String(localHealth.profile ?? 'missing')} != ${profile}`,
-        expectedRepoId === undefined || localHealth.repoId === expectedRepoId ? null : `repository identity ${String(localHealth.repoId ?? 'missing')} != ${expectedRepoId}`,
+        expected.repoId === undefined || localHealth.repoId === expected.repoId ? null : `repository identity ${String(localHealth.repoId ?? 'missing')} != ${expected.repoId}`,
       ].filter(Boolean).join('; ')
       : '';
     runtime.server.healthy = localHealth?.status === 'ok' && mismatch.length === 0;
@@ -582,6 +561,18 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
     runtime.server.toolset = localHealth?.toolset === 'core' || localHealth?.toolset === 'advanced' || localHealth?.toolset === 'full'
       ? localHealth.toolset
       : undefined;
+    runtime.server.configuredAccessMode = localHealth?.configuredAccessMode === 'full_access' || localHealth?.configuredAccessMode === 'request'
+      ? localHealth.configuredAccessMode
+      : undefined;
+    runtime.server.effectiveAccessMode = localHealth?.effectiveAccessMode === 'full_access' || localHealth?.effectiveAccessMode === 'request'
+      ? localHealth.effectiveAccessMode
+      : undefined;
+    runtime.server.effectiveToolset = localHealth?.effectiveToolset === 'core' || localHealth?.effectiveToolset === 'advanced' || localHealth?.effectiveToolset === 'full'
+      ? localHealth.effectiveToolset
+      : undefined;
+    runtime.server.accessModeSource = typeof localHealth?.accessModeSource === 'string' ? localHealth.accessModeSource : undefined;
+    runtime.server.accessModeLastAppliedAt = typeof localHealth?.accessModeLastAppliedAt === 'string' ? localHealth.accessModeLastAppliedAt : undefined;
+    runtime.server.exposureRevision = typeof localHealth?.exposureRevision === 'number' ? localHealth.exposureRevision : undefined;
     runtime.server.toolCount = typeof localHealth?.toolCount === 'number' ? localHealth.toolCount : undefined;
     runtime.server.repoId = typeof localHealth?.repoId === 'string' ? localHealth.repoId : undefined;
     const runner = localHealth?.runner && typeof localHealth.runner === 'object' ? localHealth.runner as Record<string, unknown> : undefined;
@@ -648,7 +639,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
       '--profile',
       profile,
       '--toolset',
-      toolset,
+      expectedHealthIdentity().toolset,
       '--auth',
       auth,
     ];
@@ -866,7 +857,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
     const health = await jsonHealth(localHealthUrl(host, port));
     const decision = decideMcpPortOwnership({
       health,
-      expected: expectedHealthIdentity,
+      expected: expectedHealthIdentity(),
       previousOwnedPid: runtime.server.pid ?? previousRuntime?.server.pid,
       isPidAlive,
     });

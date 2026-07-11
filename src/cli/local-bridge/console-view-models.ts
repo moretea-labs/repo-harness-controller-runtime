@@ -236,6 +236,23 @@ export interface PluginSummaryViewModel {
   lines: string[];
 }
 
+export interface AccessStateViewModel {
+  configuredAccessMode: 'request' | 'full_access';
+  configuredAccessModeLabel: string;
+  effectiveAccessMode: 'request' | 'full_access';
+  effectiveAccessModeLabel: string;
+  effectiveToolset: 'core' | 'advanced' | 'full';
+  exposureRevision: number;
+  lastAppliedAt?: string;
+  source: string;
+  reconnectRequired: boolean;
+  schemaRefreshRequired: boolean;
+  restartRequired: boolean;
+  repositoryPolicyMode: 'request' | 'full_access';
+  repositoryPolicyLabel: string;
+  toolGroups: string[];
+}
+
 /** Compact autonomous goal-loop status for console / local-bridge (no raw internal dumps). */
 export interface GoalLoopStatusViewModel {
   activeCount: number;
@@ -274,6 +291,7 @@ export interface CommandCenterViewModel {
   accessMode: 'request' | 'full_access';
   accessModeLabel: string;
   accessModeDescription: string;
+  access: AccessStateViewModel;
   readiness: SystemReadinessViewModel;
   currentRepository?: RepositoryCardViewModel;
   repositories: RepositoryCardViewModel[];

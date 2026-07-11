@@ -14,7 +14,11 @@ import { callAccessTool } from './access-tools';
 import { callRepositoryTool } from './repository-tools';
 import { callRuntimeTool } from '../../runtime/gateway/mcp/runtime-tools';
 import { injectDurableCommandFields, routeDurableMcpCall } from '../../runtime/gateway/mcp/router';
-import { exposedControllerToolDefinitions, isControllerToolExposed } from './toolset';
+import {
+  exposedControllerToolDefinitions,
+  isControllerToolExposed,
+  resolveControllerAccessStateForContext,
+} from './toolset';
 
 export type { McpServerOptions } from './multi-repository';
 export { buildMultiRepositoryToolDefinitions, callMultiRepositoryTool } from './multi-repository';
@@ -51,7 +55,13 @@ export function createRepoHarnessMcpServerFromContext(ctx: ServerToolContext): S
     const args = (request.params.arguments ?? {}) as Record<string, unknown>;
     if (isMultiRepositoryContext(ctx)) {
       if (!isControllerToolExposed(ctx, name)) {
-        const value = { error: { code: 'TOOL_NOT_EXPOSED', message: `${name} is not exposed by the ${ctx.toolset} MCP toolset.` } };
+        const access = resolveControllerAccessStateForContext(ctx);
+        const value = {
+          error: {
+            code: 'TOOL_NOT_EXPOSED',
+            message: `${name} is not exposed while effective access mode is ${access.effectiveAccessMode}. Use rh_access operation=set to switch Request vs Full Access.`,
+          },
+        };
         return { content: [{ type: 'text', text: JSON.stringify(value, null, 2) }], structuredContent: value, isError: true };
       }
       const accessResult = callAccessTool(ctx, name, args);

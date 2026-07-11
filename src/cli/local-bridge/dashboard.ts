@@ -280,10 +280,10 @@ function advancedBlock(data){
 }
 
 function renderChrome(){
-  var cc=obj(commandCenter), ready=obj(cc.readiness), repo=obj(cc.currentRepository);
+  var cc=obj(commandCenter), ready=obj(cc.readiness), repo=obj(cc.currentRepository), access=obj(cc.access);
   var plug=obj(cc.pluginSummary);
   document.getElementById('topRepo').textContent=repo.name||'未选择';
-  document.getElementById('topAccessMode').textContent=cc.accessModeLabel||(selectedAccessMode==='full_access'?'Full Access':'Request');
+  document.getElementById('topAccessMode').textContent=access.effectiveAccessModeLabel||cc.accessModeLabel||(selectedAccessMode==='full_access'?'Full Access':'Request');
   document.getElementById('topReady').textContent=ready.label||'未知';
   setDot('readyDot', ready.state==='blocked'?'red':ready.state==='needs_setup'?'amber':'green');
   document.getElementById('topConnector').textContent=ready.connectorLabel||'连接';
@@ -302,7 +302,7 @@ function renderChrome(){
 }
 
 function renderHome(){
-  var cc=obj(commandCenter), ready=obj(cc.readiness), work=obj(cc.currentWork), handoffs=arr(cc.handoffs).slice(0,3);
+  var cc=obj(commandCenter), ready=obj(cc.readiness), work=obj(cc.currentWork), handoffs=arr(cc.handoffs).slice(0,3), access=obj(cc.access);
   var repo=obj(cc.currentRepository);
   var setup=obj(cc.setupGuide);
   var warnings=arr(cc.warnings).map(function(w){return '<div class="warn">'+esc(w)+'</div>'}).join('');
@@ -312,6 +312,10 @@ function renderHome(){
   var accessDescription=accessMode==='full_access'
     ? '允许当前仓库内文件修改、命令、依赖和本地 Git；远程、破坏性、仓库外路径和密钥仍需确认或保持禁止。'
     : '在安全边界内执行；需要命令、依赖、本地 Git 或更高权限时向你请求。';
+  var accessDetails=
+    '<div class="muted" style="margin-top:10px">已配置：<strong>'+esc(access.configuredAccessModeLabel||accessLabel)+'</strong> · 实际生效：<strong>'+esc(access.effectiveAccessModeLabel||accessLabel)+'</strong> · 工具面：<strong>'+esc(access.effectiveToolset||'—')+'</strong></div>'+
+    '<div class="faint" style="margin-top:4px">修订：'+esc(String(access.exposureRevision||0))+(access.lastAppliedAt?' · 最近应用：'+esc(access.lastAppliedAt):'')+'</div>'+
+    (access.reconnectRequired?'<div class="warn" style="margin-top:10px;margin-bottom:0">连接器工具快照需要刷新/重连后，新的 Full Access 工具面才会在 ChatGPT 中出现。</div>':'');
   var el=document.getElementById('view-home');
   var setupHtml=setup.needed
     ? '<div class="setup"><strong>'+esc(setup.title||'需要先设置仓库')+'</strong><p class="muted" style="margin:6px 0 10px">'+esc(setup.body||'')+'</p>'+btn(setup.actionLabel||'去设置仓库','data-nav="repositories"','primary')+'</div>'
@@ -329,7 +333,7 @@ function renderHome(){
         '<div class="access-picker">'+
           '<button class="access-option '+(accessMode==='request'?'active':'')+'" data-access-mode="request"><strong>Request</strong><span>需要提升权限时请求确认</span></button>'+
           '<button class="access-option full '+(accessMode==='full_access'?'active':'')+'" data-access-mode="full_access"><strong>Full Access</strong><span>当前仓库内正常开发不再反复询问</span></button>'+
-        '</div><p class="muted" style="margin:9px 0 0">'+esc(accessDescription)+'</p></div>'+
+        '</div><p class="muted" style="margin:9px 0 0">'+esc(accessDescription)+'</p>'+accessDetails+'</div>'+
       '<details class="advanced" style="margin-top:10px"><summary>补充验收标准和允许修改的路径</summary>'+
         '<div class="row" style="margin-top:10px"><input class="input" id="taskAcceptance" placeholder="验收标准（可选，用分号分隔）" style="flex:1"></div>'+
         '<div class="row"><input class="input" id="taskPaths" placeholder="允许修改的路径（可选，逗号分隔）" style="flex:1"><input class="input" id="taskFiles" type="number" min="0" placeholder="预计文件数" style="width:140px"></div>'+
@@ -1085,8 +1089,9 @@ function setAccessMode(mode){
   setBusy(true,'更新权限等级…');
   api('/api/console/access-policy'+repoQuery(),{method:'POST',body:JSON.stringify({mode:mode,confirmAuthorization:true,confirmationText:mode==='full_access'?'enable-full-access':undefined})}).then(function(res){
     var policy=obj(res.policy);var descriptor=obj(res.descriptor);
+    var access=obj(res.access);
     selectedAccessMode=policy.mode==='full_access'?'full_access':'request';
-    commandCenter=commandCenter||{};commandCenter.accessMode=selectedAccessMode;commandCenter.accessModeLabel=descriptor.shortLabel||(selectedAccessMode==='full_access'?'Full Access':'Request');commandCenter.accessModeDescription=descriptor.description||'';
+    commandCenter=commandCenter||{};commandCenter.accessMode=selectedAccessMode;commandCenter.accessModeLabel=descriptor.shortLabel||(selectedAccessMode==='full_access'?'Full Access':'Request');commandCenter.accessModeDescription=descriptor.description||'';commandCenter.access=access;
     toast('权限已切换为 '+commandCenter.accessModeLabel);renderChrome();renderHome();
   }).catch(function(e){toast(e.message||'权限更新失败')}).finally(function(){setBusy(false)});
 }
@@ -1275,7 +1280,7 @@ function refreshAll(opts){
   refreshInFlight=true;
   return api('/api/console/command-center'+repoQuery()).then(function(res){
     commandCenter=res;
-    selectedAccessMode=res.accessMode==='full_access'?'full_access':'request';
+    selectedAccessMode=(obj(res.access).configuredAccessMode||res.accessMode)==='full_access'?'full_access':'request';
     lastRefreshedAt=new Date().toLocaleTimeString();
     var repo=obj(res.currentRepository);
     if(repo.id)rememberRepo(repo.id);

@@ -21,6 +21,7 @@ import {
   MAX_AGENT_TIMEOUT_MS,
 } from "../controller/runtime-config";
 import { ensureControllerHome, ensureRepoPreferredControllerHome } from "../repositories/controller-home";
+import { accessModeForLegacyToolset } from "./access-mode";
 
 export interface McpSetupResult {
   status: "ok";
@@ -444,6 +445,7 @@ export function runMcpSetupChatgpt(opts: {
   const oauth = ensureMcpControllerHomeOAuthPassphrase(controllerHome);
   if (token.changed) changed.push(token.path);
   if (oauth.changed) changed.push(oauth.path);
+  const toolset = existingConfig?.toolset ?? "core";
   const config = {
     version: 1,
     repo: repoRoot,
@@ -464,7 +466,10 @@ export function runMcpSetupChatgpt(opts: {
       ...(endpoint ? { endpoint } : {}),
     },
     profile: existingConfig?.profile ?? "controller",
-    toolset: existingConfig?.toolset ?? "core",
+    toolset,
+    accessMode: existingConfig?.accessMode ?? accessModeForLegacyToolset(toolset),
+    accessModeUpdatedAt: existingConfig?.accessModeUpdatedAt,
+    accessModeRevision: existingConfig?.accessModeRevision ?? 0,
     localController: existingConfig?.localController ?? {
       enabled: true,
       host: "127.0.0.1",

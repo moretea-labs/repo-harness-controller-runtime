@@ -14,6 +14,7 @@ import {
   normalizeKeepalivePublicEndpoint,
   resolveSelfCliInvocation,
 } from './keepalive';
+import { resolveControllerAccessState } from './access-mode';
 import { applyDirectNetworkProxyBypass, withDirectNetworkProxyBypass } from './proxy-env';
 import { resolveMcpRepoRoot } from './repo';
 import { runMcpDoctor, runMcpSetupChatgpt, runMcpSetupCodex, type McpSetupResult } from './setup';
@@ -352,11 +353,7 @@ function resolveRestartConfig(repoRoot: string, explicitLogFile?: string, explic
     runtime?.tunnel?.name,
   );
   const logs = resolveLogPaths(repoRoot, explicitLogFile);
-  const toolset = localConfig?.toolset === 'full'
-    ? 'full'
-    : localConfig?.toolset === 'advanced'
-      ? 'advanced'
-      : 'core';
+  const toolset = resolveControllerAccessState({ controllerHome, repoRoot }).effectiveToolset;
 
   const defaultServerName = doctor.chatgpt?.defaultServerName?.trim();
   const expectedToolSurface = doctor.chatgpt?.expectedToolSurface?.trim();

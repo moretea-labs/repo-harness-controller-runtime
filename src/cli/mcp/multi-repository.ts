@@ -26,6 +26,7 @@ export interface MultiRepositoryMcpToolContext extends McpToolContext {
   controllerHome: string;
   explicitRepository?: RepositoryRecord;
   toolset: McpToolset;
+  toolsetLocked: boolean;
 }
 
 type ToolResult = CallToolResult;
@@ -229,8 +230,9 @@ export function createMcpToolContext(opts: McpServerOptions): MultiRepositoryMcp
   const config = policy.profile === 'controller'
     ? loadMcpServiceLocalConfig(controllerHome, explicitRepository?.canonicalRoot)
     : loadMcpLocalConfig(policyRoot);
+  const toolsetOverride = opts.toolset ?? process.env.REPO_HARNESS_MCP_TOOLSET;
   const toolset = parseMcpToolset(
-    opts.toolset ?? process.env.REPO_HARNESS_MCP_TOOLSET ?? config?.toolset,
+    toolsetOverride ?? config?.toolset,
     policy.profile,
   );
   return {
@@ -239,6 +241,7 @@ export function createMcpToolContext(opts: McpServerOptions): MultiRepositoryMcp
     repoRoot: policyRoot,
     policy,
     toolset,
+    toolsetLocked: toolsetOverride !== undefined,
     enableChatgptBrowser: opts.enableChatgptBrowser === true,
   };
 }

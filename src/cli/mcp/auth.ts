@@ -2,6 +2,8 @@ import { randomBytes } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { resolveControllerHome } from '../repositories/controller-home';
+import type { AccessMode } from '../../runtime/control-plane/governance/access-policy';
+import type { McpToolset } from './types';
 
 export interface McpLocalConfig {
   version?: number;
@@ -22,6 +24,9 @@ export interface McpLocalConfig {
   };
   profile?: string;
   toolset?: 'core' | 'advanced' | 'full';
+  accessMode?: AccessMode;
+  accessModeUpdatedAt?: string;
+  accessModeRevision?: number;
   devMode?: {
     agentRunner?: boolean;
     allowedAgents?: string[];
@@ -64,6 +69,12 @@ export interface McpRuntimeState {
     toolSurfaceFingerprint?: string;
     runtimeToolSurfaceFingerprint?: string;
     toolset?: 'core' | 'advanced' | 'full';
+    configuredAccessMode?: AccessMode;
+    effectiveAccessMode?: AccessMode;
+    effectiveToolset?: McpToolset;
+    accessModeSource?: string;
+    accessModeLastAppliedAt?: string;
+    exposureRevision?: number;
     toolCount?: number;
     repoId?: string;
     defaultTimeoutMs?: number;
@@ -197,6 +208,14 @@ export function loadMcpServiceLocalConfig(controllerHome: string, legacyRepoRoot
 export function loadMcpServiceRuntimeState(controllerHome: string, legacyRepoRoot?: string): McpRuntimeState | null {
   return readJsonFile<McpRuntimeState>(mcpControllerHomeRuntimeStatePath(controllerHome))
     ?? (legacyRepoRoot ? loadMcpRuntimeState(legacyRepoRoot) : null);
+}
+
+export function writeMcpLocalConfig(repoRoot: string, config: McpLocalConfig): string {
+  return writeJsonFile(mcpLocalConfigPath(repoRoot), config);
+}
+
+export function writeMcpServiceLocalConfig(controllerHome: string, config: McpLocalConfig): string {
+  return writeJsonFile(mcpControllerHomeLocalConfigPath(controllerHome), config);
 }
 
 export function writeMcpRuntimeState(repoRoot: string, state: McpRuntimeState): string {
