@@ -1526,6 +1526,7 @@ async function executeRepositoryCommand(
       cwd: payload.cwd,
       authorization: "confirmed_plan",
       approvalToken: payload.approvalToken,
+      approvalRequestId: payload.approvalRequestId,
       timeoutMs: payload.timeoutMs,
       maxOutputBytes: payload.maxOutputBytes,
     }, {

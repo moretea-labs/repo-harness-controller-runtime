@@ -80,6 +80,7 @@ export interface RepositoryCommandPayload {
   command: string;
   cwd?: string;
   approvalToken?: string;
+  approvalRequestId?: string;
   timeoutMs?: number;
   maxOutputBytes?: number;
 }

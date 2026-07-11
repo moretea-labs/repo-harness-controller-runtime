@@ -2,6 +2,7 @@ import { spawnSync } from 'child_process';
 import { capProcessOutput, redactProcessOutput } from '../../effects/process-runner';
 import { executeRepositoryGitCommand, type RepositoryGitExecution } from './git-command-executor';
 import type { RepositoryRecord } from './types';
+import type { AuthorizationDecision } from '../../runtime/control-plane/governance/authorization';
 
 const MAX_GIT_OUTPUT_BYTES = 512 * 1024;
 const DEFAULT_GIT_OUTPUT_BYTES = 128 * 1024;
@@ -184,20 +185,20 @@ export function repositoryGitMergeBranch(controllerHome: string, repository: Rep
   return { branch, before, execution, after: repositoryGitStatus(repository) };
 }
 
-export function repositoryGitDeleteBranch(controllerHome: string, repository: RepositoryRecord, input: { branch: unknown; force?: unknown }): { branch: string; execution: RepositoryGitExecution } {
+export function repositoryGitDeleteBranch(controllerHome: string, repository: RepositoryRecord, input: { branch: unknown; force?: unknown; authorizationDecision?: AuthorizationDecision; sessionId?: string; principalId?: string; workId?: string; goalId?: string }): { branch: string; execution: RepositoryGitExecution } {
   const branch = assertSafeBranchName(input.branch);
   const current = repositoryGitStatus(repository).branch;
   if (current === branch) throw new Error(`GIT_DELETE_CURRENT_BRANCH_DENIED: cannot delete the checked-out branch: ${branch}`);
-  return { branch, execution: executeRepositoryGitCommand(controllerHome, repository, { args: ['branch', input.force === true ? '-D' : '-d', branch], authorization: 'explicit_user_request' }) };
+  return { branch, execution: executeRepositoryGitCommand(controllerHome, repository, { args: ['branch', input.force === true ? '-D' : '-d', branch], authorization: 'explicit_user_request', ...input }) };
 }
 
-export function repositoryGitCommit(controllerHome: string, repository: RepositoryRecord, input: { message: unknown; paths?: unknown; allowEmpty?: unknown }): RepositoryGitCommitResult {
+export function repositoryGitCommit(controllerHome: string, repository: RepositoryRecord, input: { message: unknown; paths?: unknown; allowEmpty?: unknown; authorizationDecision?: AuthorizationDecision; sessionId?: string; principalId?: string; workId?: string; goalId?: string }): RepositoryGitCommitResult {
   const before = repositoryGitStatus(repository);
   const message = normalizeCommitMessage(input.message);
   const paths = normalizePaths(input.paths);
   let stage: RepositoryGitExecution | undefined;
   if (paths.length > 0) {
-    stage = executeRepositoryGitCommand(controllerHome, repository, { args: ['add', '--all', '--', ...paths], authorization: 'explicit_user_request' });
+    stage = executeRepositoryGitCommand(controllerHome, repository, { args: ['add', '--all', '--', ...paths], authorization: 'explicit_user_request', ...input });
     if (stage.status !== 'executed' || stage.ok !== true) {
       return { repoId: repository.repoId, checkoutId: repository.activeCheckoutId, before, stage, after: repositoryGitStatus(repository), committed: false, error: { code: 'GIT_STAGE_FAILED', message: stage.stderr || 'git add failed' } };
     }
@@ -207,7 +208,7 @@ export function repositoryGitCommit(controllerHome: string, repository: Reposito
     return { repoId: repository.repoId, checkoutId: repository.activeCheckoutId, before, stage, after: repositoryGitStatus(repository), committed: false, error: { code: 'GIT_NOTHING_STAGED', message: 'No staged changes to commit. Pass paths to stage, or allow_empty=true for an empty commit.' } };
   }
   const commitArgs = ['commit', '-m', message, ...(input.allowEmpty === true ? ['--allow-empty'] : []), ...(paths.length > 0 ? ['--only', '--', ...paths] : [])];
-  const commit = executeRepositoryGitCommand(controllerHome, repository, { args: commitArgs, authorization: 'explicit_user_request' });
+  const commit = executeRepositoryGitCommand(controllerHome, repository, { args: commitArgs, authorization: 'explicit_user_request', ...input });
   const ok = commit.status === 'executed' && commit.ok === true;
   return {
     repoId: repository.repoId,
@@ -221,7 +222,7 @@ export function repositoryGitCommit(controllerHome: string, repository: Reposito
   };
 }
 
-export function repositoryGitFinishWorkflow(controllerHome: string, repository: RepositoryRecord, input: { targetBranch?: unknown; featureBranch?: unknown; deleteBranch?: unknown; noFf?: unknown }): RepositoryGitFinishResult {
+export function repositoryGitFinishWorkflow(controllerHome: string, repository: RepositoryRecord, input: { targetBranch?: unknown; featureBranch?: unknown; deleteBranch?: unknown; noFf?: unknown; authorizationDecision?: AuthorizationDecision; sessionId?: string; principalId?: string; workId?: string; goalId?: string }): RepositoryGitFinishResult {
   const before = repositoryGitStatus(repository);
   const featureBranch = assertSafeBranchName(input.featureBranch ?? before.branch);
   const targetBranch = assertSafeBranchName(input.targetBranch ?? repository.defaultBranch ?? 'main');
@@ -232,14 +233,14 @@ export function repositoryGitFinishWorkflow(controllerHome: string, repository: 
   if (featureBranch === targetBranch) {
     return { repoId: repository.repoId, checkoutId: repository.activeCheckoutId, featureBranch, targetBranch, before, steps, after: before, completed: false, error: { code: 'GIT_ALREADY_ON_TARGET', message: 'Current/feature branch equals target branch; nothing to merge or delete.' } };
   }
-  const switchTarget = executeRepositoryGitCommand(controllerHome, repository, { args: ['switch', targetBranch], authorization: 'explicit_user_request' });
+  const switchTarget = executeRepositoryGitCommand(controllerHome, repository, { args: ['switch', targetBranch], authorization: 'explicit_user_request', ...input });
   steps.push({ name: 'switch_target', execution: switchTarget });
   if (switchTarget.status !== 'executed' || switchTarget.ok !== true) return { repoId: repository.repoId, checkoutId: repository.activeCheckoutId, featureBranch, targetBranch, before, steps, after: repositoryGitStatus(repository), completed: false, error: { code: 'GIT_SWITCH_TARGET_FAILED', message: switchTarget.stderr || 'git switch failed' } };
-  const merge = executeRepositoryGitCommand(controllerHome, repository, { args: ['merge', ...(input.noFf === true ? ['--no-ff'] : ['--ff-only']), featureBranch], authorization: 'explicit_user_request' });
+  const merge = executeRepositoryGitCommand(controllerHome, repository, { args: ['merge', ...(input.noFf === true ? ['--no-ff'] : ['--ff-only']), featureBranch], authorization: 'explicit_user_request', ...input });
   steps.push({ name: 'merge_feature', execution: merge });
   if (merge.status !== 'executed' || merge.ok !== true) return { repoId: repository.repoId, checkoutId: repository.activeCheckoutId, featureBranch, targetBranch, before, steps, after: repositoryGitStatus(repository), completed: false, error: { code: 'GIT_MERGE_FAILED', message: merge.stderr || 'git merge failed' } };
   if (input.deleteBranch !== false) {
-    const del = executeRepositoryGitCommand(controllerHome, repository, { args: ['branch', '-d', featureBranch], authorization: 'explicit_user_request' });
+    const del = executeRepositoryGitCommand(controllerHome, repository, { args: ['branch', '-d', featureBranch], authorization: 'explicit_user_request', ...input });
     steps.push({ name: 'delete_feature_branch', execution: del });
     if (del.status !== 'executed' || del.ok !== true) return { repoId: repository.repoId, checkoutId: repository.activeCheckoutId, featureBranch, targetBranch, before, steps, after: repositoryGitStatus(repository), completed: false, error: { code: 'GIT_DELETE_FEATURE_FAILED', message: del.stderr || 'git branch -d failed' } };
   }

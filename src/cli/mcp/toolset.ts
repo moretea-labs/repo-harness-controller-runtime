@@ -9,6 +9,7 @@ import {
 } from './access-mode';
 import { repositoryToolDefinitions } from './repository-tools';
 import { runtimeToolDefinitions } from '../../runtime/gateway/mcp/runtime-tools';
+import { executionToolDefinitions } from '../../runtime/gateway/mcp/execution-tools';
 import { DEFAULT_CONTROLLER_TOOL_NAMES, PREFERRED_FACADE_TOOL_NAMES, STABLE_CONTROLLER_TOOL_NAMES } from './toolset-names';
 export { BOOTSTRAP_CONTROLLER_TOOL_NAMES, DEFAULT_CONTROLLER_TOOL_NAMES, PREFERRED_FACADE_TOOL_NAMES, STABLE_CONTROLLER_TOOL_NAMES } from './toolset-names';
 import type { McpToolset } from './types';
@@ -106,12 +107,13 @@ function uniqueDefinitions(definitions: McpToolDefinition[]): {
 
 export function allControllerToolDefinitions(ctx: MultiRepositoryMcpToolContext): McpToolDefinition[] {
   return uniqueDefinitions(
-    runtimeToolDefinitions.concat(accessToolDefinitions, repositoryToolDefinitions, buildMultiRepositoryToolDefinitions(ctx)),
+    runtimeToolDefinitions.concat(executionToolDefinitions, accessToolDefinitions, repositoryToolDefinitions, buildMultiRepositoryToolDefinitions(ctx)),
   ).definitions;
 }
 
 export function controllerExposureSnapshot(ctx: MultiRepositoryMcpToolContext): ControllerExposureSnapshot {
   const rawDefinitions = runtimeToolDefinitions.concat(
+    executionToolDefinitions,
     accessToolDefinitions,
     repositoryToolDefinitions,
     buildMultiRepositoryToolDefinitions(ctx),

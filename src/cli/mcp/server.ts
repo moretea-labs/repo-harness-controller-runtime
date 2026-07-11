@@ -13,6 +13,7 @@ import {
 import { callAccessTool } from './access-tools';
 import { callRepositoryTool } from './repository-tools';
 import { callRuntimeTool } from '../../runtime/gateway/mcp/runtime-tools';
+import { callExecutionTool } from '../../runtime/gateway/mcp/execution-tools';
 import { injectDurableCommandFields, routeDurableMcpCall } from '../../runtime/gateway/mcp/router';
 import {
   controllerExposureSnapshot,
@@ -64,6 +65,8 @@ export function createRepoHarnessMcpServerFromContext(ctx: ServerToolContext): S
       }
       const accessResult = callAccessTool(ctx, name, args);
       if (accessResult) return accessResult;
+      const executionResult = await callExecutionTool(ctx, name, args);
+      if (executionResult) return executionResult;
       const runtimeResult = await callRuntimeTool(ctx, name, args);
       if (runtimeResult) return runtimeResult;
       const durableResult = await routeDurableMcpCall(ctx, name, args);

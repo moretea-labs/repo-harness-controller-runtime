@@ -1,5 +1,5 @@
 export type RepositoryCommandRisk = 'readonly' | 'workspace_write' | 'remote_write' | 'destructive';
-export type RepositoryCommandAuthorization = 'explicit_user_request' | 'confirmed_plan';
+export type RepositoryCommandAuthorization = 'explicit_user_request' | 'confirmed_plan' | 'policy' | 'full_access' | 'goal_delegation' | 'gpt_risk_delegate' | 'user_confirmation';
 export type RepositoryCommandConfirmation = 'none' | 'authorization' | 'strong_confirmation';
 
 export interface RepositoryCommandClassification {

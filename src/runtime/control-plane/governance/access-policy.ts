@@ -29,6 +29,8 @@ export interface RepositoryAccessPolicy {
   schemaVersion: 1;
   repoId: string;
   mode: AccessMode;
+  /** Monotonic effective-policy version used to invalidate cached execution state. */
+  revision: number;
   updatedAt: string;
   updatedBy: 'user' | 'system';
 }
@@ -81,6 +83,7 @@ function defaultPolicy(repoId: string): RepositoryAccessPolicy {
     schemaVersion: 1,
     repoId,
     mode: 'full_access',
+    revision: 1,
     updatedAt: new Date(0).toISOString(),
     updatedBy: 'system',
   };
@@ -97,6 +100,9 @@ export function readRepositoryAccessPolicy(controllerHome: string, repoId: strin
       // A malformed existing policy fails closed to Request, while a missing
       // policy uses the usability-first Full Access default above.
       mode: normalizeAccessMode(parsed.mode, 'request'),
+      revision: typeof parsed.revision === 'number' && Number.isFinite(parsed.revision)
+        ? Math.max(1, Math.trunc(parsed.revision))
+        : 1,
       updatedAt: typeof parsed.updatedAt === 'string' && parsed.updatedAt.trim()
         ? parsed.updatedAt
         : new Date(0).toISOString(),
@@ -115,10 +121,12 @@ export function writeRepositoryAccessPolicy(
 ): RepositoryAccessPolicy {
   const path = repositoryAccessPolicyPath(controllerHome, repoId);
   mkdirSync(dirname(path), { recursive: true });
+  const previous = readRepositoryAccessPolicy(controllerHome, repoId);
   const policy: RepositoryAccessPolicy = {
     schemaVersion: 1,
     repoId,
     mode,
+    revision: previous.mode === mode ? previous.revision : previous.revision + 1,
     updatedAt: new Date().toISOString(),
     updatedBy,
   };

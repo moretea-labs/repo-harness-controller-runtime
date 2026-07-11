@@ -20,6 +20,9 @@ export interface McpServerOptions {
   devRunnerTimeoutMs?: number;
   devRunnerMaxTimeoutMs?: number;
   toolset?: McpToolset | string;
+  sessionId?: string;
+  principalId?: string;
+  controllerInstanceId?: string;
 }
 
 export interface MultiRepositoryMcpToolContext extends McpToolContext {
@@ -243,6 +246,9 @@ export function createMcpToolContext(opts: McpServerOptions): MultiRepositoryMcp
     toolset,
     toolsetLocked: toolsetOverride !== undefined,
     enableChatgptBrowser: opts.enableChatgptBrowser === true,
+    sessionId: opts.sessionId,
+    principalId: opts.principalId,
+    controllerInstanceId: opts.controllerInstanceId,
   };
 }
 

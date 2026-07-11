@@ -17,6 +17,18 @@ export const BOOTSTRAP_CONTROLLER_TOOL_NAMES = [
 export const STABLE_CONTROLLER_TOOL_NAMES = [
   ...PREFERRED_FACADE_TOOL_NAMES,
 
+  // Session-aware execution fast path and secure result retrieval.
+  'session_start',
+  'session_bind_repository',
+  'work_prepare',
+  'work_inspect',
+  'work_execute',
+  'work_validate',
+  'work_finalize',
+  'approval_resolve',
+  'result_read',
+  'result_search',
+
   // Controller truth, context, and readiness.
   'controller_capabilities',
   'controller_ready',
@@ -26,16 +38,12 @@ export const STABLE_CONTROLLER_TOOL_NAMES = [
 
   // Access policy and repository selection/bootstrap.
   'repository_access_get',
-  'repository_access_preview',
   'repository_access_set',
   'repository_list',
   'repository_get',
   'repository_register',
-  'repository_validate',
-  'repository_refresh',
   'repository_latest_source_diagnose',
   'repository_bootstrap_local_project',
-  'repository_workbench',
 
   // Source inspection and deterministic Direct Edit.
   'search_repository',
@@ -136,16 +144,6 @@ export const STABLE_CONTROLLER_TOOL_NAMES = [
   'assistant_readiness',
 
   // iOS/Xcode/simulator and visual evidence.
-  'review_artifacts_prepare',
-  'review_artifacts_index',
-  'ios_review_packet',
-  'ios_xcode_status',
-  'ios_simulators_list',
-  'ios_project_discover',
-  'ios_schemes_list',
-  'ios_simulator_boot',
-  'ios_app_build',
-  'ios_app_install',
   'ios_app_launch',
   'ios_simulator_screenshot',
   'ios_simulator_log_tail',

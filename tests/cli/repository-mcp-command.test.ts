@@ -177,7 +177,7 @@ describe("repository MCP command tools", () => {
     }
   });
 
-  test("requires the exact preview token before execution", async () => {
+  test("Full Access does not require a preview token for ordinary repository execution", async () => {
     const workspace = mkdtempSync(join(tmpdir(), "repo-harness-mcp-repo-command-token-"));
     const controllerHome = join(workspace, "controller-home");
     const repoRoot = join(workspace, "sample-repo");
@@ -200,8 +200,14 @@ describe("repository MCP command tools", () => {
         approval_token: "wrong-token",
       });
       const value = await json(executed);
-      expect(value.status).toBe("approval_required");
-      expect(value.after).toBeUndefined();
+      expect(value.accepted).toBe(true);
+      expect(typeof value.jobId).toBe("string");
+      let job = getLocalBridgeJob(repoRoot, value.jobId);
+      for (let attempt = 0; attempt < 120 && job.status === "running"; attempt += 1) {
+        await Bun.sleep(25);
+        job = getLocalBridgeJob(repoRoot, value.jobId);
+      }
+      expect(job.status).toBe("succeeded");
     } finally {
       await cleanupWorkspace([workspace, controllerHome, repoRoot]);
       rmSync(workspace, { recursive: true, force: true });

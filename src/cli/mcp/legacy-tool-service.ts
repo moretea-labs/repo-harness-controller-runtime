@@ -161,6 +161,11 @@ export interface McpToolContext {
   repoRoot: string;
   policy: McpPolicy;
   enableChatgptBrowser?: boolean;
+  /** Controller-issued MCP execution identity; absent on legacy non-controller calls. */
+  sessionId?: string;
+  /** Authenticated or controller-issued principal used to scope session state. */
+  principalId?: string;
+  controllerInstanceId?: string;
 }
 
 export interface McpToolDefinition {
