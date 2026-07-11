@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - feature/access-mode-console-ui
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
@@ -15,6 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: feature/access-mode-console-ui
           fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
         with:
