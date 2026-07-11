@@ -148,7 +148,14 @@ describe("controller service lifecycle", () => {
     expect(start.status, start.stderr || start.stdout).toBe(0);
     const firstStart = parseJsonPrefix<{
       action: string;
-      status: { running: boolean; serviceStatePath: string; supervisor: { pid?: number } };
+      status: {
+        running: boolean;
+        serviceStatePath: string;
+        runtimeStatePath: string;
+        controllerHome: string;
+        mcpRuntime?: { server?: { toolset?: string } };
+        supervisor: { pid?: number };
+      };
     }>(start.stdout);
     expect(firstStart.action).toBe("started");
     expect(firstStart.status.running).toBe(true);
@@ -156,6 +163,11 @@ describe("controller service lifecycle", () => {
       realpathSync(join(repoRoot, ".ai", "local", "state", "controller-service.json")),
     );
     expect(firstStart.status.supervisor.pid).toBeTruthy();
+    expect(realpathSync(firstStart.status.controllerHome)).toBe(realpathSync(controllerHome));
+    expect(realpathSync(firstStart.status.runtimeStatePath)).toBe(
+      realpathSync(join(controllerHome, 'mcp', 'mcp.runtime.json')),
+    );
+    expect(firstStart.status.mcpRuntime?.server?.toolset).toBe('core');
 
     const secondStart = runCli(controllerHome, ["start", "--repo", repoRoot, "--json"], { useScript: true });
     expect(secondStart.status).toBe(0);

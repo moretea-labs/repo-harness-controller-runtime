@@ -5,7 +5,7 @@ import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
 import { reconcileAgentJobs } from "../agent-jobs/job-manager";
 import { reconcileLocalBridgeJobs } from "../local-bridge/job-store";
-import { loadMcpLocalConfig, loadMcpRuntimeState, loadMcpServiceLocalConfig, loadMcpServiceRuntimeState, mcpRuntimeStatePath, type McpRuntimeState } from "../mcp/auth";
+import { loadMcpLocalConfig, loadMcpRuntimeState, loadMcpServiceLocalConfig, loadMcpServiceRuntimeState, mcpControllerHomeRuntimeStatePath, mcpRuntimeStatePath, type McpRuntimeState } from "../mcp/auth";
 import { inferMcpTunnelMode, isExpectedLocalControllerHealth, normalizeKeepalivePublicEndpoint, resolveSelfCliInvocation } from "../mcp/keepalive";
 import { withDirectNetworkProxyBypass } from "../mcp/proxy-env";
 import { resolveMcpRepoRoot } from "../mcp/repo";
@@ -406,7 +406,11 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? ".");
   const config = resolveServiceConfig(repoRoot, opts.logFile, opts.controllerHome);
   const state = loadControllerServiceState(repoRoot);
-  const runtime = loadMcpRuntimeState(repoRoot);
+  const serviceRuntime = loadMcpServiceRuntimeState(config.controllerHome, repoRoot);
+  const runtime = serviceRuntime ?? loadMcpRuntimeState(repoRoot);
+  const runtimeStatePath = serviceRuntime
+    ? mcpControllerHomeRuntimeStatePath(config.controllerHome)
+    : mcpRuntimeStatePath(repoRoot);
   const supervisorAlive = isPidAlive(state?.supervisor.pid);
   const daemon = readControllerDaemonStatus(config.controllerHome);
   const ports = await healthSummary(repoRoot, config.mcpHost, config.mcpPort, config.localControllerHost, config.localControllerPort);
@@ -446,7 +450,7 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
     controllerHome: config.controllerHome,
     adopted: adoptedRepo(repoRoot),
     serviceStatePath: controllerServiceStatePath(repoRoot),
-    runtimeStatePath: mcpRuntimeStatePath(repoRoot),
+    runtimeStatePath,
     logPath: config.logPath,
     running: supervisorAlive && ports.health.mcp && ports.health.localController,
     supervisor: {
