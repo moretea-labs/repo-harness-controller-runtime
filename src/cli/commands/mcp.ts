@@ -4,6 +4,7 @@ import { createMcpToolContext } from '../mcp/server';
 import { startMcpHttp } from '../mcp/transports/http';
 import { startMcpStdio } from '../mcp/transports/stdio';
 import { callMcpTool } from '../mcp/tools';
+import { callAccessTool } from '../mcp/access-tools';
 import { runMcpKeepalive } from '../mcp/keepalive';
 import { runMcpRestart } from '../mcp/restart';
 import {
@@ -58,6 +59,16 @@ interface McpRestartOptions {
   githubExcludeTasks?: boolean;
 }
 
+interface McpAccessOptions {
+  repo?: string;
+  controllerHome?: string;
+  repoId?: string;
+  allRepositories?: boolean;
+  mode?: string;
+  confirmAuthorization?: boolean;
+  confirmationText?: string;
+}
+
 interface McpSetupChatgptOptions {
   repo?: string;
   host?: string;
@@ -109,6 +120,34 @@ async function runMcpAction(action: () => void | Promise<void>): Promise<void> {
     console.error(`repo-harness mcp: ${error instanceof Error ? error.message : String(error)}`);
     process.exit(2);
   }
+}
+
+async function runRepositoryAccessCommand(
+  toolName: 'repository_access_get' | 'repository_access_set',
+  rawOpts: McpAccessOptions,
+): Promise<void> {
+  const ctx = createMcpToolContext({
+    repo: rawOpts.repo ?? '.',
+    controllerHome: rawOpts.controllerHome,
+    profile: 'controller',
+    toolset: 'core',
+  });
+  const result = callAccessTool(ctx, toolName, {
+    repo_id: rawOpts.repoId,
+    all_repositories: rawOpts.allRepositories === true,
+    mode: rawOpts.mode,
+    confirm_authorization: rawOpts.confirmAuthorization === true,
+    confirmation_text: rawOpts.confirmationText,
+  });
+  if (!result) throw new Error(`ACCESS_POLICY_FAILED: unsupported access tool ${toolName}`);
+  const firstContent = result.content[0];
+  const payload = result.structuredContent
+    ?? JSON.parse(firstContent?.type === 'text' ? firstContent.text : '{}');
+  const error = (payload as { error?: { code?: string; message?: string } }).error;
+  if (result.isError || error) {
+    throw new Error(`${error?.code ?? 'ACCESS_POLICY_FAILED'}: ${error?.message ?? 'repository access operation failed'}`);
+  }
+  console.log(JSON.stringify(payload, null, 2));
 }
 
 async function prepareCodexGoalFromSprint(rawOpts: McpPrepareGoalOptions): Promise<string[]> {
@@ -345,6 +384,34 @@ export function buildMcpCommand(): Command {
     });
 
   mcp.addCommand(setup);
+
+  const access = new Command('access').description('Read or change repository Request / Full Access permission levels');
+
+  access
+    .command('get')
+    .description('Read the access mode for one registered repository')
+    .option('--repo <path>', 'Repository root used to resolve controllerHome', '.')
+    .option('--controller-home <path>', 'Controller state root; defaults to repo _ops/controller-home when present')
+    .option('--repo-id <id>', 'Stable registered repository id')
+    .action((rawOpts: McpAccessOptions) => {
+      void runMcpAction(() => runRepositoryAccessCommand('repository_access_get', rawOpts));
+    });
+
+  access
+    .command('set')
+    .description('Set Request or Full Access for one repository or every enabled repository')
+    .option('--repo <path>', 'Repository root used to resolve controllerHome', '.')
+    .option('--controller-home <path>', 'Controller state root; defaults to repo _ops/controller-home when present')
+    .option('--repo-id <id>', 'Stable registered repository id; cannot be combined with --all-repositories')
+    .option('--all-repositories', 'Apply to every enabled registered repository')
+    .requiredOption('--mode <mode>', 'Access mode: request|full_access')
+    .option('--confirm-authorization', 'Confirm the access policy write')
+    .option('--confirmation-text <text>', 'Strong confirmation: enable-full-access or enable-full-access-all')
+    .action((rawOpts: McpAccessOptions) => {
+      void runMcpAction(() => runRepositoryAccessCommand('repository_access_set', rawOpts));
+    });
+
+  mcp.addCommand(access);
 
   mcp
     .command('install-skill')
