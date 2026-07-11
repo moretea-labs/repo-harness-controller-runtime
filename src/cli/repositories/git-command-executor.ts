@@ -90,10 +90,33 @@ function validateArgs(args: string[]): string[] {
     }
   }
   const lower = normalized.map((value) => value.toLowerCase());
-  if (lower.some((value) => value === '-c' || value.startsWith('-c='))) {
-    throw new Error('GIT_COMMAND_POLICY_DENIED: per-command Git configuration overrides are not allowed');
+  // Git reuses `-c` both as a global config override (`git -c key=value status`)
+  // and as a normal subcommand option (`git switch -c feature/name`). Only the
+  // leading global-option form is forbidden. Short options are case-sensitive:
+  // `-C` changes the working directory while `-c` injects configuration.
+  for (let index = 0; index < normalized.length; index += 1) {
+    const raw = normalized[index]!;
+    const value = lower[index]!;
+    if (raw === '--') break;
+    if (!raw.startsWith('-')) break;
+    if (raw === '-c' || raw.startsWith('-c=') || value === '--config-env' || value.startsWith('--config-env=')) {
+      throw new Error('GIT_COMMAND_POLICY_DENIED: per-command Git configuration overrides are not allowed');
+    }
+    if (
+      raw === '-C'
+      || raw.startsWith('-C=')
+      || value === '--git-dir'
+      || value.startsWith('--git-dir=')
+      || value === '--work-tree'
+      || value.startsWith('--work-tree=')
+    ) {
+      throw new Error('GIT_COMMAND_SCOPE_DENIED: Git repository scope overrides are not allowed');
+    }
+    if (value === '--exec-path' || value.startsWith('--exec-path=')) {
+      throw new Error('GIT_COMMAND_POLICY_DENIED: Git executable-path overrides are not allowed');
+    }
   }
-  if (lower.some((value) => value === '-c' || value === '--git-dir' || value.startsWith('--git-dir=') || value === '--work-tree' || value.startsWith('--work-tree='))) {
+  if (lower.some((value) => value === '--git-dir' || value.startsWith('--git-dir=') || value === '--work-tree' || value.startsWith('--work-tree='))) {
     throw new Error('GIT_COMMAND_SCOPE_DENIED: Git repository scope overrides are not allowed');
   }
   if (lower[0] === 'config' && lower.some((value) => value === '--global' || value === '--system')) {
@@ -138,7 +161,7 @@ function gitText(root: string, args: string[]): string {
 function repositorySnapshot(root: string): RepositoryGitSnapshot {
   const head = gitText(root, ['rev-parse', '--verify', 'HEAD']) || null;
   const branch = gitText(root, ['branch', '--show-current']) || null;
-  const status = gitText(root, ['status', '--porcelain=v1', '--branch']);
+  const status = gitText(root, ['status', '--porcelain=v1', '--branch', '--', '.', ':(exclude).ai/harness/**']);
   const refs = gitText(root, ['show-ref', '--heads', '--tags']);
   return {
     head,

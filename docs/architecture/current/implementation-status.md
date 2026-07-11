@@ -51,13 +51,15 @@ The migration preserves the existing Issue, Task, Run, Edit Session, Local Job, 
 
 ## Public Contract and Tool Surface
 
-The public MCP surface is profile-based:
+The public MCP surface is stable and profile-compatible:
 
-- `core` is the default onboarding surface: four stable facade tools (`rh_status`, `rh_inbox`, `rh_context`, `rh_work`) plus five repository bootstrap and selection tools;
-- `advanced` exposes the supervised controller menu for maintainers and diagnostics;
-- `full` retains the historical compatibility surface and fingerprint for existing integrations.
+- `advanced` is the default repair-capable schema, capped at 128 high-value tools;
+- `core` is retained as an alias for that same schema so legacy config cannot accidentally remove capabilities;
+- `full` exposes every historical definition for exhaustive compatibility diagnosis.
 
-Legacy names remain implemented behind the compatibility profile, but they are not returned by the default `tools/list`. Potentially long or mutating compatibility calls acknowledge a durable Job, and their result remains available through `get_job`.
+The five preferred orchestration facades are `rh_status`, `rh_access`, `rh_inbox`, `rh_context`, and `rh_work`. Direct Edit, command, Git, Work/Job, Agent, Campaign, plugin, browser, iOS, artifact, and recovery entry points are also available in the stable schema. Request/Full Access changes execution approval only and never changes `tools/list` or requires reconnecting.
+
+Potentially long or mutating calls acknowledge a durable Job, and their result remains available through `get_job` or bounded artifacts.
 
 ## Runtime Truth
 

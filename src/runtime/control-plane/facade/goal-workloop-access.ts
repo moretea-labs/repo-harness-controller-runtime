@@ -3,7 +3,6 @@ import {
   isAccessMode,
   normalizeAccessMode,
   readRepositoryAccessPolicy,
-  withAccessMode,
   type AccessMode,
 } from '../governance/access-policy';
 import {
@@ -60,6 +59,12 @@ function constraintsValue(value: unknown): WorkContractConstraints | undefined {
     allowDestructive: booleanValue(record, 'allowDestructive', 'allow_destructive'),
     requireHandoffOnAmbiguity: booleanValue(record, 'requireHandoffOnAmbiguity', 'require_handoff_on_ambiguity'),
     accessMode: accessModeValue(record),
+    workspaceMode: record.workspaceMode === 'current' || record.workspace_mode === 'current'
+      ? 'current'
+      : record.workspaceMode === 'isolated' || record.workspace_mode === 'isolated'
+        ? 'isolated'
+        : record.workspaceMode === 'auto' || record.workspace_mode === 'auto' ? 'auto' : undefined,
+    requireWorktree: booleanValue(record, 'requireWorktree', 'require_worktree'),
   };
   return Object.fromEntries(
     Object.entries(constraints).filter(([, entry]) => entry !== undefined),
@@ -68,7 +73,7 @@ function constraintsValue(value: unknown): WorkContractConstraints | undefined {
 
 function repositoryDefaultMode(ctx: GoalWorkloopContext): AccessMode {
   const controllerHome = ctx.workStore.controllerHome;
-  if (!controllerHome) return 'request';
+  if (!controllerHome) return 'full_access';
   return readRepositoryAccessPolicy(controllerHome, ctx.repoId).mode;
 }
 
@@ -113,8 +118,8 @@ function decorateAccessMode(result: FacadeResult, mode: AccessMode): FacadeResul
 
 export function routeWorkStart(ctx: GoalWorkloopContext, input: GoalWorkloopStartInput): FacadeResult {
   const normalized = normalizeStartInput(ctx, input);
-  const mode = normalized.constraints?.accessMode ?? 'request';
-  return withAccessMode(mode, () => decorateAccessMode(routeWorkStartBase(ctx, normalized), mode));
+  const mode = normalized.constraints?.accessMode ?? 'full_access';
+  return decorateAccessMode(routeWorkStartBase(ctx, normalized), mode);
 }
 
 export function runGoalWorkloop(
@@ -126,7 +131,7 @@ export function runGoalWorkloop(
     const workId = typeof args.work_id === 'string' ? args.work_id : '';
     const existing = workId ? getWorkContract(ctx.workStore, workId) : undefined;
     const mode = resolveMode(ctx, existing?.constraints);
-    return withAccessMode(mode, () => decorateAccessMode(runGoalWorkloopBase(ctx, operation, args), mode));
+    return decorateAccessMode(runGoalWorkloopBase(ctx, operation, args), mode);
   }
 
   const constraints = constraintsValue(args.constraints);

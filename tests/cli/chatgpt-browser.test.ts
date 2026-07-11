@@ -1199,7 +1199,7 @@ describe('chatgpt browser command', () => {
     expect(readFileSync(guide, 'utf-8')).toContain('.ai/harness/handoff/gptpro/chatgpt-review-${stamp}.md');
     expect(readFileSync(guide, 'utf-8')).toContain('docs/researches/YYYYMMDD-<topic>.md');
     expect(readFileSync(guide, 'utf-8')).toContain('not `oracle-mcp`');
-    expect(readFileSync(join(ROOT, 'docs/researches/README.md'), 'utf-8')).toContain('.ai/harness/handoff/gptpro/');
+    expect(readFileSync(join(ROOT, 'docs/researches/README.md'), 'utf-8')).toContain('local raw artifacts');
     expect(readFileSync(guide, 'utf-8')).toContain('Oracle CLI package currently requires `node >=24`');
     expect(readFileSync(guide, 'utf-8')).toContain('agent_actions');
     expect(readFileSync(guide, 'utf-8')).toContain('chatgpt-oracle-install-pinned');

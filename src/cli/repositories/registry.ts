@@ -1,5 +1,6 @@
 import { spawnSync } from 'child_process';
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -169,7 +170,19 @@ function readLegacyGitHubPluginConfig(canonicalRoot: string): Partial<Repository
   }
 }
 
+function ensureHarnessRuntimeIgnored(canonicalRoot: string): void {
+  const gitExclude = git(canonicalRoot, ['rev-parse', '--git-path', 'info/exclude']);
+  if (!gitExclude) return;
+  const path = resolve(canonicalRoot, gitExclude);
+  const existing = existsSync(path) ? readFileSync(path, 'utf-8') : '';
+  if (existing.split(/\r?\n/).some((line) => line.trim() === '.ai/harness/')) return;
+  mkdirSync(dirname(path), { recursive: true });
+  const prefix = existing.length > 0 && !existing.endsWith('\n') ? '\n' : '';
+  appendFileSync(path, `${prefix}# repo-harness runtime metadata (controller-owned, never source)\n.ai/harness/\n`, 'utf-8');
+}
+
 function writeLocalIdentity(record: RepositoryRecord): void {
+  ensureHarnessRuntimeIgnored(record.canonicalRoot);
   const path = join(record.canonicalRoot, LOCAL_CONFIG);
   atomicJson(path, {
     schemaVersion: 1,
@@ -427,6 +440,7 @@ export function addRepositoryCheckout(input: AddRepositoryCheckoutInput): Reposi
   };
   registry.repositories[index] = next;
   saveRepositoryRegistry(registry, home);
+  ensureHarnessRuntimeIgnored(canonicalRoot);
   atomicJson(join(canonicalRoot, LOCAL_CONFIG), {
     schemaVersion: 1,
     repoId: next.repoId,

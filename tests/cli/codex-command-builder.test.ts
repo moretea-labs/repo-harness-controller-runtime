@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { spawnSync } from "child_process";
 import { tmpdir } from "os";
 import { join } from "path";
 import { getAgentJob } from "../../src/cli/agent-jobs/job-manager";
@@ -23,8 +24,16 @@ function repo(): string {
   mkdirSync(join(root, "src"), { recursive: true });
   mkdirSync(join(root, "tasks"), { recursive: true });
   mkdirSync(join(root, ".ai/harness"), { recursive: true });
+  mkdirSync(join(root, ".repo-harness"), { recursive: true });
+  writeFileSync(join(root, ".repo-harness/mcp.local.json"), `${JSON.stringify({
+    version: 1,
+    devMode: { agentRunner: true, allowedAgents: ["codex"], timeoutMs: 10_000 },
+  }, null, 2)}\n`);
   writeFileSync(join(root, "src/example.ts"), "export const value = 1;\n");
   writeFileSync(join(root, "tasks/current.md"), "# Current\n");
+  spawnSync("git", ["init", "-b", "main"], { cwd: root, stdio: "ignore" });
+  spawnSync("git", ["add", "."], { cwd: root, stdio: "ignore" });
+  spawnSync("git", ["-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-m", "init"], { cwd: root, stdio: "ignore" });
   return root;
 }
 
@@ -65,7 +74,7 @@ describe("codex command builder", () => {
         requestedBy: "test",
         payload: {
           issueId: issue.id,
-          taskId: "T1",
+          taskId: issue.tasks[0]!.id,
           agent: "codex",
           executionMode: "auto",
           timeoutMs: 10_000,

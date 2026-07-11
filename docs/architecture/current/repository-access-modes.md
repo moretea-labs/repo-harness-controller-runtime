@@ -1,113 +1,102 @@
 # Repository access modes
 
-repo-harness exposes two user-selectable permission levels for repository work:
+repo-harness keeps two user-selectable execution policies:
 
-- `request` — the default. Read-only work and bounded Direct Control edits may proceed, while elevated local effects ask for approval.
-- `full_access` — permits normal local work inside the selected repository without repeated approval prompts.
+- `full_access` — the default for a personal local controller. Normal work inside the selected repository can read, edit, run bounded local commands and checks, and perform local Git operations without repeated approval prompts.
+- `request` — keeps the same MCP tool schema, but asks before elevated local side effects.
 
-The mode is repository-scoped. It is not a machine-wide sandbox bypass.
+Access mode controls **execution approval only**. It never changes `tools/list`, never hides Direct Edit, Git, Agent, iOS, browser, plugin, or recovery tools, and never requires an MCP restart or ChatGPT reconnect.
 
-## Safety boundary
+## Hard safety boundary
 
-`full_access` automatically permits:
-
-- reading and writing files in the selected repository;
-- repository-scoped local commands;
-- dependency changes;
-- local Git operations;
-- registered checks and verification.
-
-It does **not** automatically permit:
+Neither mode bypasses the controller's hard boundaries. These remain separately authorized or denied:
 
 - paths outside the selected repository;
-- external network access;
-- Git push or other remote writes;
-- deployments, publishing, or destructive actions;
-- raw secret, token, private-key, or credential access;
-- bypassing managed controller policy.
+- external network effects;
+- Git push and other remote writes;
+- deployments, publishing, destructive cleanup, and irreversible operations;
+- raw secrets, tokens, private keys, and credentials;
+- controller policy bypass.
 
-Those effects continue to require approval or remain denied by the existing hard policy.
+`full_access` is therefore repository-local autonomy, not unrestricted host access.
 
-## Storage
+## Storage and defaults
 
-The repository default is stored under controller-owned runtime state:
+The repository policy is stored under controller-owned state:
 
 ```text
 <controllerHome>/repositories/<repoId>/controller/access-policy.json
 ```
 
-The setting is not written to the repository and is not committed to Git. A missing or malformed file safely falls back to `request`.
+The setting is not written into the repository. When no policy file exists, the personal-controller default is `full_access` without creating a file. A malformed existing policy fails closed to `request`.
 
-Each durable WorkContract captures its effective `accessMode` in `constraints`. Changing the repository default affects new work; an existing task keeps its captured mode.
+Each durable `WorkContract` captures the effective `accessMode` in `constraints` when work starts. Changing the repository default affects new work only; an existing task keeps its immutable snapshot.
 
-## MCP tools
+## MCP and Local Controller UI
 
-The controller core toolset exposes:
+The stable MCP schema always includes:
 
-- `repository_access_get`
-- `repository_access_set`
+- `rh_access`;
+- `repository_access_get`;
+- `repository_access_preview`;
+- `repository_access_set`.
 
-Enabling Full Access requires both:
-
-```json
-{
-  "mode": "full_access",
-  "confirm_authorization": true,
-  "confirmation_text": "enable-full-access"
-}
-```
-
-Downgrading to Request is also an explicit write action:
+Changing a mode requires explicit authorization:
 
 ```json
 {
+  "operation": "set",
   "mode": "request",
   "confirm_authorization": true
 }
 ```
 
-## Per-task override
+No magic confirmation phrase is required for repository-local Full Access. The result explicitly reports:
 
-`rh_work` already accepts a generic `constraints` object. A caller may select a mode for one task without changing the repository default:
+```json
+{
+  "reconnectRequired": false,
+  "schemaRefreshRequired": false,
+  "toolSchemaStable": true
+}
+```
+
+The Local Controller UI uses the same controllerHome policy and explains that switching mode changes approval behavior only.
+
+## Per-work override
+
+`rh_work` may override the repository default for one work item:
 
 ```json
 {
   "operation": "start",
-  "objective": "Refactor the local controller routing",
+  "objective": "Refactor controller routing",
   "constraints": {
-    "accessMode": "full_access"
+    "accessMode": "request",
+    "workspaceMode": "current"
   }
 }
 ```
 
-Both camelCase and snake_case are accepted inside constraints:
-
-```json
-{
-  "constraints": {
-    "access_mode": "request"
-  }
-}
-```
-
-The response includes `accessMode`, `accessModeLabel`, and `accessModeDescription`, and a created work summary includes the captured mode.
+Both camelCase and snake_case are accepted inside constraints. The effective mode is captured in the created WorkContract.
 
 ## Decision matrix
 
 | Effect | Request | Full Access |
 | --- | --- | --- |
 | Read selected repository | allow | allow |
-| Bounded Direct Control edit | allow | allow |
-| General repository/workspace write | request | allow |
+| Direct Edit / safe patch | allow | allow |
+| General repository write | request | allow |
 | Repository-scoped local command | request | allow |
 | Dependency change | request | allow |
 | Local Git write | request | allow |
+| Registered checks | allow | allow |
 | External network | request | request |
 | Remote write / push | request | request |
-| Destructive effect | strong confirmation | strong confirmation |
+| Destructive effect | explicit approval | explicit approval |
 | Raw secrets or credentials | deny | deny |
-| Outside-repository path | request | request |
+| Outside-repository path | explicit grant | explicit grant |
 
 ## Compatibility
 
-Existing callers that do not send an access mode retain the previous safe behavior because the default is `request`. Existing approval fields and hard authorization checks remain in force.
+The legacy `core`, `advanced`, and `full` labels remain accepted. `core` and `advanced` resolve to the same stable, repair-capable schema. `full` exposes every historical compatibility tool and is intended only for legacy integrations and deep diagnostics.

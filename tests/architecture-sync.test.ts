@@ -85,7 +85,7 @@ function installRuntimeArchitectureBaseline(cwd: string): void {
         "",
         "> **Historical Design — Not Runtime Authority**",
         ">",
-        "> Current architecture: [docs/../current/README.md](../current/README.md).",
+        "> Current architecture: docs/architecture/current/README.md.",
         "",
       ].join("\n"),
     );

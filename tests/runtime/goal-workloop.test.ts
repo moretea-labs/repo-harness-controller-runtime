@@ -85,6 +85,8 @@ describe('goal workloop engine', () => {
     });
     expect(contracts[0]!.checks).toContain('package:check:type');
     expect(contracts[0]!.evidenceRefs.length).toBeGreaterThan(0);
+    expect(contracts[0]!.worktreePolicy.required).toBe(false);
+    expect(contracts[0]!.driver.preferred).toBe('direct_edit');
   });
 
   test('high-risk missing-authorization tasks create handoff_only without WorkContract', () => {
@@ -194,4 +196,41 @@ describe('goal workloop engine', () => {
     expect((stopped.data as { evidenceRetained: boolean }).evidenceRetained).toBe(true);
     expect(getWorkContract(ctx.workStore, workId2)?.evidenceRefs.length).toBeGreaterThan(0);
   });
+  test('work contract alone cannot continue or finalize as successful execution', () => {
+    const { ctx } = fixture();
+    const started = startGoalWorkloop(ctx, {
+      objective: 'Create orchestration state only',
+      modeInput: { scopeClear: true, expectedFiles: 5, expectedChangedLines: 250 },
+    });
+    const workId = (started.data as { work: { workId: string } }).work.workId;
+
+    const continued = continueGoalWorkloop(ctx, { workId });
+    expect(continued.status).toBe('blocked');
+    expect((continued.data as { executionEvidencePresent: boolean }).executionEvidencePresent).toBe(false);
+
+    const finalized = finalizeGoalWorkloop(ctx, { workId });
+    expect(finalized.status).toBe('blocked');
+    expect((finalized.data as { finalStatus: string }).finalStatus).toBe('waiting_for_review');
+    expect(getWorkContract(ctx.workStore, workId)?.status).toBe('waiting_for_review');
+  });
+
+  test('isolated worktree is opt-in or selected only for parallel work', () => {
+    const { ctx } = fixture();
+    const isolated = startGoalWorkloop(ctx, {
+      objective: 'Explicit isolated task',
+      constraints: { workspaceMode: 'isolated' },
+      modeInput: { scopeClear: true, expectedFiles: 5, expectedChangedLines: 250 },
+    });
+    const isolatedId = (isolated.data as { work: { workId: string } }).work.workId;
+    expect(getWorkContract(ctx.workStore, isolatedId)?.worktreePolicy.required).toBe(true);
+
+    const parallel = startGoalWorkloop(ctx, {
+      objective: 'Parallel task',
+      constraints: { workspaceMode: 'auto' },
+      modeInput: { scopeClear: true, expectedFiles: 5, expectedChangedLines: 250, requiresParallelism: true },
+    });
+    const parallelId = (parallel.data as { work: { workId: string } }).work.workId;
+    expect(getWorkContract(ctx.workStore, parallelId)?.worktreePolicy.required).toBe(true);
+  });
+
 });

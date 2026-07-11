@@ -13,7 +13,6 @@ import {
 } from '../../runtime/control-plane/governance/access-policy';
 
 export type ControllerAccessConfigSource =
-  | 'runtime_override.toolset'
   | 'controller_home.access_mode'
   | 'repo_local_fallback.access_mode'
   | 'controller_home.legacy_toolset'
@@ -23,12 +22,14 @@ export type ControllerAccessConfigSource =
 export interface ControllerAccessState {
   configuredAccessMode: AccessMode;
   effectiveAccessMode: AccessMode;
+  /** Stable schema is always the complete registered tool surface. */
   effectiveToolset: McpToolset;
   source: ControllerAccessConfigSource;
   lastAppliedAt?: string;
   exposureRevision: number;
-  configPathSource: 'runtime_override' | 'controller_home' | 'repo_local_fallback' | 'default';
+  configPathSource: 'controller_home' | 'repo_local_fallback' | 'default';
   legacyToolset?: McpToolset;
+  schemaStableAcrossAccessModes: true;
 }
 
 export interface ResolveControllerAccessStateInput {
@@ -53,8 +54,9 @@ export function accessModeForLegacyToolset(toolset: McpToolset): AccessMode {
   return toolset === 'core' ? 'request' : 'full_access';
 }
 
-export function legacyToolsetForAccessMode(mode: AccessMode): McpToolset {
-  return mode === 'full_access' ? 'advanced' : 'core';
+/** Retained for compatibility only; access mode no longer changes schema. */
+export function legacyToolsetForAccessMode(_mode: AccessMode): McpToolset {
+  return 'advanced';
 }
 
 function configLocation(controllerHome: string, repoRoot?: string): 'controller_home' | 'repo_local_fallback' | 'default' {
@@ -75,56 +77,27 @@ export function resolveControllerAccessState(input: ResolveControllerAccessState
     ? config.accessModeUpdatedAt
     : undefined;
   const exposureRevision = normalizedRevision(config?.accessModeRevision);
-
-  if (input.toolsetLocked === true && input.toolsetOverride) {
-    const mode = accessModeForLegacyToolset(input.toolsetOverride);
-    return {
-      configuredAccessMode: mode,
-      effectiveAccessMode: mode,
-      effectiveToolset: input.toolsetOverride,
-      source: 'runtime_override.toolset',
-      lastAppliedAt,
-      exposureRevision,
-      configPathSource: 'runtime_override',
-      legacyToolset: input.toolsetOverride,
-    };
-  }
-
-  if (isAccessMode(config?.accessMode)) {
-    return {
-      configuredAccessMode: config.accessMode,
-      effectiveAccessMode: config.accessMode,
-      effectiveToolset: legacyToolsetForAccessMode(config.accessMode),
-      source: location === 'controller_home' ? 'controller_home.access_mode' : 'repo_local_fallback.access_mode',
-      lastAppliedAt,
-      exposureRevision,
-      configPathSource: location,
-      legacyToolset: normalizeMaybeToolset(config?.toolset),
-    };
-  }
-
-  const legacyToolset = normalizeMaybeToolset(config?.toolset);
-  if (legacyToolset) {
-    const mode = accessModeForLegacyToolset(legacyToolset);
-    return {
-      configuredAccessMode: mode,
-      effectiveAccessMode: mode,
-      effectiveToolset: legacyToolset,
-      source: location === 'controller_home' ? 'controller_home.legacy_toolset' : 'repo_local_fallback.legacy_toolset',
-      lastAppliedAt,
-      exposureRevision,
-      configPathSource: location,
-      legacyToolset,
-    };
-  }
-
+  const legacyToolset = normalizeMaybeToolset(input.toolsetOverride ?? config?.toolset);
+  const configuredAccessMode = isAccessMode(config?.accessMode)
+    ? config.accessMode
+    : legacyToolset
+      ? accessModeForLegacyToolset(legacyToolset)
+      : 'full_access';
+  const source: ControllerAccessConfigSource = isAccessMode(config?.accessMode)
+    ? (location === 'controller_home' ? 'controller_home.access_mode' : 'repo_local_fallback.access_mode')
+    : legacyToolset
+      ? (location === 'controller_home' ? 'controller_home.legacy_toolset' : 'repo_local_fallback.legacy_toolset')
+      : 'default';
   return {
-    configuredAccessMode: 'request',
-    effectiveAccessMode: 'request',
-    effectiveToolset: 'core',
-    source: 'default',
+    configuredAccessMode,
+    effectiveAccessMode: configuredAccessMode,
+    effectiveToolset: 'advanced',
+    source,
+    lastAppliedAt,
     exposureRevision,
-    configPathSource: 'default',
+    configPathSource: location,
+    legacyToolset,
+    schemaStableAcrossAccessModes: true,
   };
 }
 
@@ -143,7 +116,8 @@ export function persistControllerAccessMode(
     accessMode: mode,
     accessModeUpdatedAt,
     accessModeRevision,
-    toolset: legacyToolsetForAccessMode(mode),
+    // Keep a compatibility label, but never use it to hide tools.
+    toolset: 'advanced',
   };
   const configPath = writeMcpServiceLocalConfig(controllerHome, config);
   return {

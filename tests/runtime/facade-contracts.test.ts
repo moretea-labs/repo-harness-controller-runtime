@@ -15,7 +15,7 @@ import {
 
 describe('handoff and facade contracts', () => {
   test('keeps the ChatGPT-facing facade small and stable', () => {
-    expect(FACADE_TOOLS).toEqual(['rh_status', 'rh_inbox', 'rh_context', 'rh_work']);
+    expect(FACADE_TOOLS).toEqual(['rh_access', 'rh_status', 'rh_inbox', 'rh_context', 'rh_work']);
   });
 
   test('classifies terminal handoff statuses', () => {

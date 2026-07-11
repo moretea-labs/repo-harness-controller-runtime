@@ -115,7 +115,17 @@ function normalizeOperation(entry: Record<string, unknown>, originalIndex: numbe
   if (type === 'create') return { type, path, content: String(entry.content ?? ''), __originalIndex: originalIndex };
   if (type === 'delete') return { type, path, expectedSha256, __originalIndex: originalIndex };
   if (type === 'write') return { type, path, expectedSha256, content: String(entry.content ?? ''), __originalIndex: originalIndex };
-  if (type === 'replace') return { type, path, expectedSha256, replacements: normalizeReplacement(entry.replacements), __originalIndex: originalIndex };
+  if (type === 'replace') {
+    const replacements = Array.isArray(entry.replacements)
+      ? normalizeReplacement(entry.replacements)
+      : (entry.old_text !== undefined || entry.oldText !== undefined)
+        ? normalizeReplacement([entry])
+        : [];
+    if (replacements.length === 0) {
+      throw new Error(`SAFE_PATCH_OPERATION_INVALID: operation ${originalIndex + 1} replace requires replacements[] or old_text/new_text`);
+    }
+    return { type, path, expectedSha256, replacements, __originalIndex: originalIndex };
+  }
   if (type === 'insert_before' || type === 'insert_after') {
     return {
       type,

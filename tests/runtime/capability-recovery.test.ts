@@ -226,7 +226,7 @@ describe('runtime maintenance executor', () => {
     });
     expect(applied.applied.some((candidate) => candidate.applied && candidate.id === 'JOB-stale')).toBe(true);
     const stored = JSON.parse(readFileSync(join(jobDir, 'job.json'), 'utf8')) as { status: string; error: string };
-    expect(stored.status).toBe('orphaned');
+    expect(stored.status).toBe('failed');
     expect(stored.error).toMatch(/runtime maintenance|Runtime storage repair/);
   });
 

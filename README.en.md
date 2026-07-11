@@ -187,7 +187,7 @@ Controller Home is primary for MCP service config, authentication, and runtime s
 
 ## Connect ChatGPT
 
-Start with [Tutorial 2: Connect ChatGPT](docs/tutorials/02-connect-chatgpt.md). After connecting, call `rh_status`, then use `rh_context` for the selected repository. The default `core` toolset contains `rh_status`, `rh_inbox`, `rh_context`, `rh_work`, plus `repository_list`, `repository_get`, `repository_register`, `repository_latest_source_diagnose`, and `repository_bootstrap_local_project`; use `advanced` for operator diagnostics and `full` only for compatibility.
+Start with [Tutorial 2: Connect ChatGPT](docs/tutorials/02-connect-chatgpt.md). After connecting, call `rh_status`, then use `rh_context` for the selected repository. The default `advanced` toolset is a stable repair-capable schema. Prefer `rh_status`, `rh_access`, `rh_context`, `rh_work`, and `rh_inbox`, while Direct Edit, command, Git, Agent, Campaign, iOS, plugin, artifact, and recovery tools remain available without switching permissions. `core` is a compatibility alias and `full` is exhaustive legacy exposure.
 
 If multiple repositories are registered, keep `repoId` and `checkoutId` explicit. The controller is a global service, but repository writes still route through repository- and checkout-scoped identities. The public MCP endpoint is distinct from the localhost-only Local Controller UI at `127.0.0.1:8766`.
 

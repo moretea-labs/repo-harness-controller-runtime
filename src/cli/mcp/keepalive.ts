@@ -408,7 +408,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
       toolSurface: `${profile}-legacy-v1`,
       schemaVersion: 1,
       toolSurfaceVersion: 1,
-      toolset: parseMcpToolset(rawOpts.toolset ?? localConfig?.toolset ?? 'core', profile),
+      toolset: parseMcpToolset(rawOpts.toolset ?? localConfig?.toolset ?? 'advanced', profile),
       profile,
       repoId: repositoryIdentity(repoRoot),
     };

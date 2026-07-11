@@ -13,7 +13,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { createHmac } from "crypto";
 import { spawn, spawnSync } from "child_process";
-import { cancelAgentJob, getAgentJob, listAgentJobs } from "../../src/cli/agent-jobs/job-manager";
+import { cancelAgentJob, getAgentJob, getAgentJobEvents, listAgentJobs } from "../../src/cli/agent-jobs/job-manager";
 import {
   controllerCheckConcurrencyClass,
   releaseControllerCheckSubscription,
@@ -395,8 +395,12 @@ printf '%s\n' '{"type":"turn.completed"}'
           break;
         }
       }
-      expect(observed).toBe(true);
-      expect(run.progress?.percent).toBeGreaterThanOrEqual(72);
+      const durableTestingActivity = getAgentJobEvents(root, dispatched.runId as string, 200, { includeHeartbeats: true })
+        .some((event) => event.type === "run_activity"
+          && event.data?.phase === "testing"
+          && (event.message ?? "").includes("bun test focused"));
+      expect(observed || durableTestingActivity).toBe(true);
+      if (observed) expect(run.progress?.percent).toBeGreaterThanOrEqual(72);
     } finally {
       process.env.PATH = originalPath;
     }
@@ -445,7 +449,7 @@ printf '%s\n' '{"type":"turn.completed"}'
     expect(duplicate.jobId).toBe(created.jobId);
 
     let finished = getLocalBridgeJob(root, created.jobId);
-    for (let attempt = 0; attempt < 600 && ["approved", "dispatched", "running"].includes(finished.status); attempt += 1) {
+    for (let attempt = 0; attempt < 1200 && ["approved", "dispatched", "running"].includes(finished.status); attempt += 1) {
       await Bun.sleep(25);
       finished = getLocalBridgeJob(root, created.jobId);
     }

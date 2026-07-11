@@ -63,11 +63,12 @@ function structured(result: Awaited<ReturnType<typeof callRuntimeTool>>): Record
 
 describe('facade MCP surface wiring', () => {
   test('preferred facade tools are part of default core exposure and runtime definitions', () => {
-    expect(PREFERRED_FACADE_TOOL_NAMES).toEqual(['rh_status', 'rh_inbox', 'rh_context', 'rh_work']);
+    expect(PREFERRED_FACADE_TOOL_NAMES).toEqual(['rh_access', 'rh_status', 'rh_inbox', 'rh_context', 'rh_work']);
     for (const name of PREFERRED_FACADE_TOOL_NAMES) {
       expect(DEFAULT_CONTROLLER_TOOL_NAMES).toContain(name);
       expect(ADVANCED_CONTROLLER_TOOL_NAMES).toContain(name);
-      expect(runtimeToolDefinitions.some((tool) => tool.name === name)).toBe(true);
+      const all = allControllerToolDefinitions(controllerFixture().ctx);
+      expect(all.some((tool) => tool.name === name)).toBe(true);
       expect(classifyControllerToolExposure(name)).toBe('facade');
     }
   });
@@ -80,7 +81,7 @@ describe('facade MCP surface wiring', () => {
     expect(expected).toContain('rh_context');
     expect(expected).toContain('rh_work');
     // Preferred facade tools are listed first.
-    expect(expected.slice(0, 4)).toEqual(['rh_status', 'rh_inbox', 'rh_context', 'rh_work']);
+    expect(expected.slice(0, 5)).toEqual(['rh_access', 'rh_status', 'rh_inbox', 'rh_context', 'rh_work']);
   });
 
   test('core toolset exposes rh_* schemas in runtime registry', () => {
@@ -111,9 +112,9 @@ describe('facade MCP surface wiring', () => {
       rawAvailable: false,
       detailLevel: 'summary',
     });
-    expect(payload.data).toMatchObject({
-      toolSurface: ['rh_status', 'rh_inbox', 'rh_context', 'rh_work'],
-    });
+    const toolSurface = (payload.data as { toolSurface: string[] }).toolSurface;
+    for (const name of PREFERRED_FACADE_TOOL_NAMES) expect(toolSurface).toContain(name);
+    expect((payload.data as { toolSurfaceStatus: { missingTools: string[] } }).toolSurfaceStatus.missingTools).toEqual([]);
     expect(JSON.stringify(payload)).not.toMatch(/stdout|stderr|Bearer |private_key/i);
   });
 

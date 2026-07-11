@@ -34,7 +34,7 @@ The corresponding MCP tools are `get_github_plugin_status` and `configure_github
 
 ## Verify the loaded tool surface
 
-After connecting ChatGPT on the default `core` toolset, call `rh_status` first and confirm the facade plus repository bootstrap tools are present. Use `controller_capabilities` only on `advanced` or `full`, where it should report `controller-chatgpt-bridge-v8` and the larger supervised surface. If ChatGPT only shows legacy planning tools, refresh or recreate the connector so it reloads the MCP tool schema.
+After connecting ChatGPT, call `rh_status` first and confirm the stable repair-capable surface is loaded. The historical `core` and `advanced` labels expose the same schema, including `controller_capabilities`, Direct Edit, local Git, agents, Campaigns, plugins, and recovery. Use `full` only for exhaustive legacy compatibility. If ChatGPT only shows legacy planning tools, reload the connector so it refreshes the MCP schema.
 
 ## What “GitHub session” means
 

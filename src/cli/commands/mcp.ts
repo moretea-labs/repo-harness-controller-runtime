@@ -195,7 +195,7 @@ export function buildMcpCommand(): Command {
     .option('--host <host>', 'HTTP bind host', '127.0.0.1')
     .option('--port <port>', 'HTTP bind port', '8765')
     .option('--profile <profile>', 'MCP profile: planner|executor|orchestrator|controller', 'controller')
-    .option('--toolset <toolset>', 'Controller toolset: core|advanced|full (default core = facade + repo bootstrap)')
+    .option('--toolset <toolset>', 'Controller toolset: core|advanced|full (default advanced; core is the same stable schema, full is exhaustive compatibility)')
     .option('--auth <mode>', 'HTTP auth mode: oauth|bearer', 'oauth')
     .option('--enable-chatgpt-browser', 'Expose tools that operate the user logged-in ChatGPT Web browser session')
     .option('--enable-dev-runner', 'Enable local Codex/Claude task runners for controller or orchestrator profiles')
@@ -249,7 +249,7 @@ export function buildMcpCommand(): Command {
     .option('--host <host>', 'HTTP bind host', '127.0.0.1')
     .option('--port <port>', 'HTTP bind port', '8765')
     .option('--profile <profile>', 'MCP profile: planner|executor|orchestrator|controller', 'controller')
-    .option('--toolset <toolset>', 'Controller toolset: core|advanced|full (default core = facade + repo bootstrap)')
+    .option('--toolset <toolset>', 'Controller toolset: core|advanced|full (default advanced; core is the same stable schema, full is exhaustive compatibility)')
     .option('--auth <mode>', 'HTTP auth mode: oauth|bearer', 'oauth')
     .option('--enable-chatgpt-browser', 'Expose tools that operate the user logged-in ChatGPT Web browser session')
     .option('--enable-dev-runner', 'Enable local Codex/Claude task runners for controller or orchestrator profiles')
@@ -406,7 +406,7 @@ export function buildMcpCommand(): Command {
     .option('--all-repositories', 'Apply to every enabled registered repository')
     .requiredOption('--mode <mode>', 'Access mode: request|full_access')
     .option('--confirm-authorization', 'Confirm the access policy write')
-    .option('--confirmation-text <text>', 'Strong confirmation: enable-full-access or enable-full-access-all')
+    .option('--confirmation-text <text>', 'Legacy optional confirmation text; access changes require --confirm-authorization')
     .action((rawOpts: McpAccessOptions) => {
       void runMcpAction(() => runRepositoryAccessCommand('repository_access_set', rawOpts));
     });

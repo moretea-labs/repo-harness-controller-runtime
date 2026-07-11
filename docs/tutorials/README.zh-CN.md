@@ -6,6 +6,6 @@
 2. [连接 ChatGPT](02-connect-chatgpt.zh-CN.md)
 3. [完成第一个仓库任务](03-first-repository-task.zh-CN.md)
 
-教程使用默认 `core` MCP 工具面。正常情况下只会看到四个 facade 工具：`rh_status`、`rh_inbox`、`rh_context` 和 `rh_work`。`advanced` 只用于运维诊断，`full` 只用于兼容性验证。
+教程使用固定的默认 `advanced` MCP schema。优先使用 `rh_status`、`rh_access`、`rh_context`、`rh_work` 和 `rh_inbox`，但 Direct Edit、Git、Agent、iOS、插件和恢复工具无需切换权限即可使用。`core` 是兼容别名，`full` 仅用于旧集成的全量暴露。
 
 English: [README.md](README.md)

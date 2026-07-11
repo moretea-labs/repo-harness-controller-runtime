@@ -8,7 +8,7 @@ These features are part of the default local setup:
 
 - repository registration with stable `repoId` and `checkoutId` identities;
 - bounded repository inspection and context collection;
-- four default ChatGPT facade tools: `rh_status`, `rh_inbox`, `rh_context`, and `rh_work`;
+- five preferred ChatGPT facade tools: `rh_status`, `rh_access`, `rh_inbox`, `rh_context`, and `rh_work`, plus a stable repair-capable default MCP schema;
 - Direct Edit sessions with path limits, SHA preconditions, revisions, savepoints, diffs, checks, and rollback;
 - durable Issue → Task → Run state and resumable evidence;
 - named verification checks instead of arbitrary remote shell access;
@@ -31,7 +31,7 @@ These features are part of the default local setup:
 
 ## Tool exposure
 
-The default `core` toolset intentionally exposes only the four facade tools plus repository bootstrap/selection tools. Use `advanced` for maintainer diagnostics. Use `full` only for compatibility with older integrations; it is not the recommended onboarding surface.
+The default `advanced` toolset exposes one stable, repair-capable schema capped at 128 tools. `core` is a compatibility alias for the same schema. `full` exposes every historical definition and should be reserved for legacy integrations or deep compatibility diagnosis.
 
 ## Execution choices
 

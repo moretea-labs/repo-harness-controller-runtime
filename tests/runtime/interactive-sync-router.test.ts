@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import { STABLE_CONTROLLER_TOOL_NAMES } from '../../src/cli/mcp/toolset-names';
 
 describe('interactive sync routing policy', () => {
   test('router marks interactive write tools as sync-by-default and supports wait', () => {
@@ -15,11 +16,10 @@ describe('interactive sync routing policy', () => {
     expect(source).toContain('buildAcceptedQueuedDigest');
   });
 
-  test('core toolset exposes interactive development tools', () => {
-    const source = readFileSync(join(import.meta.dir, '../../src/cli/mcp/toolset.ts'), 'utf8');
-    expect(source).toContain('repository_safe_patch_apply');
-    expect(source).toContain('repository_git_create_branch');
-    expect(source).toContain('work_wait');
-    expect(source).toContain('git_commit_paths');
+  test('stable controller surface exposes interactive development tools', () => {
+    expect(STABLE_CONTROLLER_TOOL_NAMES).toContain('repository_safe_patch_apply');
+    expect(STABLE_CONTROLLER_TOOL_NAMES).toContain('repository_git_create_branch');
+    expect(STABLE_CONTROLLER_TOOL_NAMES).toContain('work_wait');
+    expect(STABLE_CONTROLLER_TOOL_NAMES).toContain('git_commit_paths');
   });
 });

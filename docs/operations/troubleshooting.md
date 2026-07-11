@@ -39,7 +39,7 @@ Repo-local `.repo-harness/mcp.local.json`, `.repo-harness/mcp.tokens.json`, `.re
 
 ## Only some tools appear in ChatGPT
 
-The default surface is intentionally small. A healthy core connector should show `rh_status`, `rh_inbox`, `rh_context`, and `rh_work`, plus repository bootstrap/selection tools. Reconnect only after confirming the local MCP runtime is using the expected toolset.
+The default controller uses a stable repair-capable schema (normally 100–128 tools). Request/Full Access never changes that schema. Compare `expectedToolCount`, `actualToolCount`, `missingTools`, `unexpectedTools`, and the fingerprint from `rh_status` or `controller_ready`. Reconnect only when the Connector snapshot itself is stale, not after a permission change.
 
 ## Runtime storage is not ready or the Local UI looks stale
 

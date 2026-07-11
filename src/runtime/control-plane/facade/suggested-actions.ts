@@ -1,6 +1,7 @@
 import { FACADE_TOOLS, type EvidenceRef, type FacadeTool, type SuggestedNextAction } from './types';
 
 const ALLOWED_FACADE_OPERATIONS: Record<FacadeTool, readonly string[]> = {
+  rh_access: ['get', 'preview', 'set'],
   rh_status: ['list', 'get', 'repair'],
   rh_inbox: ['list', 'get', 'ack', 'resolve', 'dismiss', 'create'],
   rh_context: ['list', 'get'],

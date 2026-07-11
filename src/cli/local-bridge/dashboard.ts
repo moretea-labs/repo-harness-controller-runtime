@@ -126,7 +126,7 @@ function pill(tone,label){return '<span class="pill '+esc(tone||'gray')+'">'+esc
 function setDot(id,tone){document.getElementById(id).className='dot '+(tone&&tone!=='green'?tone:'')}
 
 var selectedRepoId=queryRepoId()||safeGet('repoHarnessSelectedRepoId')||'';
-var selectedAccessMode='request';
+var selectedAccessMode='full_access';
 var commandCenter=null;
 var automationSettings=null;
 var selectedWorkId=safeGet('repoHarnessSelectedWorkId')||'';
@@ -307,7 +307,7 @@ function renderHome(){
   var setup=obj(cc.setupGuide);
   var warnings=arr(cc.warnings).map(function(w){return '<div class="warn">'+esc(w)+'</div>'}).join('');
   var mode=obj(modePreview||cc.modePreviewDefault);
-  var accessMode=selectedAccessMode||cc.accessMode||'request';
+  var accessMode=selectedAccessMode||cc.accessMode||'full_access';
   var accessLabel=accessMode==='full_access'?'Full Access':'Request';
   var accessDescription=accessMode==='full_access'
     ? '允许当前仓库内文件修改、命令、依赖和本地 Git；远程、破坏性、仓库外路径和密钥仍需确认或保持禁止。'
@@ -315,7 +315,7 @@ function renderHome(){
   var accessDetails=
     '<div class="muted" style="margin-top:10px">已配置：<strong>'+esc(access.configuredAccessModeLabel||accessLabel)+'</strong> · 实际生效：<strong>'+esc(access.effectiveAccessModeLabel||accessLabel)+'</strong> · 工具面：<strong>'+esc(access.effectiveToolset||'—')+'</strong></div>'+
     '<div class="faint" style="margin-top:4px">修订：'+esc(String(access.exposureRevision||0))+(access.lastAppliedAt?' · 最近应用：'+esc(access.lastAppliedAt):'')+'</div>'+
-    (access.reconnectRequired?'<div class="warn" style="margin-top:10px;margin-bottom:0">连接器工具快照需要刷新/重连后，新的 Full Access 工具面才会在 ChatGPT 中出现。</div>':'');
+    '<div class="faint" style="margin-top:8px">工具 schema 固定；切换权限只改变审批策略，不需要重启或重连。</div>';
   var el=document.getElementById('view-home');
   var setupHtml=setup.needed
     ? '<div class="setup"><strong>'+esc(setup.title||'需要先设置仓库')+'</strong><p class="muted" style="margin:6px 0 10px">'+esc(setup.body||'')+'</p>'+btn(setup.actionLabel||'去设置仓库','data-nav="repositories"','primary')+'</div>'
@@ -1087,7 +1087,7 @@ function setAccessMode(mode){
     if(!ok)return;
   }
   setBusy(true,'更新权限等级…');
-  api('/api/console/access-policy'+repoQuery(),{method:'POST',body:JSON.stringify({mode:mode,confirmAuthorization:true,confirmationText:mode==='full_access'?'enable-full-access':undefined})}).then(function(res){
+  api('/api/console/access-policy'+repoQuery(),{method:'POST',body:JSON.stringify({mode:mode,confirmAuthorization:true})}).then(function(res){
     var policy=obj(res.policy);var descriptor=obj(res.descriptor);
     var access=obj(res.access);
     selectedAccessMode=policy.mode==='full_access'?'full_access':'request';
@@ -1280,7 +1280,7 @@ function refreshAll(opts){
   refreshInFlight=true;
   return api('/api/console/command-center'+repoQuery()).then(function(res){
     commandCenter=res;
-    selectedAccessMode=(obj(res.access).configuredAccessMode||res.accessMode)==='full_access'?'full_access':'request';
+    selectedAccessMode=(obj(res.access).configuredAccessMode||res.accessMode)==='request'?'request':'full_access';
     lastRefreshedAt=new Date().toLocaleTimeString();
     var repo=obj(res.currentRepository);
     if(repo.id)rememberRepo(repo.id);

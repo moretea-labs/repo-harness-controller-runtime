@@ -10,15 +10,9 @@ Use this page when you want the shortest current path through repo-harness witho
 
 ## What repo-harness is
 
-repo-harness is a local execution bridge that lets ChatGPT work on one or more repositories through a bounded tool surface. The default ChatGPT path is intentionally small:
+repo-harness is a local execution bridge that lets ChatGPT work on one or more repositories through a stable, bounded tool schema. The preferred orchestration tools are `rh_status`, `rh_access`, `rh_context`, `rh_work`, and `rh_inbox`, while the default schema also exposes practical Direct Edit, command, Git, Agent, Campaign, iOS, plugin, artifact, and recovery entry points.
 
-- `rh_status` checks runtime and repository readiness
-- `rh_context` loads bounded repository context
-- `rh_work` starts or continues bounded work
-- `rh_inbox` handles decisions, approvals, and attention items
-- `repository_list`, `repository_get`, `repository_register`, `repository_latest_source_diagnose`, and `repository_bootstrap_local_project` select or bootstrap repository targets
-
-Direct Edit is the default for small known changes. Durable Issue → Task → Run flows are for work that must survive sessions, carry dependencies, or preserve review evidence. Local coding agents, GitHub sessions, browser work, schedules, and plugins are optional layers.
+Direct Edit is the default for small known changes. `quick_agent_session` provides a direct local Codex/Claude path without requiring an Issue or Task. Durable Issue → Task → Run flows remain available for work that must survive sessions, carry dependencies, or preserve formal review evidence. Request/Full Access changes approval behavior only and never requires reconnecting the MCP Connector.
 
 ## Current runtime facts
 

@@ -73,7 +73,7 @@ try {
 
   const health = await waitJson(`http://127.0.0.1:${port}/health`, 20_000);
   if (health.status !== 200 || health.body.status !== 'ok') throw new Error(`HEALTH_FAILED: ${JSON.stringify(health)} ${stderr}`);
-  if (health.body.toolset !== 'core') throw new Error(`TOOLSET_CHANGED: ${String(health.body.toolset)}`);
+  if (health.body.toolset !== 'advanced') throw new Error(`TOOLSET_CHANGED: ${String(health.body.toolset)}`);
   if (health.body.toolSurface !== CONTROLLER_TOOL_SURFACE) throw new Error(`TOOL_SURFACE_CHANGED: ${String(health.body.toolSurface)}`);
   const expectedCoreFingerprint = controllerToolSurfaceFingerprint([...DEFAULT_CONTROLLER_TOOL_NAMES]);
   const expectedCompatibilityToolCount = buildMcpToolDefinitions(runtimePolicy(repoRoot, {

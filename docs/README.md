@@ -11,7 +11,7 @@ This is the public documentation hub for the current open-source/runtime surface
 - Platform and setup boundaries: [Platform support](operations/platform-support.md), [Features and setup levels](operations/features.md)
 - Fix install or connector problems: [Troubleshooting](operations/troubleshooting.md)
 
-The default `core` surface is `rh_status`, `rh_inbox`, `rh_context`, and `rh_work`, plus `repository_list`, `repository_get`, `repository_register`, `repository_latest_source_diagnose`, and `repository_bootstrap_local_project`. Use `advanced` for operator diagnostics and `full` only for compatibility.
+The default `advanced` surface is a stable repair-capable schema capped at 128 tools. It includes the five preferred facades plus Direct Edit, commands, local Git, durable Work, agents, Campaigns, plugins, browser, iOS, artifacts, and recovery. `core` is a compatibility alias for the same schema; `full` is exhaustive legacy exposure.
 
 ## Capability map
 
@@ -19,7 +19,7 @@ The default `core` surface is `rh_status`, `rh_inbox`, `rh_context`, and `rh_wor
 | --- | --- | --- |
 | Understand the core ChatGPT facade | [Public usage guide](public-usage-guide.md) | Explains `rh_status`, `rh_inbox`, `rh_context`, `rh_work`, and the safe default path. |
 | Connect ChatGPT to the local controller | [repo-harness ChatGPT MCP setup](repo-harness-chatgpt-mcp-setup.md) | Advanced/manual setup, tunnel choices, Connector auth, and toolset verification. |
-| Learn the tool surface split | [MCP tool exposure](operations/mcp-tool-exposure.md) | `core` is the onboarding default; `advanced` and `full` are operator/compatibility surfaces. |
+| Learn the stable tool schema | [MCP tool exposure](operations/mcp-tool-exposure.md) | `advanced` is the stable default, `core` is an alias, and `full` is exhaustive legacy compatibility. |
 | Use the local Controller UI safely | [repo-harness ChatGPT MCP setup](repo-harness-chatgpt-mcp-setup.md) | The Local Controller UI stays on `127.0.0.1:8766`; it is not the public MCP endpoint. |
 | Understand multi-repository routing | [README.en.md](../README.en.md), [README.md](../README.md) | The controller is global, but work is still scoped by stable `repoId` and `checkoutId`. |
 | Configure providers and executor routing | [Provider configuration and routing](operations/provider-configuration.md) | Controller-scoped provider settings live under Controller Home, not in the repository. |

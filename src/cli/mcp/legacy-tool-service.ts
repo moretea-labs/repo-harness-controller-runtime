@@ -95,7 +95,7 @@ import {
   formatDurationMs,
   normalizeAgentTimeoutMs,
 } from "../controller/runtime-config";
-import { PREFERRED_FACADE_TOOL_NAMES } from "./toolset";
+import { PREFERRED_FACADE_TOOL_NAMES, STABLE_CONTROLLER_TOOL_NAMES } from "./toolset-names";
 import { buildLocalConnectorStatusForRepo } from "../local-bridge/connector-freshness";
 import type {
   ControllerAgent,
@@ -1640,6 +1640,37 @@ export function buildMcpToolDefinitions(
         annotations: readOnly,
       },
       {
+        name: "quick_agent_session",
+        description:
+          "Start an ephemeral local Codex or Claude session directly from an objective, without requiring an Issue or Task. Current workspace is the default; isolation is opt-in or selected for concurrency.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            request_id: { type: "string" },
+            title: { type: "string" },
+            objective: { type: "string" },
+            summary: { type: "string" },
+            agent: { type: "string", enum: ["codex", "claude"] },
+            isolate: {
+              type: "boolean",
+              description: "Optional. false uses the current workspace, true forces an isolated worktree, and omission selects automatically.",
+            },
+            timeout_ms: agentTimeoutSchema,
+            ephemeral: { type: "boolean", description: "Defaults to true and stays outside the durable Issue board." },
+            allowed_paths: { type: "array", items: { type: "string" } },
+            forbidden_paths: { type: "array", items: { type: "string" } },
+            checks: { type: "array", items: { type: "string" } },
+            acceptance_criteria: { type: "array", items: { type: "string" } },
+            risk: { type: "string", enum: ["readonly", "low", "medium", "high", "destructive"] },
+            approve_destructive: { type: "boolean" },
+            requested_by: { type: "string" },
+          },
+          required: ["title", "objective"],
+          additionalProperties: false,
+        },
+        annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false },
+      },
+      {
         name: "submit_local_job",
         description:
           "Submit a high-level local Job Ticket. Local work dispatches immediately unless it is explicitly destructive; no ordinary risk approval queue is used.",
@@ -2884,10 +2915,9 @@ export function controllerExpectedToolNames(
 ): string[] {
   const names = buildMcpToolDefinitions(policy, opts).map((tool) => tool.name);
   if (policy.profile !== "controller") return names;
-  // Preferred ChatGPT facade first, then repository tools, then compatibility/legacy tools.
-  // Facade tools live in runtimeToolDefinitions and must appear in expectedTools for connector freshness checks.
-  const facadeTools = [...PREFERRED_FACADE_TOOL_NAMES];
-  return [...new Set([...facadeTools, ...repositoryToolNames, ...names])];
+  // The Connector readiness expectation must match the stable default schema
+  // served by toolset.ts. Full compatibility tools are intentionally omitted.
+  return [...STABLE_CONTROLLER_TOOL_NAMES];
 }
 
 export async function callMcpTool(
@@ -3248,13 +3278,17 @@ export async function callMcpTool(
         audit(ctx, name, "ok", args);
         return textResult(payload);
       }
+      case "quick_agent_session":
       case "submit_local_job": {
         if (ctx.policy.profile !== "controller")
           return errorResult(
             "TOOL_DISABLED",
-            "submit_local_job requires the controller profile",
+            `${name} requires the controller profile`,
           );
-        const request = localBridgeRequestFromArgs(args);
+        const requestArgs = name === "quick_agent_session"
+          ? { ...args, action: "quick-agent-session" }
+          : args;
+        const request = localBridgeRequestFromArgs(requestArgs);
         const job = submitLocalBridgeJob(ctx.repoRoot, request);
         const result =
           job.status === "approved"
@@ -4037,8 +4071,10 @@ export async function callMcpTool(
       }
       case "dispatch_task": {
         if (ctx.policy.profile !== "controller") return errorResult("TOOL_DISABLED", "dispatch_task requires the controller profile");
-        const issueId = String(args.issue_id ?? "");
-        const taskId = String(args.task_id ?? "");
+        const issueId = String(args.issue_id ?? "").trim();
+        const taskId = String(args.task_id ?? "").trim();
+        if (!issueId) return errorResult("ISSUE_ID_REQUIRED", "dispatch_task requires issue_id. Use quick_agent_session for direct Codex/Claude work without an Issue.");
+        if (!taskId) return errorResult("TASK_ID_REQUIRED", "dispatch_task requires task_id. Use quick_agent_session for direct Codex/Claude work without a Task.");
         const issue = getIssue(ctx.repoRoot, issueId);
         const task = issue.tasks.find((entry) => entry.id === taskId);
         if (!task) return errorResult("TASK_NOT_FOUND", `task not found: ${issueId}/${taskId}`);
@@ -4264,19 +4300,24 @@ export async function callMcpTool(
             "TOOL_DISABLED",
             "get_task_run_events requires the controller profile",
           );
+        const sinceEventIndex = typeof args.since_event_index === "number"
+          ? Math.trunc(args.since_event_index)
+          : undefined;
         const events = getAgentJobEvents(
           ctx.repoRoot,
           String(args.run_id ?? ""),
           typeof args.limit === "number" ? Math.trunc(args.limit) : 200,
           {
-            sinceIndex: typeof args.since_event_index === "number" ? Math.trunc(args.since_event_index) : undefined,
+            sinceIndex: sinceEventIndex,
             includeHeartbeats: args.include_heartbeats === true,
           },
         );
         audit(ctx, name, "ok", args);
         return textResult({
           events,
-          nextSinceEventIndex: events.at(-1)?.data?.eventIndex,
+          // Keep an existing cursor stable when no new event is available. New events
+          // that race with a read are returned on the next call instead of being lost.
+          nextSinceEventIndex: events.at(-1)?.data?.eventIndex ?? sinceEventIndex,
           heartbeatsCollapsed: args.include_heartbeats !== true,
         });
       }

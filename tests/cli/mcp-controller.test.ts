@@ -312,7 +312,8 @@ describe("MCP controller profile", () => {
         "controller-chatgpt-bridge-v8",
       );
       expect(capabilities.value.expectedTools).toContain("launch_issue");
-      expect(capabilities.value.expectedTools).toContain("submit_local_job");
+      expect(capabilities.value.expectedTools).toContain("work_submit");
+      expect(capabilities.value.expectedTools).toContain("quick_agent_session");
       expect(capabilities.value.expectedTools).toContain("controller_context");
       expect(capabilities.value.expectedTools).toContain("controller_context_pack");
       expect(capabilities.value.expectedTools).toContain("repository_command_preview");
@@ -664,9 +665,10 @@ describe("MCP controller profile", () => {
       const full = createMultiRepositoryContext({ repo: repoRoot, profile: "controller", toolset: "full", controllerHome });
       const coreNames = exposedControllerToolDefinitions(core).map((tool) => tool.name);
       expect(coreNames).toEqual(expect.arrayContaining(["rh_status", "rh_inbox", "rh_context", "rh_work", "repository_list"]));
-      expect(coreNames).not.toContain("create_campaign");
-      expect(coreNames.length).toBeLessThanOrEqual(12);
-      expect(exposedControllerToolDefinitions(advanced).length).toBeGreaterThanOrEqual(55);
+      expect(coreNames).toContain("create_campaign");
+      expect(coreNames.length).toBeGreaterThanOrEqual(100);
+      expect(coreNames.length).toBeLessThanOrEqual(128);
+      expect(exposedControllerToolDefinitions(advanced).map((tool) => tool.name)).toEqual(coreNames);
       expect(exposedControllerToolDefinitions(advanced).map((tool) => tool.name)).toContain("create_campaign");
       expect(exposedControllerToolDefinitions(advanced).map((tool) => tool.name)).toContain("submit_campaign_review");
       expect(exposedControllerToolDefinitions(advanced).map((tool) => tool.name)).toContain("finish_task_run");
@@ -1622,7 +1624,10 @@ printf '%s\n' '{"type":"turn.completed"}'
           since_event_index: typeof cursor === "number" ? cursor : -1,
           limit: 20,
         });
-        expect(delta.value.events.length).toBe(0);
+        expect(delta.value.events.every((event: { data?: { eventIndex?: number } }) =>
+          typeof event.data?.eventIndex === "number" && event.data.eventIndex > cursor,
+        )).toBe(true);
+        expect(delta.value.nextSinceEventIndex).toBeGreaterThanOrEqual(cursor);
       } finally {
         process.env.PATH = originalPath;
         rmSync(binRoot, { recursive: true, force: true });

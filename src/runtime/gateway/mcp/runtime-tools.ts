@@ -1486,21 +1486,49 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           return runFacadeRepair(ctx, repository, args);
         }
         const readiness = controllerReadiness(ctx, repository);
+        // Dynamic import avoids a static cycle: toolset.ts composes runtimeToolDefinitions.
+        const exposure = (await import('../../../cli/mcp/toolset')).controllerExposureSnapshot(ctx);
+        const toolSurfaceReady = exposure.ready && exposure.missingToolNames.length === 0;
+        const effectiveReady = readiness.ready && toolSurfaceReady;
+        const readinessWithToolSurface = {
+          ...readiness,
+          ready: effectiveReady,
+          state: effectiveReady ? readiness.state : 'degraded' as const,
+          reasons: toolSurfaceReady ? readiness.reasons : [
+            ...readiness.reasons,
+            {
+              code: 'MCP_TOOL_SURFACE_INCOMPLETE',
+              message: `MCP schema mismatch: missing=${exposure.missingToolNames.length}, duplicates=${exposure.duplicateToolNames.length}.`,
+            },
+          ],
+          toolSurface: {
+            ready: toolSurfaceReady,
+            expectedToolCount: exposure.expectedToolNames.length,
+            actualToolCount: exposure.actualToolNames.length,
+            missingTools: exposure.missingToolNames,
+            unexpectedTools: exposure.unexpectedToolNames,
+            duplicateTools: exposure.duplicateToolNames,
+            fingerprint: exposure.fingerprint,
+            schemaStableAcrossAccessModes: exposure.schemaStableAcrossAccessModes,
+          },
+        };
         const manifests = listAssistantPluginManifests(ctx.controllerHome, repository);
         const capabilities = listCapabilityDescriptors(manifests);
         const pendingHandoffs = listHandoffItems({ ...store, status: 'pending', limit: 20 });
         const activeWork = listWorkContracts({ ...store, status: 'active', limit: 20 });
         const facade = buildFacadeResult({
-          status: readiness.ready ? 'ok' : 'blocked',
-          summary: readiness.ready ? 'Controller is ready for bounded work.' : 'Controller needs attention before background work.',
+          status: effectiveReady ? 'ok' : 'blocked',
+          summary: effectiveReady ? 'Controller and MCP tool surface are ready for bounded work.' : 'Controller or MCP tool surface needs attention before work.',
           data: {
             operation,
             repoId: repository.repoId,
-            readiness,
+            readiness: readinessWithToolSurface,
             capabilityCount: capabilities.length,
             pendingHandoffCount: pendingHandoffs.length,
             activeWorkCount: activeWork.length,
-            toolSurface: ['rh_status', 'rh_inbox', 'rh_context', 'rh_work'],
+            toolSurface: exposure.actualToolNames,
+            toolSurfaceStatus: readinessWithToolSurface.toolSurface,
+            access: exposure.access,
           },
           suggestedNextActions: pendingHandoffs.length > 0 ? [{
             label: 'Review pending handoffs',
@@ -2156,10 +2184,13 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           ? selected(ctx, args)
           : (ctx.explicitRepository ?? (registered.length === 1 ? registered[0] : undefined));
         const readiness = controllerReadiness(ctx, repository);
+        const exposure = (await import('../../../cli/mcp/toolset')).controllerExposureSnapshot(ctx);
+        const toolSurfaceReady = exposure.ready && exposure.missingToolNames.length === 0;
+        const effectiveReady = readiness.ready && toolSurfaceReady;
         const taskLedger = repository ? buildControllerTaskLedgerProjection(repository.canonicalRoot) : undefined;
         return result({
-          ready: readiness.ready,
-          state: readiness.state,
+          ready: effectiveReady,
+          state: effectiveReady ? readiness.state : 'degraded',
           taskLedgerStatus: taskLedger?.status,
           taskLedgerCounts: taskLedger ? {
             issueCount: taskLedger.issueCount,
@@ -2174,7 +2205,18 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           durableScheduler: readiness.durableScheduler,
           workerLoop: readiness.workerLoop,
           localBridge: readiness.localBridge,
-          reasons: readiness.reasons,
+          reasons: toolSurfaceReady ? readiness.reasons : [...readiness.reasons, { code: 'MCP_TOOL_SURFACE_INCOMPLETE', message: 'Registered and exposed MCP tool schemas do not match.' }],
+          toolSurface: {
+            ready: toolSurfaceReady,
+            expectedTools: exposure.expectedToolNames,
+            actualTools: exposure.actualToolNames,
+            missingTools: exposure.missingToolNames,
+            unexpectedTools: exposure.unexpectedToolNames,
+            duplicateTools: exposure.duplicateToolNames,
+            fingerprint: exposure.fingerprint,
+            schemaStableAcrossAccessModes: true,
+          },
+          access: exposure.access,
           registeredRepositories: registered.length,
           ...(repository ? { repository: summarizeRuntimeProjectionForReadiness(readiness.projection ?? rebuildRepositoryProjection(ctx.controllerHome, repository.repoId)) } : {}),
         });
@@ -3017,23 +3059,8 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         // Validate task shape, DAG, and governance before creating any Git refs or worktrees.
         const sourceTasks = rawTasks.map((task) => campaignTaskInput(task, repository.repoId, repository.activeCheckoutId));
         validateCreateCampaignTasks(sourceTasks, budgetInput);
-        const workspaceInput = args.workspace && typeof args.workspace === 'object' && !Array.isArray(args.workspace)
-          ? args.workspace as Record<string, unknown>
-          : {};
-        const workspaceMode = workspaceInput.mode === 'current' ? 'current' : 'isolated';
-        const workspace = workspaceMode === 'current'
-          ? currentCampaignWorkspace(repository)
-          : ensureCampaignWorkspace(ctx.controllerHome, repository, {
-            requestId,
-            title,
-            baseRef: typeof workspaceInput.base_ref === 'string'
-              ? workspaceInput.base_ref
-              : typeof workspaceInput.baseRef === 'string' ? workspaceInput.baseRef : undefined,
-            branchName: typeof workspaceInput.branch_name === 'string'
-              ? workspaceInput.branch_name
-              : typeof workspaceInput.branchName === 'string' ? workspaceInput.branchName : undefined,
-          });
-        const campaignCheckoutId = workspace.checkoutId ?? repository.activeCheckoutId;
+        // Validate supervisor policy before allocating a Git worktree. Invalid
+        // recursive or external-effect operations must leave no workspace behind.
         const supervisor = args.supervisor && typeof args.supervisor === 'object' && !Array.isArray(args.supervisor)
           ? args.supervisor as Record<string, unknown>
           : {};
@@ -3056,6 +3083,26 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           if (CAMPAIGN_CONTROL_OPERATIONS.has(supervisorOperation)) throw new Error(`CAMPAIGN_RECURSIVE_OPERATION_DENIED: ${supervisorOperation}`);
           assertAutomatedOperationAllowed(supervisorOperation, supervisorArguments ?? {});
         }
+        if (supervisorMode === 'operation' && !supervisorOperation) throw new Error('CAMPAIGN_SUPERVISOR_OPERATION_REQUIRED');
+        if (supervisorMode === 'workspace_agent' && !workspaceAgentId) throw new Error('CAMPAIGN_WORKSPACE_AGENT_ID_REQUIRED');
+
+        const workspaceInput = args.workspace && typeof args.workspace === 'object' && !Array.isArray(args.workspace)
+          ? args.workspace as Record<string, unknown>
+          : {};
+        const workspaceMode = workspaceInput.mode === 'current' ? 'current' : 'isolated';
+        const workspace = workspaceMode === 'current'
+          ? currentCampaignWorkspace(repository)
+          : ensureCampaignWorkspace(ctx.controllerHome, repository, {
+            requestId,
+            title,
+            baseRef: typeof workspaceInput.base_ref === 'string'
+              ? workspaceInput.base_ref
+              : typeof workspaceInput.baseRef === 'string' ? workspaceInput.baseRef : undefined,
+            branchName: typeof workspaceInput.branch_name === 'string'
+              ? workspaceInput.branch_name
+              : typeof workspaceInput.branchName === 'string' ? workspaceInput.branchName : undefined,
+          });
+        const campaignCheckoutId = workspace.checkoutId ?? repository.activeCheckoutId;
         const campaign = createCampaign(ctx.controllerHome, {
           repoId: repository.repoId,
           checkoutId: campaignCheckoutId,
@@ -3390,6 +3437,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return result({ error: { code: message.includes(':') ? message.split(':', 1)[0] : 'RUNTIME_TOOL_FAILED', message } }, true);
+    const structuredCode = /^([A-Z][A-Z0-9_]+)(?::|$)/.exec(message)?.[1];
+    return result({ error: { code: structuredCode ?? 'RUNTIME_TOOL_FAILED', message } }, true);
   }
 }

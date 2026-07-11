@@ -145,6 +145,15 @@ function initialEvidence(objective: string): EvidenceRef {
   };
 }
 
+function hasExecutionEvidence(work: WorkContract): boolean {
+  return Boolean(
+    work.workerRef
+    || work.worktreeRef
+    || work.checkRefs.length > 0
+    || work.evidenceRefs.some((evidence) => evidence.title !== 'work contract created'),
+  );
+}
+
 /**
  * Mode selection for facade routing. Direct control never creates a WorkContract.
  * Goal workloop creates one. Handoff-only creates a handoff and stops.
@@ -176,6 +185,7 @@ export function routeWorkStart(
               : mode.mode === 'direct_control' ? 'local_repo_write'
                 : mode.mode === 'goal_workloop' ? 'workspace_write'
                   : 'readonly'),
+    accessMode: input.constraints?.accessMode,
     approvalConfirmed: input.approvalConfirmed === true,
     dryRun: input.dryRun === true,
     directEditBoundary: {
@@ -347,7 +357,10 @@ export function startGoalWorkloop(
   const at = nowIso(ctx);
   const available = ctx.availableChecks ?? [];
   const normalized = normalizeCheckIds(input.checks ?? [], available);
-  const needsWorktree = true;
+  const workspaceMode = input.constraints?.workspaceMode ?? 'auto';
+  const needsWorktree = input.constraints?.requireWorktree
+    ?? (workspaceMode === 'isolated'
+      || (workspaceMode === 'auto' && input.modeInput.requiresParallelism === true));
   const work = createWorkContract(ctx.workStore, {
     workId: workIdFor(input.objective),
     repoId: ctx.repoId,
@@ -363,13 +376,15 @@ export function startGoalWorkloop(
     forbiddenPaths: input.forbiddenPaths ?? [],
     checks: normalized.validCheckIds,
     driver: {
-      preferred: input.modeInput.requiresWorker ? 'codex_worker' : 'isolated_worktree',
+      preferred: input.modeInput.requiresWorker ? 'codex_worker' : needsWorktree ? 'isolated_worktree' : 'direct_edit',
       allowWorker: true,
-      allowDirectEdit: false,
+      allowDirectEdit: !needsWorktree,
     },
     worktreePolicy: {
       required: needsWorktree,
-      reason: 'Goal workloop isolates multi-step work in a worktree by default.',
+      reason: needsWorktree
+        ? 'Isolation was explicitly requested or required for parallel execution.'
+        : 'Current workspace is the stability-first default; isolation remains opt-in.',
     },
     evidencePolicy: {
       defaultDetailLevel: 'summary',
@@ -578,6 +593,35 @@ export function continueGoalWorkloop(ctx: GoalWorkloopContext, input: GoalWorklo
     });
   }
 
+  if (!hasExecutionEvidence(work)) {
+    const suggested = validateSuggestedNextActions([
+      {
+        label: 'Read repository context before executing',
+        tool: 'rh_context',
+        operation: 'get',
+        payload: { work_id: work.workId },
+        risk: 'readonly',
+        confidence: 'high',
+        reason: 'A WorkContract is orchestration state, not proof that source changes or an agent run occurred.',
+      },
+    ]).actions;
+    const updated = updateWorkContract(ctx.workStore, work.workId, {
+      status: 'running',
+      suggestedNextActions: suggested,
+    });
+    return buildFacadeResult({
+      status: 'blocked',
+      summary: 'Continue requires execution evidence. The work contract exists, but no edit, worker, worktree, or verification result has been recorded.',
+      data: {
+        work: summarizeWorkContract(updated),
+        backgroundCompleted: false,
+        nextStep: 'execute',
+        executionEvidencePresent: false,
+      },
+      suggestedNextActions: suggested,
+    });
+  }
+
   const suggested = validateSuggestedNextActions([
     {
       label: 'Finalize work',
@@ -727,6 +771,27 @@ export function finalizeGoalWorkloop(ctx: GoalWorkloopContext, input: GoalWorklo
       status: 'blocked',
       summary: `WorkContract ${work.workId} was cancelled; finalize is not allowed.`,
       data: { work: summarizeWorkContract(work) },
+    });
+  }
+
+  if (!input.forceFailed && !hasExecutionEvidence(work)) {
+    const updated = updateWorkContract(ctx.workStore, work.workId, { status: 'waiting_for_review' });
+    return buildFacadeResult({
+      status: 'blocked',
+      summary: 'Finalize refused: no execution evidence was recorded. Creating a WorkContract alone cannot be reported as successful work.',
+      data: {
+        work: summarizeWorkContract(updated),
+        finalStatus: 'waiting_for_review',
+        executionEvidencePresent: false,
+        hiddenFailure: false,
+      },
+      suggestedNextActions: [{
+        label: 'Inspect work context',
+        tool: 'rh_context',
+        operation: 'get',
+        payload: { work_id: work.workId },
+        risk: 'readonly',
+      }],
     });
   }
 

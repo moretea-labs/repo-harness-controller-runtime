@@ -37,7 +37,7 @@ repo-harness --version
 
 ## ChatGPT 只显示少量工具
 
-这是默认设计。健康的 core connector 应看到 `rh_status`、`rh_inbox`、`rh_context`、`rh_work`，以及少量仓库初始化/选择工具。先确认本地 MCP toolset，再决定是否重连。
+默认 Controller 使用固定、可修复的工具 schema（通常 100–128 个工具）。Request/Full Access 不会改变 schema。请从 `rh_status` 或 `controller_ready` 对比 `expectedToolCount`、`actualToolCount`、缺失/意外工具和 fingerprint；只有 Connector 快照本身过期时才需要重连，权限切换不需要。
 
 ## runtime storage 未就绪，或本地 UI 看起来是旧状态
 

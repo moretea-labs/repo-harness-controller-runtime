@@ -1,5 +1,4 @@
 import {
-  currentAccessMode,
   evaluateAccessMode,
   normalizeAccessMode,
   type AccessEffect,
@@ -72,7 +71,7 @@ export function evaluatePolicyGate(input: PolicyGateInput): PolicyDecision {
   const capabilityId = input.capability?.capabilityId ?? input.capabilityId;
   const risk = input.risk ?? input.capability?.risk;
   const sideEffect = input.sideEffect ?? sideEffectFromRisk(risk);
-  const accessMode = normalizeAccessMode(input.accessMode ?? currentAccessMode());
+  const accessMode = normalizeAccessMode(input.accessMode, 'full_access');
   const warnings: string[] = [];
 
   if (input.dryRun) {

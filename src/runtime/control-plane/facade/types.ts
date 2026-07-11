@@ -1,7 +1,9 @@
+import type { AccessMode } from '../governance/access-policy';
+
 export const EXECUTION_MODES = ['direct_control', 'goal_workloop', 'handoff_only'] as const;
 export type ExecutionMode = (typeof EXECUTION_MODES)[number];
 
-export const FACADE_TOOLS = ['rh_status', 'rh_inbox', 'rh_context', 'rh_work'] as const;
+export const FACADE_TOOLS = ['rh_access', 'rh_status', 'rh_inbox', 'rh_context', 'rh_work'] as const;
 export type FacadeTool = (typeof FACADE_TOOLS)[number];
 
 export const FACADE_STATUSES = ['ok', 'blocked', 'failed', 'approval_required', 'not_found'] as const;
@@ -183,6 +185,11 @@ export interface WorkContractConstraints {
   allowCleanup?: boolean;
   allowDestructive?: boolean;
   requireHandoffOnAmbiguity?: boolean;
+  /** Immutable execution-policy snapshot captured when work starts. */
+  accessMode?: AccessMode;
+  /** current is the stability-first default; isolated is opt-in or used for explicit parallelism. */
+  workspaceMode?: 'current' | 'isolated' | 'auto';
+  requireWorktree?: boolean;
 }
 
 export interface WorkContractDriverPolicy {

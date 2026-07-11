@@ -5,6 +5,7 @@ import {
   iosAppBuild,
   iosAppInstall,
   iosAppLaunch,
+  iosDevelopmentPlatform,
   iosProjectDiscover,
   iosSchemesList,
   iosSimulatorBoot,
@@ -78,7 +79,8 @@ function health(repoRoot: string): AssistantPluginHealth {
     canonicalRoot: repoRoot,
     activeCheckoutId: 'active',
   } as RepositoryRecord);
-  const platformOk = process.platform === 'darwin';
+  const currentPlatform = iosDevelopmentPlatform();
+  const platformOk = currentPlatform === 'darwin';
   const toolingReady = platformOk && Boolean(xcode && 'ready' in xcode && xcode.ready);
   const warnings: string[] = [];
   if (!platformOk) warnings.push('iOS plugin requires macOS with Xcode and Simulator.');
@@ -94,7 +96,7 @@ function health(repoRoot: string): AssistantPluginHealth {
     warnings,
     details: {
       provider: 'local-xcode',
-      platform: process.platform,
+      platform: currentPlatform,
       userFacingStatus: status,
       discoverable: discovery.ready,
       defaultContainer: discovery.defaultContainer,
@@ -330,7 +332,7 @@ function actions(): AssistantPluginActionDescriptor[] {
 
 export function buildIosPluginManifest(previousRevision = 0, previousUpdatedAt?: string, repoRoot?: string): AssistantPluginManifest {
   const state = health(repoRoot ?? process.cwd());
-  const enabled = process.platform === 'darwin';
+  const enabled = iosDevelopmentPlatform() === 'darwin';
   return {
     schemaVersion: 1,
     manifestVersion: 1,
@@ -362,10 +364,11 @@ export function buildIosPluginManifest(previousRevision = 0, previousUpdatedAt?:
 }
 
 export async function executeIosPluginAction(input: AssistantPluginActionExecutionInput): Promise<Record<string, unknown>> {
-  if (process.platform !== 'darwin' && input.actionId !== 'discover_project' && input.actionId !== 'xcode_status') {
+  const currentPlatform = iosDevelopmentPlatform();
+  if (currentPlatform !== 'darwin' && input.actionId !== 'discover_project' && input.actionId !== 'xcode_status') {
     throw new AssistantPluginError('PLUGIN_DEPENDENCY_MISSING', 'iOS plugin actions require macOS with Xcode/Simulator.', {
       retryable: false,
-      details: { platform: process.platform },
+      details: { platform: currentPlatform },
     });
   }
 

@@ -126,7 +126,7 @@ function splitStatus(porcelain: string): { staged: string[]; unstaged: string[];
 }
 
 export function repositoryGitStatus(repository: RepositoryRecord): RepositoryGitStatusSnapshot {
-  const porcelain = runGit(repository, ['status', '--porcelain=v1', '--branch', '--untracked-files=all']).stdout;
+  const porcelain = runGit(repository, ['status', '--porcelain=v1', '--branch', '--untracked-files=all', '--', '.', ':(exclude).ai/harness/**']).stdout;
   const split = splitStatus(porcelain);
   return {
     repoId: repository.repoId,
@@ -135,7 +135,7 @@ export function repositoryGitStatus(repository: RepositoryRecord): RepositoryGit
     head: gitText(repository, ['rev-parse', '--verify', 'HEAD']),
     upstream: gitText(repository, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']),
     porcelain,
-    shortStatus: runGit(repository, ['status', '--short', '--branch', '--untracked-files=all']).stdout,
+    shortStatus: runGit(repository, ['status', '--short', '--branch', '--untracked-files=all', '--', '.', ':(exclude).ai/harness/**']).stdout,
     ...split,
     clean: split.staged.length === 0 && split.unstaged.length === 0 && split.untracked.length === 0,
   };

@@ -10,15 +10,9 @@
 
 ## repo-harness 是什么
 
-repo-harness 是一个本地执行桥，让 ChatGPT 通过有边界的工具面处理一个或多个仓库。默认 ChatGPT 使用路径刻意保持很小：
+repo-harness 是一个本地执行桥，让 ChatGPT 通过固定且有边界的工具 schema 处理一个或多个仓库。日常编排优先使用 `rh_status`、`rh_access`、`rh_context`、`rh_work` 和 `rh_inbox`；默认工具面同时提供 Direct Edit、命令、Git、Agent、Campaign、iOS、插件、artifact 和恢复能力。
 
-- `rh_status` 检查运行时和仓库就绪状态
-- `rh_context` 读取有界仓库上下文
-- `rh_work` 发起或继续有边界的工作
-- `rh_inbox` 处理决策、授权和待关注事项
-- `repository_list`、`repository_get`、`repository_register`、`repository_latest_source_diagnose`、`repository_bootstrap_local_project` 用于选择、诊断或初始化仓库目标
-
-小而确定的修改默认走 Direct Edit。需要跨会话恢复、带依赖拆分或保留审查证据的工作，才进入 durable 的 Issue → Task → Run 路径。本地 Agent、GitHub 会话、浏览器、调度和插件都属于可选增强层。
+小而确定的修改默认走 Direct Edit；`quick_agent_session` 可以直接调用本地 Codex/Claude，不强制先创建 Issue 或 Task。需要跨会话恢复、带依赖拆分或保留正式审查证据的工作，仍可进入 durable 的 Issue → Task → Run 路径。Request/Full Access 只改变审批行为，不会要求重连 MCP Connector。
 
 ## 当前运行时事实
 

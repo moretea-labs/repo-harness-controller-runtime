@@ -406,8 +406,8 @@ export function mapWorkSummary(
     objective: work.objective,
     modeLabel: mode.label,
     mode: mode.mode,
-    accessMode: work.constraints.accessMode ?? 'request',
-    accessModeLabel: accessModeDescriptor(work.constraints.accessMode ?? 'request').shortLabel,
+    accessMode: work.constraints.accessMode ?? 'full_access',
+    accessModeLabel: accessModeDescriptor(work.constraints.accessMode ?? 'full_access').shortLabel,
     statusLabel: status.label,
     tone: status.tone,
     phase: status.phase,
@@ -623,29 +623,23 @@ function mapConnectorFreshnessView(report: ConnectorFreshnessReport): ConnectorF
   };
 }
 
-function accessToolGroups(mode: AccessMode): string[] {
-  return mode === 'full_access'
-    ? [
-      'status_and_readiness',
-      'repository_selection',
-      'approval_and_handoffs',
-      'access_control_plane',
-      'repository_reads',
-      'repository_writes_and_patches',
-      'commands_and_checks',
-      'git_and_branches',
-      'worktrees_and_task_runs',
-      'direct_edit_sessions',
-      'ios_xcode_and_simulator',
-      'screenshots_and_review_artifacts',
-    ]
-    : [
-      'status_and_readiness',
-      'repository_selection',
-      'approval_and_handoffs',
-      'access_control_plane',
-      'safe_request_entrypoints',
-    ];
+function accessToolGroups(_mode: AccessMode): string[] {
+  // Access mode controls approval behavior only. Tool discovery stays stable so
+  // changing Request/Full Access never requires an MCP reconnect.
+  return [
+    'status_and_readiness',
+    'repository_selection',
+    'approval_and_handoffs',
+    'access_control_plane',
+    'repository_reads',
+    'repository_writes_and_patches',
+    'commands_and_checks',
+    'git_and_branches',
+    'worktrees_and_task_runs',
+    'direct_edit_sessions',
+    'ios_xcode_and_simulator',
+    'screenshots_and_review_artifacts',
+  ];
 }
 
 function controllerAccessStateView(ctx: ConsoleFacadeContext): AccessStateViewModel {
@@ -674,8 +668,9 @@ function controllerAccessStateView(ctx: ConsoleFacadeContext): AccessStateViewMo
     exposureRevision: configured.exposureRevision,
     lastAppliedAt: configured.lastAppliedAt,
     source: effective.source,
-    reconnectRequired: configured.configuredAccessMode !== effective.effectiveAccessMode,
-    schemaRefreshRequired: configured.configuredAccessMode !== effective.effectiveAccessMode,
+    reconnectRequired: false,
+    schemaRefreshRequired: false,
+    toolSchemaStable: true,
     restartRequired: false,
     repositoryPolicyMode: repositoryPolicy.mode,
     repositoryPolicyLabel: accessModeDescriptor(repositoryPolicy.mode).shortLabel,
@@ -1198,9 +1193,6 @@ export function setConsoleAccessPolicy(
   if (!isAccessMode(input.mode)) throw new Error('ACCESS_MODE_INVALID: mode must be request or full_access');
   if (input.confirmAuthorization !== true) {
     throw new Error('ACCESS_MODE_AUTHORIZATION_REQUIRED: changing repository access requires explicit confirmation');
-  }
-  if (input.mode === 'full_access' && input.confirmationText !== 'enable-full-access') {
-    throw new Error('FULL_ACCESS_STRONG_CONFIRMATION_REQUIRED: confirmation text must equal enable-full-access');
   }
   persistControllerAccessMode(ctx.controllerHome, input.mode, ctx.repository.canonicalRoot);
   const policy = writeRepositoryAccessPolicy(ctx.controllerHome, ctx.repository.repoId, input.mode, 'user');

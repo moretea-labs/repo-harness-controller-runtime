@@ -133,11 +133,11 @@ describe('mcp command', () => {
     expect(defaultMcpRestartLogPath('/tmp/example-repo')).toBe('/tmp/example-repo/.ai/local/logs/repo-harness-mcp.log');
   });
 
-  test('restart skips public verification when runtime tunnel mode is none', () => {
+  test('restart verifies any configured public endpoint even when tunnel ownership is external', () => {
     expect(shouldVerifyPublicSurface({
       tunnelMode: 'none',
       publicEndpoint: 'https://example.test/mcp',
-    })).toBe(false);
+    })).toBe(true);
     expect(shouldVerifyPublicSurface({
       tunnelMode: 'quick',
       publicEndpoint: 'https://example.test/mcp',

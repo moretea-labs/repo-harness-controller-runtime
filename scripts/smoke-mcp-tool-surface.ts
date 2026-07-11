@@ -44,8 +44,8 @@ for (const name of OPTIONAL_INTERACTIVE_DEVELOPMENT_TOOLS) {
     `interactive tool ${name} missing from ADVANCED_CONTROLLER_TOOL_NAMES`,
   );
   assert(
-    !(DEFAULT_CONTROLLER_TOOL_NAMES as readonly string[]).includes(name),
-    `interactive tool ${name} must not be in default core tools/list`,
+    (DEFAULT_CONTROLLER_TOOL_NAMES as readonly string[]).includes(name),
+    `interactive tool ${name} missing from the stable default tools/list`,
   );
 }
 
@@ -64,10 +64,11 @@ for (const name of EXPECTED_FACADE_TOOLS) {
 }
 assert(coreExposed.includes('repository_list'), 'default surface missing repository_list');
 assert(coreExposed.includes('repository_bootstrap_local_project'), 'default surface missing bootstrap tool');
-assert(coreExposed.length <= 12, `default tools/list is not minimal: ${coreExposed.length}`);
+assert(coreExposed.length <= 128, `stable tools/list exceeds schema budget: ${coreExposed.length}`);
+assert(JSON.stringify(coreExposed) === JSON.stringify(advancedExposed), 'core and advanced labels must expose the same stable schema');
 for (const name of OPTIONAL_INTERACTIVE_DEVELOPMENT_TOOLS) {
-  assert(!coreExposed.includes(name), `default surface must hide interactive ${name}`);
-  assert(advancedExposed.includes(name), `advanced surface missing interactive ${name}`);
+  assert(coreExposed.includes(name), `stable default surface missing interactive ${name}`);
+  assert(advancedExposed.includes(name), `advanced alias missing interactive ${name}`);
 }
 
 const unable = evaluateConnectorFreshness({ localToolNames: expected });

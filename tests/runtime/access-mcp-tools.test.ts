@@ -60,43 +60,37 @@ describe('repository access MCP tools', () => {
     expect(names).toContain('repository_access_set');
   });
 
-  test('get returns Request by default', () => {
+  test('get returns Full Access by default without mutating storage', () => {
     const { ctx, repository } = fixture();
     const value = payload(callAccessTool(ctx, 'repository_access_get', { repo_id: repository.repoId }));
     expect(value).toMatchObject({
-      policy: { mode: 'request', updatedBy: 'system' },
-      descriptor: { shortLabel: 'Request' },
+      policy: { mode: 'full_access', updatedBy: 'system' },
+      descriptor: { shortLabel: 'Full Access' },
       scope: 'repository',
       storage: 'controllerHome',
     });
   });
 
-  test('Full Access requires explicit strong confirmation', () => {
+  test('Full Access requires explicit authorization but never a reconnect phrase', () => {
     const { ctx, repository } = fixture();
-    const missing = callAccessTool(ctx, 'repository_access_set', {
+    const denied = callAccessTool(ctx, 'repository_access_set', {
       repo_id: repository.repoId,
       mode: 'full_access',
-      confirm_authorization: true,
     });
-    expect(missing?.isError).toBe(true);
-    expect(payload(missing)).toMatchObject({
-      error: { code: 'FULL_ACCESS_STRONG_CONFIRMATION_REQUIRED' },
-    });
+    expect(denied?.isError).toBe(true);
+    expect(payload(denied)).toMatchObject({ error: { code: 'ACCESS_MODE_AUTHORIZATION_REQUIRED' } });
 
     const enabled = callAccessTool(ctx, 'repository_access_set', {
       repo_id: repository.repoId,
       mode: 'full_access',
       confirm_authorization: true,
-      confirmation_text: 'enable-full-access',
     });
     expect(enabled?.isError).not.toBe(true);
     expect(payload(enabled)).toMatchObject({
       policy: { mode: 'full_access', updatedBy: 'user' },
       descriptor: { shortLabel: 'Full Access' },
-    });
-
-    expect(payload(callAccessTool(ctx, 'repository_access_get', { repo_id: repository.repoId }))).toMatchObject({
-      policy: { mode: 'full_access' },
+      reconnectRequired: false,
+      toolSchemaStable: true,
     });
   });
 
@@ -118,28 +112,18 @@ describe('repository access MCP tools', () => {
       repoIdOverride: 'repo-permissions-second',
     });
 
-    const weakConfirmation = callAccessTool(ctx, 'repository_access_set', {
-      all_repositories: true,
-      mode: 'full_access',
-      confirm_authorization: true,
-      confirmation_text: 'enable-full-access',
-    });
-    expect(weakConfirmation?.isError).toBe(true);
-    expect(payload(weakConfirmation)).toMatchObject({
-      error: { code: 'FULL_ACCESS_STRONG_CONFIRMATION_REQUIRED' },
-    });
-
     const enabled = callAccessTool(ctx, 'repository_access_set', {
       all_repositories: true,
       mode: 'full_access',
       confirm_authorization: true,
-      confirmation_text: 'enable-full-access-all',
     });
     expect(enabled?.isError).not.toBe(true);
     expect(payload(enabled)).toMatchObject({
       mode: 'full_access',
       scope: 'all_enabled_repositories',
       updatedCount: 2,
+      reconnectRequired: false,
+      toolSchemaStable: true,
     });
     expect(readRepositoryAccessPolicy(ctx.controllerHome, repository.repoId).mode).toBe('full_access');
     expect(readRepositoryAccessPolicy(ctx.controllerHome, second.repoId).mode).toBe('full_access');

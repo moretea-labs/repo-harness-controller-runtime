@@ -8,7 +8,7 @@ repo-harness 不依赖编码 Agent 或外部插件也能使用。先完成核心
 
 - 用稳定 `repoId`、`checkoutId` 注册和选择仓库；
 - 有边界的仓库读取与上下文聚合；
-- 默认四个 ChatGPT facade：`rh_status`、`rh_inbox`、`rh_context`、`rh_work`；
+- 五个首选 ChatGPT facade：`rh_status`、`rh_access`、`rh_inbox`、`rh_context`、`rh_work`，以及固定、可修复的默认 MCP 工具面；
 - Direct Edit：路径限制、SHA 前置条件、多 revision、savepoint、diff、检查和回滚；
 - 可恢复的 Issue → Task → Run 状态与执行证据；
 - 命名检查，而不是向远端开放任意 shell；
@@ -31,7 +31,7 @@ repo-harness 不依赖编码 Agent 或外部插件也能使用。先完成核心
 
 ## 工具暴露
 
-默认 `core` 只暴露四个 facade 和仓库初始化/选择工具。维护和诊断时才使用 `advanced`；`full` 只用于旧集成兼容，不是新用户教程路径。
+默认 `advanced` 暴露固定、可修复且不超过 128 个工具的 schema；`core` 是同一 schema 的兼容别名。`full` 会暴露全部历史定义，只用于旧集成或深度兼容诊断。
 
 ## 如何选择执行方式
 

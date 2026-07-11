@@ -41,11 +41,11 @@ afterEach(() => {
 });
 
 describe('repository access policy', () => {
-  test('defaults to request without writing controller state', () => {
+  test('defaults to Full Access without writing controller state', () => {
     const home = controllerHome();
     const policy = readRepositoryAccessPolicy(home, 'repo-test');
 
-    expect(policy.mode).toBe('request');
+    expect(policy.mode).toBe('full_access');
     expect(policy.updatedBy).toBe('system');
     expect(repositoryAccessPolicyPath(home, 'repo-test')).toEndWith(
       join('repositories', 'repo-test', 'controller', 'access-policy.json'),
@@ -96,8 +96,8 @@ describe('access decision matrix', () => {
   test('descriptors explain the remaining hard boundaries', () => {
     const full = accessModeDescriptor('full_access');
     expect(full.shortLabel).toBe('Full Access');
-    expect(full.stillRequiresApproval.join(' ')).toContain('远程');
-    expect(full.alwaysDenied.join(' ')).toContain('密钥');
+    expect(full.stillRequiresApproval.join(' ')).toContain('remote');
+    expect(full.alwaysDenied.join(' ')).toContain('secrets');
   });
 });
 
@@ -192,4 +192,28 @@ describe('access-aware work routing', () => {
     expect(getWorkContract({ controllerHome: home, repoId: 'repo-test' }, workId)?.constraints.accessMode).toBe('full_access');
     expect(readRepositoryAccessPolicy(home, 'repo-test').mode).toBe('request');
   });
+  test('running work keeps its captured mode and current-workspace policy after repository settings change', () => {
+    const home = controllerHome();
+    const ctx = workloopContext(home);
+    writeRepositoryAccessPolicy(home, 'repo-test', 'full_access');
+    const result = runGoalWorkloop(ctx, 'start', {
+      objective: 'Refactor local source safely',
+      expected_files: 5,
+      expected_changed_lines: 250,
+      scope_clear: true,
+      constraints: { workspace_mode: 'current' },
+      requested_by: 'user',
+    });
+    const workId = String((result.data.work as { workId?: string }).workId ?? '');
+    const before = getWorkContract({ controllerHome: home, repoId: 'repo-test' }, workId)!;
+    expect(before.constraints.accessMode).toBe('full_access');
+    expect(before.worktreePolicy.required).toBe(false);
+    expect(before.driver.preferred).toBe('direct_edit');
+
+    writeRepositoryAccessPolicy(home, 'repo-test', 'request');
+    const after = getWorkContract({ controllerHome: home, repoId: 'repo-test' }, workId)!;
+    expect(after.constraints.accessMode).toBe('full_access');
+    expect(readRepositoryAccessPolicy(home, 'repo-test').mode).toBe('request');
+  });
+
 });

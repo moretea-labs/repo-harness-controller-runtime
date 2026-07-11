@@ -39,11 +39,19 @@ describe('local bridge access mode', () => {
     expect(html).toContain('/api/console/access-policy');
   });
 
-  test('console policy requires strong confirmation for Full Access', () => {
+  test('console defaults to Full Access and access changes never require reconnect', () => {
     const ctx = fixture();
-    expect(getConsoleAccessPolicy(ctx).policy.mode).toBe('request');
-    expect(() => setConsoleAccessPolicy(ctx, { mode: 'full_access', confirmAuthorization: true })).toThrow('FULL_ACCESS_STRONG_CONFIRMATION_REQUIRED');
-    expect(setConsoleAccessPolicy(ctx, { mode: 'full_access', confirmAuthorization: true, confirmationText: 'enable-full-access' }).policy.mode).toBe('full_access');
+    const initial = getConsoleAccessPolicy(ctx);
+    expect(initial.policy.mode).toBe('full_access');
+    expect(initial.access.reconnectRequired).toBe(false);
+    expect(initial.access.schemaRefreshRequired).toBe(false);
+    expect(initial.access.toolSchemaStable).toBe(true);
+    const request = setConsoleAccessPolicy(ctx, { mode: 'request', confirmAuthorization: true });
+    expect(request.policy.mode).toBe('request');
+    expect(request.access.reconnectRequired).toBe(false);
+    const full = setConsoleAccessPolicy(ctx, { mode: 'full_access', confirmAuthorization: true });
+    expect(full.policy.mode).toBe('full_access');
+    expect(full.access.toolGroups).toEqual(request.access.toolGroups);
   });
 
   test('console task captures selected access mode', () => {
@@ -62,7 +70,7 @@ describe('local bridge access mode', () => {
 
   test('command center reports the repository default', async () => {
     const ctx = fixture();
-    setConsoleAccessPolicy(ctx, { mode: 'full_access', confirmAuthorization: true, confirmationText: 'enable-full-access' });
+    setConsoleAccessPolicy(ctx, { mode: 'full_access', confirmAuthorization: true });
     const commandCenter = await buildCommandCenter(ctx, []);
     expect(commandCenter.accessMode).toBe('full_access');
     expect(commandCenter.accessModeLabel).toBe('Full Access');

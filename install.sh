@@ -99,7 +99,7 @@ verify_repo_harness() {
 }
 
 if [ "${REPO_HARNESS_DRY_RUN:-0}" = "1" ]; then
-  log "DRY RUN: would require Git and Node.js 20.10+, choose runtime (${INSTALL_RUNTIME}), install ${PACKAGE_NAME}@${PACKAGE_VERSION}, and verify the CLI."
+  log "DRY RUN: would require Git and Node.js 20.10 or newer, choose runtime (${INSTALL_RUNTIME}), install ${PACKAGE_NAME}@${PACKAGE_VERSION}, and verify the CLI."
   exit 0
 fi
 

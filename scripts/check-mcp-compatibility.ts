@@ -1,64 +1,65 @@
 import { CONTROLLER_TOOL_SURFACE, controllerToolSurfaceFingerprint } from '../src/cli/controller/runtime-config';
 import { runtimePolicy } from '../src/cli/mcp/multi-repository';
-import { controllerExpectedToolNames } from '../src/cli/mcp/tools';
+import { buildMcpToolDefinitions } from '../src/cli/mcp/tools';
 import { accessToolDefinitions } from '../src/cli/mcp/access-tools';
+import { repositoryToolDefinitions } from '../src/cli/mcp/repository-tools';
 import { runtimeToolDefinitions } from '../src/runtime/gateway/mcp/runtime-tools';
 import {
   ADVANCED_CONTROLLER_TOOL_NAMES,
   DEFAULT_CONTROLLER_TOOL_NAMES,
+  PREFERRED_FACADE_TOOL_NAMES,
+  STABLE_CONTROLLER_TOOL_NAMES,
 } from '../src/cli/mcp/toolset';
 
-const EXPECTED_COMPATIBILITY_FINGERPRINT = '75fc20396887283e';
-const EXPECTED_COMPATIBILITY_TOOL_COUNT = 116;
-const EXPECTED_DEFAULT_TOOL_COUNT = DEFAULT_CONTROLLER_TOOL_NAMES.length;
-const EXPECTED_ADVANCED_TOOL_COUNT = ADVANCED_CONTROLLER_TOOL_NAMES.length;
+const EXPECTED_STABLE_TOOL_COUNT = 128;
+const MAX_STABLE_TOOL_COUNT = 128;
 
 const policy = runtimePolicy(process.cwd(), {
   profile: 'controller',
   enableDevRunner: true,
   devRunnerAgents: 'codex,claude',
 });
-const runtimeNames = runtimeToolDefinitions.map((tool) => tool.name);
-const accessNames = accessToolDefinitions.map((tool) => tool.name);
-const compatibilityNames = controllerExpectedToolNames(policy)
-  .filter((name) => !runtimeNames.includes(name));
-const compatibilityFingerprint = controllerToolSurfaceFingerprint(compatibilityNames);
-const duplicateCompatibility = compatibilityNames.filter((name, index) => compatibilityNames.indexOf(name) !== index);
-const collisions = [...runtimeNames, ...accessNames]
-  .filter((name) => compatibilityNames.includes(name));
-const accessRuntimeCollisions = accessNames.filter((name) => runtimeNames.includes(name));
+
+const sourceGroups = {
+  runtime: runtimeToolDefinitions.map((tool) => tool.name),
+  access: accessToolDefinitions.map((tool) => tool.name),
+  repository: repositoryToolDefinitions.map((tool) => tool.name),
+  legacyCompatibility: buildMcpToolDefinitions(policy).map((tool) => tool.name),
+};
+const fullNames = [...new Set(Object.values(sourceGroups).flat())];
+const stableNames: string[] = [...STABLE_CONTROLLER_TOOL_NAMES];
 const defaultNames: string[] = [...DEFAULT_CONTROLLER_TOOL_NAMES];
 const advancedNames: string[] = [...ADVANCED_CONTROLLER_TOOL_NAMES];
-const fullNames = [...compatibilityNames, ...runtimeNames, ...accessNames];
-const defaultFingerprint = controllerToolSurfaceFingerprint(defaultNames);
-const advancedFingerprint = controllerToolSurfaceFingerprint(advancedNames);
+const preferredNames: string[] = [...PREFERRED_FACADE_TOOL_NAMES];
+const stableFingerprint = controllerToolSurfaceFingerprint(stableNames);
 const fullFingerprint = controllerToolSurfaceFingerprint(fullNames);
+const duplicateStable = stableNames.filter((name, index) => stableNames.indexOf(name) !== index);
+const missingStable = stableNames.filter((name) => !fullNames.includes(name));
+const sourceCollisions = Object.entries(sourceGroups).flatMap(([group, names], groupIndex, entries) =>
+  names.filter((name) => entries.slice(0, groupIndex).some(([, earlier]) => earlier.includes(name)))
+    .map((name) => `${group}:${name}`));
 
 const failures: string[] = [];
-if (compatibilityNames.length !== EXPECTED_COMPATIBILITY_TOOL_COUNT) {
-  failures.push(`legacy Controller tool count changed: expected ${EXPECTED_COMPATIBILITY_TOOL_COUNT}, got ${compatibilityNames.length}`);
+if (stableNames.length !== EXPECTED_STABLE_TOOL_COUNT) {
+  failures.push(`stable Controller tool count changed: expected ${EXPECTED_STABLE_TOOL_COUNT}, got ${stableNames.length}`);
 }
-if (compatibilityFingerprint !== EXPECTED_COMPATIBILITY_FINGERPRINT) {
-  failures.push(`legacy Controller fingerprint changed: expected ${EXPECTED_COMPATIBILITY_FINGERPRINT}, got ${compatibilityFingerprint}`);
+if (stableNames.length > MAX_STABLE_TOOL_COUNT) {
+  failures.push(`stable Controller tools/list exceeds the schema budget: ${stableNames.length} > ${MAX_STABLE_TOOL_COUNT}`);
 }
-if (duplicateCompatibility.length) failures.push(`legacy duplicate names: ${[...new Set(duplicateCompatibility)].join(', ')}`);
-if (collisions.length) failures.push(`runtime/access tools collide with legacy tools: ${collisions.join(', ')}`);
-if (accessRuntimeCollisions.length) failures.push(`access tools collide with runtime tools: ${accessRuntimeCollisions.join(', ')}`);
-if (defaultNames.length !== EXPECTED_DEFAULT_TOOL_COUNT) {
-  failures.push(`default core Controller tool count changed: expected ${EXPECTED_DEFAULT_TOOL_COUNT}, got ${defaultNames.length}`);
+if (duplicateStable.length) failures.push(`stable duplicate names: ${[...new Set(duplicateStable)].join(', ')}`);
+if (missingStable.length) failures.push(`stable tools missing from registered definitions: ${missingStable.join(', ')}`);
+if (defaultNames.join('\n') !== stableNames.join('\n')) {
+  failures.push('default/core surface must alias the stable Controller surface');
 }
-if (advancedNames.length !== EXPECTED_ADVANCED_TOOL_COUNT) {
-  failures.push(`advanced Controller tool count changed: expected ${EXPECTED_ADVANCED_TOOL_COUNT}, got ${advancedNames.length}`);
+if (advancedNames.join('\n') !== stableNames.join('\n')) {
+  failures.push('advanced surface must alias the stable Controller surface');
 }
-if (defaultNames.length > 12) {
-  failures.push(`default core tools/list is no longer minimal: ${defaultNames.length} tools`);
+for (const name of ['rh_access', 'rh_status', 'rh_inbox', 'rh_context', 'rh_work']) {
+  if (!preferredNames.includes(name)) failures.push(`preferred facade surface missing: ${name}`);
+  if (!stableNames.includes(name)) failures.push(`stable surface missing facade tool: ${name}`);
 }
-const missingDefault = defaultNames.filter((name) => !advancedNames.includes(name));
-if (missingDefault.length) failures.push(`default tools missing from advanced surface: ${missingDefault.join(', ')}`);
-const missingAdvanced = advancedNames.filter((name) => !fullNames.includes(name));
-if (missingAdvanced.length) failures.push(`advanced tools missing from full surface: ${missingAdvanced.join(', ')}`);
-for (const name of ['rh_status', 'rh_inbox', 'rh_context', 'rh_work']) {
-  if (!defaultNames.includes(name)) failures.push(`default surface missing facade tool: ${name}`);
+if (fullNames.length < stableNames.length) {
+  failures.push(`full compatibility surface is smaller than stable surface: ${fullNames.length} < ${stableNames.length}`);
 }
 
 if (failures.length) {
@@ -66,17 +67,15 @@ if (failures.length) {
   for (const failure of failures) console.error(`- ${failure}`);
   process.exit(1);
 }
+
 console.log(JSON.stringify({
   status: 'ok',
   toolSurface: CONTROLLER_TOOL_SURFACE,
-  compatibilityToolCount: compatibilityNames.length,
-  compatibilityFingerprint,
-  addedRuntimeControlToolCount: runtimeNames.length,
-  addedAccessToolCount: accessNames.length,
-  defaultToolCount: defaultNames.length,
-  defaultFingerprint,
-  advancedToolCount: advancedNames.length,
-  advancedFingerprint,
-  fullToolCount: fullNames.length,
-  fullFingerprint,
+  stableToolCount: stableNames.length,
+  stableFingerprint,
+  fullCompatibilityToolCount: fullNames.length,
+  fullCompatibilityFingerprint: fullFingerprint,
+  sourceToolCounts: Object.fromEntries(Object.entries(sourceGroups).map(([name, tools]) => [name, tools.length])),
+  sourceCollisions: [...new Set(sourceCollisions)].sort(),
+  accessModeChangesSchema: false,
 }, null, 2));

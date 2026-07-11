@@ -1,4 +1,4 @@
-import { existsSync, statSync } from "fs";
+import { existsSync, lstatSync, readdirSync, statSync } from "fs";
 import { gitSnapshot, readRepositoryRange, searchRepository } from "../repository/inspector";
 import { resolveMcpPath, globMatches } from "../mcp/paths";
 import type { McpPolicy } from "../mcp/types";
@@ -223,6 +223,76 @@ function readableFile(repoRoot: string, policy: McpPolicy, path: string): { ok: 
   return { ok: true, path: decision.relativePath };
 }
 
+interface ExpandedKnownPath {
+  files: string[];
+  denied: Array<{ path: string; reason: string }>;
+  directory?: string;
+  truncated: boolean;
+}
+
+/**
+ * Expand an explicit file or directory without following symlinks. Every file
+ * is re-checked through resolveMcpPath so directory support never broadens the
+ * policy boundary. Enumeration is deterministic and bounded.
+ */
+function expandKnownPath(
+  repoRoot: string,
+  policy: McpPolicy,
+  path: string,
+  maxFiles: number,
+): ExpandedKnownPath {
+  const decision = resolveMcpPath(repoRoot, path, policy, "read");
+  if (!decision.ok || !decision.relativePath || !decision.absolutePath) {
+    return { files: [], denied: [{ path: decision.relativePath ?? path, reason: decision.reason ?? "path denied" }], truncated: false };
+  }
+  if (!existsSync(decision.absolutePath)) {
+    return { files: [], denied: [{ path: decision.relativePath, reason: "path does not exist" }], truncated: false };
+  }
+  const rootStat = lstatSync(decision.absolutePath);
+  if (rootStat.isSymbolicLink()) {
+    return { files: [], denied: [{ path: decision.relativePath, reason: "symbolic links are not followed" }], truncated: false };
+  }
+  if (rootStat.isFile()) return { files: [decision.relativePath], denied: [], truncated: false };
+  if (!rootStat.isDirectory()) {
+    return { files: [], denied: [{ path: decision.relativePath, reason: "path is neither a regular file nor directory" }], truncated: false };
+  }
+
+  const files: string[] = [];
+  const denied: Array<{ path: string; reason: string }> = [];
+  let truncated = false;
+  const walk = (relativeDirectory: string, depth: number): void => {
+    if (files.length >= maxFiles) { truncated = true; return; }
+    if (depth > 8) { denied.push({ path: relativeDirectory, reason: "directory recursion depth exceeded" }); return; }
+    const directoryDecision = resolveMcpPath(repoRoot, relativeDirectory, policy, "read");
+    if (!directoryDecision.ok || !directoryDecision.absolutePath || !directoryDecision.relativePath) {
+      denied.push({ path: directoryDecision.relativePath ?? relativeDirectory, reason: directoryDecision.reason ?? "path denied" });
+      return;
+    }
+    let entries;
+    try {
+      entries = readdirSync(directoryDecision.absolutePath, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name));
+    } catch (error) {
+      denied.push({ path: directoryDecision.relativePath, reason: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    for (const entry of entries) {
+      if (files.length >= maxFiles) { truncated = true; break; }
+      const child = `${directoryDecision.relativePath}/${entry.name}`.replace(/^\.\//, "");
+      if (entry.isSymbolicLink()) {
+        denied.push({ path: child, reason: "symbolic links are not followed" });
+      } else if (entry.isDirectory()) {
+        walk(child, depth + 1);
+      } else if (entry.isFile()) {
+        const readable = readableFile(repoRoot, policy, child);
+        if (readable.ok) files.push(readable.path);
+        else denied.push(readable);
+      }
+    }
+  };
+  walk(decision.relativePath, 0);
+  return { files, denied, directory: decision.relativePath, truncated };
+}
+
 function boundedSnippet(content: string, maxChars: number): { content: string; truncated: boolean } {
   if (content.length <= maxChars) return { content, truncated: false };
   return { content: `${content.slice(0, maxChars)}\n... <snippet truncated>`, truncated: true };
@@ -276,9 +346,13 @@ export function buildControllerContextPack(
   let searchTruncated = false;
 
   for (const path of explicitKnownPaths) {
-    const file = readableFile(repoRoot, policy, path);
-    if (file.ok) addReason(candidates, file.path, "explicit-known-path", 1);
-    else deniedPaths.push(file);
+    const expanded = expandKnownPath(repoRoot, policy, path, Math.max(maxFiles * 4, 40));
+    for (const file of expanded.files) {
+      addReason(candidates, file, expanded.directory ? `explicit-known-directory:${expanded.directory}` : "explicit-known-path", 1);
+    }
+    deniedPaths.push(...expanded.denied);
+    scannedFiles += expanded.files.length;
+    searchTruncated = searchTruncated || expanded.truncated;
   }
 
   for (const glob of allowedPathGlobs) {
@@ -311,8 +385,8 @@ export function buildControllerContextPack(
   const rankedCandidates = Array.from(candidates.entries())
     .map(([path, entry]) => ({ path, reasons: Array.from(entry.reasons), lines: Array.from(entry.lines) }))
     .sort((left, right) => {
-      const leftExplicit = left.reasons.includes("explicit-known-path") ? 1 : 0;
-      const rightExplicit = right.reasons.includes("explicit-known-path") ? 1 : 0;
+      const leftExplicit = left.reasons.some((reason) => reason === "explicit-known-path" || reason.startsWith("explicit-known-directory:")) ? 1 : 0;
+      const rightExplicit = right.reasons.some((reason) => reason === "explicit-known-path" || reason.startsWith("explicit-known-directory:")) ? 1 : 0;
       if (leftExplicit !== rightExplicit) return rightExplicit - leftExplicit;
       if (left.reasons.length !== right.reasons.length) return right.reasons.length - left.reasons.length;
       if (left.lines.length !== right.lines.length) return right.lines.length - left.lines.length;

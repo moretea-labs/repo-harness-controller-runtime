@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { spawnSync } from "child_process";
 import { tmpdir } from "os";
 import { join } from "path";
 import { createIssue, getIssue, listIssues } from "../../src/cli/controller/issue-store";
@@ -15,6 +16,7 @@ function repo(): string {
   roots.push(root);
   mkdirSync(join(root, "tasks"), { recursive: true });
   mkdirSync(join(root, ".ai/harness/jobs"), { recursive: true });
+  spawnSync("git", ["init", "-b", "main"], { cwd: root, stdio: "ignore" });
   return root;
 }
 

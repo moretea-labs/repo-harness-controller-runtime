@@ -231,9 +231,16 @@ export function routeExecutor(input: ExecutorRouteInput): ExecutorRouteDecision 
   const key: RoutingIntentKey = forceRepair && routingKey !== 'deterministic_edit' ? 'repair' : routingKey;
   let order = orderFor(input, key);
 
+  // A repair pass should try another ready provider before immediately selecting
+  // the provider that just failed. Keep the failed provider as the final fallback
+  // so single-provider installations still make progress.
+  if (forceRepair && lastProvider) {
+    order = [...order.filter((id) => id !== lastProvider), lastProvider];
+  }
+
   // Put explicit default at front when configured and not handoff-only for direct intents.
   const def = preferredDefault(input, key);
-  if (def && def !== 'chatgpt_handoff') {
+  if (def && def !== 'chatgpt_handoff' && !(forceRepair && def === lastProvider)) {
     order = [def, ...order.filter((id) => id !== def)];
   }
 

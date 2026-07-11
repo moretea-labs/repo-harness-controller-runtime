@@ -25,28 +25,28 @@ describe('mcp keepalive helpers', () => {
 
   test('infers tunnel mode from endpoint and named tunnel presence', () => {
     expect(inferMcpTunnelMode(undefined, undefined, undefined)).toBe('quick');
-    expect(inferMcpTunnelMode(undefined, 'https://repo-harness-mcp.example.com/mcp', 'repo-harness-mcp')).toBe('named');
-    expect(inferMcpTunnelMode(undefined, 'https://repo-harness-mcp.example.com/mcp', undefined)).toBe('none');
-    expect(inferMcpTunnelMode('none', 'https://repo-harness-mcp.example.com/mcp', 'repo-harness-mcp')).toBe('none');
+    expect(inferMcpTunnelMode(undefined, 'https://repo-harness-mcp.acme.dev/mcp', 'repo-harness-mcp')).toBe('named');
+    expect(inferMcpTunnelMode(undefined, 'https://repo-harness-mcp.acme.dev/mcp', undefined)).toBe('none');
+    expect(inferMcpTunnelMode('none', 'https://repo-harness-mcp.acme.dev/mcp', 'repo-harness-mcp')).toBe('none');
     expect(() => inferMcpTunnelMode('bad-mode', undefined, undefined)).toThrow('invalid --tunnel');
   });
 
   test('validates keepalive public endpoint values', () => {
-    expect(normalizeKeepalivePublicEndpoint('https://repo-harness-mcp.example.com/mcp')).toBe(
-      'https://repo-harness-mcp.example.com/mcp',
+    expect(normalizeKeepalivePublicEndpoint('https://repo-harness-mcp.acme.dev/mcp')).toBe(
+      'https://repo-harness-mcp.acme.dev/mcp',
     );
     expect(normalizeKeepalivePublicEndpoint(undefined)).toBeUndefined();
-    expect(() => normalizeKeepalivePublicEndpoint('http://repo-harness-mcp.example.com/mcp')).toThrow(
+    expect(() => normalizeKeepalivePublicEndpoint('http://repo-harness-mcp.acme.dev/mcp')).toThrow(
       'invalid --public-endpoint',
     );
-    expect(() => normalizeKeepalivePublicEndpoint('https://repo-harness-mcp.example.com/not-mcp')).toThrow(
+    expect(() => normalizeKeepalivePublicEndpoint('https://repo-harness-mcp.acme.dev/not-mcp')).toThrow(
       'invalid --public-endpoint',
     );
   });
 
   test('supports operator-managed fixed public endpoints with no managed tunnel', () => {
-    expect(normalizeKeepalivePublicEndpoint('https://mcp.example.com/mcp')).toBe('https://mcp.example.com/mcp');
-    expect(inferMcpTunnelMode('none', 'https://mcp.example.com/mcp', undefined)).toBe('none');
+    expect(normalizeKeepalivePublicEndpoint('https://mcp.acme.dev/mcp')).toBe('https://mcp.acme.dev/mcp');
+    expect(inferMcpTunnelMode('none', 'https://mcp.acme.dev/mcp', undefined)).toBe('none');
   });
 
   test('does not restart a live gateway during transient health failures', () => {

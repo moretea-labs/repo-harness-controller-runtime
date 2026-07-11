@@ -135,12 +135,33 @@ function externalizeJobValue(
   return artifactPointerFor(job, artifact, byteLength);
 }
 
+const INLINE_ERROR_DETAIL_KEYS = new Set([
+  'workerLostReason',
+  'heartbeatAgeMs',
+  'attempt',
+  'maxAttempts',
+  'failureClass',
+  'candidateId',
+  'executionJobId',
+]);
+
+function inlineSafeErrorDetails(details: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(details).filter(([key, value]) =>
+    INLINE_ERROR_DETAIL_KEYS.has(key)
+    && (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean')
+  ));
+}
+
 function sanitizeJobForPersistence(controllerHome: string, job: ExecutionJob): ExecutionJob {
   const next: ExecutionJob = { ...job };
   if (next.error) {
     const error = { ...next.error, message: scrubErrorMessage(next.error.message) };
     if (error.details && !isArtifactPointer(error.details)) {
-      error.details = externalizeJobValue(controllerHome, next, 'job-error', error.details);
+      const inlineDetails = inlineSafeErrorDetails(error.details);
+      const pointer = externalizeJobValue(controllerHome, next, 'job-error', error.details);
+      error.details = Object.keys(inlineDetails).length > 0
+        ? { ...inlineDetails, ...pointer }
+        : pointer;
     }
     next.error = error;
   }

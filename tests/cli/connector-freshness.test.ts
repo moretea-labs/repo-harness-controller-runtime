@@ -66,24 +66,23 @@ function fixture() {
 
 describe('connector freshness diagnostics', () => {
   test('expected facade tools and preferredTools stay aligned with default core exposure', () => {
-    expect(EXPECTED_FACADE_TOOLS).toEqual(['rh_status', 'rh_inbox', 'rh_context', 'rh_work']);
+    expect(EXPECTED_FACADE_TOOLS).toEqual(['rh_access', 'rh_status', 'rh_inbox', 'rh_context', 'rh_work']);
     expect([...PREFERRED_FACADE_TOOL_NAMES]).toEqual([...EXPECTED_FACADE_TOOLS]);
     for (const name of EXPECTED_FACADE_TOOLS) {
       expect(DEFAULT_CONTROLLER_TOOL_NAMES).toContain(name);
     }
     for (const name of OPTIONAL_INTERACTIVE_DEVELOPMENT_TOOLS) {
       expect(ADVANCED_CONTROLLER_TOOL_NAMES).toContain(name);
-      expect(DEFAULT_CONTROLLER_TOOL_NAMES).not.toContain(name);
     }
     const policy = getMcpPolicy('controller');
     const expected = controllerExpectedToolNames(policy);
     for (const name of EXPECTED_FACADE_TOOLS) {
       expect(expected).toContain(name);
     }
-    expect(expected.slice(0, 4)).toEqual([...EXPECTED_FACADE_TOOLS]);
+    expect(expected.slice(0, 5)).toEqual([...EXPECTED_FACADE_TOOLS]);
   });
 
-  test('exposed core definitions include rh_* and bootstrap tools only; interactive tools need advanced', () => {
+  test('core and advanced labels expose the same repair-capable schema', () => {
     const { repository, controllerHome, repoRoot } = fixture();
     const policy = getMcpPolicy('controller', { repoRoot });
     const coreCtx = {
@@ -103,8 +102,9 @@ describe('connector freshness diagnostics', () => {
     }
     expect(coreExposed).toContain('repository_list');
     expect(coreExposed).toContain('repository_bootstrap_local_project');
+    expect(coreExposed).toEqual(advancedExposed);
     for (const name of OPTIONAL_INTERACTIVE_DEVELOPMENT_TOOLS) {
-      expect(coreExposed).not.toContain(name);
+      expect(coreExposed).toContain(name);
       expect(advancedExposed).toContain(name);
     }
   });

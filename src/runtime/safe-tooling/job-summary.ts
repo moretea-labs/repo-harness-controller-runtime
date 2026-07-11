@@ -134,7 +134,10 @@ export function summarizeExecutionJobForMcp(job: ExecutionJob, repoRoot?: string
   const artifactRefs = collectArtifactRefs(job.result, job.error?.details);
   const evidenceIds = job.evidenceIds.slice(-20);
   const errorDetailsAvailable = job.error?.details !== undefined;
-  const digest = buildJobOperationDigest(job);
+  const rawDigest = buildJobOperationDigest(job);
+  const digest = JSON.parse(
+    redactMcpText(scrubPathText(JSON.stringify(rawDigest), replacements)).text,
+  ) as ReturnType<typeof buildJobOperationDigest>;
   return {
     jobId: job.jobId,
     repoId: job.repoId,

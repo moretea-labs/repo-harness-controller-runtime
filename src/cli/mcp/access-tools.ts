@@ -5,7 +5,6 @@ import {
   writeRepositoryAccessPolicy,
 } from '../../runtime/control-plane/governance/access-policy';
 import {
-  legacyToolsetForAccessMode,
   persistControllerAccessMode,
   resolveControllerAccessState,
 } from './access-mode';
@@ -42,7 +41,7 @@ const repoId = { type: 'string', description: 'Stable repository id. Omit when e
 export const accessToolDefinitions: McpToolDefinition[] = [
   definition(
     'rh_access',
-    'Always-exposed controller access control plane. Get, preview, or set Request vs Full Access for the current connector and repository defaults.',
+    'Always-exposed controller execution policy. Request vs Full Access changes approval behavior only; the MCP tool schema remains stable.',
     {
       operation: {
         type: 'string',
@@ -65,7 +64,7 @@ export const accessToolDefinitions: McpToolDefinition[] = [
       },
       confirmation_text: {
         type: 'string',
-        description: 'Required when enabling Full Access: enable-full-access or enable-full-access-all.',
+        description: 'Optional compatibility confirmation text. Tool exposure never changes and no reconnect is required.',
       },
     },
     [],
@@ -78,7 +77,7 @@ export const accessToolDefinitions: McpToolDefinition[] = [
   ),
   definition(
     'repository_access_preview',
-    'Preview how Request or Full Access would affect the connector exposure and selected repository policy.',
+    'Preview how Request or Full Access changes execution approval behavior. Tool discovery remains unchanged.',
     {
       repo_id: repoId,
       all_repositories: {
@@ -112,7 +111,7 @@ export const accessToolDefinitions: McpToolDefinition[] = [
       },
       confirmation_text: {
         type: 'string',
-        description: 'Required when enabling Full Access: enable-full-access for one repository or enable-full-access-all for all enabled repositories.',
+        description: 'Optional compatibility confirmation text; explicit confirm_authorization is sufficient.',
       },
     },
     ['mode', 'confirm_authorization'],
@@ -139,29 +138,23 @@ function result(value: Record<string, unknown>, isError = false): CallToolResult
   };
 }
 
-function accessToolGroups(mode: 'request' | 'full_access'): string[] {
-  return mode === 'full_access'
-    ? [
-      'status_and_readiness',
-      'repository_selection',
-      'approval_and_handoffs',
-      'access_control_plane',
-      'repository_reads',
-      'repository_writes_and_patches',
-      'commands_and_checks',
-      'git_and_branches',
-      'worktrees_and_task_runs',
-      'direct_edit_sessions',
-      'ios_xcode_and_simulator',
-      'screenshots_and_review_artifacts',
-    ]
-    : [
-      'status_and_readiness',
-      'repository_selection',
-      'approval_and_handoffs',
-      'access_control_plane',
-      'safe_request_entrypoints',
-    ];
+function accessToolGroups(_mode: 'request' | 'full_access'): string[] {
+  // Discovery is intentionally stable across modes. These are availability
+  // groups, not automatically-authorized effect groups.
+  return [
+    'status_and_readiness',
+    'repository_selection',
+    'approval_and_handoffs',
+    'access_control_plane',
+    'repository_reads',
+    'repository_writes_and_patches',
+    'commands_and_checks',
+    'git_and_branches',
+    'worktrees_and_task_runs',
+    'direct_edit_sessions',
+    'ios_xcode_and_simulator',
+    'screenshots_and_review_artifacts',
+  ];
 }
 
 function accessStatePayload(
@@ -186,8 +179,9 @@ function accessStatePayload(
     exposureRevision: configured.exposureRevision,
     lastAppliedAt: configured.lastAppliedAt,
     source: effective.source,
-    reconnectRequired: configured.configuredAccessMode !== effective.effectiveAccessMode,
-    schemaRefreshRequired: configured.configuredAccessMode !== effective.effectiveAccessMode,
+    reconnectRequired: false,
+    schemaRefreshRequired: false,
+    toolSchemaStable: true,
     restartRequired: false,
     repository: {
       repoId: repository.repoId,
@@ -216,7 +210,6 @@ function previewPayload(
     toolsetLocked: ctx.toolsetLocked,
   });
   const currentPolicy = readRepositoryAccessPolicy(ctx.controllerHome, repository.repoId);
-  const nextToolset = legacyToolsetForAccessMode(mode);
   const currentGroups = accessToolGroups(currentEffective.effectiveAccessMode);
   const nextGroups = accessToolGroups(mode);
   return {
@@ -226,28 +219,27 @@ function previewPayload(
     },
     target: {
       configuredAccessMode: mode,
-      effectiveAccessMode: ctx.toolsetLocked ? currentEffective.effectiveAccessMode : mode,
-      effectiveToolset: ctx.toolsetLocked ? currentEffective.effectiveToolset : nextToolset,
+      effectiveAccessMode: mode,
+      effectiveToolset: 'full',
       exposureRevision: currentConfigured.exposureRevision + (currentConfigured.configuredAccessMode === mode ? 0 : 1),
-      source: ctx.toolsetLocked ? currentEffective.source : 'controller_home.access_mode',
+      source: 'controller_home.access_mode',
       toolGroups: nextGroups,
       repositoryPolicyMode: mode,
       repositoryPolicyDescriptor: accessModeDescriptor(mode),
     },
     changes: {
       modeChanged: currentConfigured.configuredAccessMode !== mode,
-      toolsetChanged: currentEffective.effectiveToolset !== (ctx.toolsetLocked ? currentEffective.effectiveToolset : nextToolset),
+      toolsetChanged: false,
       repositoryPolicyWillChange: currentPolicy.mode !== mode,
       addedToolGroups: nextGroups.filter((group) => !currentGroups.includes(group)),
       removedToolGroups: currentGroups.filter((group) => !nextGroups.includes(group)),
       scope: applyAll ? 'all_enabled_repositories' : 'repository',
     },
-    reconnectRequired: !ctx.toolsetLocked && currentEffective.effectiveAccessMode !== mode,
-    schemaRefreshRequired: !ctx.toolsetLocked && currentEffective.effectiveAccessMode !== mode,
+    reconnectRequired: false,
+    schemaRefreshRequired: false,
+    toolSchemaStable: true,
     restartRequired: false,
-    warning: ctx.toolsetLocked
-      ? 'This MCP process was started with an explicit toolset override, so changing controllerHome access mode will not change the live effective mode until the override is removed.'
-      : undefined,
+    warning: 'Access mode changes execution approval only. The complete MCP tool schema remains available without reconnecting.',
   };
 }
 
@@ -284,16 +276,6 @@ export function callAccessTool(
           },
         }, true);
       }
-      const requiredConfirmation = applyAll ? 'enable-full-access-all' : 'enable-full-access';
-      if (mode === 'full_access' && args.confirmation_text !== requiredConfirmation) {
-        return result({
-          error: {
-            code: 'FULL_ACCESS_STRONG_CONFIRMATION_REQUIRED',
-            message: `confirmation_text must equal ${requiredConfirmation}.`,
-          },
-        }, true);
-      }
-
       const persisted = persistControllerAccessMode(ctx.controllerHome, mode, ctx.explicitRepository?.canonicalRoot);
       if (applyAll) {
         const repositories = loadRepositoryRegistry(ctx.controllerHome).repositories
@@ -313,9 +295,7 @@ export function callAccessTool(
         ...accessStatePayload(ctx, repository, configured, effective),
         updatedConfigPath: persisted.configPath,
         scope: applyAll ? 'all_enabled_repositories' : 'repository',
-        warning: ctx.toolsetLocked
-          ? 'Access mode was saved, but this MCP process still has an explicit toolset override. Effective mode will not change until that override is removed.'
-          : 'The live MCP process now reports the new access mode. Reconnect or refresh the Connector tool schema before relying on the new tool surface.',
+        warning: 'Access mode was saved. It affects new execution-policy snapshots immediately; no Connector reconnect or schema refresh is required.',
       });
     }
 
@@ -368,16 +348,6 @@ export function callAccessTool(
       }, true);
     }
 
-    const requiredConfirmation = applyAll ? 'enable-full-access-all' : 'enable-full-access';
-    if (mode === 'full_access' && args.confirmation_text !== requiredConfirmation) {
-      return result({
-        error: {
-          code: 'FULL_ACCESS_STRONG_CONFIRMATION_REQUIRED',
-          message: `confirmation_text must equal ${requiredConfirmation}.`,
-        },
-      }, true);
-    }
-
     if (applyAll) {
       const repositories = loadRepositoryRegistry(ctx.controllerHome).repositories
         .filter((repository) => repository.enabled !== false);
@@ -395,6 +365,9 @@ export function callAccessTool(
         storage: 'controllerHome',
         updatedCount: updated.length,
         repositories: updated,
+        reconnectRequired: false,
+        schemaRefreshRequired: false,
+        toolSchemaStable: true,
         warning: mode === 'full_access'
           ? 'Full Access applies only to local work in each enabled repository. Remote writes, destructive actions, outside-repository paths, and raw secrets remain gated.'
           : 'Request mode is active for every enabled repository; elevated local effects will ask for approval.',
@@ -412,6 +385,9 @@ export function callAccessTool(
       descriptor: accessModeDescriptor(policy.mode),
       scope: 'repository',
       storage: 'controllerHome',
+      reconnectRequired: false,
+      schemaRefreshRequired: false,
+      toolSchemaStable: true,
       warning: mode === 'full_access'
         ? 'Full Access applies only to local work in this repository. Remote writes, destructive actions, outside-repository paths, and raw secrets remain gated.'
         : 'Request mode is active; elevated local effects will ask for approval.',

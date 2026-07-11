@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import type { McpToolDefinition } from './tools';
 import type { MultiRepositoryMcpToolContext } from './multi-repository';
 import { buildMultiRepositoryToolDefinitions } from './multi-repository';
@@ -8,116 +9,59 @@ import {
 } from './access-mode';
 import { repositoryToolDefinitions } from './repository-tools';
 import { runtimeToolDefinitions } from '../../runtime/gateway/mcp/runtime-tools';
-import { DEFAULT_CONTROLLER_TOOL_NAMES, PREFERRED_FACADE_TOOL_NAMES } from './toolset-names';
-export { DEFAULT_CONTROLLER_TOOL_NAMES, PREFERRED_FACADE_TOOL_NAMES } from './toolset-names';
+import { DEFAULT_CONTROLLER_TOOL_NAMES, PREFERRED_FACADE_TOOL_NAMES, STABLE_CONTROLLER_TOOL_NAMES } from './toolset-names';
+export { BOOTSTRAP_CONTROLLER_TOOL_NAMES, DEFAULT_CONTROLLER_TOOL_NAMES, PREFERRED_FACADE_TOOL_NAMES, STABLE_CONTROLLER_TOOL_NAMES } from './toolset-names';
 import type { McpToolset } from './types';
 
 export type ToolExposureClass = 'facade' | 'advanced' | 'internal' | 'compatibility';
 
+/**
+ * One authoritative snapshot of the MCP schema actually served to a client.
+ * Access mode intentionally does not alter this schema: Request vs Full Access
+ * is an execution-policy decision, not a tool-discovery decision.
+ */
 export interface ControllerExposureSnapshot {
   access: ControllerAccessState;
+  toolset: McpToolset;
+  definitions: McpToolDefinition[];
   toolNames: string[];
+  expectedToolNames: string[];
+  actualToolNames: string[];
+  missingToolNames: string[];
+  unexpectedToolNames: string[];
+  duplicateToolNames: string[];
+  fingerprint: string;
+  schemaStableAcrossAccessModes: true;
+  ready: boolean;
 }
 
 /**
- * Explicit advanced/supervised controller surface (`--toolset advanced`).
- * Includes the default set plus recovery, work, campaign, and interactive git tools.
- * This is the former large "core" exposure.
+ * Historical profile name retained for CLI/config compatibility. The stable
+ * controller now serves the complete registered schema for core, advanced,
+ * and full so a stale access setting can never hide repair/edit tools.
  */
-export const ADVANCED_CONTROLLER_TOOL_NAMES = [
-  ...DEFAULT_CONTROLLER_TOOL_NAMES,
-  'repository_access_preview',
-  'repository_access_set',
-  // Core controller entrypoints
-  'controller_capabilities',
-  'controller_ready',
-  'controller_context',
-  'controller_context_pack',
-  'capability_recovery_probe',
-  'capability_recovery_plan',
-  'capability_recovery_apply',
-  'runtime_maintenance_status',
-  'runtime_maintenance_apply',
-  'self_healing_loop_plan',
-  'self_healing_monitor_tick',
-  'workspace_auth_status',
-  'workspace_auth_login_prepare',
-  'external_filesystem_targets_list',
-  'external_filesystem_grant_preview',
-  'external_filesystem_grant_apply',
-  'external_filesystem_text_snapshot',
-  'local_bridge_status',
-  'list_plugins',
-  'get_plugin',
-  'plugin_action_execute',
-  'toolchain_plugin_summary',
-  'web_targets_list',
-  'web_target_snapshot',
-  'web_domain_access_preview',
-  'web_domain_access_apply',
-  'work_result_summary',
-  'finish_task_run',
-  'work_status_digest',
-  'model_clients_summary',
-  'model_control_plane_summary',
-  'deepseek_tool_manifest',
-  'deepseek_tool_call_prepare',
-  'deepseek_controller_manifest',
-  'deepseek_controller_handoff_prepare',
-  'deepseek_controller_request_prepare',
-  'work_submit',
-  'work_get',
-  'work_list',
-  'work_cancel',
-  'work_wait',
-  'get_job',
-  'get_artifact',
-  // Interactive development tools (sync by default)
-  'repository_safe_patch_plan',
-  'repository_safe_patch_apply',
-  'repository_git_status',
-  'repository_git_diff',
-  'repository_git_create_branch',
-  'repository_git_switch_branch',
-  'repository_git_commit',
-  'git_diff_paths',
-  'git_stage_paths',
-  'git_commit_paths',
-  'create_campaign',
-  'list_campaigns',
-  'get_campaign',
-  'add_campaign_task',
-  'pause_campaign',
-  'resume_campaign',
-  'cancel_campaign',
-  'get_campaign_review_packet',
-  'submit_campaign_review',
-  'accept_campaign',
-  'reconcile_campaign',
-  'harness_doctor',
-] as const;
 
-/**
- * Alias for the default (`core`) exposure set.
- * Prefer DEFAULT_CONTROLLER_TOOL_NAMES in new code.
- */
-export const CORE_CONTROLLER_TOOL_NAMES = DEFAULT_CONTROLLER_TOOL_NAMES;
+/** Historical names retained for compatibility. Both map to the stable surface. */
+export const ADVANCED_CONTROLLER_TOOL_NAMES = STABLE_CONTROLLER_TOOL_NAMES;
+export const CORE_CONTROLLER_TOOL_NAMES = STABLE_CONTROLLER_TOOL_NAMES;
 
-const DEFAULT_CONTROLLER_TOOL_SET = new Set<string>(DEFAULT_CONTROLLER_TOOL_NAMES);
-const ADVANCED_CONTROLLER_TOOL_SET = new Set<string>(ADVANCED_CONTROLLER_TOOL_NAMES);
+const DEFAULT_CONTROLLER_TOOL_SET = new Set<string>(STABLE_CONTROLLER_TOOL_NAMES);
 
 export function normalizeMcpToolset(value: unknown): McpToolset {
   if (value === 'full' || value === 'advanced' || value === 'core') return value;
-  return 'core';
+  return 'advanced';
 }
 
+/**
+ * null means expose every registered definition. All controller profile labels
+ * now resolve to that stable schema; labels remain only for compatibility and
+ * diagnostics, not authorization.
+ */
 export function controllerToolNamesForToolset(
   toolset: McpToolset,
   _ctx?: MultiRepositoryMcpToolContext,
 ): readonly string[] | null {
-  if (toolset === 'full') return null;
-  if (toolset === 'advanced') return ADVANCED_CONTROLLER_TOOL_NAMES;
-  return DEFAULT_CONTROLLER_TOOL_NAMES;
+  return toolset === 'full' ? null : STABLE_CONTROLLER_TOOL_NAMES;
 }
 
 export function resolveControllerAccessStateForContext(
@@ -127,29 +71,90 @@ export function resolveControllerAccessStateForContext(
     controllerHome: ctx.controllerHome,
     repoRoot: ctx.explicitRepository?.canonicalRoot,
     toolsetOverride: ctx.toolset,
-    toolsetLocked: ctx.toolsetLocked ?? true,
+    toolsetLocked: ctx.toolsetLocked ?? false,
   });
 }
 
-export function controllerExposedToolNames(ctx: MultiRepositoryMcpToolContext): string[] {
-  const access = resolveControllerAccessStateForContext(ctx);
-  const allowed = controllerToolNamesForToolset(access.effectiveToolset, ctx);
-  if (allowed === null) return allControllerToolDefinitions(ctx).map((tool) => tool.name);
-  return [...allowed];
+function uniqueDefinitions(definitions: McpToolDefinition[]): {
+  definitions: McpToolDefinition[];
+  duplicates: string[];
+} {
+  const byName = new Map<string, McpToolDefinition>();
+  const duplicates = new Set<string>();
+  for (const definition of definitions) {
+    if (byName.has(definition.name)) {
+      duplicates.add(definition.name);
+      continue;
+    }
+    byName.set(definition.name, definition);
+  }
+  const preferredOrder = new Map<string, number>(
+    (PREFERRED_FACADE_TOOL_NAMES as readonly string[]).map((name, index) => [name, index]),
+  );
+  const orderedDefinitions = [...byName.values()].sort((left, right) => {
+    const leftOrder = preferredOrder.get(left.name);
+    const rightOrder = preferredOrder.get(right.name);
+    if (leftOrder !== undefined || rightOrder !== undefined) {
+      if (leftOrder === undefined) return 1;
+      if (rightOrder === undefined) return -1;
+      return leftOrder - rightOrder;
+    }
+    return 0;
+  });
+  return { definitions: orderedDefinitions, duplicates: [...duplicates].sort() };
+}
+
+export function allControllerToolDefinitions(ctx: MultiRepositoryMcpToolContext): McpToolDefinition[] {
+  return uniqueDefinitions(
+    runtimeToolDefinitions.concat(accessToolDefinitions, repositoryToolDefinitions, buildMultiRepositoryToolDefinitions(ctx)),
+  ).definitions;
 }
 
 export function controllerExposureSnapshot(ctx: MultiRepositoryMcpToolContext): ControllerExposureSnapshot {
+  const rawDefinitions = runtimeToolDefinitions.concat(
+    accessToolDefinitions,
+    repositoryToolDefinitions,
+    buildMultiRepositoryToolDefinitions(ctx),
+  );
+  const unique = uniqueDefinitions(rawDefinitions);
+  const allowed = controllerToolNamesForToolset(ctx.toolset, ctx);
+  const expectedToolNames = allowed === null
+    ? unique.definitions.map((tool) => tool.name)
+    : [...new Set(allowed)];
+  const definitionByName = new Map(unique.definitions.map((definition) => [definition.name, definition]));
+  const definitions = expectedToolNames
+    .map((name) => definitionByName.get(name))
+    .filter((definition): definition is McpToolDefinition => Boolean(definition));
+  const actualToolNames = definitions.map((tool) => tool.name);
+  const actualSet = new Set(actualToolNames);
+  const expectedSet = new Set(expectedToolNames);
+  const missingToolNames = expectedToolNames.filter((name) => !actualSet.has(name));
+  const unexpectedToolNames = actualToolNames.filter((name) => !expectedSet.has(name));
+  const fingerprint = createHash('sha256').update(actualToolNames.join('\n')).digest('hex');
   return {
     access: resolveControllerAccessStateForContext(ctx),
-    toolNames: controllerExposedToolNames(ctx),
+    toolset: ctx.toolset,
+    definitions,
+    toolNames: actualToolNames,
+    expectedToolNames,
+    actualToolNames,
+    missingToolNames,
+    unexpectedToolNames,
+    duplicateToolNames: unique.duplicates,
+    fingerprint,
+    schemaStableAcrossAccessModes: true,
+    ready: missingToolNames.length === 0 && unexpectedToolNames.length === 0 && unique.duplicates.length === 0,
   };
+}
+
+export function controllerExposedToolNames(ctx: MultiRepositoryMcpToolContext): string[] {
+  return controllerExposureSnapshot(ctx).actualToolNames;
 }
 
 export function classifyControllerToolExposure(toolName: string): ToolExposureClass {
   if ((PREFERRED_FACADE_TOOL_NAMES as readonly string[]).includes(toolName)) return 'facade';
   if (toolName.startsWith('rh_')) return 'facade';
   if (DEFAULT_CONTROLLER_TOOL_SET.has(toolName)) return 'advanced';
-  if (ADVANCED_CONTROLLER_TOOL_SET.has(toolName)) return 'advanced';
   return 'compatibility';
 }
 
@@ -169,16 +174,10 @@ export function controllerToolExposureMetadata(toolNames: readonly string[]): {
   };
 }
 
-export function allControllerToolDefinitions(ctx: MultiRepositoryMcpToolContext): McpToolDefinition[] {
-  return runtimeToolDefinitions.concat(accessToolDefinitions, repositoryToolDefinitions, buildMultiRepositoryToolDefinitions(ctx));
-}
-
 export function exposedControllerToolDefinitions(ctx: MultiRepositoryMcpToolContext): McpToolDefinition[] {
-  const definitions = allControllerToolDefinitions(ctx);
-  const allowedSet = new Set<string>(controllerExposedToolNames(ctx));
-  return definitions.filter((tool) => allowedSet.has(tool.name));
+  return controllerExposureSnapshot(ctx).definitions;
 }
 
 export function isControllerToolExposed(ctx: MultiRepositoryMcpToolContext, name: string): boolean {
-  return new Set(controllerExposedToolNames(ctx)).has(name);
+  return controllerExposureSnapshot(ctx).actualToolNames.includes(name);
 }

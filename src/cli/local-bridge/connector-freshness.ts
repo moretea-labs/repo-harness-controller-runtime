@@ -22,8 +22,8 @@ import type { PlainStatusTone } from './console-view-models';
 export const EXPECTED_FACADE_TOOLS = [...PREFERRED_FACADE_TOOL_NAMES] as const;
 
 /**
- * Interactive development tools available on the advanced (and full) surface.
- * Not part of the default core tools/list — require `--toolset advanced` or `full`.
+ * Interactive development tools included in the stable default schema.
+ * The historical core and advanced labels expose the same repair-capable tools.
  */
 export const OPTIONAL_INTERACTIVE_DEVELOPMENT_TOOLS = [
   'work_wait',
@@ -474,7 +474,7 @@ export function evaluateConnectorFreshness(input: EvaluateConnectorFreshnessInpu
     connectorTone: 'blue',
     sectionStatusLabel: '未确认',
     sectionDetail:
-      '本地 MCP 工具面已更新。GUI 无法直接确认 ChatGPT 当前连接器快照；如果你在 ChatGPT 里看不到 rh_status / rh_inbox / rh_context / rh_work，请重连 MCP。',
+      '本地 MCP 工具面已更新。GUI 无法直接确认 ChatGPT 当前连接器快照；如果你在 ChatGPT 里看不到 rh_access / rh_status / rh_inbox / rh_context / rh_work，说明连接器快照确实陈旧，可重新加载连接器。',
     // No scary banner — this is informational, not a confirmed missing-tools state.
   });
 }
@@ -487,7 +487,7 @@ function finalize(
 
 /**
  * Build local tool names from the in-process controller registry (not ChatGPT).
- * Uses expectedTools when provided; otherwise falls back to default core exposure.
+ * Uses expectedTools when provided; otherwise falls back to the stable default exposure.
  */
 export function localControllerToolNames(expectedTools?: readonly string[]): string[] {
   if (expectedTools && expectedTools.length > 0) return uniqueSorted(expectedTools);

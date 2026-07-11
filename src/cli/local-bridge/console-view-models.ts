@@ -247,6 +247,7 @@ export interface AccessStateViewModel {
   source: string;
   reconnectRequired: boolean;
   schemaRefreshRequired: boolean;
+  toolSchemaStable: boolean;
   restartRequired: boolean;
   repositoryPolicyMode: 'request' | 'full_access';
   repositoryPolicyLabel: string;

@@ -1,5 +1,5 @@
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs';
-import { basename, dirname, join, relative } from 'path';
+import { basename, dirname, join, relative, resolve } from 'path';
 import { ensureRepositoryRuntimeStorage, type RepositoryRuntimeStorageReport } from '../../cli/repositories/runtime-storage';
 import type { RepositoryRecord } from '../../cli/repositories/types';
 import { rebuildRepositoryProjection } from '../projections/materialized-view';
@@ -617,6 +617,7 @@ function terminalizeLocalJob(candidate: RuntimeMaintenanceCandidate, status: 'or
   if (!candidate.path) throw new Error('LOCAL_JOB_PATH_MISSING');
   const jobPath = join(candidate.path, 'job.json');
   const job = readJson(jobPath) as LocalJobState;
+  if (job.status && TERMINAL_LOCAL_JOB_STATUSES.has(job.status)) return job.status;
   const updated = {
     ...job,
     status,
@@ -685,7 +686,13 @@ export function applyRuntimeMaintenance(
       maxCandidates: options.maxCandidates,
     })
     : undefined;
+  const typedAppliedPaths = new Set((runtimeStorageRepairApply?.applied ?? [])
+    .filter((entry) => entry.status === 'applied')
+    .map((entry) => resolve(entry.path)));
   const applied = before.candidates.map((candidate) => {
+    if (candidate.path && typedAppliedPaths.has(resolve(candidate.path))) {
+      return { ...candidate, applied: true, result: 'handled_by_runtime_storage_repair' };
+    }
     if (!shouldApply(options.actionId, candidate)) return { ...candidate, applied: false, result: 'not_selected' };
     try {
       if (candidate.kind === 'stale_active_local_job') {

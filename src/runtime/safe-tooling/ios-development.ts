@@ -27,8 +27,12 @@ export function resetIosDevelopmentHooksForTest(): void {
   hooks = {};
 }
 
-function platform(): NodeJS.Platform {
+export function iosDevelopmentPlatform(): NodeJS.Platform {
   return hooks.platform?.() ?? process.platform;
+}
+
+function platform(): NodeJS.Platform {
+  return iosDevelopmentPlatform();
 }
 
 function now(): Date {
