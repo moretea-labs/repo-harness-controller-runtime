@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'async_hooks';
 import {
   existsSync,
   mkdirSync,
@@ -9,6 +10,8 @@ import { dirname, join, resolve } from 'path';
 
 export const ACCESS_MODES = ['request', 'full_access'] as const;
 export type AccessMode = (typeof ACCESS_MODES)[number];
+
+const accessModeContext = new AsyncLocalStorage<AccessMode>();
 
 declare module '../facade/types' {
   interface WorkContractConstraints {
@@ -77,6 +80,14 @@ export function isAccessMode(value: unknown): value is AccessMode {
 
 export function normalizeAccessMode(value: unknown, fallback: AccessMode = 'request'): AccessMode {
   return isAccessMode(value) ? value : fallback;
+}
+
+export function currentAccessMode(): AccessMode | undefined {
+  return accessModeContext.getStore();
+}
+
+export function withAccessMode<T>(mode: AccessMode, operation: () => T): T {
+  return accessModeContext.run(mode, operation);
 }
 
 export function repositoryAccessPolicyPath(controllerHome: string, repoId: string): string {
