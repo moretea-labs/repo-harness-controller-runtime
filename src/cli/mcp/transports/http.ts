@@ -52,6 +52,12 @@ function bearerFromRequest(req: Request): string | null {
   return match ? match[1].trim() : null;
 }
 
+function principalFromRequest(req: Request): string {
+  const auth = (req as unknown as { auth?: { clientId?: string } }).auth;
+  if (auth?.clientId?.trim()) return `oauth-client:${auth.clientId.trim()}`;
+  return bearerFromRequest(req) ? 'mcp-bearer-client' : 'controller-http-client';
+}
+
 export function isAuthorizedMcpHttpRequest(req: Request, expectedToken: string | null): boolean {
   if (!expectedToken) return false;
   return bearerFromRequest(req) === expectedToken;
@@ -514,6 +520,7 @@ function requireMcpHttpAuth(
 
 interface ManagedTransport {
   transport: StreamableHTTPServerTransport;
+  toolContext: ReturnType<typeof createMcpToolContext>;
   lastSeenAt: number;
   inFlightPosts: number;
   inFlightGets: number;
@@ -564,7 +571,7 @@ async function pruneTransports(transports: Map<string, ManagedTransport>, forceC
 async function handleMcpPost(
   req: Request,
   res: Response,
-  toolContext: ReturnType<typeof createMcpToolContext>,
+  baseOptions: McpServerOptions,
   transports: Map<string, ManagedTransport>,
   stats: McpRuntimeStats,
 ): Promise<void> {
@@ -598,16 +605,21 @@ async function handleMcpPost(
         res.status(503).json({ error: 'session_capacity', message: 'All MCP sessions are active; retry shortly' });
         return;
       }
+      const sessionContext = createMcpToolContext({
+        ...baseOptions,
+        sessionId: `mcp_${randomUUID().replace(/-/g, '')}`,
+        principalId: principalFromRequest(req),
+      });
       transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (newSessionId: string): void => {
-          transports.set(newSessionId, { transport: transport!, lastSeenAt: Date.now(), inFlightPosts: 0, inFlightGets: 0 });
+          transports.set(newSessionId, { transport: transport!, toolContext: sessionContext, lastSeenAt: Date.now(), inFlightPosts: 0, inFlightGets: 0 });
         },
       });
       transport.onclose = () => {
         if (transport?.sessionId) transports.delete(transport.sessionId);
       };
-      const server = createRepoHarnessMcpServerFromContext(toolContext);
+      const server = createRepoHarnessMcpServerFromContext(sessionContext);
       await server.connect(transport);
       await transport.handleRequest(req, res, body);
     } finally {
@@ -695,6 +707,17 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   const bearerTransports = new Map<string, ManagedTransport>();
   const runtimeStats: McpRuntimeStats = { initializing: 0, activePosts: 0, rejectedOverload: 0 };
   const toolContext = createMcpToolContext({ ...opts, repo: repoRoot, controllerHome, profile });
+  const baseOptions: McpServerOptions = {
+    repo: repoRoot,
+    controllerHome,
+    profile,
+    toolset: opts.toolset,
+    enableChatgptBrowser: opts.enableChatgptBrowser,
+    enableDevRunner: opts.enableDevRunner,
+    devRunnerAgents: opts.devRunnerAgents,
+    devRunnerTimeoutMs: opts.devRunnerTimeoutMs,
+    devRunnerMaxTimeoutMs: opts.devRunnerMaxTimeoutMs,
+  };
   const runtimeControllerHome = 'controllerHome' in toolContext ? toolContext.controllerHome : undefined;
   if (runtimeControllerHome) ensureControllerDaemon(runtimeControllerHome);
   const compatibilityToolDefinitions = buildMcpToolDefinitions(toolContext.policy, { enableChatgptBrowser: opts.enableChatgptBrowser === true });
@@ -883,7 +906,7 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   // Primary MCP path: OAuth (or bearer when --auth bearer). Unchanged for ChatGPT.
   app.use('/mcp', setMcpResponseHeaders);
   app.post('/mcp', requireMcpHttpAuth(authMode, authToken, oauthProvider, configuredPublicOrigin), express.raw({ type: '*/*', limit: '1mb' }), (req, res) => {
-    handleMcpPost(req, res, toolContext, transports, runtimeStats).catch((error: unknown) => {
+    handleMcpPost(req, res, baseOptions, transports, runtimeStats).catch((error: unknown) => {
       if (!res.headersSent) sendMcpRequestError(res, error);
     });
   });
@@ -896,7 +919,7 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   // Grok-compatible MCP path: OAuth resource separate from ChatGPT's /mcp, same tools.
   app.use('/mcp-grok', setMcpResponseHeaders);
   app.post('/mcp-grok', requireMcpHttpAuth(authMode, authToken, oauthProvider, configuredPublicOrigin, '/mcp-grok'), express.raw({ type: '*/*', limit: '1mb' }), (req, res) => {
-    handleMcpPost(req, res, toolContext, grokTransports, runtimeStats).catch((error: unknown) => {
+    handleMcpPost(req, res, baseOptions, grokTransports, runtimeStats).catch((error: unknown) => {
       if (!res.headersSent) sendMcpRequestError(res, error);
     });
   });
@@ -909,7 +932,7 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   // Bearer-only MCP path for clients that can send Authorization headers. Never advertises OAuth resource_metadata.
   app.use('/mcp-bearer', setMcpResponseHeaders);
   app.post('/mcp-bearer', requireMcpHttpAuth('bearer', authToken, null, configuredPublicOrigin), express.raw({ type: '*/*', limit: '1mb' }), (req, res) => {
-    handleMcpPost(req, res, toolContext, bearerTransports, runtimeStats).catch((error: unknown) => {
+    handleMcpPost(req, res, baseOptions, bearerTransports, runtimeStats).catch((error: unknown) => {
       if (!res.headersSent) sendMcpRequestError(res, error);
     });
   });

@@ -25,7 +25,7 @@ export interface WorkContractStoreOptions extends WorkContractStoreLocation {
 
 export type CreateWorkContractInput = Omit<
   WorkContract,
-  'schemaVersion' | 'status' | 'createdAt' | 'updatedAt' | 'evidenceRefs' | 'handoffRefs' | 'suggestedNextActions' | 'policyDecisions' | 'checkRefs'
+  'schemaVersion' | 'status' | 'createdAt' | 'updatedAt' | 'evidenceRefs' | 'handoffRefs' | 'suggestedNextActions' | 'policyDecisions' | 'checkRefs' | 'driver' | 'worktreePolicy' | 'evidencePolicy' | 'approvalPolicy' | 'recoveryPolicy'
 > & {
   status?: WorkContractStatus;
   createdAt?: string;
@@ -35,6 +35,11 @@ export type CreateWorkContractInput = Omit<
   suggestedNextActions?: SuggestedNextAction[];
   policyDecisions?: PolicyDecision[];
   checkRefs?: VerificationRecord[];
+  driver?: WorkContract['driver'];
+  worktreePolicy?: WorkContract['worktreePolicy'];
+  evidencePolicy?: WorkContract['evidencePolicy'];
+  approvalPolicy?: WorkContract['approvalPolicy'];
+  recoveryPolicy?: WorkContract['recoveryPolicy'];
 };
 
 export interface ListWorkContractOptions extends WorkContractStoreOptions {

@@ -214,15 +214,16 @@ export const repositoryToolDefinitions: McpToolDefinition[] = [
     command: { type: 'string', description: 'Repository-local shell command to classify and preview.' },
     cwd: { type: 'string', description: 'Optional repository-relative working directory.' },
   }, ['command'], true),
-  definition('repository_command_execute', 'Execute one repository-scoped local command after replaying the exact approved preview token.', {
+  definition('repository_command_execute', 'Execute one repository-scoped local command through Full Access, Goal delegation, or a resumable approval request. Legacy preview-token callers remain compatible.', {
     repo_id: repoId,
     checkout_id: { type: 'string', description: 'Optional checkout identity for repositories with multiple local clones.' },
     command: { type: 'string', description: 'Repository-local shell command to execute.' },
     cwd: { type: 'string', description: 'Optional repository-relative working directory.' },
     approval_token: { type: 'string', description: 'Exact approval token returned by repository_command_preview.' },
+    approval_request_id: { type: 'string', description: 'Resolved approvalRequestId returned by approval_resolve.' },
     timeout_ms: { type: 'number', description: 'Optional execution timeout in milliseconds.' },
     max_output_bytes: { type: 'number', description: 'Optional cap for captured stdout/stderr.' },
-  }, ['command', 'approval_token']),
+  }, ['command']),
 ];
 
 export const repositoryToolNames = repositoryToolDefinitions.map((tool) => tool.name);
@@ -509,9 +510,10 @@ export async function callRepositoryTool(
           cwd: typeof args.cwd === 'string' ? args.cwd : undefined,
           authorization: 'confirmed_plan',
           approvalToken: typeof args.approval_token === 'string' ? args.approval_token : undefined,
+          approvalRequestId: typeof args.approval_request_id === 'string' ? args.approval_request_id : undefined,
           timeoutMs,
           maxOutputBytes,
-        });
+        }, controllerHome);
         if (!preview.executable) {
           return result(preview.execution as unknown as Record<string, unknown>);
         }
@@ -526,6 +528,7 @@ export async function callRepositoryTool(
             command: String(args.command ?? ''),
             cwd: typeof args.cwd === 'string' ? args.cwd : undefined,
             approvalToken: typeof args.approval_token === 'string' ? args.approval_token : undefined,
+            approvalRequestId: typeof args.approval_request_id === 'string' ? args.approval_request_id : undefined,
             timeoutMs,
             maxOutputBytes,
           },

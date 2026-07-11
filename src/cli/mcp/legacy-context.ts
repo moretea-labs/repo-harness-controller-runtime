@@ -9,5 +9,8 @@ export function createLegacyMcpToolContext(opts: McpServerOptions): McpToolConte
     repoRoot,
     policy: getMcpPolicy(parseMcpProfile(opts.profile ?? 'planner'), { repoRoot }),
     enableChatgptBrowser: opts.enableChatgptBrowser === true,
+    sessionId: opts.sessionId,
+    principalId: opts.principalId,
+    controllerInstanceId: opts.controllerInstanceId,
   };
 }

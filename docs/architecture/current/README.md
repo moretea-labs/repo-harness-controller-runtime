@@ -68,6 +68,7 @@ Read the architecture in this order:
 14. `runtime-directory-map.md` — executable module boundaries.
 15. `operations-runbook.md` — health, recovery and release operations.
 16. `governance.md` — ownership, ADR, drift, and maintenance rules.
+17. `session-aware-execution-and-authorization.md` — Session Context, Work Handle, Goal delegation, and resumable approval boundaries.
 
 
 ## Architecture Layers

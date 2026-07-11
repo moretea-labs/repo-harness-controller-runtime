@@ -7,6 +7,8 @@ import { repositoryControllerRoot } from './controller-home';
 import { classifyRepositoryCommand, type RepositoryCommandAuthorization, type RepositoryCommandClassification } from './command-classifier';
 import { resolveRepositoryCommandCwd } from './command-scope';
 import type { RepositoryRecord } from './types';
+import { assertResolvedAuthorization, decideAuthorization, type AuthorizationDecision } from '../../runtime/control-plane/governance/authorization';
+import { readRepositoryAccessPolicy } from '../../runtime/control-plane/governance/access-policy';
 
 export interface ExecuteRepositoryGitCommandInput {
   args: string[];
@@ -16,6 +18,12 @@ export interface ExecuteRepositoryGitCommandInput {
   dryRun?: boolean;
   timeoutMs?: number;
   maxOutputBytes?: number;
+  authorizationDecision?: AuthorizationDecision;
+  approvalRequestId?: string;
+  sessionId?: string;
+  principalId?: string;
+  workId?: string;
+  goalId?: string;
 }
 
 export interface RepositoryGitSnapshot {
@@ -36,6 +44,8 @@ export interface RepositoryGitExecution {
   classification: RepositoryCommandClassification;
   approvalToken: string;
   authorization?: RepositoryCommandAuthorization;
+  authorizationDecision?: AuthorizationDecision;
+  approvalRequestId?: string;
   ok?: boolean;
   exitCode?: number;
   timedOut?: boolean;
@@ -222,6 +232,33 @@ export function executeRepositoryGitCommand(
   const classification = classifyRepositoryCommand(command, repository.defaultBranch);
   const before = repositorySnapshot(root);
   const token = approvalToken(repository, relativeCwd, args, classification, before);
+  const permission = readRepositoryAccessPolicy(controllerHome, repository.repoId);
+  const safeMergedBranchDelete = classification.risk === 'destructive'
+    && /^git\s+branch\s+-d(?:\s|$)/i.test(command);
+  const risk = classification.risk === 'readonly'
+    ? 'readonly'
+    : classification.risk === 'remote_write'
+      ? 'remote_write'
+      : classification.risk === 'destructive' && !safeMergedBranchDelete ? 'destructive' : 'local_git';
+  const authorizationDecision = input.authorizationDecision ?? decideAuthorization({
+    controllerHome,
+    accessMode: permission.mode,
+    risk,
+    repositoryId: repository.repoId,
+    currentRepositoryId: repository.repoId,
+    permissionSnapshotVersion: permission.revision,
+    ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+    ...(input.principalId ? { principalId: input.principalId } : {}),
+    ...(input.workId ? { workId: input.workId, boundWorkId: input.workId } : {}),
+    ...(input.goalId ? { goalId: input.goalId, boundGoalId: input.goalId } : {}),
+    command,
+  });
+  const resolved = input.approvalRequestId
+    ? assertResolvedAuthorization({ controllerHome, repositoryId: repository.repoId, approvalRequestId: input.approvalRequestId, sessionId: input.sessionId, principalId: input.principalId, workId: input.workId, permissionSnapshotVersion: permission.revision, command })
+    : undefined;
+  const effectiveDecision = resolved
+    ? { decision: 'allow', source: 'user_confirmation', reason: 'Resolved approval request matches the exact Git operation and current permission snapshot.' } as const
+    : authorizationDecision;
   const base: RepositoryGitExecution = {
     status: input.dryRun === true ? 'preview' : 'approval_required',
     repoId: repository.repoId,
@@ -232,17 +269,18 @@ export function executeRepositoryGitCommand(
     classification,
     approvalToken: token,
     authorization: input.authorization,
+    authorizationDecision: effectiveDecision,
+    ...(effectiveDecision.decision === 'user_confirmation_required' ? { approvalRequestId: effectiveDecision.approvalRequestId } : {}),
     before,
   };
   if (input.dryRun === true) {
     auditExecution(controllerHome, repository, base);
     return base;
   }
-  const explicit = input.authorization === 'explicit_user_request';
   const confirmed = input.authorization === 'confirmed_plan' && input.approvalToken === token;
   const canExecute = classification.risk === 'readonly'
-    || (classification.confirmation === 'authorization' && (explicit || confirmed))
-    || (classification.confirmation === 'strong_confirmation' && confirmed);
+    || effectiveDecision.decision === 'allow'
+    || confirmed;
   if (!canExecute) {
     auditExecution(controllerHome, repository, base);
     return base;

@@ -18,6 +18,8 @@ import {
 } from './command-scope';
 import { loadExternalFilesystemGrants } from '../../runtime/safe-tooling/external-filesystem';
 import type { RepositoryRecord } from './types';
+import { readRepositoryAccessPolicy } from '../../runtime/control-plane/governance/access-policy';
+import { assertResolvedAuthorization, decideAuthorization, type AuthorizationDecision } from '../../runtime/control-plane/governance/authorization';
 
 export { classifyRepositoryCommand } from './command-classifier';
 export type {
@@ -35,6 +37,11 @@ export interface ExecuteRepositoryCommandInput {
   dryRun?: boolean;
   timeoutMs?: number;
   maxOutputBytes?: number;
+  authorizationDecision?: AuthorizationDecision;
+  approvalRequestId?: string;
+  sessionId?: string;
+  principalId?: string;
+  workId?: string;
 }
 
 export interface RepositoryCommandSnapshot {
@@ -67,6 +74,8 @@ export interface RepositoryCommandExecution {
   repositoryChanged?: boolean;
   changedPaths?: string[];
   policyDecision?: 'allowed' | 'approval_required' | 'rejected';
+  authorizationDecision?: AuthorizationDecision;
+  approvalRequestId?: string;
   infrastructureError?: { code: string; message: string };
   externalPathUsages?: RepositoryCommandExternalPathUsage[];
 }
@@ -353,6 +362,7 @@ function snapshotChanged(before: RepositoryCommandSnapshot, after: RepositoryCom
 function prepareRepositoryCommandExecution(
   repository: RepositoryRecord,
   input: ExecuteRepositoryCommandInput,
+  controllerHome?: string,
 ): { root: string; cwd: string; command: string; timeoutMs: number; maxOutputBytes: number; before: RepositoryCommandSnapshot; execution: RepositoryCommandExecution; executable: boolean; externalPathUsages: RepositoryCommandExternalPathUsage[] } {
   const { root, cwd, relativeCwd } = resolveRepositoryCommandCwd(repository, input.cwd);
   const command = assertRepositoryCommandAllowed(input.command);
@@ -361,6 +371,28 @@ function prepareRepositoryCommandExecution(
   const classification = classifyRepositoryCommand(command, repository.defaultBranch);
   const before = repositorySnapshot(root);
   const token = approvalToken(repository, relativeCwd, command, classification, before, externalPathUsages);
+  const permission = controllerHome ? readRepositoryAccessPolicy(controllerHome, repository.repoId) : undefined;
+  const risk = classification.risk === 'readonly' ? 'readonly' : classification.risk === 'remote_write' ? 'remote_write' : classification.risk === 'destructive' ? 'destructive' : /^\s*git\s+/i.test(command) ? 'local_git' : 'workspace_write';
+  const delegated = input.authorizationDecision ?? (controllerHome ? decideAuthorization({
+    controllerHome,
+    accessMode: permission?.mode ?? 'request',
+    risk,
+    repositoryId: repository.repoId,
+    currentRepositoryId: repository.repoId,
+    permissionSnapshotVersion: permission?.revision ?? 1,
+    approvalToken: token,
+    command,
+    cwd: relativeCwd,
+    ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+    ...(input.principalId ? { principalId: input.principalId } : {}),
+    ...(input.workId ? { workId: input.workId, boundWorkId: input.workId } : {}),
+  }) : undefined);
+  const resolved = controllerHome && input.approvalRequestId
+    ? assertResolvedAuthorization({ controllerHome, repositoryId: repository.repoId, approvalRequestId: input.approvalRequestId, sessionId: input.sessionId, principalId: input.principalId, workId: input.workId, permissionSnapshotVersion: permission?.revision ?? 1, command })
+    : undefined;
+  const effectiveDecision: AuthorizationDecision | undefined = resolved
+    ? { decision: 'allow', source: 'user_confirmation', reason: 'Resolved approval request matches the exact command and current permission snapshot.' }
+    : delegated;
   const execution: RepositoryCommandExecution = {
     status: input.dryRun === true ? 'preview' : 'approval_required',
     repoId: repository.repoId,
@@ -373,11 +405,14 @@ function prepareRepositoryCommandExecution(
     before,
     policyDecision: input.dryRun === true || classification.risk === 'readonly'
       ? 'allowed'
-      : 'approval_required',
+      : effectiveDecision?.decision === 'allow' ? 'allowed' : 'approval_required',
+    ...(effectiveDecision ? { authorizationDecision: effectiveDecision } : {}),
+    ...(effectiveDecision?.decision === 'user_confirmation_required' ? { approvalRequestId: effectiveDecision.approvalRequestId } : {}),
     externalPathUsages: externalPathUsages.length > 0 ? externalPathUsages : undefined,
   };
   const confirmed = input.authorization === 'confirmed_plan' && input.approvalToken === token;
-  const executable = input.dryRun === true || classification.risk === 'readonly' || confirmed;
+  const delegatedAllowed = effectiveDecision?.decision === 'allow';
+  const executable = input.dryRun === true || classification.risk === 'readonly' || confirmed || delegatedAllowed;
   execution.policyDecision = executable ? 'allowed' : 'approval_required';
   return {
     root,
@@ -395,8 +430,9 @@ function prepareRepositoryCommandExecution(
 export function previewRepositoryCommandExecution(
   repository: RepositoryRecord,
   input: ExecuteRepositoryCommandInput,
+  controllerHome?: string,
 ): PreparedRepositoryCommandExecution {
-  const prepared = prepareRepositoryCommandExecution(repository, input);
+  const prepared = prepareRepositoryCommandExecution(repository, input, controllerHome);
   return {
     before: prepared.before,
     executable: prepared.executable,
@@ -424,7 +460,7 @@ export function executeRepositoryCommand(
   repository: RepositoryRecord,
   input: ExecuteRepositoryCommandInput,
 ): RepositoryCommandExecution {
-  const prepared = prepareRepositoryCommandExecution(repository, input);
+  const prepared = prepareRepositoryCommandExecution(repository, input, controllerHome);
   const { root, cwd, command, timeoutMs, maxOutputBytes, before, execution: base, executable, externalPathUsages } = prepared;
 
   if (input.dryRun === true) {
@@ -483,7 +519,7 @@ export async function executeRepositoryCommandAsync(
   input: ExecuteRepositoryCommandInput,
   hooks: RepositoryCommandAsyncHooks = {},
 ): Promise<RepositoryCommandExecution> {
-  const prepared = prepareRepositoryCommandExecution(repository, input);
+  const prepared = prepareRepositoryCommandExecution(repository, input, controllerHome);
   const { root, cwd, command, timeoutMs, maxOutputBytes, before, execution: base, executable, externalPathUsages } = prepared;
 
   if (input.dryRun === true) {
