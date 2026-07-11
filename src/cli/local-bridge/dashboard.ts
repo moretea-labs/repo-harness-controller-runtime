@@ -327,8 +327,8 @@ function renderHome(){
       '<textarea id="taskObjective" placeholder="例如：优化 Controller 首页的信息层级，让当前任务和待决定事项更容易找到，不改变后端行为。"></textarea>'+
       '<div class="access-panel" id="accessModePanel"><div class="section-title" style="margin:0"><div><strong>权限等级</strong><div class="faint">本设置对当前仓库的新任务生效</div></div>'+pill(accessMode==='full_access'?'amber':'green',accessLabel)+'</div>'+
         '<div class="access-picker">'+
-          '<button class="access-option '+(accessMode==='request'?'active':'')+'" onclick="setAccessMode(\'request\')"><strong>Request</strong><span>需要提升权限时请求确认</span></button>'+
-          '<button class="access-option full '+(accessMode==='full_access'?'active':'')+'" onclick="setAccessMode(\'full_access\')"><strong>Full Access</strong><span>当前仓库内正常开发不再反复询问</span></button>'+
+          '<button class="access-option '+(accessMode==='request'?'active':'')+'" data-access-mode="request"><strong>Request</strong><span>需要提升权限时请求确认</span></button>'+
+          '<button class="access-option full '+(accessMode==='full_access'?'active':'')+'" data-access-mode="full_access"><strong>Full Access</strong><span>当前仓库内正常开发不再反复询问</span></button>'+
         '</div><p class="muted" style="margin:9px 0 0">'+esc(accessDescription)+'</p></div>'+
       '<details class="advanced" style="margin-top:10px"><summary>补充验收标准和允许修改的路径</summary>'+
         '<div class="row" style="margin-top:10px"><input class="input" id="taskAcceptance" placeholder="验收标准（可选，用分号分隔）" style="flex:1"></div>'+
@@ -936,6 +936,9 @@ function bindNav(root){
 
 function bindActions(root){
   if(!root)return;
+  root.querySelectorAll('[data-access-mode]').forEach(function(el){
+    el.addEventListener('click',function(ev){ev.stopPropagation();setAccessMode(el.getAttribute('data-access-mode'))});
+  });
   root.querySelectorAll('[data-work-act]').forEach(function(el){
     el.addEventListener('click',function(ev){ev.stopPropagation();workAction(el.getAttribute('data-work-act'),el.getAttribute('data-work-id'))});
   });
@@ -1073,9 +1076,10 @@ function toggleAddRepo(){var el=document.getElementById('repoAdd');if(el)el.styl
 
 function focusAccessMode(){var el=document.getElementById('accessModePanel');if(el)el.scrollIntoView({behavior:'smooth',block:'center'})}
 function setAccessMode(mode){
+  if(mode!=='request'&&mode!=='full_access'){toast('无效权限模式');return}
   if(busy||mode===selectedAccessMode)return;
   if(mode==='full_access'){
-    var ok=confirm('启用 Full Access？\n\n允许：当前仓库内文件修改、命令、依赖和本地 Git。\n仍需确认：远程写入、破坏性操作、仓库外路径。\n始终禁止：原始密钥和凭据。');
+    var ok=confirm('启用 Full Access？\\n\\n允许：当前仓库内文件修改、命令、依赖和本地 Git。\\n仍需确认：远程写入、破坏性操作、仓库外路径。\\n始终禁止：原始密钥和凭据。');
     if(!ok)return;
   }
   setBusy(true,'更新权限等级…');
@@ -1242,7 +1246,7 @@ function registerRepo(){
 function removeRepo(id, name){
   if(!id)return;
   var label=name||id;
-  if(!confirm('从控制台删除「'+label+'」的注册？\n不会删除磁盘上的仓库文件，仅从 Controller 注册表中移除（可重新注册）。'))return;
+  if(!confirm('从控制台删除「'+label+'」的注册？\\n不会删除磁盘上的仓库文件，仅从 Controller 注册表中移除（可重新注册）。'))return;
   if(busy)return;
   setBusy(true,'删除注册中');
   api('/api/repositories/'+encodeURIComponent(id)+'/remove',{method:'POST',body:JSON.stringify({})}).then(function(res){

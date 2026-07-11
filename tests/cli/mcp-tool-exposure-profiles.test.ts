@@ -24,19 +24,21 @@ function stubCtx(toolset: 'core' | 'advanced' | 'full'): MultiRepositoryMcpToolC
 }
 
 describe('MCP tool exposure profiles', () => {
-  test('default core tools/list is facade + repository bootstrap/selection only', () => {
+  test('default core tools/list is facade + access controls + repository bootstrap/selection only', () => {
     expect([...DEFAULT_CONTROLLER_TOOL_NAMES]).toEqual([
       'rh_status',
       'rh_inbox',
       'rh_context',
       'rh_work',
+      'repository_access_get',
+      'repository_access_set',
       'repository_list',
       'repository_get',
       'repository_register',
       'repository_latest_source_diagnose',
       'repository_bootstrap_local_project',
     ]);
-    expect(DEFAULT_CONTROLLER_TOOL_NAMES).toHaveLength(9);
+    expect(DEFAULT_CONTROLLER_TOOL_NAMES).toHaveLength(11);
     for (const name of PREFERRED_FACADE_TOOL_NAMES) {
       expect(DEFAULT_CONTROLLER_TOOL_NAMES).toContain(name);
       expect(classifyControllerToolExposure(name)).toBe('facade');

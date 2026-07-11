@@ -1,6 +1,7 @@
 import { CONTROLLER_TOOL_SURFACE, controllerToolSurfaceFingerprint } from '../src/cli/controller/runtime-config';
 import { runtimePolicy } from '../src/cli/mcp/multi-repository';
 import { controllerExpectedToolNames } from '../src/cli/mcp/tools';
+import { accessToolDefinitions } from '../src/cli/mcp/access-tools';
 import { runtimeToolDefinitions } from '../src/runtime/gateway/mcp/runtime-tools';
 import {
   ADVANCED_CONTROLLER_TOOL_NAMES,
@@ -18,14 +19,17 @@ const policy = runtimePolicy(process.cwd(), {
   devRunnerAgents: 'codex,claude',
 });
 const runtimeNames = runtimeToolDefinitions.map((tool) => tool.name);
+const accessNames = accessToolDefinitions.map((tool) => tool.name);
 const compatibilityNames = controllerExpectedToolNames(policy)
   .filter((name) => !runtimeNames.includes(name));
 const compatibilityFingerprint = controllerToolSurfaceFingerprint(compatibilityNames);
 const duplicateCompatibility = compatibilityNames.filter((name, index) => compatibilityNames.indexOf(name) !== index);
-const collisions = runtimeNames.filter((name) => compatibilityNames.includes(name));
+const collisions = [...runtimeNames, ...accessNames]
+  .filter((name) => compatibilityNames.includes(name));
+const accessRuntimeCollisions = accessNames.filter((name) => runtimeNames.includes(name));
 const defaultNames: string[] = [...DEFAULT_CONTROLLER_TOOL_NAMES];
 const advancedNames: string[] = [...ADVANCED_CONTROLLER_TOOL_NAMES];
-const fullNames = [...compatibilityNames, ...runtimeNames];
+const fullNames = [...compatibilityNames, ...runtimeNames, ...accessNames];
 const defaultFingerprint = controllerToolSurfaceFingerprint(defaultNames);
 const advancedFingerprint = controllerToolSurfaceFingerprint(advancedNames);
 const fullFingerprint = controllerToolSurfaceFingerprint(fullNames);
@@ -38,7 +42,8 @@ if (compatibilityFingerprint !== EXPECTED_COMPATIBILITY_FINGERPRINT) {
   failures.push(`legacy Controller fingerprint changed: expected ${EXPECTED_COMPATIBILITY_FINGERPRINT}, got ${compatibilityFingerprint}`);
 }
 if (duplicateCompatibility.length) failures.push(`legacy duplicate names: ${[...new Set(duplicateCompatibility)].join(', ')}`);
-if (collisions.length) failures.push(`runtime-control tools collide with legacy tools: ${collisions.join(', ')}`);
+if (collisions.length) failures.push(`runtime/access tools collide with legacy tools: ${collisions.join(', ')}`);
+if (accessRuntimeCollisions.length) failures.push(`access tools collide with runtime tools: ${accessRuntimeCollisions.join(', ')}`);
 if (defaultNames.length !== EXPECTED_DEFAULT_TOOL_COUNT) {
   failures.push(`default core Controller tool count changed: expected ${EXPECTED_DEFAULT_TOOL_COUNT}, got ${defaultNames.length}`);
 }
@@ -67,6 +72,7 @@ console.log(JSON.stringify({
   compatibilityToolCount: compatibilityNames.length,
   compatibilityFingerprint,
   addedRuntimeControlToolCount: runtimeNames.length,
+  addedAccessToolCount: accessNames.length,
   defaultToolCount: defaultNames.length,
   defaultFingerprint,
   advancedToolCount: advancedNames.length,
