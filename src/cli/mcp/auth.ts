@@ -49,6 +49,7 @@ export interface McpRuntimeState {
   server: {
     endpoint: string;
     pid?: number;
+    instanceId?: string;
     running: boolean;
     healthy: boolean;
     restartCount: number;

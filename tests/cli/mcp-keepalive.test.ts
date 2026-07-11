@@ -115,13 +115,29 @@ describe('mcp keepalive helpers', () => {
       health: {
         status: 'ok',
         server: 'repo-harness-mcp',
+        instanceId: 'instance-a',
         ...expected,
       },
       expected,
       previousOwnedPid: 42_001,
+      previousOwnedInstanceId: 'instance-a',
       isPidAlive: (pid) => pid === 42_001,
     });
     expect(takeover).toEqual({ action: 'takeover', pid: 42_001 });
+
+    const reusedPid = decideMcpPortOwnership({
+      health: {
+        status: 'ok',
+        server: 'repo-harness-mcp',
+        instanceId: 'instance-b',
+        ...expected,
+      },
+      expected,
+      previousOwnedPid: 42_001,
+      previousOwnedInstanceId: 'instance-a',
+      isPidAlive: (pid) => pid === 42_001,
+    });
+    expect(reusedPid.action).toBe('abort');
 
     expect(decideMcpPortOwnership({
       health: null,

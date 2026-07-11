@@ -221,7 +221,7 @@ describe('runtime cleanup', () => {
     expect(cleanupEntries(home).at(-1)?.budgetExhausted).toBe(true);
   });
 
-  test('terminal failed, cancelled, or unknown Runs do not permanently pin their worktrees', () => {
+  test('terminal cancelled Runs release worktrees while unknown Runs remain protected', () => {
     const home = controllerHome();
     const cancelledWorktree = join(home, 'repositories', 'repo-a', 'worktrees', 'RUN-cancelled');
     const unknownWorktree = join(home, 'repositories', 'repo-a', 'worktrees', 'RUN-unknown');
@@ -299,10 +299,11 @@ describe('runtime cleanup', () => {
     const report = cleanupControllerRuntimeState(home, { maxEntries: 100 });
 
     expect(existsSync(cancelledWorktree)).toBe(false);
-    expect(existsSync(unknownWorktree)).toBe(false);
+    expect(existsSync(unknownWorktree)).toBe(true);
     expect(existsSync(activeWorktree)).toBe(true);
     expect(report.removedWorktrees).toContain('repositories/repo-a/worktrees/RUN-cancelled');
-    expect(report.removedWorktrees).toContain('repositories/repo-a/worktrees/RUN-unknown');
+    expect(report.removedWorktrees).not.toContain('repositories/repo-a/worktrees/RUN-unknown');
+    expect(report.skippedActiveWorktrees).toContain('repositories/repo-a/worktrees/RUN-unknown');
     expect(report.skippedActiveWorktrees).toContain('repositories/repo-a/worktrees/RUN-active');
   });
 

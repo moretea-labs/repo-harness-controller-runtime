@@ -733,6 +733,9 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
     res.json({
       status: 'ok',
       server: 'repo-harness-mcp',
+      ...(process.env.REPO_HARNESS_MCP_INSTANCE_ID
+        ? { instanceId: process.env.REPO_HARNESS_MCP_INSTANCE_ID }
+        : {}),
       version: '1.4.0',
       profile: toolContext.policy.profile,
       toolSurface,

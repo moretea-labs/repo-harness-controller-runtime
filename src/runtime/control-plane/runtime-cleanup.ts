@@ -45,7 +45,6 @@ const WORKTREE_RELEASE_STATUSES = new Set([
   'timed_out',
   'orphaned',
   'stale',
-  'unknown',
 ]);
 
 /**
@@ -289,8 +288,9 @@ function createScanBudget(maxEntries: number): ScanBudget {
 function shouldProtectWorktreeReference(meta: AgentRunSnapshot): boolean {
   if (meta.executionMode !== 'worktree' || meta.worktreeCleanedAt) return false;
   const status = typeof meta.status === 'string' ? meta.status.trim().toLowerCase() : '';
-  // Terminal failure/cancel statuses no longer need the worktree. Keep protecting
-  // active, waiting_for_user, succeeded-awaiting-integration, and unknown runs.
+  // Explicit terminal failure/cancel statuses no longer need the worktree.
+  // Missing or unknown lifecycle state fails closed because it may represent an
+  // interrupted integration with unique uncommitted work still in the worktree.
   if (status && WORKTREE_RELEASE_STATUSES.has(status)) return false;
   return true;
 }

@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'child_process';
+import { randomUUID } from 'crypto';
 import { accessSync, constants } from 'fs';
 import { resolve } from 'path';
 import {
@@ -101,6 +102,7 @@ export function decideMcpPortOwnership(input: {
   health: Record<string, unknown> | null | undefined;
   expected: McpExpectedHealthIdentity;
   previousOwnedPid?: number;
+  previousOwnedInstanceId?: string;
   isPidAlive?: (pid: number | undefined) => boolean;
 }): McpPortOwnershipDecision {
   const health = input.health;
@@ -125,8 +127,17 @@ export function decideMcpPortOwnership(input: {
     && (input.expected.repoId === undefined || health.repoId === input.expected.repoId);
 
   const previousPid = input.previousOwnedPid;
-  if (pidAlive(previousPid)) {
-    return { action: 'takeover', pid: previousPid as number };
+  const previousInstanceId = input.previousOwnedInstanceId?.trim();
+  const healthInstanceId = typeof health.instanceId === 'string' ? health.instanceId.trim() : '';
+  // A persisted PID can be reused by the OS. Only take over when the process
+  // answering this health request proves the same opaque supervisor instance.
+  if (
+    previousPid
+    && previousInstanceId
+    && healthInstanceId === previousInstanceId
+    && pidAlive(previousPid)
+  ) {
+    return { action: 'takeover', pid: previousPid };
   }
   if (!matches) {
     return {
@@ -414,6 +425,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
     health: existingHealth,
     expected: expectedHealthIdentity,
     previousOwnedPid: previousRuntime?.server.pid,
+    previousOwnedInstanceId: previousRuntime?.server.instanceId,
     isPidAlive,
   });
   if (ownership.action === 'takeover') {
@@ -630,7 +642,12 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
     if (rawOpts.devRunnerAgents) args.push('--dev-runner-agents', rawOpts.devRunnerAgents);
     if (rawOpts.devRunnerTimeoutMs) args.push('--dev-runner-timeout-ms', String(rawOpts.devRunnerTimeoutMs));
     if (rawOpts.devRunnerMaxTimeoutMs) args.push('--dev-runner-max-timeout-ms', String(rawOpts.devRunnerMaxTimeoutMs));
-    const env: NodeJS.ProcessEnv = { ...process.env, REPO_HARNESS_CONTROLLER_HOME: controllerHome };
+    const instanceId = randomUUID();
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      REPO_HARNESS_CONTROLLER_HOME: controllerHome,
+      REPO_HARNESS_MCP_INSTANCE_ID: instanceId,
+    };
     if (configuredEndpoint) {
       env.REPO_HARNESS_MCP_PUBLIC_ORIGIN = endpointOrigin(configuredEndpoint);
     }
@@ -641,6 +658,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
     });
     runtime.server.running = true;
     runtime.server.pid = serverChild.pid;
+    runtime.server.instanceId = instanceId;
     runtime.server.lastStartAt = nowIso();
     if (isRestart) runtime.server.restartCount += 1;
     attachLineLogging(serverChild, 'serve', (line) => {
