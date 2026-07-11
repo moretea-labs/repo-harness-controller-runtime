@@ -22,19 +22,19 @@ repo-harness controller github status --json
 
 The canonical configuration is stored on each repository's Controller Registry record. Legacy `.repo-harness/plugins/github.json` files are still read for compatibility and absorbed into the registry on first use. No credential is stored in either place; authentication remains in the local `gh` CLI. `manual` and `checkpoint` are policy labels; both require an explicit publish or refresh action, so no hidden background network write can block local Task progress.
 
-When controller code or repo-harness workflow scripts change, roll the update out across every registered repository with one command:
+When controller code or repo-harness workflow scripts change, prefer a repo-scoped rollout for the repository you are actively using:
 
 ```bash
-repo-harness repo rollout
+repo-harness repo rollout --repo-id <current-repo-id>
 ```
 
-That command refreshes the repo-local harness for each enabled registered repository, then restarts only the repositories that already have MCP/controller config under `.repo-harness/mcp.local.json`, so running ChatGPT Connector sessions pick up the new code immediately without force-enabling MCP on unrelated repos.
+The rollout refreshes that repository's Registry record and repo-local harness files. Its compatibility restart step runs only when the selected repository still has a matching legacy `.repo-harness/mcp.local.json`; the live MCP service configuration, authentication, OAuth token state, and runtime state remain owned by Controller Home. Use an unscoped rollout only when you intentionally want to refresh every enabled registered repository.
 
 The corresponding MCP tools are `get_github_plugin_status` and `configure_github_plugin`. Existing low-level GitHub tools remain available for compatibility.
 
 ## Verify the loaded tool surface
 
-After connecting ChatGPT, call `controller_capabilities`. It should report `controller-chatgpt-bridge-v8` and list direct-change evidence, Issue Launcher, GitHub session, Run inspection, and Verification Gate tools. If ChatGPT only shows legacy planning tools, refresh or recreate the connector so it reloads the MCP tool schema.
+After connecting ChatGPT on the default `core` toolset, call `rh_status` first and confirm the facade plus repository bootstrap tools are present. Use `controller_capabilities` only on `advanced` or `full`, where it should report `controller-chatgpt-bridge-v8` and the larger supervised surface. If ChatGPT only shows legacy planning tools, refresh or recreate the connector so it reloads the MCP tool schema.
 
 ## What “GitHub session” means
 

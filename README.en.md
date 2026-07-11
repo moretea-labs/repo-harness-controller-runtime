@@ -16,9 +16,18 @@
 
 The project is designed for real repositories rather than disposable chat sessions: plans, task state, execution evidence, checks, and handoffs remain attached to the repository and can be resumed later. The current runtime uses a Thin Gateway, durable Jobs, a Global Scheduler, one Repo Actor per repository, isolated Workers, and an Evidence Plane.
 
-> Current package version: `1.4.0`
+New users should enter through this path:
+
+1. [Public usage guide](docs/public-usage-guide.md)
+2. [Install and start](docs/tutorials/01-install-and-start.md)
+3. [Connect ChatGPT](docs/tutorials/02-connect-chatgpt.md)
+4. [Complete the first repository task](docs/tutorials/03-first-repository-task.md)
+
+> Current package version: `1.4.0-rc.1` (`next` dist-tag on npm)
 >
 > Controller tool surface: `controller-chatgpt-bridge-v8`, schema `10`, surface version `8`
+
+The current public distribution is still an RC. This README describes the current implementation and install path; it does not imply that stable `1.4.0` has already shipped.
 
 ## Why this project
 
@@ -37,7 +46,8 @@ The project is designed for real repositories rather than disposable chat sessio
 | ChatGPT MCP controller | Repository inspection, Issues/Tasks, Direct Edit, verification, Git, GitHub sync, and execution tools. |
 | Direct Edit transactions | Multi-revision patches, bounded paths and size, SHA preconditions, savepoints, diff review, checks, and rollback. |
 | Issue → Task → Run workflow | Durable dependency-aware work planning with review and verification gates. |
-| Local Controller UI | Local-only Overview, Work, Activity, and Settings views for Runs, edits, checks, and evidence. |
+| Local Controller UI | A localhost-only execution-assistant console with Command Center, Approvals and Decisions, Current Work, Capabilities / Plugins, Models / Tools, System Status, Repositories, and Advanced Diagnostics. |
+| Bounded results and evidence | Long-running work lands in durable Jobs and Runs first; MCP and the UI return summaries and bounded previews by default, then deeper evidence or artifacts on demand. |
 | Runtime control plane | Thin Gateway, Global Scheduler, per-repository Actor, durable Execution Jobs, Claims, Leases, fencing, and isolated Workers. |
 | Automation governance | Bounded Schedule/Decision/Occurrence workflows, Candidate Findings, Portfolio DAG/Saga, and release gates. |
 | Runtime isolation | Controller state is stored outside the public source tree and linked only where required at runtime. |
@@ -173,11 +183,13 @@ bash scripts/controller-runtime.sh status --repo .
 
 `start` performs bounded preflight checks for Bun, repository root resolution, package version, tracked PID state, MCP and Local Controller ports, controller home, and detached repo-harness orphan processes before launching the daemon, MCP Gateway, and Local Bridge. Logs default to `.ai/local/logs/repo-harness-controller.log`.
 
-Store stable public endpoints in the Controller Home MCP service configuration. Repo-local MCP files are read only for compatibility and are not part of the new-install path; see [MCP tool exposure](docs/operations/mcp-tool-exposure.md).
+Controller Home is primary for MCP service config, authentication, and runtime state, including `controllerHome/mcp/mcp.local.json`, `mcp.tokens.json`, `mcp.oauth.json`, `mcp.oauth-tokens.json`, and `mcp.runtime.json`. The matching repo-local `.repo-harness/mcp.local.json`, `.repo-harness/mcp.tokens.json`, `.repo-harness/mcp.oauth.json`, `.repo-harness/mcp.oauth-tokens.json`, and `.repo-harness/mcp.runtime.json` files are legacy fallback only; repository-scoped `.repo-harness/mcp.policy.json` still narrows repository access. See [MCP tool exposure](docs/operations/mcp-tool-exposure.md).
 
 ## Connect ChatGPT
 
-Start with [Tutorial 2: Connect ChatGPT](docs/tutorials/02-connect-chatgpt.md). After connecting, call `rh_status`, then use `rh_context` for the selected repository. Normal use requires only `rh_status`, `rh_inbox`, `rh_context`, and `rh_work`; the `advanced` and `full` toolsets are diagnostic and compatibility surfaces.
+Start with [Tutorial 2: Connect ChatGPT](docs/tutorials/02-connect-chatgpt.md). After connecting, call `rh_status`, then use `rh_context` for the selected repository. The default `core` toolset contains `rh_status`, `rh_inbox`, `rh_context`, `rh_work`, plus `repository_list`, `repository_get`, `repository_register`, `repository_latest_source_diagnose`, and `repository_bootstrap_local_project`; use `advanced` for operator diagnostics and `full` only for compatibility.
+
+If multiple repositories are registered, keep `repoId` and `checkoutId` explicit. The controller is a global service, but repository writes still route through repository- and checkout-scoped identities. The public MCP endpoint is distinct from the localhost-only Local Controller UI at `127.0.0.1:8766`.
 
 See the [documentation hub](docs/README.md), or switch to [README.md](README.md) for Simplified Chinese.
 
@@ -212,6 +224,7 @@ Historical designs and research records are explicitly non-authoritative. A new 
 - Do not expose the local Controller UI (`127.0.0.1:8766`) publicly.
 - Prefer ChatGPT connector authentication and conservative app permissions for write-capable tools.
 - Use named checks instead of arbitrary verification commands.
+- Do not assume a `502`, reconnect, or truncated large response means a write failed; confirm the actual state from the Job, Run, or evidence summary first.
 - Review diffs and verification evidence before accepting a Task or finalizing a Direct Edit.
 - Never commit Controller runtime state, local logs, credentials, tokens, worktrees, or edit-session data.
 

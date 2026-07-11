@@ -25,9 +25,39 @@ Use WSL2 for repository adoption, Bash hooks, source release checks, or shell li
 
 `http://127.0.0.1:8765/mcp` is local-only. ChatGPT needs a stable public HTTPS URL ending in `/mcp`. Check the tunnel, the exact path, and `repo-harness mcp doctor`. Do not expose the local Controller UI port publicly.
 
+## MCP config seems to be in the wrong place
+
+Current service-level MCP config lives under Controller Home, not as the primary repo-local source:
+
+- `controllerHome/mcp/mcp.local.json`
+- `controllerHome/mcp/mcp.tokens.json`
+- `controllerHome/mcp/mcp.oauth.json`
+- `controllerHome/mcp/mcp.oauth-tokens.json`
+- `controllerHome/mcp/mcp.runtime.json`
+
+Repo-local `.repo-harness/mcp.local.json`, `.repo-harness/mcp.tokens.json`, `.repo-harness/mcp.oauth.json`, `.repo-harness/mcp.oauth-tokens.json`, and `.repo-harness/mcp.runtime.json` are legacy compatibility fallbacks. Repository-scoped `.repo-harness/mcp.policy.json` remains the access policy. If setup appears split between both locations, rerun `repo-harness mcp setup chatgpt --repo /path/to/your-project`, then restart the MCP service and verify the active endpoint and server name from Controller Home first.
+
 ## Only some tools appear in ChatGPT
 
 The default surface is intentionally small. A healthy core connector should show `rh_status`, `rh_inbox`, `rh_context`, and `rh_work`, plus repository bootstrap/selection tools. Reconnect only after confirming the local MCP runtime is using the expected toolset.
+
+## Runtime storage is not ready or the Local UI looks stale
+
+Do not delete `.ai/harness`, `.repo-harness`, or Controller Home state as a first response. Start with bounded diagnostics:
+
+```bash
+repo-harness mcp doctor --repo /path/to/your-project
+repo-harness repo list --json
+```
+
+If you are using the operator surfaces, inspect the runtime-maintenance path before restarting or replaying writes. The self-healing and reliability docs describe the safe recovery flow:
+
+- `runtime_maintenance_status`
+- `runtime_maintenance_apply`
+- [Self-healing loop](../repo-harness-runtime-self-healing-loop.md)
+- [Controller reliability runbook](controller-reliability-runbook.md)
+
+A `502`, reconnect, or truncated response does not prove a durable write failed. Confirm the Job, Run, or evidence summary before retrying the mutation.
 
 ## Agent delegation is unavailable
 

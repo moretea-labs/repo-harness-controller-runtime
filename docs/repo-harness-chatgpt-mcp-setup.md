@@ -24,7 +24,7 @@ repo-harness mcp setup chatgpt --repo .
 repo-harness mcp keepalive --repo . --profile controller --toolset core --enable-dev-runner --dev-runner-agents codex,claude --tunnel quick
 ```
 
-The `controller` profile starts a localhost-only visual controller at `http://127.0.0.1:8766/` by default. It is separate from the public MCP tunnel. Use it to launch ready Tasks, create small Codex/Claude sessions, approve local Jobs, inspect live logs, and run named checks. Add `--open-local-ui` to open it automatically, or `--no-local-ui` to disable it.
+The `controller` profile starts a localhost-only execution-assistant console at `http://127.0.0.1:8766/` by default. It is separate from the public MCP tunnel and is organized around Command Center, Approvals and Decisions, Current Work, Capabilities / Plugins, Models / Tools, System Status, Repositories, and Advanced Diagnostics. Add `--open-local-ui` to open it automatically, or `--no-local-ui` to disable it.
 
 Health check:
 
@@ -44,7 +44,7 @@ HTTPS_PROXY= HTTP_PROXY= ALL_PROXY= curl -v https://<named-tunnel-host>/mcp
 
 If a local HTTP proxy interferes with endpoint checks, add the fixed domain, `*.trycloudflare.com`, `*.ts.net`, and `100.64.0.0/10` to `NO_PROXY` instead of disabling proxies globally.
 
-The controller profile stores service-level MCP config under `controllerHome/mcp/mcp.local.json`, including allowed local agents, timeout, endpoint, and `chatgpt.serverName`. OAuth credentials live in `controllerHome/mcp/mcp.oauth.json`; the bearer fallback lives in `controllerHome/mcp/mcp.tokens.json`. Existing repo-local `.repo-harness/mcp.*` files remain a legacy fallback.
+The controller profile stores service-level MCP state under `controllerHome/mcp/`: `mcp.local.json` for configuration, `mcp.tokens.json` for bearer auth, `mcp.oauth.json` for the OAuth passphrase, `mcp.oauth-tokens.json` for OAuth token state, and `mcp.runtime.json` for runtime status. The matching repo-local `.repo-harness/mcp.*` service files remain legacy fallback only.
 
 Repository-specific MCP access rules may be added in `.repo-harness/mcp.policy.json`. Repository policy can narrow access, but immutable secret, credential, Git-internal, and build-output denies remain enforced.
 
@@ -102,7 +102,7 @@ Authenticate with `Authorization: Bearer <token>` using the token stored under `
 
 ## Verify the loaded tool surface
 
-Default `--toolset core` exposes only the ChatGPT facade (`rh_status`, `rh_inbox`, `rh_context`, `rh_work`) plus repository bootstrap/selection tools (`repository_list`, `repository_get`, `repository_register`, `repository_latest_source_diagnose`, `repository_bootstrap_local_project`). Use `--toolset advanced` for the supervised controller menu, or `--toolset full` for legacy compatibility. After connect, call `rh_status` (or, on advanced/full, `controller_capabilities`) and confirm the four `rh_*` tools appear. If only legacy planning tools are visible, refresh or recreate the Connector so ChatGPT reloads the MCP tool schema. See `docs/operations/mcp-tool-exposure.md`.
+Default `--toolset core` exposes `rh_status`, `rh_inbox`, `rh_context`, `rh_work`, plus `repository_list`, `repository_get`, `repository_register`, `repository_latest_source_diagnose`, and `repository_bootstrap_local_project`. Use `--toolset advanced` for operator diagnostics or `--toolset full` for legacy compatibility. After connecting, call `rh_status`; `controller_capabilities` is available only on `advanced` or `full`. If only legacy planning tools are visible, refresh or recreate the Connector so ChatGPT reloads the MCP tool schema.
 
 ## Refresh newly added repository tools
 
@@ -118,7 +118,7 @@ If this repository is already registered with the global Controller and also nee
 repo-harness repo rollout --repo-id <current-repo-id>
 ```
 
-After either command, rescan or recreate the ChatGPT Connector, then call `controller_capabilities` again and verify `expectedTools` still includes `repository_latest_source_diagnose` and `repository_bootstrap_local_project`. Do not run an unscoped `repo-harness repo rollout` unless you intentionally want to refresh every registered repository.
+A repo-scoped rollout refreshes the selected Registry record and repo-local harness files. Its compatibility restart step runs only when that repository still has a matching legacy `.repo-harness/mcp.local.json`; this does not make the repo-local file the service authority. Live MCP service config, auth, OAuth token state, and runtime state remain under Controller Home. After restart or rollout, rescan or recreate the ChatGPT Connector, call `rh_status`, and confirm the facade plus repository bootstrap tools are present. On `advanced` or `full`, you may additionally inspect `controller_capabilities`. Do not run an unscoped rollout unless you intentionally want to refresh every registered repository.
 
 ## Daily workflow
 
@@ -236,7 +236,7 @@ The executor profile remains read-oriented. Controller-dispatched Codex work is 
 - ChatGPT cannot connect: verify the HTTPS tunnel ends in `/mcp` and local `/health` responds.
 - Grok or other non-OAuth clients loop on `/authorize`: use `…/mcp-bearer` with a bearer token from `controllerHome/mcp/mcp.tokens.json`; do not use OAuth `/mcp` for those clients.
 - ChatGPT auth loops: retry authorization and inspect `controllerHome/mcp/mcp.oauth.json` first, then legacy `.repo-harness/mcp.oauth.json` only when using fallback; do not paste the passphrase into chat.
-- Tool scan misses tools: run `repo-harness mcp restart --repo .`, then rescan or recreate the versioned Connector and verify `controller_capabilities.expectedTools` includes `repository_latest_source_diagnose` and `repository_bootstrap_local_project`.
+- Tool scan misses tools: run `repo-harness mcp restart --repo .`, then rescan or recreate the versioned Connector and call `rh_status`; confirm the facade and repository bootstrap tools are present. On `advanced` or `full`, you may additionally inspect `controller_capabilities`.
 - Codex cannot see the MCP server: rerun `repo-harness mcp setup codex --repo . --scope project`.
 - A quick tunnel URL changed: update the Connector URL or switch to a named tunnel.
 - A Task is blocked: inspect `get_task_run`, shrink or re-plan the Task, then retry that Task rather than redispatching the full Issue.
