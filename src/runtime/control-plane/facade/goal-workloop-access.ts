@@ -1,4 +1,5 @@
 import {
+  accessModeDescriptor,
   isAccessMode,
   normalizeAccessMode,
   readRepositoryAccessPolicy,
@@ -12,6 +13,7 @@ import {
   type GoalWorkloopOperation,
   type GoalWorkloopStartInput,
 } from './goal-workloop';
+import { getWorkContract } from './work-contract-store';
 import type { CapabilityRisk, FacadeResult, WorkContractConstraints } from './types';
 
 export {
@@ -86,9 +88,33 @@ function normalizeStartInput(ctx: GoalWorkloopContext, input: GoalWorkloopStartI
   };
 }
 
+function decorateAccessMode(result: FacadeResult, mode: AccessMode): FacadeResult {
+  const descriptor = accessModeDescriptor(mode);
+  const work = result.data.work;
+  return {
+    ...result,
+    data: {
+      ...result.data,
+      accessMode: mode,
+      accessModeLabel: descriptor.shortLabel,
+      accessModeDescription: descriptor.description,
+      ...(work && typeof work === 'object' && !Array.isArray(work)
+        ? {
+            work: {
+              ...(work as Record<string, unknown>),
+              accessMode: mode,
+              accessModeLabel: descriptor.shortLabel,
+            },
+          }
+        : {}),
+    },
+  };
+}
+
 export function routeWorkStart(ctx: GoalWorkloopContext, input: GoalWorkloopStartInput): FacadeResult {
   const normalized = normalizeStartInput(ctx, input);
-  return withAccessMode(normalized.constraints?.accessMode ?? 'request', () => routeWorkStartBase(ctx, normalized));
+  const mode = normalized.constraints?.accessMode ?? 'request';
+  return withAccessMode(mode, () => decorateAccessMode(routeWorkStartBase(ctx, normalized), mode));
 }
 
 export function runGoalWorkloop(
@@ -97,7 +123,10 @@ export function runGoalWorkloop(
   args: Record<string, unknown>,
 ): FacadeResult {
   if (operation !== 'start') {
-    return withAccessMode(repositoryDefaultMode(ctx), () => runGoalWorkloopBase(ctx, operation, args));
+    const workId = typeof args.work_id === 'string' ? args.work_id : '';
+    const existing = workId ? getWorkContract(ctx.workStore, workId) : undefined;
+    const mode = resolveMode(ctx, existing?.constraints);
+    return withAccessMode(mode, () => decorateAccessMode(runGoalWorkloopBase(ctx, operation, args), mode));
   }
 
   const constraints = constraintsValue(args.constraints);
