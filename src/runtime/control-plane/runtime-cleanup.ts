@@ -38,6 +38,42 @@ const TEMP_SCAN_MAX_DEPTH = numericSetting(
   1,
 );
 
+/** Terminal / abandoned runs that no longer need their worktree for integration/review. */
+const WORKTREE_RELEASE_STATUSES = new Set([
+  'failed',
+  'cancelled',
+  'timed_out',
+  'orphaned',
+  'stale',
+  'unknown',
+]);
+
+/**
+ * High-cardinality permanent state directories. Cleanup only scans them one
+ * level deep for stale `*.tmp` siblings and does not recurse further.
+ */
+const TEMP_SCAN_LEAF_DIR_NAMES = new Set([
+  'records',
+  'receipts',
+  'events',
+  'evidence',
+  'edit-sessions',
+  'indexes',
+  'audit',
+  'local-jobs',
+  'runs',
+  'campaigns',
+  'schedules',
+  'leases',
+  'projections',
+]);
+
+const TEMP_SCAN_SKIP_DIR_NAMES = new Set([
+  'node_modules',
+  '.git',
+  'worktrees',
+]);
+
 interface DaemonStateSnapshot {
   schemaVersion?: number;
   status?: string;
@@ -242,6 +278,23 @@ function visitDirectoryEntries(
   }
 }
 
+function createScanBudget(maxEntries: number): ScanBudget {
+  return {
+    remaining: numericSetting(String(maxEntries), DEFAULT_SCAN_BUDGET, 1),
+    inspected: 0,
+    exhausted: false,
+  };
+}
+
+function shouldProtectWorktreeReference(meta: AgentRunSnapshot): boolean {
+  if (meta.executionMode !== 'worktree' || meta.worktreeCleanedAt) return false;
+  const status = typeof meta.status === 'string' ? meta.status.trim().toLowerCase() : '';
+  // Terminal failure/cancel statuses no longer need the worktree. Keep protecting
+  // active, waiting_for_user, succeeded-awaiting-integration, and unknown runs.
+  if (status && WORKTREE_RELEASE_STATUSES.has(status)) return false;
+  return true;
+}
+
 function collectReferencedWorktrees(
   controllerHome: string,
   budget: ScanBudget,
@@ -263,18 +316,19 @@ function collectReferencedWorktrees(
       }
       try {
         const meta = readJsonFile<AgentRunSnapshot>(metaPath);
-        if (meta.executionMode !== 'worktree' || meta.worktreeCleanedAt) return;
+        if (!shouldProtectWorktreeReference(meta)) return;
         const worktree = typeof meta.worktree === 'string' && meta.worktree.trim()
           ? meta.worktree.trim()
           : typeof meta.worktreePath === 'string' && meta.worktreePath.trim()
             ? meta.worktreePath.trim()
             : undefined;
         if (!worktree) {
+          // Missing path on a still-protected Run is unsafe only when the Run
+          // still expects a worktree (active / succeeded / waiting).
           unsafeRepositories.add(repoId);
           return;
         }
-        // Any Run that still references a worktree is protected, including a
-        // succeeded Run awaiting integration or cleanup.
+        // Protect active Runs and succeeded Runs awaiting integration/cleanup.
         referenced.add(canonicalPath(worktree));
       } catch (error) {
         unsafeRepositories.add(repoId);
@@ -284,6 +338,59 @@ function collectReferencedWorktrees(
     if (budget.exhausted) unsafeRepositories.add(repoId);
   });
   return { referenced, unsafeRepositories, complete: !budget.exhausted };
+}
+
+function resolveWorktreeSourceRoot(worktreePath: string): string | undefined {
+  const gitMarker = join(worktreePath, '.git');
+  if (!existsSync(gitMarker)) return undefined;
+  try {
+    const stats = lstatSync(gitMarker);
+    if (stats.isDirectory()) return undefined;
+    const content = readFileSync(gitMarker, 'utf8').trim();
+    const match = /^gitdir:\s*(.+)$/i.exec(content);
+    if (!match) return undefined;
+    const gitDir = resolve(worktreePath, match[1].trim()).replace(/\\/g, '/');
+    const marker = '/.git/worktrees/';
+    const index = gitDir.lastIndexOf(marker);
+    if (index <= 0) return undefined;
+    return gitDir.slice(0, index);
+  } catch {
+    return undefined;
+  }
+}
+
+function removeOrphanWorktreeDirectory(path: string, errors: string[], relativePath: string): boolean {
+  const sourceRoot = resolveWorktreeSourceRoot(path);
+  if (sourceRoot) {
+    try {
+      execFileSync('git', ['-C', sourceRoot, 'worktree', 'remove', '--force', path], {
+        encoding: 'utf8',
+        timeout: 60_000,
+        maxBuffer: 256 * 1024,
+      });
+      if (!existsSync(path)) return true;
+    } catch {
+      // Fall through to filesystem removal + prune.
+    }
+  }
+  try {
+    rmSync(path, { recursive: true, force: true });
+  } catch (error) {
+    errors.push(errorText(`worktree cleanup ${relativePath}`, error));
+    return false;
+  }
+  if (sourceRoot) {
+    try {
+      execFileSync('git', ['-C', sourceRoot, 'worktree', 'prune', '--expire', 'now'], {
+        encoding: 'utf8',
+        timeout: 30_000,
+        maxBuffer: 64 * 1024,
+      });
+    } catch {
+      // Prune is best-effort; directory removal is the primary goal.
+    }
+  }
+  return !existsSync(path);
 }
 
 function cleanupOrphanWorktrees(
@@ -311,8 +418,9 @@ function cleanupOrphanWorktrees(
       }
       try {
         if (nowMs - lstatSync(path).mtimeMs < ORPHAN_WORKTREE_TTL_MS) return;
-        rmSync(path, { recursive: true, force: true });
-        removed.push(relativePath);
+        if (removeOrphanWorktreeDirectory(path, errors, relativePath)) {
+          removed.push(relativePath);
+        }
       } catch (error) {
         errors.push(errorText(`worktree cleanup ${relativePath}`, error));
       }
@@ -325,6 +433,24 @@ function worktreeContentPath(relativePath: string): boolean {
   return /^repositories\/[^/]+\/worktrees(?:\/|$)/.test(relativePath);
 }
 
+function removeStaleTempEntry(
+  path: string,
+  relativePath: string,
+  isDirectory: boolean,
+  mtimeMs: number,
+  nowMs: number,
+  removed: string[],
+  errors: string[],
+): void {
+  if (nowMs - mtimeMs < TEMP_STATE_TTL_MS) return;
+  try {
+    rmSync(path, { recursive: isDirectory, force: true });
+    removed.push(relativePath);
+  } catch (error) {
+    errors.push(errorText(`temp-state cleanup ${relativePath}`, error));
+  }
+}
+
 function cleanupTemporaryStatePaths(
   controllerHome: string,
   budget: ScanBudget,
@@ -332,12 +458,14 @@ function cleanupTemporaryStatePaths(
   errors: string[],
 ): string[] {
   const removed: string[] = [];
-  const visit = (directory: string, depth: number): void => {
+  const visit = (directory: string, depth: number, leafOnly = false): void => {
     if (budget.exhausted || depth > TEMP_SCAN_MAX_DEPTH) return;
     visitDirectoryEntries(directory, budget, errors, (entry) => {
       const path = join(directory, entry.name);
       const relativePath = relativeHomePath(controllerHome, path);
       if (worktreeContentPath(relativePath)) return;
+      if (entry.isDirectory() && TEMP_SCAN_SKIP_DIR_NAMES.has(entry.name)) return;
+
       let stats;
       try {
         stats = lstatSync(path);
@@ -345,24 +473,43 @@ function cleanupTemporaryStatePaths(
         errors.push(errorText(`temp-state stat ${relativePath}`, error));
         return;
       }
-      if (entry.name.endsWith('.tmp') && nowMs - stats.mtimeMs >= TEMP_STATE_TTL_MS) {
-        try {
-          rmSync(path, { recursive: entry.isDirectory(), force: true });
-          removed.push(relativePath);
-        } catch (error) {
-          errors.push(errorText(`temp-state cleanup ${relativePath}`, error));
-        }
+
+      if (entry.name.endsWith('.tmp')) {
+        removeStaleTempEntry(path, relativePath, entry.isDirectory(), stats.mtimeMs, nowMs, removed, errors);
         return;
       }
-      if (entry.isDirectory()) visit(path, depth + 1);
+
+      if (!entry.isDirectory() || leafOnly) return;
+
+      // High-cardinality permanent state: only look for sibling *.tmp files.
+      if (TEMP_SCAN_LEAF_DIR_NAMES.has(entry.name)) {
+        visit(path, depth + 1, true);
+        return;
+      }
+      visit(path, depth + 1, false);
     });
   };
 
-  // Only known runtime-state roots are scanned. Repository worktree contents
-  // are explicitly excluded above, and the shared budget bounds every pass.
+  // Only known runtime-state roots are scanned. Worktree contents and other
+  // high-volume permanent trees are bounded above so periodic cleanup cannot
+  // burn its entire budget walking historical job records.
   visit(join(controllerHome, 'daemon'), 0);
   visit(join(controllerHome, 'repositories'), 0);
   return removed;
+}
+
+function shouldPersistCleanupAudit(report: RuntimeCleanupReport): boolean {
+  // Avoid unbounded audit growth from no-op periodic passes that only report
+  // budgetExhausted, skippedActiveWorktrees, or a live protected PID skip.
+  const hadMutations = Boolean(
+    report.removedPidFiles.length
+    || report.removedWorktrees.length
+    || report.removedTemporaryPaths.length,
+  );
+  if (hadMutations || report.errors.length) return true;
+  // Startup/manual may record defensive skips (live PID protected, budget).
+  if (report.reason === 'periodic') return false;
+  return Boolean(report.skippedPidFiles.length || report.budgetExhausted);
 }
 
 export function cleanupControllerRuntimeState(
@@ -372,16 +519,19 @@ export function cleanupControllerRuntimeState(
   const home = ensureControllerHome(controllerHome);
   const nowMs = options.nowMs ?? Date.now();
   const nowIso = new Date(nowMs).toISOString();
-  const budget: ScanBudget = {
-    remaining: numericSetting(String(options.maxEntries ?? DEFAULT_SCAN_BUDGET), DEFAULT_SCAN_BUDGET, 1),
-    inspected: 0,
-    exhausted: false,
-  };
+  const maxEntries = numericSetting(String(options.maxEntries ?? DEFAULT_SCAN_BUDGET), DEFAULT_SCAN_BUDGET, 1);
+  // Separate phase budgets so a huge permanent-state tree cannot starve
+  // worktree reference collection or orphan worktree removal.
+  const referenceBudget = createScanBudget(maxEntries);
+  const worktreeBudget = createScanBudget(maxEntries);
+  const tempBudget = createScanBudget(maxEntries);
   const errors: string[] = [];
   const pidFiles = cleanupDaemonPidFile(home, nowIso, options, errors);
-  const references = collectReferencedWorktrees(home, budget, errors);
-  const worktrees = cleanupOrphanWorktrees(home, references, budget, nowMs, errors);
-  const removedTemporaryPaths = cleanupTemporaryStatePaths(home, budget, nowMs, errors).sort();
+  const references = collectReferencedWorktrees(home, referenceBudget, errors);
+  const worktrees = cleanupOrphanWorktrees(home, references, worktreeBudget, nowMs, errors);
+  const removedTemporaryPaths = cleanupTemporaryStatePaths(home, tempBudget, nowMs, errors).sort();
+  const inspectedPaths = referenceBudget.inspected + worktreeBudget.inspected + tempBudget.inspected;
+  const budgetExhausted = referenceBudget.exhausted || worktreeBudget.exhausted || tempBudget.exhausted;
   const report: RuntimeCleanupReport = {
     at: nowIso,
     reason: options.reason ?? 'manual',
@@ -390,19 +540,12 @@ export function cleanupControllerRuntimeState(
     removedWorktrees: worktrees.removed.sort(),
     removedTemporaryPaths,
     skippedActiveWorktrees: worktrees.skippedActive.sort(),
-    inspectedPaths: budget.inspected,
-    budgetExhausted: budget.exhausted,
+    inspectedPaths,
+    budgetExhausted,
     errors: errors.sort(),
     logPath: runtimeCleanupLogPath(home),
   };
-  if (
-    report.removedPidFiles.length
-    || report.removedWorktrees.length
-    || report.removedTemporaryPaths.length
-    || report.skippedPidFiles.length
-    || report.budgetExhausted
-    || report.errors.length
-  ) {
+  if (shouldPersistCleanupAudit(report)) {
     try {
       appendJsonLine(report.logPath, { schemaVersion: 1, ...report });
     } catch (error) {

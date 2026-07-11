@@ -72,6 +72,74 @@ export function shouldRestartMcpServer(
   return now - unhealthySinceAt >= unhealthyRestartWindowMs;
 }
 
+/**
+ * Detect bind failures such as Bun/Node "Failed to start server. Is port 8765 in use?".
+ * These must fail-fast instead of thrashing KeepAlive restarts against a foreign owner.
+ */
+export function isAddressInUseFailure(message: string | undefined): boolean {
+  if (!message) return false;
+  return /eaddrinuse|address already in use|port\s+\d+\s+(is\s+)?in use|failed to start server.*port/i.test(message);
+}
+
+export interface McpExpectedHealthIdentity {
+  toolSurface: string;
+  schemaVersion: number;
+  toolSurfaceVersion: number;
+  toolSurfaceFingerprint?: string;
+  runtimeToolSurfaceFingerprint?: string;
+  toolset: string;
+  profile: string;
+  repoId?: string;
+}
+
+export type McpPortOwnershipDecision =
+  | { action: 'free' }
+  | { action: 'takeover'; pid: number }
+  | { action: 'abort'; reason: string };
+
+export function decideMcpPortOwnership(input: {
+  health: Record<string, unknown> | null | undefined;
+  expected: McpExpectedHealthIdentity;
+  previousOwnedPid?: number;
+  isPidAlive?: (pid: number | undefined) => boolean;
+}): McpPortOwnershipDecision {
+  const health = input.health;
+  if (!health || health.status !== 'ok' || health.server !== 'repo-harness-mcp') {
+    return { action: 'free' };
+  }
+
+  const pidAlive = input.isPidAlive ?? ((pid) => {
+    if (!pid || !Number.isInteger(pid) || pid <= 0) return false;
+    try { process.kill(pid, 0); return true; } catch { return false; }
+  });
+
+  const matches = health.toolSurface === input.expected.toolSurface
+    && health.schemaVersion === input.expected.schemaVersion
+    && health.toolSurfaceVersion === input.expected.toolSurfaceVersion
+    && (input.expected.toolSurfaceFingerprint === undefined
+      || health.toolSurfaceFingerprint === input.expected.toolSurfaceFingerprint)
+    && (input.expected.runtimeToolSurfaceFingerprint === undefined
+      || health.runtimeToolSurfaceFingerprint === input.expected.runtimeToolSurfaceFingerprint)
+    && health.toolset === input.expected.toolset
+    && health.profile === input.expected.profile
+    && (input.expected.repoId === undefined || health.repoId === input.expected.repoId);
+
+  const previousPid = input.previousOwnedPid;
+  if (pidAlive(previousPid)) {
+    return { action: 'takeover', pid: previousPid as number };
+  }
+  if (!matches) {
+    return {
+      action: 'abort',
+      reason: `port is occupied by an incompatible MCP server (surface=${String(health.toolSurface ?? 'unknown')}, schema=${String(health.schemaVersion ?? 'unknown')}, version=${String(health.toolSurfaceVersion ?? 'unknown')}, fingerprint=${String(health.toolSurfaceFingerprint ?? 'unknown')}, profile=${String(health.profile ?? 'unknown')}, toolset=${String(health.toolset ?? 'unknown')}). Stop the other Gateway or choose another port. One MCP control plane should operate multiple repositories; do not run a second keepalive against the same port.`,
+    };
+  }
+  return {
+    action: 'abort',
+    reason: 'port already has a compatible repo-harness MCP server that is not owned by this keepalive process. Stop it before starting a new supervisor, or attach to the existing single control plane.',
+  };
+}
+
 export function mcpServerRestartDelayMs(
   childRunning: boolean,
   restartDelayMs = DEFAULT_RESTART_DELAY_MS,
@@ -331,26 +399,29 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
     : undefined;
   const expectedRepoId = profile === 'controller' ? undefined : repositoryIdentity(repoRoot);
   const previousRuntime = loadMcpServiceRuntimeState(controllerHome, repoRoot);
+  const expectedHealthIdentity: McpExpectedHealthIdentity = {
+    toolSurface: expectedToolSurface,
+    schemaVersion: expectedSchemaVersion,
+    toolSurfaceVersion: expectedToolSurfaceVersion,
+    toolSurfaceFingerprint: expectedToolSurfaceFingerprint,
+    runtimeToolSurfaceFingerprint: expectedRuntimeToolSurfaceFingerprint,
+    toolset,
+    profile,
+    repoId: expectedRepoId,
+  };
   const existingHealth = await jsonHealth(localHealthUrl(host, port));
-  if (existingHealth?.status === 'ok') {
-    const existingMatches = existingHealth.toolSurface === expectedToolSurface
-      && existingHealth.schemaVersion === expectedSchemaVersion
-      && existingHealth.toolSurfaceVersion === expectedToolSurfaceVersion
-      && (expectedToolSurfaceFingerprint === undefined || existingHealth.toolSurfaceFingerprint === expectedToolSurfaceFingerprint)
-      && (expectedRuntimeToolSurfaceFingerprint === undefined || existingHealth.runtimeToolSurfaceFingerprint === expectedRuntimeToolSurfaceFingerprint)
-      && existingHealth.toolset === toolset
-      && existingHealth.profile === profile
-      && (expectedRepoId === undefined || existingHealth.repoId === expectedRepoId);
-    const previousPid = previousRuntime?.server.pid;
-    if (isPidAlive(previousPid) && existingHealth.server === 'repo-harness-mcp') {
-      console.error(`[repo-harness mcp keepalive] Replacing previous repo-harness MCP process ${previousPid}.`);
-      await stopPid(previousPid as number);
-      await sleep(250);
-    } else if (!existingMatches) {
-      throw new Error(`port ${port} is occupied by an incompatible MCP server (surface=${String(existingHealth.toolSurface ?? 'unknown')}, schema=${String(existingHealth.schemaVersion ?? 'unknown')}, version=${String(existingHealth.toolSurfaceVersion ?? 'unknown')}, fingerprint=${String(existingHealth.toolSurfaceFingerprint ?? 'unknown')}, profile=${String(existingHealth.profile ?? 'unknown')}). Stop the old process or choose another port.`);
-    } else {
-      throw new Error(`port ${port} already has a compatible repo-harness MCP server, but it is not owned by this keepalive process. Stop it before starting a new supervisor.`);
-    }
+  const ownership = decideMcpPortOwnership({
+    health: existingHealth,
+    expected: expectedHealthIdentity,
+    previousOwnedPid: previousRuntime?.server.pid,
+    isPidAlive,
+  });
+  if (ownership.action === 'takeover') {
+    console.error(`[repo-harness mcp keepalive] Replacing previous repo-harness MCP process ${ownership.pid}.`);
+    await stopPid(ownership.pid);
+    await sleep(250);
+  } else if (ownership.action === 'abort') {
+    throw new Error(`port ${port}: ${ownership.reason}`);
   }
   const localBridgeConfig = loadLocalBridgeConfig(repoRoot);
   const localUiEnabled = rawOpts.localUi ?? localConfig?.localController?.enabled ?? profile === 'controller';
@@ -391,6 +462,8 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
   }
 
   let stopping = false;
+  let fatalPortConflict: string | undefined;
+  let recentServeStderr = '';
   let serverChild: ChildProcess | undefined;
   let tunnelChild: ChildProcess | undefined;
   let localBridge: LocalBridgeServerHandle | undefined;
@@ -532,6 +605,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
   };
 
   const spawnServer = (isRestart: boolean): void => {
+    recentServeStderr = '';
     const args = [
       ...cli.args,
       'mcp',
@@ -569,7 +643,14 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
     runtime.server.pid = serverChild.pid;
     runtime.server.lastStartAt = nowIso();
     if (isRestart) runtime.server.restartCount += 1;
-    attachLineLogging(serverChild, 'serve');
+    attachLineLogging(serverChild, 'serve', (line) => {
+      // Bound recent serve output so bind failures like "port already in use"
+      // can fail-fast instead of thrashing KeepAlive restarts.
+      recentServeStderr = `${recentServeStderr}\n${line}`.slice(-4_000);
+      if (isAddressInUseFailure(line)) {
+        fatalPortConflict = `port ${port} is already in use (${line.trim()})`;
+      }
+    });
     serverChild.once('exit', (code, signal) => {
       runtime.server.running = false;
       runtime.server.healthy = false;
@@ -578,7 +659,16 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
       runtime.server.lastExit = summarizeExit(code, signal);
       updateStatus();
       persistRuntime();
-      if (!stopping) recordError('server', `mcp serve exited (${runtime.server.lastExit})`);
+      if (!stopping) {
+        const exitMessage = `mcp serve exited (${runtime.server.lastExit})`;
+        if (isAddressInUseFailure(recentServeStderr) || isAddressInUseFailure(fatalPortConflict)) {
+          fatalPortConflict = fatalPortConflict
+            ?? `port ${port} is already in use; mcp serve exited without binding`;
+          recordError('config', `${exitMessage}; ${fatalPortConflict}`);
+        } else {
+          recordError('server', exitMessage);
+        }
+      }
     });
     updateStatus();
     persistRuntime();
@@ -646,22 +736,6 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
     await sleep(restartDelayMs);
     spawnTunnel(true);
   };
-
-  const restartServer = async (reason: string): Promise<void> => {
-    const restartDelay = mcpServerRestartDelayMs(isRunning(serverChild), restartDelayMs);
-    recordError('server', reason);
-    // Keep the tunnel process and public URL alive while the local Gateway is
-    // replaced. cloudflared will reconnect to the same local port, avoiding a
-    // quick-tunnel URL rotation and preserving the Connector endpoint.
-    await stopChild(serverChild, 'mcp serve');
-    serverChild = undefined;
-    runtime.server.running = false;
-    runtime.server.healthy = false;
-    if (restartDelay > 0) await sleep(restartDelay);
-    spawnServer(true);
-    await warmServerHealth();
-  };
-
 
   const startLocalController = async (): Promise<void> => {
     if (!localUiEnabled || localBridge) return;
@@ -741,6 +815,63 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
     persistRuntime();
   };
 
+  const abortForPortConflict = async (reason: string): Promise<never> => {
+    fatalPortConflict = reason;
+    recordError('config', reason);
+    console.error(`[repo-harness mcp keepalive] FAIL-FAST: ${reason}`);
+    await shutdown();
+    throw new Error(reason);
+  };
+
+  const ensurePortOwnershipOrAbort = async (): Promise<void> => {
+    const health = await jsonHealth(localHealthUrl(host, port));
+    const decision = decideMcpPortOwnership({
+      health,
+      expected: expectedHealthIdentity,
+      previousOwnedPid: runtime.server.pid ?? previousRuntime?.server.pid,
+      isPidAlive,
+    });
+    if (decision.action === 'takeover') {
+      console.error(`[repo-harness mcp keepalive] Replacing previous repo-harness MCP process ${decision.pid}.`);
+      await stopPid(decision.pid);
+      await sleep(250);
+      return;
+    }
+    if (decision.action === 'abort') {
+      await abortForPortConflict(`port ${port}: ${decision.reason}`);
+    }
+  };
+
+  const restartServer = async (reason: string): Promise<void> => {
+    if (fatalPortConflict) {
+      await abortForPortConflict(fatalPortConflict);
+    }
+    if (isAddressInUseFailure(reason) || isAddressInUseFailure(recentServeStderr)) {
+      await abortForPortConflict(
+        `port ${port} is already in use by another process; refusing restart thrash. `
+        + 'One MCP control plane should serve multiple repositories from the product source repo. '
+        + `Details: ${reason}`,
+      );
+    }
+    // Before respawning, re-check that we still own (or can claim) the port.
+    // A foreign healthy Gateway must never be fought with blind KeepAlive restarts.
+    if (!isRunning(serverChild)) {
+      await ensurePortOwnershipOrAbort();
+    }
+    const restartDelay = mcpServerRestartDelayMs(isRunning(serverChild), restartDelayMs);
+    recordError('server', reason);
+    // Keep the tunnel process and public URL alive while the local Gateway is
+    // replaced. cloudflared will reconnect to the same local port, avoiding a
+    // quick-tunnel URL rotation and preserving the Connector endpoint.
+    await stopChild(serverChild, 'mcp serve');
+    serverChild = undefined;
+    runtime.server.running = false;
+    runtime.server.healthy = false;
+    if (restartDelay > 0) await sleep(restartDelay);
+    spawnServer(true);
+    await warmServerHealth();
+  };
+
   process.once('SIGINT', () => {
     void shutdown().finally(() => process.exit(0));
   });
@@ -762,6 +893,9 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
   await warmServerHealth();
 
   while (!stopping) {
+    if (fatalPortConflict) {
+      await abortForPortConflict(fatalPortConflict);
+    }
     const localHealthy = await probeLocalHealth();
     if (localHealthy) {
       localFailureCount = 0;
@@ -777,7 +911,11 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
         now,
         unhealthyRestartWindowMs,
       )) {
-        await restartServer(`local MCP health failed at ${localHealthUrl(host, port)}`);
+        await restartServer(
+          isAddressInUseFailure(recentServeStderr) || isAddressInUseFailure(fatalPortConflict)
+            ? (fatalPortConflict ?? `port ${port} is already in use`)
+            : `local MCP health failed at ${localHealthUrl(host, port)}`,
+        );
         localFailureCount = 0;
         localUnhealthySinceAt = undefined;
         lastLocalHealthWarningAt = undefined;

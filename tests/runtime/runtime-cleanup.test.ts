@@ -215,9 +215,131 @@ describe('runtime cleanup', () => {
 
     const report = cleanupControllerRuntimeState(home, { maxEntries: 3 });
 
-    expect(report.inspectedPaths).toBeLessThanOrEqual(3);
+    // Reference, worktree, and temp phases each receive the configured budget.
+    expect(report.inspectedPaths).toBeLessThanOrEqual(9);
     expect(report.budgetExhausted).toBe(true);
     expect(cleanupEntries(home).at(-1)?.budgetExhausted).toBe(true);
+  });
+
+  test('terminal failed, cancelled, or unknown Runs do not permanently pin their worktrees', () => {
+    const home = controllerHome();
+    const cancelledWorktree = join(home, 'repositories', 'repo-a', 'worktrees', 'RUN-cancelled');
+    const unknownWorktree = join(home, 'repositories', 'repo-a', 'worktrees', 'RUN-unknown');
+    const activeWorktree = join(home, 'repositories', 'repo-a', 'worktrees', 'RUN-active');
+    mkdirSync(cancelledWorktree, { recursive: true });
+    mkdirSync(unknownWorktree, { recursive: true });
+    mkdirSync(activeWorktree, { recursive: true });
+    mkdirSync(join(home, 'repositories', 'repo-a', 'runs', 'RUN-cancelled'), { recursive: true });
+    mkdirSync(join(home, 'repositories', 'repo-a', 'runs', 'RUN-unknown'), { recursive: true });
+    mkdirSync(join(home, 'repositories', 'repo-a', 'runs', 'RUN-active'), { recursive: true });
+    writeFileSync(join(home, 'repositories', 'repo-a', 'runs', 'RUN-cancelled', 'meta.json'), `${JSON.stringify({
+      schemaVersion: 3,
+      runId: 'RUN-cancelled',
+      issueId: 'ISS-1',
+      taskId: 'T1',
+      agent: 'codex',
+      provider: 'local',
+      executionMode: 'worktree',
+      status: 'cancelled',
+      repoRoot: '/repo',
+      worktree: cancelledWorktree,
+      branch: 'controller/cancelled',
+      baseRevision: 'HEAD',
+      promptPath: 'prompt.md',
+      stdoutPath: 'stdout.log',
+      stderrPath: 'stderr.log',
+      resultPath: 'result.json',
+      eventsPath: 'events.jsonl',
+      createdAt: new Date().toISOString(),
+    }, null, 2)}\n`, 'utf8');
+    writeFileSync(join(home, 'repositories', 'repo-a', 'runs', 'RUN-unknown', 'meta.json'), `${JSON.stringify({
+      schemaVersion: 3,
+      runId: 'RUN-unknown',
+      issueId: 'ISS-1',
+      taskId: 'T1b',
+      agent: 'codex',
+      provider: 'local',
+      executionMode: 'worktree',
+      status: 'unknown',
+      repoRoot: '/repo',
+      worktree: unknownWorktree,
+      branch: 'controller/unknown',
+      baseRevision: 'HEAD',
+      promptPath: 'prompt.md',
+      stdoutPath: 'stdout.log',
+      stderrPath: 'stderr.log',
+      resultPath: 'result.json',
+      eventsPath: 'events.jsonl',
+      createdAt: new Date().toISOString(),
+    }, null, 2)}\n`, 'utf8');
+    writeFileSync(join(home, 'repositories', 'repo-a', 'runs', 'RUN-active', 'meta.json'), `${JSON.stringify({
+      schemaVersion: 3,
+      runId: 'RUN-active',
+      issueId: 'ISS-1',
+      taskId: 'T2',
+      agent: 'codex',
+      provider: 'local',
+      executionMode: 'worktree',
+      status: 'waiting_for_user',
+      repoRoot: '/repo',
+      worktree: activeWorktree,
+      branch: 'controller/active',
+      baseRevision: 'HEAD',
+      promptPath: 'prompt.md',
+      stdoutPath: 'stdout.log',
+      stderrPath: 'stderr.log',
+      resultPath: 'result.json',
+      eventsPath: 'events.jsonl',
+      createdAt: new Date().toISOString(),
+    }, null, 2)}\n`, 'utf8');
+    age(cancelledWorktree);
+    age(unknownWorktree);
+    age(activeWorktree);
+
+    const report = cleanupControllerRuntimeState(home, { maxEntries: 100 });
+
+    expect(existsSync(cancelledWorktree)).toBe(false);
+    expect(existsSync(unknownWorktree)).toBe(false);
+    expect(existsSync(activeWorktree)).toBe(true);
+    expect(report.removedWorktrees).toContain('repositories/repo-a/worktrees/RUN-cancelled');
+    expect(report.removedWorktrees).toContain('repositories/repo-a/worktrees/RUN-unknown');
+    expect(report.skippedActiveWorktrees).toContain('repositories/repo-a/worktrees/RUN-active');
+  });
+
+  test('worktree cleanup is not starved by high-cardinality permanent job records', () => {
+    const home = controllerHome();
+    const orphanWorktree = join(home, 'repositories', 'repo-a', 'worktrees', 'RUN-orphaned');
+    const records = join(home, 'repositories', 'repo-a', 'execution-jobs', 'records');
+    mkdirSync(orphanWorktree, { recursive: true });
+    mkdirSync(records, { recursive: true });
+    for (let index = 0; index < 80; index += 1) {
+      writeFileSync(join(records, `EJOB-${index}.json`), '{}\n', 'utf8');
+    }
+    age(orphanWorktree);
+
+    const report = cleanupControllerRuntimeState(home, { maxEntries: 40 });
+
+    expect(existsSync(orphanWorktree)).toBe(false);
+    expect(report.removedWorktrees).toContain('repositories/repo-a/worktrees/RUN-orphaned');
+  });
+
+  test('no-op periodic cleanup does not append audit noise for budget exhaustion alone', () => {
+    const home = controllerHome();
+    const records = join(home, 'repositories', 'repo-a', 'execution-jobs', 'records');
+    mkdirSync(records, { recursive: true });
+    for (let index = 0; index < 20; index += 1) {
+      writeFileSync(join(records, `record-${index}.json`), '{}\n', 'utf8');
+    }
+
+    const report = cleanupControllerRuntimeState(home, {
+      reason: 'periodic',
+      maxEntries: 3,
+    });
+
+    expect(report.budgetExhausted).toBe(true);
+    expect(report.removedWorktrees).toEqual([]);
+    expect(report.removedTemporaryPaths).toEqual([]);
+    expect(existsSync(runtimeCleanupLogPath(home))).toBe(false);
   });
 
   test('bounds cleanup preview candidates and reports truncation', () => {

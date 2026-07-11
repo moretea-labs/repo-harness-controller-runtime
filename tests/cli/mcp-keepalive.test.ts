@@ -1,9 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  decideMcpPortOwnership,
   extractCloudflareQuickTunnelUrl,
   inferMcpTunnelMode,
   DEFAULT_MCP_UNHEALTHY_RESTART_WINDOW_MS,
   DEFAULT_MCP_TUNNEL_UNHEALTHY_RESTART_WINDOW_MS,
+  isAddressInUseFailure,
   isExpectedLocalControllerHealth,
   mcpServerRestartDelayMs,
   normalizeKeepalivePublicEndpoint,
@@ -57,6 +59,75 @@ describe('mcp keepalive helpers', () => {
     expect(shouldRestartMcpServer(false, 0, undefined, Date.now())).toBe(true);
     expect(mcpServerRestartDelayMs(false, 2_000)).toBe(0);
     expect(mcpServerRestartDelayMs(true, 2_000)).toBe(2_000);
+  });
+
+  test('detects address-in-use bind failures for fail-fast', () => {
+    expect(isAddressInUseFailure('Failed to start server. Is port 8765 in use?')).toBe(true);
+    expect(isAddressInUseFailure('Error: listen EADDRINUSE: address already in use 127.0.0.1:8765')).toBe(true);
+    expect(isAddressInUseFailure('local MCP health is degraded')).toBe(false);
+  });
+
+  test('aborts when another healthy MCP already owns the port', () => {
+    const expected = {
+      toolSurface: 'controller-chatgpt-bridge-v8',
+      schemaVersion: 10,
+      toolSurfaceVersion: 8,
+      toolSurfaceFingerprint: 'abc',
+      runtimeToolSurfaceFingerprint: 'def',
+      toolset: 'full',
+      profile: 'controller',
+    };
+    const foreign = decideMcpPortOwnership({
+      health: {
+        status: 'ok',
+        server: 'repo-harness-mcp',
+        toolSurface: 'controller-chatgpt-bridge-v8',
+        schemaVersion: 10,
+        toolSurfaceVersion: 8,
+        toolSurfaceFingerprint: 'abc',
+        runtimeToolSurfaceFingerprint: 'def',
+        toolset: 'core',
+        profile: 'controller',
+      },
+      expected,
+      previousOwnedPid: undefined,
+      isPidAlive: () => false,
+    });
+    expect(foreign.action).toBe('abort');
+    if (foreign.action === 'abort') {
+      expect(foreign.reason).toContain('incompatible');
+      expect(foreign.reason).toContain('One MCP control plane');
+    }
+
+    const sameSurfaceUnowned = decideMcpPortOwnership({
+      health: {
+        status: 'ok',
+        server: 'repo-harness-mcp',
+        ...expected,
+      },
+      expected,
+      previousOwnedPid: undefined,
+      isPidAlive: () => false,
+    });
+    expect(sameSurfaceUnowned.action).toBe('abort');
+
+    const takeover = decideMcpPortOwnership({
+      health: {
+        status: 'ok',
+        server: 'repo-harness-mcp',
+        ...expected,
+      },
+      expected,
+      previousOwnedPid: 42_001,
+      isPidAlive: (pid) => pid === 42_001,
+    });
+    expect(takeover).toEqual({ action: 'takeover', pid: 42_001 });
+
+    expect(decideMcpPortOwnership({
+      health: null,
+      expected,
+      isPidAlive: () => false,
+    }).action).toBe('free');
   });
 
   test('restarts a live gateway only after the continuous unhealthy window', () => {
