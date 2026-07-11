@@ -1,29 +1,26 @@
 # Current Status Snapshot
 
-<!-- updated_at: 2026-07-09 -->
+<!-- updated_at: 2026-07-11 -->
 <!-- stale_after: 24h -->
 
 > **Status**: Ready for Delivery
-> **Updated At**: 2026-07-09
-> **Source**: Goal loop provider/executor GUI configuration center
-> **Target**: User-controllable LLM providers, local tools, routing, and policy without secret exposure
+> **Updated At**: 2026-07-11
+> **Source**: Local-bridge GUI repository registry management
+> **Target**: Support soft-removing registered repositories from the console without deleting disk files
 > **Stale After**: 24h
 
 This snapshot is a read model, not an execution gate.
 
 ## Current Focus
 
-- Automation Settings / Model & Tool Providers GUI page in local-bridge console.
-- Persistent non-secret config under `controllerHome/global/*.json`.
-- ExecutorRouter + provider registry respect enable/disable, priority, live mode, and tool disables.
-- ChatGPT remains handoff-only; Grok direct dispatch requires credential + live mode.
+- GUI 仓库页支持「删除注册」：调用 soft-remove，保留审计历史，不删磁盘文件。
+- Local-bridge 暴露 `POST /api/repositories/:repoId/remove`。
+- 列表默认隐藏已 soft-remove 的仓库；当前选中被删时自动切到剩余仓库。
+- 自我保护：不能删除当前进程所在仓库的注册。
 
 ## Validation Completed
 
-- `npm run check:type`
-- `bun test tests/runtime/provider-config.test.ts`
-- `bun test tests/runtime/goal-loop.test.ts`
-- `bun test tests/runtime/facade-contracts.test.ts`
+- `bun test tests/cli/local-bridge.test.ts --test-name-pattern "registers and soft-removes|hardened localhost"`
 
 ## Remaining Before Delivery
 
