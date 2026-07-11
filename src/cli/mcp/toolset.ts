@@ -1,6 +1,7 @@
 import type { McpToolDefinition } from './tools';
 import type { MultiRepositoryMcpToolContext } from './multi-repository';
 import { buildMultiRepositoryToolDefinitions } from './multi-repository';
+import { accessToolDefinitions } from './access-tools';
 import { repositoryToolDefinitions } from './repository-tools';
 import { runtimeToolDefinitions } from '../../runtime/gateway/mcp/runtime-tools';
 import { FACADE_TOOLS } from '../../runtime/control-plane/facade/types';
@@ -20,6 +21,8 @@ export const DEFAULT_CONTROLLER_TOOL_NAMES = [
   'rh_inbox',
   'rh_context',
   'rh_work',
+  'repository_access_get',
+  'repository_access_set',
   'repository_list',
   'repository_get',
   'repository_register',
@@ -148,7 +151,7 @@ export function controllerToolExposureMetadata(toolNames: readonly string[]): {
 }
 
 export function allControllerToolDefinitions(ctx: MultiRepositoryMcpToolContext): McpToolDefinition[] {
-  return runtimeToolDefinitions.concat(repositoryToolDefinitions, buildMultiRepositoryToolDefinitions(ctx));
+  return runtimeToolDefinitions.concat(accessToolDefinitions, repositoryToolDefinitions, buildMultiRepositoryToolDefinitions(ctx));
 }
 
 export function exposedControllerToolDefinitions(ctx: MultiRepositoryMcpToolContext): McpToolDefinition[] {

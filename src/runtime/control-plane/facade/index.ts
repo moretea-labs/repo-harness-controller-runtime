@@ -6,7 +6,7 @@ export * from './suggested-actions';
 export * from './capability-registry';
 export * from './policy-gate';
 export * from './check-normalization';
-export * from './goal-workloop';
+export * from './goal-workloop-access';
 export * from './codex-delegation';
 export * from './self-healing-loop';
 export * from './operation-digest';
