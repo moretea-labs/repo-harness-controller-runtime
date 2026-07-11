@@ -236,21 +236,14 @@ export function routeWorkStart(
     });
   }
 
-  // Handoff-only for underspecified/high-risk routes. Goal workloop start is allowed without
-  // pre-approval; destructive/remote/secret still require handoff when mode says so.
+  // Any policy approval decision must stop before a WorkContract is created. The policy
+  // gate already allows bounded Direct Control edits and Full Access local work, so
+  // requiring an additional caller-provided hint here would let Request-mode work bypass
+  // its approval boundary.
   const blockForHandoff =
     mode.mode === 'handoff_only'
     || policy.decision === 'denied'
-    || (
-      policy.decision === 'approval_required'
-      && (
-        input.modeInput.requiresApproval === true
-        || input.modeInput.requiresUserApproval === true
-        || input.modeInput.destructive === true
-        || input.modeInput.remoteWrite === true
-        || input.modeInput.secretAccess === true
-      )
-    );
+    || policy.decision === 'approval_required';
 
   if (blockForHandoff) {
     const handoff = createHandoffItem(ctx.handoffStore, {
@@ -299,6 +292,7 @@ export function routeWorkStart(
               requiresWorker: input.modeInput.requiresWorker,
               requiresApproval: input.modeInput.requiresApproval === true || input.modeInput.requiresUserApproval === true,
               destructive: input.modeInput.destructive === true,
+              accessMode: input.constraints?.accessMode,
               approvalConfirmed: true,
               forceMode: 'goal_workloop',
             },

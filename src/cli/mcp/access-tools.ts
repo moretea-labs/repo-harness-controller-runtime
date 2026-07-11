@@ -220,7 +220,7 @@ function previewPayload(
     target: {
       configuredAccessMode: mode,
       effectiveAccessMode: mode,
-      effectiveToolset: 'full',
+      effectiveToolset: currentEffective.effectiveToolset,
       exposureRevision: currentConfigured.exposureRevision + (currentConfigured.configuredAccessMode === mode ? 0 : 1),
       source: 'controller_home.access_mode',
       toolGroups: nextGroups,

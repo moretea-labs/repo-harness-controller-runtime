@@ -1460,6 +1460,7 @@ export function approveConsoleHandoff(ctx: ConsoleFacadeContext, handoffId: stri
     requiresWorker: payload.requiresWorker === true,
     requiresApproval: payload.requiresApproval === true,
     destructive: payload.destructive === true,
+    accessMode: isAccessMode(payload.accessMode) ? payload.accessMode : undefined,
     approvalConfirmed: true,
     forceMode: 'goal_workloop',
     checkIds: strings(payload.checkIds),

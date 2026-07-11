@@ -149,6 +149,27 @@ describe('access-aware work routing', () => {
     expect(listHandoffItems({ controllerHome: home, repoId: 'repo-test', status: 'pending' })).toHaveLength(1);
   });
 
+  test('request mode cannot bypass approval when the caller omits an approval hint', () => {
+    const home = controllerHome();
+    const ctx = workloopContext(home);
+    writeRepositoryAccessPolicy(home, 'repo-test', 'request');
+
+    const result = routeWorkStart(ctx, {
+      objective: 'Update several local repository files',
+      modeInput: {
+        objective: 'Update several local repository files',
+        scopeClear: true,
+        expectedFiles: 4,
+      },
+      requestedBy: 'user',
+    });
+
+    expect(result.status).toBe('approval_required');
+    expect(result.data.workContractCreated).toBe(false);
+    const [handoff] = listHandoffItems({ controllerHome: home, repoId: 'repo-test', status: 'pending' });
+    expect(handoff?.approvalAction?.payload.accessMode).toBe('request');
+  });
+
   test('repository full access creates work and captures the permission snapshot', () => {
     const home = controllerHome();
     const ctx = workloopContext(home);
