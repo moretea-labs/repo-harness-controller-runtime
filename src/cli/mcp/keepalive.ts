@@ -26,6 +26,7 @@ import {
 import { controllerExpectedToolNames } from './tools';
 import { controllerToolNamesForToolset } from './toolset';
 import { parseMcpToolset } from './multi-repository';
+import { applyDirectNetworkProxyBypass, withDirectNetworkProxyBypass } from './proxy-env';
 import { runtimeToolDefinitions } from '../../runtime/gateway/mcp/runtime-tools';
 
 export interface McpKeepaliveOptions extends McpServerOptions {
@@ -176,6 +177,15 @@ export function extractCloudflareQuickTunnelUrl(text: string): string | undefine
   return text.match(QUICK_TUNNEL_PATTERN)?.[0];
 }
 
+function isPlaceholderPublicEndpointHost(hostname: string): boolean {
+  const host = hostname.trim().toLowerCase();
+  if (!host) return true;
+  if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true;
+  if (host.includes('example.com') || host.includes('example.org') || host.includes('example.net')) return true;
+  if (host.includes('<') || host.includes('>') || host.includes('named-tunnel-host')) return true;
+  return false;
+}
+
 export function normalizeKeepalivePublicEndpoint(value: string | undefined): string | undefined {
   if (value === undefined) return undefined;
   const trimmed = value.trim();
@@ -196,6 +206,8 @@ export function normalizeKeepalivePublicEndpoint(value: string | undefined): str
   ) {
     throw new Error(`invalid --public-endpoint "${value}" (expected a public HTTPS URL exactly ending in /mcp)`);
   }
+  // Setup placeholders must not become live ChatGPT Connector endpoints.
+  if (isPlaceholderPublicEndpointHost(parsed.hostname)) return undefined;
   return parsed.toString();
 }
 
@@ -370,6 +382,9 @@ function attachLineLogging(
 }
 
 export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<void> {
+  // System HTTP proxies must not intercept MagicDNS / Funnel / loopback health checks.
+  applyDirectNetworkProxyBypass(process.env);
+
   const repoRoot = resolveMcpRepoRoot(rawOpts.repo ?? '.');
   const controllerHome = ensureControllerHome(rawOpts.controllerHome);
   const serviceConfig = loadMcpServiceLocalConfig(controllerHome, repoRoot);
@@ -638,13 +653,19 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
       auth,
     ];
     if (rawOpts.enableChatgptBrowser === true) args.push('--enable-chatgpt-browser');
-    if (rawOpts.enableDevRunner === true) args.push('--enable-dev-runner');
-    if (rawOpts.devRunnerAgents) args.push('--dev-runner-agents', rawOpts.devRunnerAgents);
-    if (rawOpts.devRunnerTimeoutMs) args.push('--dev-runner-timeout-ms', String(rawOpts.devRunnerTimeoutMs));
-    if (rawOpts.devRunnerMaxTimeoutMs) args.push('--dev-runner-max-timeout-ms', String(rawOpts.devRunnerMaxTimeoutMs));
+    // Prefer explicit CLI flags; otherwise honor controllerHome mcp.local.json devMode.
+    const enableDevRunner = rawOpts.enableDevRunner === true || localConfig?.devMode?.agentRunner === true;
+    if (enableDevRunner) args.push('--enable-dev-runner');
+    const devRunnerAgents = rawOpts.devRunnerAgents
+      ?? (localConfig?.devMode?.allowedAgents?.length ? localConfig.devMode.allowedAgents.join(',') : undefined);
+    if (devRunnerAgents) args.push('--dev-runner-agents', devRunnerAgents);
+    const devRunnerTimeoutMs = rawOpts.devRunnerTimeoutMs ?? localConfig?.devMode?.timeoutMs;
+    if (devRunnerTimeoutMs) args.push('--dev-runner-timeout-ms', String(devRunnerTimeoutMs));
+    const devRunnerMaxTimeoutMs = rawOpts.devRunnerMaxTimeoutMs ?? localConfig?.devMode?.maxTimeoutMs;
+    if (devRunnerMaxTimeoutMs) args.push('--dev-runner-max-timeout-ms', String(devRunnerMaxTimeoutMs));
     const instanceId = randomUUID();
     const env: NodeJS.ProcessEnv = {
-      ...process.env,
+      ...withDirectNetworkProxyBypass(process.env),
       REPO_HARNESS_CONTROLLER_HOME: controllerHome,
       REPO_HARNESS_MCP_INSTANCE_ID: instanceId,
     };

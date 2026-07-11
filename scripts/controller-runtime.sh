@@ -7,6 +7,41 @@ source "$ROOT/scripts/lib/controller-home-env.sh"
 
 repo_harness_use_local_controller_home "$ROOT"
 
+# Local HTTP/SOCKS proxies must not intercept Tailscale Funnel / MagicDNS or loopback.
+# Bun fetch only honors leading-dot NO_PROXY forms for multi-label hosts (e.g. .ts.net).
+# Portable (bash 3.2+): avoid associative arrays.
+repo_harness_merge_no_proxy() {
+  local existing="${NO_PROXY:-${no_proxy:-}}"
+  local required="127.0.0.1,localhost,::1,.local,.ts.net,*.ts.net,.tailscale.com,*.tailscale.com,100.64.0.0/10"
+  local merged=""
+  local entry key
+  local old_ifs="$IFS"
+  IFS=','
+  # shellcheck disable=SC2086
+  set -- ${existing},${required}
+  IFS="$old_ifs"
+  for entry in "$@"; do
+    entry="$(printf '%s' "$entry" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    [ -n "$entry" ] || continue
+    key="$(printf '%s' "$entry" | tr '[:upper:]' '[:lower:]')"
+    case ",${merged}," in
+      *",${entry},"*|*",${key},"*) continue ;;
+    esac
+    # Case-insensitive dedupe against already-merged entries.
+    if printf '%s' ",${merged}," | tr '[:upper:]' '[:lower:]' | grep -F ",${key}," >/dev/null 2>&1; then
+      continue
+    fi
+    if [ -n "$merged" ]; then
+      merged="${merged},${entry}"
+    else
+      merged="$entry"
+    fi
+  done
+  export NO_PROXY="$merged"
+  export no_proxy="$merged"
+}
+repo_harness_merge_no_proxy
+
 cd "$ROOT"
 LEGACY_NGROK_MANAGER="$ROOT/scripts/controller-ngrok-rotation.sh"
 LOCAL_CLI="$ROOT/scripts/repo-harness-local.sh"

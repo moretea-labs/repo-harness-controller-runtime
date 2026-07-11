@@ -144,7 +144,7 @@ import { getMcpPolicy } from "../mcp/policy";
 import { runtimePolicy } from "../mcp/multi-repository";
 import { controllerExpectedToolNames } from "../mcp/tools";
 import { loadMcpLocalConfig, loadMcpRuntimeState } from "../mcp/auth";
-import { loadRepositoryRegistry, registerRepository, resolveRepositorySelection } from "../repositories/registry";
+import { loadRepositoryRegistry, registerRepository, removeRepository, resolveRepositorySelection } from "../repositories/registry";
 import { resolveControllerHome } from "../repositories/controller-home";
 import { ensureControllerDaemon, readControllerDaemonStatus } from "../../runtime/control-plane/daemon-client";
 import { findExecutionJob, listExecutionJobs } from "../../runtime/execution/jobs/store";
@@ -600,18 +600,19 @@ function action(id: string, label: string): UserFacingAction {
 function userFacingRepositories(repoRoot: string, controllerHome = resolveControllerHome(), selectedRepoId?: string) {
   const currentRoot = normalizePathForCompare(repoRoot);
   return loadRepositoryRegistry(controllerHome).repositories
+    .filter((record) => !record.removedAt)
     .map((record) => {
       const checkout = record.checkouts.find((value) => value.checkoutId === record.activeCheckoutId) ?? record.checkouts[0];
       const current = selectedRepoId
         ? record.repoId === selectedRepoId
         : normalizePathForCompare(record.canonicalRoot) === currentRoot || normalizePathForCompare(checkout?.canonicalRoot) === currentRoot;
-      const status = record.removedAt ? 'removed' : record.enabled === false ? 'disabled' : current ? 'ready' : 'available';
+      const status = record.enabled === false ? 'disabled' : current ? 'ready' : 'available';
       return {
         id: record.repoId,
         name: record.displayName,
         path: displayPath(checkout?.canonicalRoot ?? record.canonicalRoot),
         status,
-        statusLabel: status === 'ready' ? '就绪' : status === 'available' ? '可用' : status === 'disabled' ? '已停用' : '已移除',
+        statusLabel: status === 'ready' ? '就绪' : status === 'available' ? '可用' : '已停用',
         current,
         defaultBranch: record.defaultBranch,
         remote: record.remoteUrl,
@@ -1800,6 +1801,34 @@ export async function startLocalBridgeServer(
       response.status(201).json({ repository, userSnapshot: buildUserControllerExperienceSnapshot(repository.canonicalRoot, controllerHome, repository.repoId) });
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
+  app.post("/api/repositories/:repoId/remove", (request, response) => {
+    try {
+      const repoId = queryString(request.params.repoId);
+      if (!repoId) throw new Error("REPOSITORY_ID_REQUIRED");
+      const repository = removeRepository(repoId, controllerHome);
+      localSnapshotCache.delete(repository.canonicalRoot);
+      for (const checkout of repository.checkouts ?? []) {
+        if (checkout.canonicalRoot) localSnapshotCache.delete(checkout.canonicalRoot);
+      }
+      const remaining = userFacingRepositories(options.repoRoot, controllerHome);
+      response.json({
+        repository,
+        repositories: remaining,
+        summary: `已删除仓库注册：${repository.displayName || repository.repoId}`,
+      });
+    } catch (error) {
+      const message = errorMessage(error);
+      if (message.startsWith("REPOSITORY_SELF_PROTECTED")) {
+        response.status(400).json({
+          error: message,
+          errorMessage: "不能删除当前进程所在仓库的注册（自我保护）",
+        });
+        return;
+      }
+      response.status(400).json({ error: message });
     }
   });
   app.get("/api/completion/backlog", (request, response) => {

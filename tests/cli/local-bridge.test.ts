@@ -1313,6 +1313,67 @@ printf '%s\n' '{"type":"turn.completed"}'
     expect(dashboard).toContain("审批与决定");
     expect(dashboard).toContain("当前任务");
     expect(dashboard).toContain("selectRepo");
+    expect(dashboard).toContain("removeRepo");
+    expect(dashboard).toContain("删除注册");
+    expect(dashboard).toContain("/api/repositories/");
+  });
+
+  test("registers and soft-removes repositories through the local-bridge API", async () => {
+    const root = repo();
+    const otherRoot = mkdtempSync(join(tmpdir(), "repo-harness-local-bridge-other-"));
+    roots.push(otherRoot);
+    expect(spawnSync("git", ["init", "-b", "main"], { cwd: otherRoot }).status).toBe(0);
+    writeFileSync(join(otherRoot, "README.md"), "# other\n");
+
+    const handle = await startLocalBridgeServer({
+      repoRoot: root,
+      port: 0,
+      openBrowser: false,
+    });
+    servers.push(handle);
+    const headers = { "x-repo-harness-local-token": handle.token, "content-type": "application/json" };
+
+    const registered = await fetch(new URL("/api/repositories/register", handle.url), {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ path: otherRoot, displayName: "Other Fixture" }),
+    }).then(async (response) => {
+      expect(response.status).toBe(201);
+      return response.json();
+    });
+    expect(registered.repository.displayName).toBe("Other Fixture");
+    expect(typeof registered.repository.repoId).toBe("string");
+    expect(registered.repository.removedAt).toBeUndefined();
+
+    const listedBefore = await fetch(new URL("/api/repositories", handle.url), { headers }).then((response) => response.json());
+    expect(listedBefore.repositories.some((entry: { id: string }) => entry.id === registered.repository.repoId)).toBe(true);
+
+    const removed = await fetch(new URL(`/api/repositories/${encodeURIComponent(registered.repository.repoId)}/remove`, handle.url), {
+      method: "POST",
+      headers,
+      body: JSON.stringify({}),
+    }).then(async (response) => {
+      expect(response.status).toBe(200);
+      return response.json();
+    });
+    expect(removed.repository.repoId).toBe(registered.repository.repoId);
+    expect(typeof removed.repository.removedAt).toBe("string");
+    expect(removed.repository.enabled).toBe(false);
+    expect(removed.summary).toContain("已删除仓库注册");
+    expect(Array.isArray(removed.repositories)).toBe(true);
+    expect(removed.repositories.some((entry: { id: string }) => entry.id === registered.repository.repoId)).toBe(false);
+
+    const listedAfter = await fetch(new URL("/api/repositories", handle.url), { headers }).then((response) => response.json());
+    expect(listedAfter.repositories.some((entry: { id: string }) => entry.id === registered.repository.repoId)).toBe(false);
+
+    const missing = await fetch(new URL("/api/repositories/does-not-exist/remove", handle.url), {
+      method: "POST",
+      headers,
+      body: JSON.stringify({}),
+    });
+    expect(missing.status).toBe(400);
+    const missingBody = await missing.json();
+    expect(String(missingBody.error)).toContain("repository not found");
   });
 
   test("serves a hardened localhost visual control surface", async () => {
@@ -1390,6 +1451,8 @@ printf '%s\n' '{"type":"turn.completed"}'
     expect(dashboard).toContain("批准并创建任务");
     expect(dashboard).toContain("查看审批详情");
     expect(dashboard).toContain("kind==='approve'");
+    expect(dashboard).toContain("removeRepo");
+    expect(dashboard).toContain("删除注册");
 
     const plugins = await fetch(new URL("/api/console/plugins", handle.url), {
       headers: { "x-repo-harness-local-token": handle.token },

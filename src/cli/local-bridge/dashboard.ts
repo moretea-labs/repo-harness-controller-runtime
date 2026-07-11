@@ -563,7 +563,10 @@ function renderRepositories(){
     '<div class="list">'+repos.map(function(r){
       return '<div class="panel card-row"><div><h3>'+esc(r.name)+'</h3><div class="muted mono">'+esc(r.path)+'</div>'+
         '<div class="muted" style="margin-top:6px">'+(r.branchLabel?('分支 '+esc(r.branchLabel)):'')+(r.dirtyLabel?' · '+esc(r.dirtyLabel):'')+(r.readinessLabel?' · '+esc(r.readinessLabel):'')+'</div></div>'+
-        '<div class="actions">'+btn(r.current?'当前仓库':'设为当前','data-select-repo="'+esc(r.id)+'"',r.current?'primary':'')+'</div>'+
+        '<div class="actions">'+
+          btn(r.current?'当前仓库':'设为当前','data-select-repo="'+esc(r.id)+'"',r.current?'primary':'')+
+          btn('删除注册','data-remove-repo="'+esc(r.id)+'" data-remove-repo-name="'+esc(r.name||r.id)+'"','danger')+
+        '</div>'+
         advancedBlock(r.advanced)+
       '</div>';
     }).join('')+'</div>';
@@ -948,6 +951,12 @@ function bindActions(root){
   root.querySelectorAll('[data-select-repo]').forEach(function(el){
     el.addEventListener('click',function(ev){ev.stopPropagation();selectRepo(el.getAttribute('data-select-repo'))});
   });
+  root.querySelectorAll('[data-remove-repo]').forEach(function(el){
+    el.addEventListener('click',function(ev){
+      ev.stopPropagation();
+      removeRepo(el.getAttribute('data-remove-repo'), el.getAttribute('data-remove-repo-name'));
+    });
+  });
   root.querySelectorAll('[data-open-plugin]').forEach(function(el){
     el.addEventListener('click',function(ev){ev.stopPropagation();openPlugin(el.getAttribute('data-open-plugin'))});
   });
@@ -1229,6 +1238,28 @@ function registerRepo(){
     var repo=obj(res.repository);if(repo.repoId)rememberRepo(repo.repoId);
     toast('仓库已注册');return refreshAll();
   }).catch(function(e){toast(e.message)});
+}
+function removeRepo(id, name){
+  if(!id)return;
+  var label=name||id;
+  if(!confirm('从控制台删除「'+label+'」的注册？\n不会删除磁盘上的仓库文件，仅从 Controller 注册表中移除（可重新注册）。'))return;
+  if(busy)return;
+  setBusy(true,'删除注册中');
+  api('/api/repositories/'+encodeURIComponent(id)+'/remove',{method:'POST',body:JSON.stringify({})}).then(function(res){
+    if(selectedRepoId===id){
+      var remaining=arr(res.repositories);
+      var next=remaining.find(function(r){return r.id&&r.id!==id})||remaining[0];
+      rememberRepo(next&&next.id?next.id:'');
+    }
+    toast(res.summary||'已删除仓库注册');
+    return refreshAll();
+  }).catch(function(e){
+    var msg=e.message||'删除失败';
+    if(String(msg).indexOf('REPOSITORY_SELF_PROTECTED')===0||(e.payload&&e.payload.errorMessage)){
+      msg=(e.payload&&e.payload.errorMessage)||'不能删除当前进程所在仓库的注册（自我保护）';
+    }
+    toast(msg);
+  }).finally(function(){setBusy(false)});
 }
 function loadAdvanced(){
   api('/api/console/advanced'+repoQuery()).then(function(res){advancedRaw=res;renderAdvanced();toast('原始快照已刷新')}).catch(function(e){toast(e.message)});

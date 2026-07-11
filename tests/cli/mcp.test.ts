@@ -103,6 +103,7 @@ describe('mcp command', () => {
       port: 8765,
       profile: 'controller',
       authMode: 'oauth',
+      toolset: 'core',
       publicEndpoint: 'https://example.test/mcp',
       defaultServerName: 'repo-harness-controller-v8',
       expectedToolSurface: 'controller-chatgpt-bridge-v8',

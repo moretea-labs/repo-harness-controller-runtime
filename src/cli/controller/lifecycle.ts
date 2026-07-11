@@ -7,6 +7,7 @@ import { reconcileAgentJobs } from "../agent-jobs/job-manager";
 import { reconcileLocalBridgeJobs } from "../local-bridge/job-store";
 import { loadMcpLocalConfig, loadMcpRuntimeState, loadMcpServiceLocalConfig, loadMcpServiceRuntimeState, mcpRuntimeStatePath, type McpRuntimeState } from "../mcp/auth";
 import { inferMcpTunnelMode, isExpectedLocalControllerHealth, normalizeKeepalivePublicEndpoint, resolveSelfCliInvocation } from "../mcp/keepalive";
+import { withDirectNetworkProxyBypass } from "../mcp/proxy-env";
 import { resolveMcpRepoRoot } from "../mcp/repo";
 import { resolveControllerHome } from "../repositories/controller-home";
 import { runProcess } from "../../effects/process-runner";
@@ -324,6 +325,12 @@ function resolveServiceConfig(repoRoot: string, explicitLogFile?: string): {
   tunnelMode: "none" | "quick" | "named" | "tailscale";
   publicEndpoint?: string;
   toolset: "core" | "advanced" | "full";
+  profile: string;
+  authMode: string;
+  enableDevRunner: boolean;
+  devRunnerAgents: string[];
+  devRunnerTimeoutMs?: number;
+  devRunnerMaxTimeoutMs?: number;
   logPath: string;
 } {
   const controllerHome = resolveControllerHome();
@@ -349,7 +356,23 @@ function resolveServiceConfig(repoRoot: string, explicitLogFile?: string): {
     tunnelMode,
     publicEndpoint,
     toolset,
+    profile: localConfig?.profile ?? "controller",
+    authMode: localConfig?.auth?.mode === "bearer" ? "bearer" : "oauth",
+    enableDevRunner: localConfig?.devMode?.agentRunner === true,
+    devRunnerAgents: localConfig?.devMode?.allowedAgents ?? ["codex"],
+    devRunnerTimeoutMs: localConfig?.devMode?.timeoutMs,
+    devRunnerMaxTimeoutMs: localConfig?.devMode?.maxTimeoutMs,
     logPath: resolve(explicitLogFile ?? defaultControllerServiceLogPath(repoRoot)),
+  };
+}
+
+export function buildControllerServiceEnv(
+  controllerHome: string,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  return {
+    ...withDirectNetworkProxyBypass(baseEnv),
+    REPO_HARNESS_CONTROLLER_HOME: controllerHome,
   };
 }
 
@@ -483,13 +506,19 @@ function ensureStartableStatus(status: ControllerServiceStatus): void {
   }
 }
 
-function spawnDetached(command: string, args: string[], cwd: string, logPath: string): number {
+function spawnDetached(
+  command: string,
+  args: string[],
+  cwd: string,
+  logPath: string,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
   mkdirSync(dirname(logPath), { recursive: true });
   const fd = openSync(logPath, "a");
   try {
     const child = spawn(command, args, {
       cwd,
-      env: process.env,
+      env,
       detached: true,
       stdio: ["ignore", fd, fd],
     });
@@ -535,6 +564,7 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
   ensureControllerDaemon(config.controllerHome);
 
   const cli = resolveSelfCliInvocation();
+  const serviceEnv = buildControllerServiceEnv(config.controllerHome);
   const localControllerPid = spawnDetached(
     cli.command,
     [
@@ -551,6 +581,7 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
     ],
     repoRoot,
     config.logPath,
+    serviceEnv,
   );
   let pid: number;
   try {
@@ -564,18 +595,35 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
       config.mcpHost,
       "--port",
       String(config.mcpPort),
+      "--profile",
+      config.profile,
+      "--auth",
+      config.authMode,
       "--toolset",
       config.toolset,
       "--no-local-ui",
       "--tunnel",
       config.tunnelMode,
     ];
+    if (config.enableDevRunner) {
+      keepaliveArgs.push("--enable-dev-runner");
+      if (config.devRunnerAgents.length > 0) {
+        keepaliveArgs.push("--dev-runner-agents", config.devRunnerAgents.join(","));
+      }
+      if (config.devRunnerTimeoutMs) {
+        keepaliveArgs.push("--dev-runner-timeout-ms", String(config.devRunnerTimeoutMs));
+      }
+      if (config.devRunnerMaxTimeoutMs) {
+        keepaliveArgs.push("--dev-runner-max-timeout-ms", String(config.devRunnerMaxTimeoutMs));
+      }
+    }
     if (config.publicEndpoint) keepaliveArgs.push("--public-endpoint", config.publicEndpoint);
     pid = spawnDetached(
       cli.command,
       keepaliveArgs,
       repoRoot,
       config.logPath,
+      serviceEnv,
     );
   } catch (error) {
     await stopPid(localControllerPid, opts.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS);

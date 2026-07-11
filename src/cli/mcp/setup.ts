@@ -20,7 +20,7 @@ import {
   DEFAULT_AGENT_TIMEOUT_MS,
   MAX_AGENT_TIMEOUT_MS,
 } from "../controller/runtime-config";
-import { ensureControllerHome } from "../repositories/controller-home";
+import { ensureControllerHome, ensureRepoPreferredControllerHome } from "../repositories/controller-home";
 
 export interface McpSetupResult {
   status: "ok";
@@ -422,7 +422,7 @@ export function runMcpSetupChatgpt(opts: {
   serverName?: string;
 }): McpSetupResult {
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? ".");
-  const controllerHome = ensureControllerHome();
+  const controllerHome = ensureRepoPreferredControllerHome(repoRoot);
   const changed: string[] = [];
   const existingConfig = loadMcpServiceLocalConfig(controllerHome, repoRoot);
   const host = opts.host ?? existingConfig?.server?.host ?? "127.0.0.1";
@@ -783,7 +783,7 @@ export function runMcpDoctor(opts: {
   json?: boolean;
 }): McpSetupResult {
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? ".");
-  const controllerHome = ensureControllerHome();
+  const controllerHome = ensureRepoPreferredControllerHome(repoRoot);
   const localConfig = loadMcpServiceLocalConfig(controllerHome, repoRoot);
   const runtimeState = loadMcpServiceRuntimeState(controllerHome, repoRoot);
   const configuredServerName = localConfig?.chatgpt?.serverName;

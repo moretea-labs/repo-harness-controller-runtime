@@ -14,10 +14,11 @@ import {
   normalizeKeepalivePublicEndpoint,
   resolveSelfCliInvocation,
 } from './keepalive';
+import { applyDirectNetworkProxyBypass, withDirectNetworkProxyBypass } from './proxy-env';
 import { resolveMcpRepoRoot } from './repo';
 import { runMcpDoctor, runMcpSetupChatgpt, runMcpSetupCodex, type McpSetupResult } from './setup';
 import { CONTROLLER_TOOL_SURFACE } from '../controller/runtime-config';
-import { ensureControllerHome } from '../repositories/controller-home';
+import { ensureRepoPreferredControllerHome } from '../repositories/controller-home';
 import { getGitHubPluginStatus, loadGitHubPluginConfig, saveGitHubPluginConfig } from '../github/plugin';
 
 const LOCAL_HEALTH_TIMEOUT_MS = 4_000;
@@ -25,11 +26,20 @@ const STARTUP_WAIT_ATTEMPTS = 160;
 const STARTUP_WAIT_INTERVAL_MS = 250;
 const TOOLS_SMOKE_ATTEMPTS = 20;
 const TOOLS_SMOKE_INTERVAL_MS = 500;
-const REQUIRED_RESTART_TOOLS = [
+const REQUIRED_RESTART_TOOLS_CORE = [
+  'rh_status',
+  'repository_latest_source_diagnose',
+  'repository_bootstrap_local_project',
+] as const;
+const REQUIRED_RESTART_TOOLS_ADVANCED = [
   'controller_capabilities',
   'repository_latest_source_diagnose',
   'repository_bootstrap_local_project',
 ] as const;
+
+export function requiredRestartSmokeTools(toolset: 'core' | 'advanced' | 'full'): readonly string[] {
+  return toolset === 'core' ? REQUIRED_RESTART_TOOLS_CORE : REQUIRED_RESTART_TOOLS_ADVANCED;
+}
 
 export interface McpRestartOptions {
   repo?: string;
@@ -58,6 +68,7 @@ interface ResolvedMcpRestartConfig {
   port: number;
   profile: string;
   authMode: string;
+  toolset: 'core' | 'advanced' | 'full';
   publicEndpoint?: string;
   defaultServerName: string;
   expectedToolSurface: string;
@@ -124,6 +135,8 @@ export function buildMcpRestartKeepaliveArgs(config: ResolvedMcpRestartConfig): 
     config.profile,
     '--auth',
     config.authMode,
+    '--toolset',
+    config.toolset,
     '--tunnel',
     config.tunnelMode,
   ];
@@ -159,9 +172,17 @@ export function buildMcpRestartKeepaliveEnv(
   baseEnv: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
   return {
-    ...baseEnv,
+    ...withDirectNetworkProxyBypass(baseEnv),
     REPO_HARNESS_CONTROLLER_HOME: config.controllerHome,
   };
+}
+
+/**
+ * Prefer an explicit env home, then the repo-local self-host layout used by
+ * `bun run controller:restart` (`_ops/controller-home`), then the user home default.
+ */
+export function resolveMcpRestartControllerHome(repoRoot: string): string {
+  return ensureRepoPreferredControllerHome(repoRoot);
 }
 
 function localHealthUrl(host: string, port: number): string {
@@ -319,7 +340,7 @@ function resolveLogPaths(repoRoot: string, explicitLogFile?: string): { stdoutPa
 }
 
 function resolveRestartConfig(repoRoot: string, explicitLogFile?: string): ResolvedMcpRestartConfig {
-  const controllerHome = ensureControllerHome();
+  const controllerHome = resolveMcpRestartControllerHome(repoRoot);
   const doctor = parseDoctorReport(runMcpDoctor({ repo: repoRoot, json: true }));
   const localConfig = loadMcpServiceLocalConfig(controllerHome, repoRoot);
   const runtime = loadMcpServiceRuntimeState(controllerHome, repoRoot);
@@ -330,6 +351,11 @@ function resolveRestartConfig(repoRoot: string, explicitLogFile?: string): Resol
     runtime?.tunnel?.name,
   );
   const logs = resolveLogPaths(repoRoot, explicitLogFile);
+  const toolset = localConfig?.toolset === 'full'
+    ? 'full'
+    : localConfig?.toolset === 'advanced'
+      ? 'advanced'
+      : 'core';
 
   const defaultServerName = doctor.chatgpt?.defaultServerName?.trim();
   const expectedToolSurface = doctor.chatgpt?.expectedToolSurface?.trim();
@@ -344,6 +370,7 @@ function resolveRestartConfig(repoRoot: string, explicitLogFile?: string): Resol
     port: localConfig?.server?.port ?? 8765,
     profile: localConfig?.profile ?? 'controller',
     authMode: localConfig?.auth?.mode ?? 'oauth',
+    toolset,
     publicEndpoint,
     defaultServerName,
     expectedToolSurface,
@@ -697,11 +724,12 @@ async function runToolsSmoke(config: ResolvedMcpRestartConfig): Promise<ToolsSmo
         ? ((payload.result as { tools: Array<{ name?: string }> }).tools)
         : [];
       const names = tools.map((tool) => tool.name).filter((name): name is string => typeof name === 'string');
-      const missing = REQUIRED_RESTART_TOOLS.filter((tool) => !names.includes(tool));
+      const expectedTools = requiredRestartSmokeTools(config.toolset);
+      const missing = expectedTools.filter((tool) => !names.includes(tool));
       if (missing.length > 0) {
         throw new Error(`missing expected tools: ${missing.join(', ')}`);
       }
-      return { toolCount: names.length, expectedTools: [...REQUIRED_RESTART_TOOLS] };
+      return { toolCount: names.length, expectedTools: [...expectedTools] };
     } catch (error) {
       if (attempt === TOOLS_SMOKE_ATTEMPTS - 1) throw error;
       await sleep(TOOLS_SMOKE_INTERVAL_MS);
@@ -767,7 +795,11 @@ function configureGitHubPlugin(
 
 export async function runMcpRestart(opts: McpRestartOptions): Promise<McpSetupResult> {
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? '.');
-  const controllerHome = ensureControllerHome();
+  const controllerHome = resolveMcpRestartControllerHome(repoRoot);
+  // Pin home for setup/doctor/load paths and bypass local proxies for Funnel health.
+  process.env.REPO_HARNESS_CONTROLLER_HOME = controllerHome;
+  applyDirectNetworkProxyBypass(process.env);
+
   const runtimeBefore = loadMcpServiceRuntimeState(controllerHome, repoRoot);
   const launchAgents = findRepoLaunchAgents(repoRoot);
 
@@ -776,9 +808,13 @@ export async function runMcpRestart(opts: McpRestartOptions): Promise<McpSetupRe
   const changed = [...chatgptSetup.changed];
   const lines: string[] = [
     `[repo-harness restart] repo=${repoRoot}`,
-    `[repo-harness restart] host=${config.host} port=${config.port} profile=${config.profile} auth=${config.authMode}`,
+    `[repo-harness restart] controller_home=${controllerHome}`,
+    `[repo-harness restart] host=${config.host} port=${config.port} profile=${config.profile} auth=${config.authMode} toolset=${config.toolset}`,
     `[repo-harness restart] target_server_name=${config.defaultServerName}`,
     `[repo-harness restart] expected_tool_surface=${config.expectedToolSurface}`,
+    config.publicEndpoint
+      ? `[repo-harness restart] public_endpoint=${config.publicEndpoint}`
+      : '[repo-harness restart] public_endpoint=(none — configure chatgpt.endpoint in controllerHome/mcp/mcp.local.json)',
     `[repo-harness restart] stdout_log=${relative(repoRoot, config.stdoutLogPath)}`,
     `[repo-harness restart] stderr_log=${relative(repoRoot, config.stderrLogPath)}`,
   ];
@@ -817,7 +853,7 @@ export async function runMcpRestart(opts: McpRestartOptions): Promise<McpSetupRe
       repoRoot,
       config.stdoutLogPath,
       config.stderrLogPath,
-      buildMcpRestartKeepaliveEnv({ controllerHome: config.controllerHome ?? ensureControllerHome() }),
+      buildMcpRestartKeepaliveEnv({ controllerHome: config.controllerHome ?? controllerHome }),
     );
     lines.push(`[repo-harness restart] keepalive_pid=${keepalivePid}`);
   }
