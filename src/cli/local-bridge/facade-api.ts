@@ -13,6 +13,7 @@ import {
 import { listControllerChecks, runControllerCheck } from '../controller/check-runner';
 import { createMcpToolContext, type MultiRepositoryMcpToolContext } from '../mcp/multi-repository';
 import { readControllerDaemonStatus } from '../../runtime/control-plane/daemon-client';
+import { readSchedulerHealthSnapshot } from '../../runtime/control-plane/global-scheduler/scheduler';
 import {
   getAssistantPluginManifest,
   listAssistantPluginManifests,
@@ -50,6 +51,7 @@ import {
 import { buildRuntimeMaintenanceStatus } from '../../runtime/recovery';
 import { applySafePatch } from '../repositories/safe-patch';
 import { withControllerLock } from '../repositories/locks';
+import { loadMcpServiceLocalConfig, loadMcpServiceRuntimeState } from '../mcp/auth';
 import {
   buildLocalConnectorStatusForRepo,
   EXPECTED_FACADE_TOOLS,
@@ -62,6 +64,13 @@ import {
   type UserFacingPhase,
 } from '../../runtime/control-plane/facade/operation-digest';
 import { repositoryGitStatus } from '../repositories/structured-git';
+import { listExecutionJobs } from '../../runtime/execution/jobs/store';
+import {
+  createConnectivityObservation,
+  deriveExecutionJobTimingSnapshots,
+  recordConnectivityProbe,
+  type ConnectivityComponentObservation,
+} from '../../runtime/diagnostics/connectivity-observability';
 import type {
   ChangedFileEntryViewModel,
   ChangedFilesSummaryViewModel,
@@ -702,10 +711,13 @@ export async function evaluateConsoleConnectorFreshness(
 
 export async function buildSystemReadiness(
   ctx: ConsoleFacadeContext,
-  opts: { connectorToolNames?: readonly string[] | null } = {},
+  opts: { connectorToolNames?: readonly string[] | null; refreshRuntimeFile?: boolean } = {},
 ): Promise<SystemReadinessViewModel> {
   const daemon = readControllerDaemonStatus(ctx.controllerHome);
-  const freshness = await evaluateConsoleConnectorFreshness(ctx, opts);
+  const freshness = await evaluateConsoleConnectorFreshness(ctx, {
+    connectorToolNames: opts.connectorToolNames,
+    refreshRuntimeFile: opts.refreshRuntimeFile,
+  });
   const pendingHandoffs = listHandoffItems({ ...store(ctx), status: 'pending', limit: 50 });
   const checks = listControllerChecks(ctx.repository.canonicalRoot);
   const automation = buildAutomationReadinessSection(ctx);
@@ -1580,6 +1592,208 @@ export function normalizeRequestedChecks(ctx: ConsoleFacadeContext, requested: s
   return normalizeCheckIds(requested, listControllerChecks(ctx.repository.canonicalRoot));
 }
 
+const ADVANCED_SCHEDULER_STALE_MS = 10_000;
+
+function controllerObservation(ctx: ConsoleFacadeContext): ConnectivityComponentObservation {
+  const daemon = readControllerDaemonStatus(ctx.controllerHome);
+  if (daemon.status === 'ready' && daemon.degraded !== true) {
+    return createConnectivityObservation(
+      'controller_daemon',
+      'Controller daemon',
+      'ready',
+      'Controller daemon 处于 ready 状态。',
+      daemon.pid ? [`pid=${daemon.pid}`] : [],
+    );
+  }
+  if (daemon.status === 'ready' || daemon.status === 'starting') {
+    return createConnectivityObservation(
+      'controller_daemon',
+      'Controller daemon',
+      'degraded',
+      daemon.error
+        ? `Controller daemon ${daemon.status}，并带有降级信号：${daemon.error}`
+        : `Controller daemon 当前为 ${daemon.status}。`,
+      [daemon.error ? `daemon=${daemon.error}` : `status=${daemon.status}`],
+    );
+  }
+  return createConnectivityObservation(
+    'controller_daemon',
+    'Controller daemon',
+    'failed',
+    daemon.error
+      ? `Controller daemon 不可用：${daemon.error}`
+      : `Controller daemon 当前为 ${daemon.status}。`,
+    [daemon.error ? `daemon=${daemon.error}` : `status=${daemon.status}`],
+  );
+}
+
+function schedulerObservation(ctx: ConsoleFacadeContext): ConnectivityComponentObservation {
+  const snapshot = readSchedulerHealthSnapshot(ctx.controllerHome);
+  const lastTick = snapshot.lastTickAt ? Date.parse(snapshot.lastTickAt) : Number.NaN;
+  const ageMs = Number.isFinite(lastTick) ? Date.now() - lastTick : undefined;
+  if (snapshot.loopStartedAt && typeof ageMs === 'number' && ageMs <= ADVANCED_SCHEDULER_STALE_MS) {
+    return createConnectivityObservation(
+      'scheduler',
+      'Scheduler',
+      'ready',
+      `最近一次 durable scheduler 心跳距今 ${Math.round(ageMs)}ms。`,
+      [`lastTickAt=${snapshot.lastTickAt}`],
+    );
+  }
+  if (snapshot.loopStartedAt && typeof ageMs === 'number') {
+    return createConnectivityObservation(
+      'scheduler',
+      'Scheduler',
+      'degraded',
+      `durable scheduler 心跳已陈旧（${Math.round(ageMs)}ms）。`,
+      [`lastTickAt=${snapshot.lastTickAt}`],
+    );
+  }
+  return createConnectivityObservation(
+    'scheduler',
+    'Scheduler',
+    'unknown',
+    '尚未观察到 durable scheduler 心跳。',
+    [],
+  );
+}
+
+function localMcpObservation(
+  ctx: ConsoleFacadeContext,
+  freshness: ConnectorFreshnessReport,
+): ConnectivityComponentObservation {
+  const runtime = loadMcpServiceRuntimeState(ctx.controllerHome, ctx.repository.canonicalRoot);
+  if (
+    freshness.status === 'local_mcp_updated'
+    || freshness.status === 'chatgpt_snapshot_missing_facade'
+    || freshness.status === 'unable_to_verify_chatgpt_snapshot'
+  ) {
+    return createConnectivityObservation(
+      'local_mcp',
+      'Local MCP',
+      'ready',
+      freshness.summary || 'Local MCP /health 可达且工具面匹配。',
+      runtime?.server?.lastHealthyAt ? [`lastHealthyAt=${runtime.server.lastHealthyAt}`] : [],
+    );
+  }
+  if (freshness.status === 'local_mcp_missing_facade' || freshness.status === 'stale_fingerprint') {
+    return createConnectivityObservation(
+      'local_mcp',
+      'Local MCP',
+      'degraded',
+      freshness.summary,
+      freshness.missingLocalTools.slice(0, 5).map((tool) => `missing_local_tool=${tool}`),
+    );
+  }
+  if (runtime?.status === 'running' || runtime?.status === 'degraded') {
+    return createConnectivityObservation(
+      'local_mcp',
+      'Local MCP',
+      'degraded',
+      '存在 MCP runtime 状态，但当前未确认 live /health 为 healthy。',
+      runtime.server.lastExit ? [`lastExit=${runtime.server.lastExit}`] : [],
+    );
+  }
+  return createConnectivityObservation(
+    'local_mcp',
+    'Local MCP',
+    'failed',
+    '未确认本地 MCP /health 可达。',
+    [],
+  );
+}
+
+function publicMcpObservation(ctx: ConsoleFacadeContext): ConnectivityComponentObservation {
+  const config = loadMcpServiceLocalConfig(ctx.controllerHome, ctx.repository.canonicalRoot);
+  const runtime = loadMcpServiceRuntimeState(ctx.controllerHome, ctx.repository.canonicalRoot);
+  const publicEndpoint = config?.chatgpt?.endpoint ?? runtime?.tunnel?.publicEndpoint;
+  if (!publicEndpoint) {
+    return createConnectivityObservation(
+      'public_mcp',
+      'Public MCP endpoint',
+      'unknown',
+      '当前没有配置公网 MCP endpoint。',
+      [],
+    );
+  }
+  if (runtime?.tunnel?.healthy === true && runtime.tunnel.connectorNeedsReconnect !== true) {
+    return createConnectivityObservation(
+      'public_mcp',
+      'Public MCP endpoint',
+      'ready',
+      '公网 MCP endpoint 最近一次发现检查通过。',
+      [`endpoint=${publicEndpoint}`],
+    );
+  }
+  if (runtime?.tunnel?.connectorNeedsReconnect === true) {
+    return createConnectivityObservation(
+      'public_mcp',
+      'Public MCP endpoint',
+      'degraded',
+      '公网 MCP endpoint 发生变化，ChatGPT Connector 需要重连。',
+      [`endpoint=${publicEndpoint}`],
+    );
+  }
+  if (runtime?.tunnel?.healthy === false || runtime?.status === 'degraded') {
+    return createConnectivityObservation(
+      'public_mcp',
+      'Public MCP endpoint',
+      'degraded',
+      '公网 MCP endpoint 最近一次发现检查未通过或 tunnel 处于降级状态。',
+      [`endpoint=${publicEndpoint}`],
+    );
+  }
+  return createConnectivityObservation(
+    'public_mcp',
+    'Public MCP endpoint',
+    'unknown',
+    '公网 MCP endpoint 已配置，但当前没有足够健康证据。',
+    [`endpoint=${publicEndpoint}`],
+  );
+}
+
+function localBridgeObservation(): ConnectivityComponentObservation {
+  return createConnectivityObservation(
+    'local_bridge',
+    'Local Bridge',
+    'ready',
+    '高级诊断请求已经到达 Local Bridge HTTP 进程。',
+    [],
+  );
+}
+
+function connectorSignals(ctx: ConsoleFacadeContext, freshness: ConnectorFreshnessReport): string[] {
+  const runtime = loadMcpServiceRuntimeState(ctx.controllerHome, ctx.repository.canonicalRoot);
+  const signals: string[] = [];
+  if (freshness.status === 'chatgpt_snapshot_missing_facade' || freshness.status === 'unable_to_verify_chatgpt_snapshot') {
+    signals.push(freshness.summary);
+  }
+  if (runtime?.tunnel?.connectorNeedsReconnect === true) {
+    signals.push('Public MCP endpoint changed; reconnect the ChatGPT connector.');
+  }
+  return signals;
+}
+
+async function buildConnectivityObservability(
+  ctx: ConsoleFacadeContext,
+  freshness: ConnectorFreshnessReport,
+) {
+  const jobs = listExecutionJobs(ctx.controllerHome, ctx.repository.repoId, 6);
+  return recordConnectivityProbe({
+    controllerHome: ctx.controllerHome,
+    repoId: ctx.repository.repoId,
+    observations: [
+      localMcpObservation(ctx, freshness),
+      publicMcpObservation(ctx),
+      localBridgeObservation(),
+      controllerObservation(ctx),
+      schedulerObservation(ctx),
+    ],
+    connectorSignals: connectorSignals(ctx, freshness),
+    jobTimings: deriveExecutionJobTimingSnapshots(ctx.controllerHome, ctx.repository.repoId, jobs),
+  });
+}
+
 /**
  * Interactive safe patch for console/GUI: always sync, returns readable digest.
  */
@@ -1639,14 +1853,16 @@ export function applyConsoleSafePatch(
 
 /** Keep advanced/debug payload separate from primary console models. */
 export async function buildAdvancedDiagnosticsEnvelope(rawSnapshot: unknown, ctx: ConsoleFacadeContext) {
-  const readiness = await buildSystemReadiness(ctx);
-  const connector = await evaluateConsoleConnectorFreshness(ctx);
+  const readiness = await buildSystemReadiness(ctx, { refreshRuntimeFile: false });
+  const connector = await evaluateConsoleConnectorFreshness(ctx, { refreshRuntimeFile: false });
+  const connectivity = await buildConnectivityObservability(ctx, connector);
   return {
     schemaVersion: 1,
     note: '高级诊断仅供排错。日常任务请使用控制台主流程。',
     readinessSummary: readiness,
     preferredTools: [...EXPECTED_FACADE_TOOLS],
     connectorFreshness: connector,
+    connectivity,
     raw: rawSnapshot,
   };
 }

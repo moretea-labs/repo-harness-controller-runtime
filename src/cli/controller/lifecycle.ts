@@ -3,15 +3,17 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync
 import { createConnection } from "net";
 import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
-import { reconcileAgentJobs } from "../agent-jobs/job-manager";
-import { reconcileLocalBridgeJobs } from "../local-bridge/job-store";
-import { loadMcpLocalConfig, loadMcpRuntimeState, loadMcpServiceLocalConfig, loadMcpServiceRuntimeState, mcpControllerHomeRuntimeStatePath, mcpRuntimeStatePath, type McpRuntimeState } from "../mcp/auth";
+import { listAgentJobs, reconcileAgentJobs } from "../agent-jobs/job-manager";
+import { listLocalBridgeJobs, reconcileLocalBridgeJobs } from "../local-bridge/job-store";
+import { loadMcpLocalConfig, loadMcpRuntimeState, loadMcpServiceLocalConfig, loadMcpServiceRuntimeState, mcpControllerHomeLocalConfigPath, mcpControllerHomeRuntimeStatePath, mcpRuntimeStatePath, type McpRuntimeState } from "../mcp/auth";
 import { inferMcpTunnelMode, isExpectedLocalControllerHealth, normalizeKeepalivePublicEndpoint, resolveSelfCliInvocation } from "../mcp/keepalive";
 import { withDirectNetworkProxyBypass } from "../mcp/proxy-env";
 import { resolveMcpRepoRoot } from "../mcp/repo";
 import { resolveRepoPreferredControllerHome } from "../repositories/controller-home";
+import { loadRepositoryRegistry } from "../repositories/registry";
 import { runProcess } from "../../effects/process-runner";
 import { ensureControllerDaemon, readControllerDaemonStatus, type ControllerDaemonStatus } from "../../runtime/control-plane/daemon-client";
+import { listActiveExecutionJobs } from "../../runtime/execution/jobs/store";
 import { isProcessAlive, terminateProcessTree } from "../../runtime/shared/process-tree";
 
 const DEFAULT_START_TIMEOUT_MS = 20_000;
@@ -97,6 +99,7 @@ export interface ControllerServiceStatus {
     localControllerOwners: string[];
   };
   orphanedProcesses: ControllerServiceProcess[];
+  infos: string[];
   warnings: string[];
   problems: string[];
 }
@@ -281,6 +284,56 @@ function currentProcessAncestry(): Set<number> {
   return protectedPids;
 }
 
+function trackedActiveChildProcessPids(repoRoot: string, controllerHome: string): Set<number> {
+  const tracked = new Set<number>();
+  const add = (pid: number | undefined) => {
+    if (Number.isInteger(pid) && Number(pid) > 0) tracked.add(Number(pid));
+  };
+  for (const run of listAgentJobs(repoRoot, 200)) {
+    if (!["queued", "starting", "running"].includes(run.status)) continue;
+    add(run.launchPid);
+    add(run.workerPid);
+    add(run.agentPid);
+  }
+  for (const job of listLocalBridgeJobs(repoRoot, 200)) {
+    if (!["pending_approval", "approved", "running", "dispatched"].includes(job.status)) continue;
+    add(job.ownerPid);
+    add(job.workerPid);
+  }
+  const normalizedRoot = repoRoot.replace(/\\/g, "/");
+  const repository = loadRepositoryRegistry(controllerHome).repositories.find((entry) =>
+    entry.canonicalRoot.replace(/\\/g, "/") === normalizedRoot
+  );
+  if (repository) {
+    for (const job of listActiveExecutionJobs(controllerHome, repository.repoId)) add(job.workerPid);
+  }
+  return tracked;
+}
+
+export function classifyDetachedControllerServiceProcesses(
+  processes: ControllerServiceProcess[],
+  opts: {
+    supervisorAlive: boolean;
+    supervisorPid?: number;
+    trackedChildPids?: Set<number>;
+  },
+): ControllerServiceProcess[] {
+  const trackedChildPids = opts.trackedChildPids ?? new Set<number>();
+  return opts.supervisorAlive
+    ? processes.filter((entry) =>
+      entry.kind !== "controller-daemon"
+      && entry.kind !== "mcp-serve"
+      && entry.kind !== "local-controller"
+      && entry.kind !== "tunnel-supervisor"
+      && entry.kind !== "tunnel-worker"
+      && entry.kind !== "tunnel-client"
+      && entry.pid !== opts.supervisorPid
+      && !trackedChildPids.has(entry.pid))
+    : processes.filter((entry) =>
+      entry.kind !== "controller-daemon"
+      && !trackedChildPids.has(entry.pid));
+}
+
 function collectControllerServiceProcesses(repoRoot: string, state: ControllerServiceState | null, controllerHome: string): ControllerServiceProcess[] {
   const seen = new Map<number, ControllerServiceProcess>();
   const protectedPids = currentProcessAncestry();
@@ -440,6 +493,10 @@ function summarizeLegacyMcpConfigMismatch(repoRoot: string, controllerHome: stri
   ];
 }
 
+function controllerHomeConfigAuthoritative(controllerHome: string): boolean {
+  return existsSync(mcpControllerHomeLocalConfigPath(controllerHome));
+}
+
 export async function controllerServiceStatus(opts: ControllerServiceOptions = {}): Promise<ControllerServiceStatus> {
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? ".");
   const config = resolveServiceConfig(repoRoot, opts.logFile, opts.controllerHome);
@@ -453,16 +510,13 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
   const daemon = readControllerDaemonStatus(config.controllerHome);
   const ports = await healthSummary(repoRoot, config.mcpHost, config.mcpPort, config.localControllerHost, config.localControllerPort);
   const processes = collectControllerServiceProcesses(repoRoot, state, config.controllerHome);
-  const orphanedProcesses = supervisorAlive
-    ? processes.filter((entry) =>
-      entry.kind !== "controller-daemon"
-      && entry.kind !== "mcp-serve"
-      && entry.kind !== "local-controller"
-      && entry.kind !== "tunnel-supervisor"
-      && entry.kind !== "tunnel-worker"
-      && entry.kind !== "tunnel-client"
-      && entry.pid !== state?.supervisor.pid)
-    : processes.filter((entry) => entry.kind !== "controller-daemon");
+  const trackedChildPids = trackedActiveChildProcessPids(repoRoot, config.controllerHome);
+  const orphanedProcesses = classifyDetachedControllerServiceProcesses(processes, {
+    supervisorAlive,
+    supervisorPid: state?.supervisor.pid,
+    trackedChildPids,
+  });
+  const infos: string[] = [];
   const warnings: string[] = [];
   const problems: string[] = [];
 
@@ -471,7 +525,10 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
   if (state?.packageVersion && state.packageVersion !== config.packageVersion) {
     warnings.push(`Lifecycle state was started by repo-harness ${state.packageVersion}; current CLI is ${config.packageVersion}. Use restart to refresh the stack.`);
   }
-  warnings.push(...summarizeLegacyMcpConfigMismatch(repoRoot, config.controllerHome));
+  const legacyConfigDivergence = summarizeLegacyMcpConfigMismatch(repoRoot, config.controllerHome);
+  if (legacyConfigDivergence.length > 0) {
+    (controllerHomeConfigAuthoritative(config.controllerHome) ? infos : warnings).push(...legacyConfigDivergence);
+  }
   if (state?.supervisor.pid && !supervisorAlive) problems.push(`Supervisor PID ${state.supervisor.pid} is no longer alive; a previous start likely exited unexpectedly.`);
   if (ports.mcpReachable && !ports.health.mcp) {
     problems.push(`MCP port ${config.mcpPort} is in use but /health is not reporting a healthy repo-harness surface.`);
@@ -509,6 +566,7 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
       localControllerOwners: listPortOwners(config.localControllerPort),
     },
     orphanedProcesses,
+    infos,
     warnings,
     problems,
   };
@@ -792,6 +850,7 @@ export function formatControllerServiceStatus(status: ControllerServiceStatus): 
     `Local Controller: port=${status.ports.localController} health=${status.health.localController ? "ok" : status.ports.localControllerReachable ? "conflict" : "down"}`,
     `Log: ${status.logPath}`,
   ];
+  if (status.infos.length > 0) lines.push("", ...status.infos.map((line) => `info: ${line}`));
   if (status.warnings.length > 0) lines.push("", ...status.warnings.map((line) => `warning: ${line}`));
   if (status.problems.length > 0) lines.push("", ...status.problems.map((line) => `problem: ${line}`));
   return lines.join("\n");

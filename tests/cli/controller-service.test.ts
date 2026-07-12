@@ -224,7 +224,8 @@ describe("controller service lifecycle", () => {
 
     const status = runCli(controllerHome, ["controller", "service", "status", "--repo", repoRoot, "--json"]);
     expect(status.status).toBe(0);
-    const payload = JSON.parse(status.stdout) as { warnings?: string[] };
-    expect(payload.warnings?.some((line) => line.includes("Legacy repo-local MCP config diverges from controllerHome"))).toBe(true);
+    const payload = JSON.parse(status.stdout) as { infos?: string[]; warnings?: string[] };
+    expect(payload.infos?.some((line) => line.includes("Legacy repo-local MCP config diverges from controllerHome"))).toBe(true);
+    expect(payload.warnings?.some((line) => line.includes("Legacy repo-local MCP config diverges from controllerHome"))).not.toBe(true);
   });
 });

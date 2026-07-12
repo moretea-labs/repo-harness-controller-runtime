@@ -666,6 +666,64 @@ function pluginActionRow(pluginId, action, isPreview){
     '</div></div>';
 }
 
+function fmtDuration(ms){
+  if(typeof ms!=='number'||!isFinite(ms)||ms<0)return '—';
+  if(ms<1000)return Math.round(ms)+' ms';
+  var sec=ms/1000;
+  if(sec<60)return (sec<10?sec.toFixed(1):Math.round(sec))+' s';
+  var min=Math.floor(sec/60), rem=Math.round(sec%60);
+  return min+'m '+rem+'s';
+}
+
+function renderConnectivitySection(payload){
+  payload=obj(payload);
+  var conn=obj(payload.connectivity);
+  var summary=obj(conn.summary);
+  if(!summary.headline)return '';
+  var latest=obj(conn.latestEvent);
+  var attr=obj(latest.attribution||summary.latestAttribution);
+  var observations=arr(latest.observations);
+  var jobs=arr(latest.jobTimings);
+  var counts=obj(summary.attributionCounts);
+  var evidence=arr(attr.evidence);
+  return '<div class="panel" style="margin-bottom:14px">'+
+    '<div class="section-title"><h2 style="margin:0">连接稳定性</h2>'+pill(summary.tone||attr.tone||'gray', summary.statusLabel||attr.overallStatusLabel||'观察中')+'</div>'+
+    '<p class="muted">'+esc(summary.headline||'')+'</p>'+
+    '<div class="muted" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px">'+
+      '<span>归因：'+esc(attr.categoryLabel||'—')+'</span>'+
+      '<span>置信度：'+esc(attr.confidenceLabel||'—')+'</span>'+
+      '<span>最近探测：'+esc(summary.latestObservedAt||'—')+'</span>'+
+      '<span>样本：'+esc(String(summary.eventsStored||0))+'</span>'+
+    '</div>'+
+    '<div class="evidence" style="margin-top:10px">'+
+      '<span>公网路径 '+esc(String(counts.public_path||0))+'</span>'+
+      '<span>Gateway '+esc(String(counts.gateway||0))+'</span>'+
+      '<span>Local Bridge '+esc(String(counts.local_bridge||0))+'</span>'+
+      '<span>Controller '+esc(String(counts.controller||0))+'</span>'+
+      '<span>连接器/未知 '+esc(String(counts.connector_or_unknown||0))+'</span>'+
+    '</div>'+
+    (observations.length?'<div class="grid cards" style="margin-top:14px">'+observations.map(function(item){
+      item=obj(item);
+      return '<div class="panel" style="padding:12px;background:rgba(255,255,255,.02)">'+
+        '<div class="section-title"><strong>'+esc(item.label||item.component||'组件')+'</strong>'+pill(item.tone||'gray', item.stateLabel||item.state||'未知')+'</div>'+
+        '<p class="muted" style="margin:0">'+esc(item.detail||'')+'</p>'+
+      '</div>';
+    }).join('')+'</div>':'')+
+    (jobs.length?'<div style="margin-top:14px"><div class="section-title"><h3 style="margin:0">最近 durable Job 时序</h3><span class="muted">基于 queued/dispatched/started/finished 持久时间戳</span></div><div class="list">'+jobs.map(function(job){
+      job=obj(job);
+      return '<div class="card-row" style="padding:12px"><div><h3 style="margin:0 0 6px">'+esc(job.operation||job.jobId||'job')+'</h3>'+
+        '<p class="muted">Job '+esc(job.jobId||'—')+' · '+esc(job.statusLabel||job.status||'未知')+' · '+esc(job.stageLabel||'—')+'</p>'+
+        '<div class="evidence">'+
+          '<span>排队 '+esc(fmtDuration(job.queuedDelayMs))+'</span>'+
+          '<span>派发到启动 '+esc(fmtDuration(job.dispatchToStartMs))+'</span>'+
+          '<span>执行 '+esc(fmtDuration(job.executionDurationMs))+'</span>'+
+          '<span>总计 '+esc(fmtDuration(job.totalMs))+'</span>'+
+        '</div></div>'+pill((job.status==='failed'||job.status==='timed_out'||job.status==='orphaned'||job.status==='stale')?'red':(job.status==='running'||job.status==='dispatched')?'blue':'gray', job.statusLabel||job.status||'')+'</div>';
+    }).join('')+'</div></div>':'')+
+    (evidence.length?'<details class="advanced" style="margin-top:14px"><summary>归因证据</summary><ul style="margin:10px 0 0 18px;color:var(--muted);font-size:13px;line-height:1.55">'+evidence.map(function(line){return '<li>'+esc(line)+'</li>';}).join('')+'</ul></details>':'')+
+  '</div>';
+}
+
 function renderAdvanced(){
   var root=document.getElementById('view-advanced');
   var payload=advancedRaw||lastFacade||{note:'点击“读取原始快照”加载调试数据。日常任务请使用指挥中心。'};
@@ -674,6 +732,7 @@ function renderAdvanced(){
       '<div class="actions"><button class="btn" onclick="loadAdvanced()">读取原始快照</button>'+
       '<button class="btn" onclick="copyText(JSON.stringify(advancedRaw||lastFacade||{},null,2))">复制 JSON</button>'+
       btn('返回指挥中心','data-nav="home"','primary')+'</div></div>'+
+    renderConnectivitySection(payload)+
     '<div class="panel"><div class="warn">调试信息默认折叠，避免干扰主流程。</div>'+
       '<details class="advanced" open><summary>原始 JSON（调试）</summary>'+
       '<pre class="mono" style="white-space:pre-wrap;font-size:12px;color:var(--muted);max-height:60vh;overflow:auto">'+esc(JSON.stringify(payload,null,2))+'</pre></details></div>';
