@@ -402,6 +402,44 @@ function adoptedRepo(repoRoot: string): boolean {
   return existsSync(join(repoRoot, ".ai", "harness", "policy.json")) || existsSync(join(repoRoot, "tasks", "current.md"));
 }
 
+function summarizeLegacyMcpConfigMismatch(repoRoot: string, controllerHome: string): string[] {
+  const legacy = loadMcpLocalConfig(repoRoot);
+  const service = loadMcpServiceLocalConfig(controllerHome, repoRoot);
+  if (!legacy || !service) return [];
+
+  const mismatches: string[] = [];
+  if ((legacy.toolset ?? "core") !== (service.toolset ?? "core")) {
+    mismatches.push(`toolset legacy=${legacy.toolset ?? "core"} service=${service.toolset ?? "core"}`);
+  }
+  if ((legacy.chatgpt?.endpoint ?? "") !== (service.chatgpt?.endpoint ?? "")) {
+    mismatches.push("chatgpt.endpoint");
+  }
+  if ((legacy.server?.host ?? "127.0.0.1") !== (service.server?.host ?? "127.0.0.1")) {
+    mismatches.push("server.host");
+  }
+  if ((legacy.server?.port ?? 8765) !== (service.server?.port ?? 8765)) {
+    mismatches.push("server.port");
+  }
+  if ((legacy.localController?.port ?? 8766) !== (service.localController?.port ?? 8766)) {
+    mismatches.push("localController.port");
+  }
+  if ((legacy.devMode?.timeoutMs ?? 0) !== (service.devMode?.timeoutMs ?? 0)) {
+    mismatches.push("devMode.timeoutMs");
+  }
+  if ((legacy.devMode?.maxTimeoutMs ?? 0) !== (service.devMode?.maxTimeoutMs ?? 0)) {
+    mismatches.push("devMode.maxTimeoutMs");
+  }
+  const legacyAgents = (legacy.devMode?.allowedAgents ?? []).join(",");
+  const serviceAgents = (service.devMode?.allowedAgents ?? []).join(",");
+  if (legacyAgents !== serviceAgents) {
+    mismatches.push("devMode.allowedAgents");
+  }
+  if (mismatches.length === 0) return [];
+  return [
+    `Legacy repo-local MCP config diverges from controllerHome (${mismatches.join(", ")}). Controller Home is authoritative; avoid reading or editing .repo-harness/mcp.* for live status.`,
+  ];
+}
+
 export async function controllerServiceStatus(opts: ControllerServiceOptions = {}): Promise<ControllerServiceStatus> {
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? ".");
   const config = resolveServiceConfig(repoRoot, opts.logFile, opts.controllerHome);
@@ -433,6 +471,7 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
   if (state?.packageVersion && state.packageVersion !== config.packageVersion) {
     warnings.push(`Lifecycle state was started by repo-harness ${state.packageVersion}; current CLI is ${config.packageVersion}. Use restart to refresh the stack.`);
   }
+  warnings.push(...summarizeLegacyMcpConfigMismatch(repoRoot, config.controllerHome));
   if (state?.supervisor.pid && !supervisorAlive) problems.push(`Supervisor PID ${state.supervisor.pid} is no longer alive; a previous start likely exited unexpectedly.`);
   if (ports.mcpReachable && !ports.health.mcp) {
     problems.push(`MCP port ${config.mcpPort} is in use but /health is not reporting a healthy repo-harness surface.`);

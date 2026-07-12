@@ -25,7 +25,7 @@ import {
   normalizeAgentTimeoutMs,
 } from "../controller/runtime-config";
 import { verifyEditSessionAsync } from "../editing/edit-session";
-import { loadMcpLocalConfig } from "../mcp/auth";
+import { loadMcpLocalConfig, loadMcpServiceLocalConfig } from "../mcp/auth";
 import {
   executeRepositoryCommandAsync,
 } from "../repositories/command-executor";
@@ -33,7 +33,7 @@ import { registerRepository, resolveRepositorySelection } from "../repositories/
 import type { ControllerAgent, ControllerTask } from "../controller/types";
 import { taskExecutionPolicy } from "../controller/execution-policy";
 import { tryAppendControllerWorklogEvent } from "../controller/worklog";
-import { resolveControllerHome } from "../repositories/controller-home";
+import { resolveControllerHome, resolveRepoPreferredControllerHome } from "../repositories/controller-home";
 import { ensureRepositoryRuntimeStorage } from "../repositories/runtime-storage";
 import { commandValue, normalizeRepositoryCommand } from "../repositories/command-normalization";
 import { dispatchLegacyLocalJob } from "../../runtime/execution/jobs/legacy-adapter";
@@ -354,7 +354,8 @@ export function localBridgeTimeoutPolicy(repoRoot: string): {
   maxTimeoutMs: number;
 } {
   const local = loadLocalBridgeConfig(repoRoot);
-  const mcp = loadMcpLocalConfig(repoRoot);
+  const controllerHome = resolveRepoPreferredControllerHome(repoRoot);
+  const mcp = loadMcpServiceLocalConfig(controllerHome, repoRoot) ?? loadMcpLocalConfig(repoRoot);
   const maxTimeoutMs = normalizeAgentTimeoutMs(
     local.maxTimeoutMs ?? mcp?.devMode?.maxTimeoutMs,
     {
@@ -1241,14 +1242,16 @@ function resolveExecutionAgent(
   value: ControllerAgent | undefined,
 ): ControllerAgent {
   if (value) return value;
-  const configured = loadMcpLocalConfig(repoRoot)?.devMode?.allowedAgents ?? [];
+  const controllerHome = resolveRepoPreferredControllerHome(repoRoot);
+  const configured = (loadMcpServiceLocalConfig(controllerHome, repoRoot) ?? loadMcpLocalConfig(repoRoot))?.devMode?.allowedAgents ?? [];
   const local = configured.find((entry) => entry === "codex" || entry === "claude");
   if (local === "codex" || local === "claude") return local;
   throw new Error("no local Agent is configured; select an Agent explicitly or enable one in MCP settings");
 }
 
 function localExecutorPolicy(repoRoot: string): LocalExecutorPolicy {
-  const configured = loadMcpLocalConfig(repoRoot)?.devMode;
+  const controllerHome = resolveRepoPreferredControllerHome(repoRoot);
+  const configured = (loadMcpServiceLocalConfig(controllerHome, repoRoot) ?? loadMcpLocalConfig(repoRoot))?.devMode;
   const allowedAgents = Array.isArray(configured?.allowedAgents)
     ? configured.allowedAgents.filter(
         (entry): entry is McpAgentRunnerName =>
