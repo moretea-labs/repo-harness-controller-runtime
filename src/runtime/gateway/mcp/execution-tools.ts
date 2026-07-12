@@ -17,6 +17,7 @@ import { currentPermissionSnapshotVersion, validateWorkHandle, type ValidationLe
 import { markWorkHandleFailed, newWorkId, readWorkHandle, transitionWorkHandle, writeWorkHandle, type WorkFinalizationStages, type WorkHandleState } from '../../control-plane/execution/work-handle-store';
 import { assertResolvedAuthorization, createGoalDelegation, decideAuthorization, resolveAuthorizationRequest, type AuthorizationDecision, type AuthorizationRiskClass } from '../../control-plane/governance/authorization';
 import { readControllerResult, searchControllerResult, writeControllerResult } from '../../evidence/result-store';
+import { resumeExecutionJobAfterApproval } from '../../execution/jobs/store';
 import { recordMcpTiming, type McpTimingTrace } from '../../diagnostics/mcp-timing';
 import { commandValue, normalizeRepositoryCommand, type RepositoryCommandValue } from '../../../cli/repositories/command-normalization';
 
@@ -556,7 +557,15 @@ export async function callExecutionTool(ctx: MultiRepositoryMcpToolContext, name
           permissionSnapshotVersion: currentPermissionSnapshotVersion(ctx.controllerHome, repositoryId),
           confirm: args.confirm_authorization === true,
         });
-        return result({ authorization: { decision: 'allow', source: 'user_confirmation', reason: 'User confirmation was recorded for the exact pending operation.' }, approval: resolved, continuation: `Retry the original operation with approval_request_id=${resolved.approvalRequestId}.` });
+        const resumed = resumeExecutionJobAfterApproval(ctx.controllerHome, repositoryId, resolved.approvalRequestId);
+        return result({
+          authorization: { decision: 'allow', source: 'user_confirmation', reason: 'User confirmation was recorded for the exact pending operation.' },
+          approval: resolved,
+          resumedJob: resumed ? { jobId: resumed.jobId, status: resumed.status, requestId: resumed.requestId } : undefined,
+          continuation: resumed
+            ? `The original durable Job ${resumed.jobId} was resumed with the resolved approval request.`
+            : `Retry the original operation with approval_request_id=${resolved.approvalRequestId}.`,
+        });
       }
       case 'result_read': {
         const session = requireSession(ctx, args);

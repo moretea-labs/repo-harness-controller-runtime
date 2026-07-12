@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'crypto';
 import { spawnSync } from 'child_process';
 import { join } from 'path';
 import { repositoryControllerRoot } from '../../cli/repositories/controller-home';
-import { writeJsonAtomic } from '../shared/json-files';
+import { readJsonFile, sanitizeFileComponent, writeJsonAtomic } from '../shared/json-files';
 import type { ExecutionJob } from '../execution/jobs/types';
 
 export interface ExecutionEvidence {
@@ -33,6 +33,16 @@ function environmentFingerprint(): string {
   })).digest('hex').slice(0, 24);
 }
 
+function executionEvidencePath(controllerHome: string, repoId: string, evidenceId: string): string {
+  return join(repositoryControllerRoot(controllerHome, repoId), 'evidence', `${sanitizeFileComponent(evidenceId)}.json`);
+}
+
+export function readExecutionEvidence(controllerHome: string, repoId: string, evidenceId: string): ExecutionEvidence {
+  const evidence = readJsonFile<ExecutionEvidence>(executionEvidencePath(controllerHome, repoId, evidenceId));
+  if (evidence.repoId !== repoId || evidence.evidenceId !== evidenceId) throw new Error('EVIDENCE_IDENTITY_MISMATCH');
+  return evidence;
+}
+
 export function recordExecutionEvidence(
   controllerHome: string,
   repoRoot: string,
@@ -53,6 +63,6 @@ export function recordExecutionEvidence(
     outcome,
     details,
   };
-  writeJsonAtomic(join(repositoryControllerRoot(controllerHome, job.repoId), 'evidence', `${evidence.evidenceId}.json`), evidence);
+  writeJsonAtomic(executionEvidencePath(controllerHome, job.repoId, evidence.evidenceId), evidence);
   return evidence;
 }

@@ -50,11 +50,15 @@ export function readControllerDaemonStatus(controllerHome: string): ControllerDa
     if (Number.isFinite(startedAt) && Date.now() - startedAt < DAEMON_STARTUP_GRACE_MS) {
       return { ...state, status: 'starting', pid };
     }
+    // A stale scheduler heartbeat is degraded runtime state, not proof that the
+    // daemon process is dead. Keep the live PID authoritative so callers do not
+    // spawn a second daemon and invalidate Workers owned by the first one.
     return {
       ...state,
-      status: 'failed',
+      status: 'ready',
       pid,
-      error: state.error ?? 'SCHEDULER_HEARTBEAT_MISSING',
+      degraded: true,
+      error: state.error ?? 'SCHEDULER_HEARTBEAT_STALE',
     };
   }
   return { ...state, pid };
@@ -71,7 +75,9 @@ export function ensureControllerDaemon(controllerHome: string): ControllerDaemon
   }
   return withControllerLock(home, { scope: 'global' }, 'ensure-controller-daemon', () => {
     const current = readControllerDaemonStatus(home);
-    if ((current.status === 'ready' || current.status === 'starting') && pidAlive(current.pid)) return current;
+    // PID liveness is the fencing boundary. A degraded/stale heartbeat must not
+    // create a competing daemon while the recorded process is still alive.
+    if (pidAlive(current.pid)) return current;
     const entry = fileURLToPath(new URL('./daemon-entry.ts', import.meta.url));
     const bun = Boolean(process.versions.bun);
     const loader = fileURLToPath(new URL('../shared/node-ts-loader.mjs', import.meta.url));

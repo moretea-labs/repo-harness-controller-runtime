@@ -794,6 +794,20 @@ function syncProjectedExecutionJob(repoRoot: string, job: LocalBridgeJob): Local
     }
     return saveJob(repoRoot, job);
   }
+  if (execution.status === "waiting_for_approval") {
+    job.status = "pending_approval";
+    job.finishedAt = undefined;
+    job.workerPid = undefined;
+    job.error = undefined;
+    if (previous !== job.status) {
+      appendEvent(repoRoot, job.jobId, {
+        type: "job_approval_required",
+        message: `Durable Execution Job ${execution.jobId} is waiting for approval.`,
+        data: { executionJobId: execution.jobId, approvalRequestId: execution.result?.approvalRequestId },
+      });
+    }
+    return saveJob(repoRoot, job);
+  }
   if (["queued", "waiting_for_dependency", "waiting_for_workspace", "waiting_for_heavy_check", "waiting_for_integration", "waiting_for_release_barrier", "dispatched"].includes(execution.status)) {
     return saveJob(repoRoot, job);
   }
@@ -1565,14 +1579,12 @@ async function executeRepositoryCommand(
     });
     job = tryReadLocalBridgeJob(repoRoot, jobId);
     if (!job || job.status !== "running") return;
-    job.status = execution.ok ? "succeeded" : execution.timedOut ? "timed_out" : "failed";
-    job.finishedAt = now();
-    job.workerPid = undefined;
-    job.result = execution as unknown as Record<string, unknown>;
     const stdoutPath = `.ai/harness/local-jobs/${job.jobId}/stdout.log`;
     const stderrPath = `.ai/harness/local-jobs/${job.jobId}/stderr.log`;
+    job.workerPid = undefined;
+    job.ownerPid = undefined;
     job.result = {
-      ...job.result,
+      ...(execution as unknown as Record<string, unknown>),
       stdoutPath,
       stderrPath,
     };
@@ -1585,6 +1597,24 @@ async function executeRepositoryCommand(
       },
       infrastructureError: execution.infrastructureError,
     };
+    if (execution.status === "approval_required") {
+      job.status = "pending_approval";
+      job.finishedAt = undefined;
+      job.error = undefined;
+      appendEvent(repoRoot, job.jobId, {
+        type: "job_approval_required",
+        message: `Repository command is waiting for approval for ${payload.repoId}.`,
+        data: {
+          repoId: payload.repoId,
+          approvalRequestId: execution.approvalRequestId,
+          authorizationDecision: execution.authorizationDecision,
+        },
+      });
+      saveJob(repoRoot, job);
+      return;
+    }
+    job.status = execution.ok ? "succeeded" : execution.timedOut ? "timed_out" : "failed";
+    job.finishedAt = now();
     job.error = execution.ok ? undefined : execution.infrastructureError?.message
       ?? execution.stderr
       ?? `repository command exited with ${String(execution.exitCode ?? 1)}`;

@@ -20,6 +20,7 @@ export type ExecutionJobStatus =
   | 'waiting_for_heavy_check'
   | 'waiting_for_integration'
   | 'waiting_for_release_barrier'
+  | 'waiting_for_approval'
   | 'running'
   | 'dispatched'
   | 'succeeded'
@@ -136,5 +137,5 @@ export const TERMINAL_JOB_STATUSES = new Set<ExecutionJobStatus>([
 
 export const ACTIVE_JOB_STATUSES = new Set<ExecutionJobStatus>([
   'queued', 'waiting_for_dependency', 'waiting_for_workspace', 'waiting_for_heavy_check',
-  'waiting_for_integration', 'waiting_for_release_barrier', 'running', 'dispatched',
+  'waiting_for_integration', 'waiting_for_release_barrier', 'waiting_for_approval', 'running', 'dispatched',
 ]);

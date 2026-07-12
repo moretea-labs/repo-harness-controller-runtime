@@ -63,11 +63,39 @@ function legacyJobIdFromResult(record: Record<string, unknown>): string | undefi
   return undefined;
 }
 
+function approvalFromLocalJob(localJob: { status?: string; result?: Record<string, unknown> }) {
+  if (localJob.status !== 'pending_approval') return undefined;
+  const execution = localJob.result && typeof localJob.result === 'object' ? localJob.result : {};
+  const decision = execution.authorizationDecision && typeof execution.authorizationDecision === 'object'
+    ? execution.authorizationDecision as Record<string, unknown>
+    : undefined;
+  const approvalRequestId = typeof execution.approvalRequestId === 'string'
+    ? execution.approvalRequestId
+    : typeof decision?.approvalRequestId === 'string' ? decision.approvalRequestId : undefined;
+  if (!approvalRequestId) return undefined;
+  return {
+    approvalRequestId,
+    humanSummary: typeof decision?.humanSummary === 'string' ? decision.humanSummary : 'This operation requires confirmation before it can continue.',
+    consequences: Array.isArray(decision?.consequences) ? decision.consequences.map(String) : [],
+    continuation: typeof decision?.continuation === 'string'
+      ? decision.continuation
+      : `Resolve approvalRequestId=${approvalRequestId} to resume the same durable Job.`,
+    authorization: decision ?? { decision: 'user_confirmation_required', approvalRequestId },
+  };
+}
+
 export interface WorkerExecutionResult {
   ok: boolean;
   result?: Record<string, unknown>;
   outcome?: ExecutionJobOutcome;
   error?: { code: string; message: string; retryable: boolean; details?: Record<string, unknown> };
+  awaitingApproval?: {
+    approvalRequestId: string;
+    humanSummary: string;
+    consequences: string[];
+    continuation: string;
+    authorization: Record<string, unknown>;
+  };
   repoRoot: string;
 }
 
@@ -124,6 +152,16 @@ export async function executeExecutionJob(controllerHome: string, job: Execution
             status: localJob.status,
             localJob,
           };
+          const awaitingApproval = approvalFromLocalJob(localJob);
+          if (awaitingApproval) {
+            return {
+              ok: false,
+              result: { ...record, approvalRequestId: awaitingApproval.approvalRequestId, authorization: awaitingApproval.authorization },
+              outcome: localJob.outcome,
+              awaitingApproval,
+              repoRoot,
+            };
+          }
           if (localJob.status !== 'succeeded') {
             return {
               ok: false,
@@ -193,6 +231,10 @@ export async function executeExecutionJob(controllerHome: string, job: Execution
         localJobId,
         settlementTimeoutMsForJob(job),
       );
+      const awaitingApproval = approvalFromLocalJob(localJob);
+      if (awaitingApproval) {
+        return { ok: false, result: { localJob, approvalRequestId: awaitingApproval.approvalRequestId, authorization: awaitingApproval.authorization }, outcome: localJob.outcome, awaitingApproval, repoRoot };
+      }
       return localJob.status === 'succeeded'
         ? { ok: true, result: { localJob }, outcome: localJob.outcome, repoRoot }
         : { ok: false, outcome: localJob.outcome, error: { code: 'LEGACY_JOB_FAILED', message: localJob.error ?? `Local Job ended as ${localJob.status}`, retryable: false, details: { localJob } }, repoRoot };
@@ -284,6 +326,10 @@ export async function executeExecutionJob(controllerHome: string, job: Execution
         );
         record = { ...record, localJob };
         outcome = localJob.outcome;
+        const awaitingApproval = approvalFromLocalJob(localJob);
+        if (awaitingApproval) {
+          return { ok: false, result: { ...record, localJob, approvalRequestId: awaitingApproval.approvalRequestId, authorization: awaitingApproval.authorization }, outcome, awaitingApproval, repoRoot };
+        }
         if (localJob.status !== 'succeeded') {
           return { ok: false, error: { code: 'LEGACY_JOB_FAILED', message: localJob.error ?? `Local Job ended as ${localJob.status}`, retryable: false, details: { localJob } }, repoRoot };
         }

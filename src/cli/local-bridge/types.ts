@@ -107,6 +107,7 @@ export interface LocalBridgeJobEvent {
     | "job_started"
     | "job_dispatched"
     | "job_progress"
+    | "job_approval_required"
     | "job_succeeded"
     | "job_failed"
     | "job_cancelled"

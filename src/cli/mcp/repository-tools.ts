@@ -242,8 +242,8 @@ function failure(error: unknown): RepositoryToolResult {
   return { ...result({ error: { code, message, ...(details ? { details } : {}) } }), isError: true };
 }
 
-function terminalLocalJobStatus(status: string): boolean {
-  return ['succeeded', 'failed', 'timed_out', 'orphaned', 'stale', 'cancelled'].includes(status);
+function settledLocalJobStatus(status: string): boolean {
+  return ['pending_approval', 'succeeded', 'failed', 'timed_out', 'orphaned', 'stale', 'cancelled'].includes(status);
 }
 
 async function waitForRepositoryCommandHandoff(
@@ -254,7 +254,7 @@ async function waitForRepositoryCommandHandoff(
   const deadline = Date.now() + 400;
   while (Date.now() < deadline) {
     const snapshot = getLocalBridgeJobSnapshot(repoRoot, jobId);
-    if (snapshot.status !== 'ok' || !snapshot.job || terminalLocalJobStatus(snapshot.job.status)) {
+    if (snapshot.status !== 'ok' || !snapshot.job || settledLocalJobStatus(snapshot.job.status)) {
       break;
     }
     await new Promise((resolve) => setTimeout(resolve, 20));

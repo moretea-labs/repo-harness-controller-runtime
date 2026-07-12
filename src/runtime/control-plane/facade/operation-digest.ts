@@ -111,6 +111,7 @@ export function phaseFromJobStatus(status: ExecutionJobStatus | string): UserFac
     case 'waiting_for_heavy_check':
     case 'waiting_for_integration':
     case 'waiting_for_release_barrier':
+    case 'waiting_for_approval':
       return 'waiting';
     case 'succeeded':
       return 'succeeded';
@@ -226,6 +227,14 @@ function readableErrorMessage(job: ExecutionJob): string | undefined {
   if (job.outcome?.infrastructureError?.message) return bound(job.outcome.infrastructureError.message);
   if (job.status === 'failed') return '任务失败，但未提供详细错误信息。请查看证据或运行诊断。';
   if (job.status === 'timed_out') return '任务超时。';
+  if (job.status === 'waiting_for_approval') {
+    const approval = job.result?.authorization && typeof job.result.authorization === 'object'
+      ? job.result.authorization as Record<string, unknown>
+      : undefined;
+    return typeof approval?.humanSummary === 'string'
+      ? approval.humanSummary
+      : '任务正在等待当前对话确认后继续。';
+  }
   if (job.status === 'human_attention_required') return '任务需要你的判断后才能继续。';
   return undefined;
 }

@@ -410,7 +410,7 @@ export function updateExecutionJob(
 
 const WAITING_JOB_STATUSES = new Set<ExecutionJobStatus>([
   'queued', 'waiting_for_dependency', 'waiting_for_workspace', 'waiting_for_heavy_check',
-  'waiting_for_integration', 'waiting_for_release_barrier',
+  'waiting_for_integration', 'waiting_for_release_barrier', 'waiting_for_approval',
 ]);
 
 function writeJobState(
@@ -449,7 +449,7 @@ function transitionAllowed(from: ExecutionJobStatus, to: ExecutionJobStatus): bo
       || ['running', 'cancelled', 'timed_out', 'human_attention_required'].includes(to);
   }
   if (from === 'running') {
-    return ['queued', 'succeeded', 'failed', 'timed_out', 'cancelled', 'orphaned', 'stale', 'human_attention_required'].includes(to);
+    return ['queued', 'waiting_for_approval', 'succeeded', 'failed', 'timed_out', 'cancelled', 'orphaned', 'stale', 'human_attention_required'].includes(to);
   }
   if (from === 'dispatched') {
     return ['running', 'succeeded', 'failed', 'timed_out', 'cancelled', 'orphaned', 'stale', 'human_attention_required'].includes(to);
@@ -578,7 +578,7 @@ export function transitionExecutionJobFromWorker(
     attempt: number;
     leaseRefs: Array<Pick<ExecutionJob['leaseRefs'][number], 'leaseId' | 'fencingToken'>>;
   },
-  status: Extract<ExecutionJobStatus, 'succeeded' | 'failed' | 'human_attention_required'>,
+  status: Extract<ExecutionJobStatus, 'waiting_for_approval' | 'succeeded' | 'failed' | 'human_attention_required'>,
   patch: Partial<ExecutionJob> = {},
   eventData?: Record<string, unknown>,
 ): ExecutionJob {
@@ -594,7 +594,7 @@ export function transitionExecutionJobFromWorker(
       ...current,
       ...patch,
       status,
-      finishedAt: timestamp,
+      ...(status === 'waiting_for_approval' ? { finishedAt: undefined } : { finishedAt: timestamp }),
       workerPid: undefined,
     };
   }, `job_${status}`, eventData, true);
@@ -611,6 +611,41 @@ export function listActiveExecutionJobs(controllerHome: string, repoId?: string)
     } catch { /* stale index repaired below */ }
   }
   return output;
+}
+
+function executionJobApprovalRequestId(job: ExecutionJob): string | undefined {
+  if (typeof job.result?.approvalRequestId === 'string') return job.result.approvalRequestId;
+  const authorization = job.result?.authorization;
+  return authorization && typeof authorization === 'object' && typeof (authorization as Record<string, unknown>).approvalRequestId === 'string'
+    ? String((authorization as Record<string, unknown>).approvalRequestId)
+    : undefined;
+}
+
+export function resumeExecutionJobAfterApproval(
+  controllerHome: string,
+  repoId: string,
+  approvalRequestId: string,
+): ExecutionJob | undefined {
+  const waiting = listActiveExecutionJobs(controllerHome, repoId).find((job) =>
+    job.status === 'waiting_for_approval' && executionJobApprovalRequestId(job) === approvalRequestId,
+  );
+  if (!waiting) return undefined;
+  const args = waiting.payload.arguments ?? {};
+  return transitionExecutionJob(controllerHome, repoId, waiting.jobId, 'queued', {
+    payload: {
+      ...waiting.payload,
+      arguments: { ...args, approval_request_id: approvalRequestId },
+    },
+    result: undefined,
+    error: undefined,
+    outcome: undefined,
+    workerPid: undefined,
+    leaseRefs: [],
+    dispatchedAt: undefined,
+    startedAt: undefined,
+    heartbeatAt: undefined,
+    finishedAt: undefined,
+  }, { approvalRequestId, resumed: true });
 }
 
 export function listExecutionJobs(controllerHome: string, repoId: string, limit = 100): ExecutionJob[] {

@@ -189,6 +189,10 @@ export async function routeDurableMcpCall(
   delete workerArgs.request_id;
   const semanticKey = `${isRepositoryTool ? 'repository-tool' : 'mcp-tool'}:${name}:${repoId}:${hashArguments(workerArgs)}`;
   const claims = claimsForMcpOperation(name, workerArgs, repoId, checkoutId);
+  // Refresh and fence the daemon before persisting work. Creating the Job first
+  // can leave a newly submitted operation associated with a stale Controller
+  // epoch when the long-lived Gateway survives a daemon restart.
+  const daemon = ensureControllerDaemon(ctx.controllerHome);
   const created = createExecutionJob(ctx.controllerHome, {
     repoId,
     checkoutId,
@@ -212,7 +216,6 @@ export async function routeDurableMcpCall(
     timeoutMs: typeof args.timeout_ms === 'number' ? args.timeout_ms : undefined,
     maxAttempts: 2,
   });
-  const daemon = ensureControllerDaemon(ctx.controllerHome);
   if (wantsWaitForResult(args)) {
     const waited = await waitForExecutionJob({
       controllerHome: ctx.controllerHome,

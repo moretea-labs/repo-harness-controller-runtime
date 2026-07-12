@@ -18,8 +18,12 @@ export function isTerminalExecutionJob(job: ExecutionJob): boolean {
   return TERMINAL_JOB_STATUSES.has(job.status);
 }
 
+export function isInteractiveExecutionStop(job: ExecutionJob): boolean {
+  return isTerminalExecutionJob(job) || job.status === 'waiting_for_approval';
+}
+
 /**
- * Poll a durable ExecutionJob until terminal status or timeout.
+ * Poll a durable ExecutionJob until terminal status, resumable approval wait, or timeout.
  * Intended for interactive development UX, not long agent runs.
  */
 export async function waitForExecutionJob(options: WaitForExecutionJobOptions): Promise<{
@@ -31,13 +35,11 @@ export async function waitForExecutionJob(options: WaitForExecutionJobOptions): 
   const pollIntervalMs = Math.max(50, Math.min(Math.trunc(options.pollIntervalMs ?? 150), 2_000));
   const started = Date.now();
   let job = getExecutionJob(options.controllerHome, options.repoId, options.jobId);
-  while (!isTerminalExecutionJob(job) && Date.now() - started < timeoutMs) {
+  if (isInteractiveExecutionStop(job)) return { job, timedOut: false, waitedMs: Date.now() - started };
+  while (Date.now() - started < timeoutMs) {
     await sleep(pollIntervalMs);
     job = getExecutionJob(options.controllerHome, options.repoId, options.jobId);
+    if (isInteractiveExecutionStop(job)) return { job, timedOut: false, waitedMs: Date.now() - started };
   }
-  return {
-    job,
-    timedOut: !isTerminalExecutionJob(job),
-    waitedMs: Date.now() - started,
-  };
+  return { job, timedOut: true, waitedMs: Date.now() - started };
 }

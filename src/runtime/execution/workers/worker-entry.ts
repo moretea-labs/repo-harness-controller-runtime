@@ -111,6 +111,24 @@ async function main(): Promise<void> {
   });
   if (completionInvalidation) exitForOwnershipLoss(completionInvalidation.message);
   for (const ref of claimedLeaseRefs) assertFencingToken(controllerHome, repoId, ref.leaseId, ref.fencingToken);
+  if (execution.awaitingApproval) {
+    transitionExecutionJobFromWorker(controllerHome, repoId, jobId, owner, 'waiting_for_approval', {
+      result: {
+        ...(execution.result ?? {}),
+        approvalRequestId: execution.awaitingApproval.approvalRequestId,
+        authorization: execution.awaitingApproval.authorization,
+        consequences: execution.awaitingApproval.consequences,
+        continuation: execution.awaitingApproval.continuation,
+      },
+      outcome: execution.outcome,
+      error: undefined,
+      leaseRefs: [],
+    }, {
+      approvalRequestId: execution.awaitingApproval.approvalRequestId,
+      humanSummary: execution.awaitingApproval.humanSummary,
+    });
+    return;
+  }
   const bounded = execution.ok
     ? boundExecutionResult(controllerHome, current, execution.result ?? {})
     : execution.error?.details

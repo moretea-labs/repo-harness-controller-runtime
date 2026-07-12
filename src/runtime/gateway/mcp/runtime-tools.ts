@@ -11,6 +11,7 @@ import type { ExecutionJob } from '../../execution/jobs/types';
 import { buildJobOperationDigest } from '../../control-plane/facade/operation-digest';
 import { readJobEvents } from '../../evidence/event-ledger';
 import { readExecutionArtifact } from '../../evidence/artifact-store';
+import { readExecutionEvidence } from '../../evidence/evidence-store';
 import { ensureControllerDaemon, readControllerDaemonStatus } from '../../control-plane/daemon-client';
 import { readSchedulerHealthSnapshot } from '../../control-plane/global-scheduler/scheduler';
 import { rebuildRepositoryProjection, readRepositoryProjectionSnapshot } from '../../projections/materialized-view';
@@ -2176,6 +2177,13 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
       case 'get_artifact': {
         const artifactId = String(args.artifact_id ?? '').trim();
         const artifactRepoId = String(args.repo_id ?? '').trim();
+        if (artifactId.startsWith('EVD-')) {
+          return result({
+            evidence: readExecutionEvidence(ctx.controllerHome, artifactRepoId, artifactId),
+            referenceType: 'execution-evidence',
+            readableThrough: 'get_artifact',
+          });
+        }
         return result(readExecutionArtifact(ctx.controllerHome, artifactRepoId, artifactId, typeof args.max_bytes === 'number' ? args.max_bytes : undefined) as unknown as Record<string, unknown>);
       }
       case 'list_jobs': {
