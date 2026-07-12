@@ -3,6 +3,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'path';
 import type { ExternalFilesystemGrant } from '../../runtime/safe-tooling/external-filesystem';
 import { externalFilesystemGrantExpired } from '../../runtime/safe-tooling/external-filesystem';
 import type { RepositoryRecord } from './types';
+import { normalizeRepositoryCommand, type CanonicalRepositoryCommand } from './command-normalization';
 
 const MAX_COMMAND_LENGTH = 32 * 1024;
 
@@ -74,6 +75,40 @@ export function assertRepositoryCommandAllowed(command: string): string {
     if (pattern.test(normalized)) throw new Error(`COMMAND_POLICY_DENIED: ${reason}`);
   }
   return normalized;
+}
+
+export function assertRepositoryCommandInputAllowed(input: unknown): CanonicalRepositoryCommand {
+  const command = normalizeRepositoryCommand(input);
+  if (command.kind === 'shell') {
+    assertRepositoryCommandAllowed(command.shellCommand!);
+    return command;
+  }
+  const executableName = command.executable!.split(/[\\/]/).at(-1)?.toLowerCase() ?? '';
+  const args = command.args ?? [];
+  const shellFlag = args.some((arg) => ['-c', '/c', '-Command'].includes(arg));
+  if (['bash', 'sh', 'zsh', 'fish', 'dash', 'cmd', 'powershell', 'pwsh'].includes(executableName) && shellFlag) {
+    throw new Error('COMMAND_POLICY_DENIED: nested shell execution is not allowed');
+  }
+  if (['node', 'nodejs', 'bun', 'deno', 'ruby', 'perl', 'python', 'python3'].includes(executableName)
+    && args.some((arg) => ['-c', '-e', '--eval'].includes(arg))) {
+    throw new Error('COMMAND_POLICY_DENIED: inline interpreter execution is not allowed');
+  }
+  if (args.some((arg) => /(?:^|[\\/])\.\.(?:[\\/]|$)|^(?:~|[A-Za-z]:[\\/])/.test(arg))) {
+    throw new Error('COMMAND_POLICY_DENIED: ambiguous parent/home/drive paths are not allowed; use repo-relative paths or an authorized absolute external path');
+  }
+  if (args.some((arg) => /(?:^|[\\/])(?:\.ssh|\.aws|\.gnupg|Library[\\/]Keychains|login\.keychain|\.config[\\/]gh[\\/]hosts\.yml)(?:[\\/]|$)/i.test(arg))) {
+    throw new Error('COMMAND_POLICY_DENIED: sensitive credential paths are not allowed');
+  }
+  if (executableName === 'git' && args.some((arg) => ['--git-dir', '--work-tree', '-C'].includes(arg))) {
+    throw new Error('COMMAND_POLICY_DENIED: Git repository scope overrides are not allowed');
+  }
+  if (executableName === 'git' && args[0] === 'config' && args.some((arg) => ['--global', '--system'].includes(arg))) {
+    throw new Error('COMMAND_POLICY_DENIED: global or system Git configuration changes are not allowed');
+  }
+  if (['env', 'printenv', 'curl', 'wget', 'scp', 'sftp', 'ftp', 'nc', 'ncat', 'netcat', 'socat', 'ssh'].includes(executableName)) {
+    throw new Error('COMMAND_POLICY_DENIED: credential or network inspection is not allowed');
+  }
+  return command;
 }
 
 function shellSegments(command: string): string[] {
@@ -170,18 +205,22 @@ function operationForToken(words: string[], index: number, external: string, cwd
 }
 
 export function assertCommandPathOperandsStayInRepository(
-  command: string,
+  command: string | CanonicalRepositoryCommand,
   cwd: string,
   root: string,
   externalGrants: ExternalFilesystemGrant[] = [],
 ): RepositoryCommandExternalPathUsage[] {
   const usages: RepositoryCommandExternalPathUsage[] = [];
-  for (const segment of shellSegments(command)) {
+  const segments = typeof command === 'string'
+    ? shellSegments(command).map((segment) => ({ raw: segment, words: shellWords(segment) }))
+    : command.kind === 'shell'
+      ? shellSegments(command.shellCommand!).map((segment) => ({ raw: segment, words: shellWords(segment) }))
+      : [{ raw: '', words: [command.executable!, ...(command.args ?? [])] }];
+  for (const { raw: segment, words } of segments) {
     const redirectionTarget = segment.match(/(?:^|\s)(?:\d?>?>)\s*(\/[^\s]+)/)?.[1];
     if (redirectionTarget && !redirectionTarget.startsWith('/dev/null')) {
       throw new Error(`COMMAND_SCOPE_DENIED: external writes are not allowed from repository commands: ${redirectionTarget}`);
     }
-    const words = shellWords(segment);
     for (let index = 0; index < words.length; index += 1) {
       const token = words[index]!;
       if (!token || token.startsWith('-') || /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(token)) continue;

@@ -45,7 +45,7 @@ export interface AuthorizationRequestRecord {
   principalId?: string;
   workId?: string;
   goalId?: string;
-  command?: string;
+  command?: string | string[];
   approvalToken?: string;
   risk: AuthorizationRiskClass;
   permissionSnapshotVersion: number;
@@ -74,7 +74,7 @@ export interface AuthorizationContext {
   delegation?: GoalDelegation;
   worktreePath?: string;
   cwd?: string;
-  command?: string;
+  command?: string | string[];
   approvalRequestId?: string;
   approvalToken?: string;
   approvedByUser?: boolean;
@@ -186,13 +186,13 @@ export function resolveAuthorizationRequest(input: { controllerHome: string; rep
   return resolved;
 }
 
-export function assertResolvedAuthorization(input: { controllerHome: string; repositoryId: string; approvalRequestId: string; sessionId?: string; principalId?: string; workId?: string; permissionSnapshotVersion: number; command?: string }): AuthorizationRequestRecord {
+export function assertResolvedAuthorization(input: { controllerHome: string; repositoryId: string; approvalRequestId: string; sessionId?: string; principalId?: string; workId?: string; permissionSnapshotVersion: number; command?: string | string[] }): AuthorizationRequestRecord {
   const request = readAuthorizationRequest(input.controllerHome, input.repositoryId, input.approvalRequestId);
   if (request.status !== 'resolved') throw new Error('APPROVAL_REQUEST_NOT_RESOLVED: confirm the approval request in the current conversation first');
   if (request.sessionId && request.sessionId !== input.sessionId) throw new Error('APPROVAL_REQUEST_SESSION_MISMATCH');
   if (request.principalId && request.principalId !== input.principalId) throw new Error('APPROVAL_REQUEST_PRINCIPAL_MISMATCH');
   if (request.workId && request.workId !== input.workId) throw new Error('APPROVAL_REQUEST_WORK_MISMATCH');
   if (request.permissionSnapshotVersion !== input.permissionSnapshotVersion) throw new Error('APPROVAL_REQUEST_STALE_PERMISSION');
-  if (request.command && input.command && request.command !== input.command) throw new Error('APPROVAL_REQUEST_COMMAND_CHANGED: request a new approval for changed parameters');
+  if (request.command && input.command && JSON.stringify(request.command) !== JSON.stringify(input.command)) throw new Error('APPROVAL_REQUEST_COMMAND_CHANGED: request a new approval for changed parameters');
   return request;
 }

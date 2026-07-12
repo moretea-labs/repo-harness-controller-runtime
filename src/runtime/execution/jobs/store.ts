@@ -229,6 +229,46 @@ function upsertIndexes(controllerHome: string, job: ExecutionJob): void {
   }, 10_000);
 }
 
+/** Rebuild index entries from durable Job records during bounded startup recovery. */
+export function rebuildExecutionJobIndexes(controllerHome: string, repoIds: string[] = []): void {
+  withControllerLock(controllerHome, { scope: 'global', resource: 'execution-index' }, 'execution-index-rebuild', () => {
+    const targetRepos = new Set(repoIds);
+    const active = readActiveIndex(controllerHome);
+    const recent = readRecentIndex(controllerHome);
+    const activeEntries: ActiveJobIndex['jobs'] = [];
+    const recentEntries: RecentJobIndex['jobs'] = [];
+    for (const repoId of targetRepos) {
+      const records = join(executionJobRoot(controllerHome, repoId), 'records');
+      let names: string[] = [];
+      try { names = readdirSync(records).filter((name) => name.endsWith('.json')).slice(0, 5000); } catch { continue; }
+      for (const name of names) {
+        try {
+          const job = readJsonFile<ExecutionJob>(join(records, name));
+          if (job.requestId) {
+            writeJsonAtomic(requestPath(controllerHome, job.requestId), {
+              schemaVersion: 1,
+              requestId: job.requestId,
+              semanticKey: job.semanticKey,
+              jobId: job.jobId,
+              repoId: job.repoId,
+              createdAt: job.createdAt,
+            } satisfies RequestIndexRecord);
+          }
+          recentEntries.push({ jobId: job.jobId, repoId: job.repoId, createdAt: job.createdAt, updatedAt: job.updatedAt, status: job.status });
+          if (ACTIVE_JOB_STATUSES.has(job.status)) {
+            activeEntries.push({ jobId: job.jobId, repoId: job.repoId, status: job.status, priority: job.priority, queuedAt: job.queuedAt, updatedAt: job.updatedAt });
+          }
+        } catch { /* malformed records are left for the existing repair surface */ }
+      }
+    }
+    const activeRepoIds = targetRepos;
+    active.jobs = active.jobs.filter((entry) => !activeRepoIds.has(entry.repoId)).concat(activeEntries);
+    recent.jobs = recent.jobs.filter((entry) => !activeRepoIds.has(entry.repoId)).concat(recentEntries);
+    writeActiveIndex(controllerHome, active);
+    writeRecentIndex(controllerHome, recent);
+  }, 10_000);
+}
+
 function persistJobRecord(controllerHome: string, job: ExecutionJob): ExecutionJob {
   const sanitized = sanitizeJobForPersistence(controllerHome, job);
   writeJsonAtomic(jobPath(controllerHome, sanitized.repoId, sanitized.jobId), sanitized);

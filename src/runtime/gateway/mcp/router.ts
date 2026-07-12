@@ -14,6 +14,7 @@ import { waitForExecutionJob } from '../../execution/jobs/wait';
 import { ensureControllerDaemon } from '../../control-plane/daemon-client';
 import { buildAcceptedQueuedDigest, buildJobOperationDigest } from '../../control-plane/facade/operation-digest';
 import { claimsForMcpOperation } from './resource-policy';
+import { commandValue, normalizeRepositoryCommand } from '../../../cli/repositories/command-normalization';
 
 const DIRECT_REPOSITORY_TOOLS = new Set(['repository_list', 'repository_get', 'repository_workbench', 'repository_command_preview']);
 const DIRECT_HOT_READ_TOOLS = new Set([
@@ -182,6 +183,9 @@ export async function routeDurableMcpCall(
   const workerArgs = isRepositoryTool
     ? { ...args }
     : repositoryScopedToolArgs(name, args, repository!);
+  if (name === 'repository_command_execute' || name === 'repository_command_preview') {
+    workerArgs.command = commandValue(normalizeRepositoryCommand(workerArgs.command));
+  }
   delete workerArgs.request_id;
   const semanticKey = `${isRepositoryTool ? 'repository-tool' : 'mcp-tool'}:${name}:${repoId}:${hashArguments(workerArgs)}`;
   const claims = claimsForMcpOperation(name, workerArgs, repoId, checkoutId);

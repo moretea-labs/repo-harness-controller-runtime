@@ -35,6 +35,7 @@ import { taskExecutionPolicy } from "../controller/execution-policy";
 import { tryAppendControllerWorklogEvent } from "../controller/worklog";
 import { resolveControllerHome } from "../repositories/controller-home";
 import { ensureRepositoryRuntimeStorage } from "../repositories/runtime-storage";
+import { commandValue, normalizeRepositoryCommand } from "../repositories/command-normalization";
 import { dispatchLegacyLocalJob } from "../../runtime/execution/jobs/legacy-adapter";
 import { findExecutionJob } from "../../runtime/execution/jobs/store";
 import type { McpAgentRunnerName } from "../mcp/types";
@@ -503,7 +504,7 @@ function findExistingRepositoryCommandJob(
     ["approved", "running"].includes(entry.status) &&
     (entry.payload as RepositoryCommandPayload).repoId === payload.repoId &&
     (entry.payload as RepositoryCommandPayload).checkoutId === payload.checkoutId &&
-    (entry.payload as RepositoryCommandPayload).command === payload.command &&
+    JSON.stringify((entry.payload as RepositoryCommandPayload).command) === JSON.stringify(payload.command) &&
     (entry.payload as RepositoryCommandPayload).cwd === payload.cwd &&
     (entry.payload as RepositoryCommandPayload).approvalToken === payload.approvalToken,
   );
@@ -521,6 +522,12 @@ export function submitLocalBridgeJob(
     throw new Error(
       `unsupported local bridge action: ${String(request.action)}`,
     );
+  }
+
+  if (request.action === "repository-command") {
+    const payload = request.payload as RepositoryCommandPayload;
+    const normalized = normalizeRepositoryCommand(payload.command);
+    request = { ...request, payload: { ...payload, command: commandValue(normalized) } };
   }
 
   // Bind runtime storage before the first Local Job is persisted when the

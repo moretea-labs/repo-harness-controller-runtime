@@ -84,19 +84,20 @@ function workerLostMessage(
     : `${processMissing} The job was safely requeued before its outcome became ambiguous.`;
 }
 
-export function reconcileExecutionJobs(controllerHome: string): ReconcileSummary {
-  return reconcileExecutionJobsWith(controllerHome, (pid) => terminateProcessTreeSync(pid));
+export function reconcileExecutionJobs(controllerHome: string, repoId?: string): ReconcileSummary {
+  return reconcileExecutionJobsWith(controllerHome, (pid) => terminateProcessTreeSync(pid), repoId);
 }
 
-export async function reconcileExecutionJobsAsync(controllerHome: string): Promise<ReconcileSummary> {
-  return reconcileExecutionJobsAsyncWith(controllerHome, (pid) => terminateProcessTree(pid));
+export async function reconcileExecutionJobsAsync(controllerHome: string, repoId?: string): Promise<ReconcileSummary> {
+  return reconcileExecutionJobsAsyncWith(controllerHome, (pid) => terminateProcessTree(pid), repoId);
 }
 
 function reconcileExecutionJobsWith(
   controllerHome: string,
   terminateWorker: (pid: number | undefined) => ProcessTreeTerminationResult,
+  repoId?: string,
 ): ReconcileSummary {
-  const jobs = listActiveExecutionJobs(controllerHome);
+  const jobs = listActiveExecutionJobs(controllerHome, repoId);
   let requeued = 0;
   let terminal = 0;
   let recovered = 0;
@@ -130,8 +131,9 @@ function reconcileExecutionJobsWith(
 async function reconcileExecutionJobsAsyncWith(
   controllerHome: string,
   terminateWorker: (pid: number | undefined) => Promise<ProcessTreeTerminationResult>,
+  repoId?: string,
 ): Promise<ReconcileSummary> {
-  const jobs = listActiveExecutionJobs(controllerHome);
+  const jobs = listActiveExecutionJobs(controllerHome, repoId);
   let requeued = 0;
   let terminal = 0;
   let recovered = 0;

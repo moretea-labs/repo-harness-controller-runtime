@@ -18,6 +18,7 @@ import { markWorkHandleFailed, newWorkId, readWorkHandle, transitionWorkHandle, 
 import { assertResolvedAuthorization, createGoalDelegation, decideAuthorization, resolveAuthorizationRequest, type AuthorizationDecision, type AuthorizationRiskClass } from '../../control-plane/governance/authorization';
 import { readControllerResult, searchControllerResult, writeControllerResult } from '../../evidence/result-store';
 import { recordMcpTiming, type McpTimingTrace } from '../../diagnostics/mcp-timing';
+import { commandValue, normalizeRepositoryCommand, type RepositoryCommandValue } from '../../../cli/repositories/command-normalization';
 
 const MAX_INLINE_RESULT_BYTES = 64 * 1024;
 
@@ -40,7 +41,7 @@ export const executionToolDefinitions: McpToolDefinition[] = [
   definition('work_inspect', 'Collect bounded Git, WorkContract, path, check, and readiness evidence through one work handle.', { session_id: sessionId, work_id: workId, detail: { type: 'string', enum: ['summary', 'detail'] } }, ['work_id'], true),
   definition('work_execute', 'Execute approved, repository-scoped commands against a validated work handle while preserving the existing command policy and audit path.', {
     session_id: sessionId, work_id: workId,
-    command: { type: 'string' }, approval_token: { type: 'string' }, cwd: { type: 'string' }, timeout_ms: { type: 'number' }, max_output_bytes: { type: 'number' },
+    command: { anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' }, minItems: 1 }] }, approval_token: { type: 'string' }, cwd: { type: 'string' }, timeout_ms: { type: 'number' }, max_output_bytes: { type: 'number' },
     commands: { type: 'array', items: { type: 'object' } }, approval_request_id: { type: 'string' },
   }, ['work_id'], false),
   definition('work_validate', 'Run targeted checks or read-only validation commands against a work handle with full current-state validation.', {
@@ -285,16 +286,17 @@ function inspectWork(ctx: MultiRepositoryMcpToolContext, args: Record<string, un
 
 function commandInputs(args: Record<string, unknown>): Array<Record<string, unknown>> {
   if (Array.isArray(args.commands)) return args.commands.filter((value): value is Record<string, unknown> => Boolean(value && typeof value === 'object' && !Array.isArray(value)));
-  if (typeof args.command === 'string' && args.command.trim()) return [{ command: args.command, cwd: args.cwd, approval_token: args.approval_token, timeout_ms: args.timeout_ms, max_output_bytes: args.max_output_bytes }];
+  if (args.command !== undefined) return [{ command: args.command, cwd: args.cwd, approval_token: args.approval_token, timeout_ms: args.timeout_ms, max_output_bytes: args.max_output_bytes }];
   throw new Error('COMMAND_REQUIRED: provide command or commands');
 }
 
-function authorizationRisk(command: string, classification: ReturnType<typeof classifyRepositoryCommand>): AuthorizationRiskClass {
+function authorizationRisk(command: RepositoryCommandValue, classification: ReturnType<typeof classifyRepositoryCommand>): AuthorizationRiskClass {
   if (classification.risk === 'readonly') return 'readonly';
   if (classification.risk === 'remote_write') return 'remote_write';
   if (classification.risk === 'destructive') return 'destructive';
-  if (/\b(?:npm|bun|pnpm|yarn)\s+(?:install|add|remove|update)\b/i.test(command)) return 'dependency_change';
-  if (/^\s*git\s+/i.test(command)) return 'local_git';
+  const executable = typeof command === 'string' ? command : command[0] ?? '';
+  if (typeof command === 'string' && /\b(?:npm|bun|pnpm|yarn)\s+(?:install|add|remove|update)\b/i.test(command)) return 'dependency_change';
+  if (/^\s*(?:git|.*[\\/]git)(?:\s|$)/i.test(executable)) return 'local_git';
   return 'workspace_write';
 }
 
@@ -304,7 +306,11 @@ async function executeWork(ctx: MultiRepositoryMcpToolContext, args: Record<stri
   const commands = commandInputs(args);
   if (commands.length > 16) throw new Error('COMMAND_BATCH_TOO_LARGE: at most 16 commands per work_execute');
   const cheap = validateWorkHandle(ctx.controllerHome, handle, identityFor(ctx, args), 'cheap', 'execute');
-  const inputs = commands.map((entry) => ({ command: String(entry.command ?? ''), cwd: typeof entry.cwd === 'string' ? entry.cwd : undefined, approvalToken: typeof entry.approval_token === 'string' ? entry.approval_token : undefined }));
+  const inputs = commands.map((entry) => ({
+    command: commandValue(normalizeRepositoryCommand(entry.command)),
+    cwd: typeof entry.cwd === 'string' ? entry.cwd : undefined,
+    approvalToken: typeof entry.approval_token === 'string' ? entry.approval_token : undefined,
+  }));
   const classifications = inputs.map((entry) => classifyRepositoryCommand(entry.command, cheap.repository.defaultBranch));
   const requiresFull = classifications.some((classification) => classification.risk !== 'readonly');
   if (requiresFull) validateWorkHandle(ctx.controllerHome, handle, identityFor(ctx, args), 'full', 'execute');

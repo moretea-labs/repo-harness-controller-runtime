@@ -5,6 +5,7 @@ import { DEFAULT_AGENT_TIMEOUT_MS, MAX_AGENT_TIMEOUT_MS } from '../../../cli/con
 import { ensureControllerDaemon } from '../../control-plane/daemon-client';
 import { createExecutionJob } from './store';
 import type { ResourceClaimSpec } from './types';
+import { commandValue, normalizeRepositoryCommand } from '../../../cli/repositories/command-normalization';
 
 const LEGACY_SETTLEMENT_GRACE_MS = 30_000;
 const MAX_DURABLE_EXECUTION_TIMEOUT_MS = 24 * 60 * 60_000;
@@ -56,7 +57,12 @@ export function dispatchLegacyLocalJob(repoRoot: string, legacyJob: LocalBridgeJ
     payload: {
       operation: 'legacy-local-job',
       target: 'runtime',
-      arguments: { localJobId: legacyJob.jobId },
+      arguments: {
+        localJobId: legacyJob.jobId,
+        ...(legacyJob.action === 'repository-command'
+          ? { command: commandValue(normalizeRepositoryCommand((legacyJob.payload as { command: string | string[] }).command)) }
+          : {}),
+      },
       timeoutMs: settlementTimeoutMs,
     },
     resourceClaims: claims(legacyJob, repository.repoId, repository.activeCheckoutId),

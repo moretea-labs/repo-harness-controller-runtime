@@ -211,13 +211,13 @@ export const repositoryToolDefinitions: McpToolDefinition[] = [
   definition('repository_command_preview', 'Preview one repository-scoped local command with classification, approval token, and Git snapshots.', {
     repo_id: repoId,
     checkout_id: { type: 'string', description: 'Optional checkout identity for repositories with multiple local clones.' },
-    command: { type: 'string', description: 'Repository-local shell command to classify and preview.' },
+    command: { anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' }, minItems: 1 }], description: 'Legacy shell string or typed argv array. Typed argv executes without a shell.' },
     cwd: { type: 'string', description: 'Optional repository-relative working directory.' },
   }, ['command'], true),
   definition('repository_command_execute', 'Execute one repository-scoped local command through Full Access, Goal delegation, or a resumable approval request. Legacy preview-token callers remain compatible.', {
     repo_id: repoId,
     checkout_id: { type: 'string', description: 'Optional checkout identity for repositories with multiple local clones.' },
-    command: { type: 'string', description: 'Repository-local shell command to execute.' },
+    command: { anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' }, minItems: 1 }], description: 'Legacy shell string or typed argv array. Typed argv executes without a shell.' },
     cwd: { type: 'string', description: 'Optional repository-relative working directory.' },
     approval_token: { type: 'string', description: 'Exact approval token returned by repository_command_preview.' },
     approval_request_id: { type: 'string', description: 'Resolved approvalRequestId returned by approval_resolve.' },
@@ -480,7 +480,7 @@ export async function callRepositoryTool(
           { scope: 'repository', repoId: repository.repoId },
           'mcp:repository_command_preview',
           () => executeRepositoryCommand(controllerHome, repository, {
-            command: String(args.command ?? ''),
+            command: args.command as string | string[],
             cwd: typeof args.cwd === 'string' ? args.cwd : undefined,
             dryRun: true,
           }),
@@ -506,7 +506,7 @@ export async function callRepositoryTool(
             ? Number(args.max_output_bytes)
             : undefined;
         const preview = previewRepositoryCommandExecution(repository, {
-          command: String(args.command ?? ''),
+          command: args.command as string | string[],
           cwd: typeof args.cwd === 'string' ? args.cwd : undefined,
           authorization: 'confirmed_plan',
           approvalToken: typeof args.approval_token === 'string' ? args.approval_token : undefined,
@@ -525,7 +525,7 @@ export async function callRepositoryTool(
             repoId: repository.repoId,
             checkoutId: repository.activeCheckoutId,
             requestId: typeof args.request_id === 'string' ? args.request_id.trim() || undefined : undefined,
-            command: String(args.command ?? ''),
+            command: args.command as string | string[],
             cwd: typeof args.cwd === 'string' ? args.cwd : undefined,
             approvalToken: typeof args.approval_token === 'string' ? args.approval_token : undefined,
             approvalRequestId: typeof args.approval_request_id === 'string' ? args.approval_request_id : undefined,

@@ -1,3 +1,5 @@
+import { normalizeRepositoryCommand, type CanonicalRepositoryCommand } from './command-normalization';
+
 export type RepositoryCommandRisk = 'readonly' | 'workspace_write' | 'remote_write' | 'destructive';
 export type RepositoryCommandAuthorization = 'explicit_user_request' | 'confirmed_plan' | 'policy' | 'full_access' | 'goal_delegation' | 'gpt_risk_delegate' | 'user_confirmation';
 export type RepositoryCommandConfirmation = 'none' | 'authorization' | 'strong_confirmation';
@@ -156,6 +158,57 @@ function escapeRegex(value: string): string {
 }
 
 export function classifyRepositoryCommand(
+  input: string | readonly string[] | CanonicalRepositoryCommand,
+  defaultBranch?: string,
+): RepositoryCommandClassification {
+  const canonical = 'kind' in Object(input) && (input as CanonicalRepositoryCommand).kind
+    ? input as CanonicalRepositoryCommand
+    : normalizeRepositoryCommand(input);
+  if (canonical.kind === 'argv') return classifyArgvCommand(canonical, defaultBranch);
+  return classifyShellCommand(canonical.shellCommand!, defaultBranch);
+}
+
+function classifyArgvCommand(
+  command: CanonicalRepositoryCommand,
+  defaultBranch?: string,
+): RepositoryCommandClassification {
+  const argv = [command.executable!, ...(command.args ?? [])];
+  const program = argv[0]!.split(/[\\/]/).at(-1)!.toLowerCase();
+  const subcommand = argv[1]?.toLowerCase();
+  const reasons: string[] = [];
+  const has = (value: string) => argv.includes(value);
+  const forcePush = program === 'git' && subcommand === 'push' && (has('--force') || has('--force-with-lease') || has('-f') || argv.some((arg) => arg.startsWith('+')));
+  const hardReset = program === 'git' && subcommand === 'reset' && has('--hard');
+  const cleanAll = program === 'git' && subcommand === 'clean' && (has('-fdx') || argv.some((arg) => arg.startsWith('-') && arg.includes('x') && arg.includes('f')));
+  const deleteRemote = program === 'git' && subcommand === 'push' && (has('--delete') || argv.some((arg) => arg.startsWith(':')));
+  const deletesDefault = Boolean(defaultBranch && deleteRemote && argv.includes(defaultBranch));
+  if (forcePush) reasons.push('force push rewrites shared remote history');
+  if (hardReset) reasons.push('hard reset can discard local changes and commits');
+  if (cleanAll) reasons.push('git clean can permanently remove untracked or ignored files');
+  if (deletesDefault) reasons.push(`remote deletion targets the default branch ${defaultBranch}`);
+  if (reasons.length > 0) return { risk: 'destructive', confirmation: 'strong_confirmation', reasons };
+  if (program === 'git' && ((subcommand === 'push' && deleteRemote) || (['branch', 'tag'].includes(subcommand ?? '') && (has('--delete') || has('-d') || has('-D'))))) {
+    return { risk: 'destructive', confirmation: 'authorization', reasons: ['deletes a remote branch or tag'] };
+  }
+  if (program === 'rm' || program === 'rmdir' || program === 'unlink' || (program === 'find' && has('-delete'))) {
+    return { risk: 'destructive', confirmation: 'authorization', reasons: ['deletes repository files'] };
+  }
+  if (program === 'git' && subcommand === 'push') return { risk: 'remote_write', confirmation: 'authorization', reasons: ['writes Git refs to a remote'] };
+  if (program === 'git' && ['add', 'commit', 'pull', 'fetch', 'merge', 'rebase', 'checkout', 'switch', 'cherry-pick', 'revert', 'stash', 'mv', 'restore', 'apply', 'am', 'bisect'].includes(subcommand ?? '')) {
+    return { risk: 'workspace_write', confirmation: 'authorization', reasons: ['changes the checkout, local refs, index, or working tree'] };
+  }
+  if (['touch', 'mkdir', 'cp', 'mv', 'install', 'tee', 'truncate', 'patch'].includes(program)
+    || (['npm', 'bun', 'pnpm', 'yarn'].includes(program) && ['install', 'add', 'remove', 'update', 'run'].includes(subcommand ?? ''))) {
+    return { risk: 'workspace_write', confirmation: 'authorization', reasons: ['writes repository files'] };
+  }
+  if (program === 'git' && READ_ONLY_GIT_SUBCOMMANDS.has(subcommand ?? '')) {
+    return { risk: 'readonly', confirmation: 'none', reasons: ['the argv command is a recognized repository-local read operation'] };
+  }
+  if (READ_ONLY_PROGRAMS.has(program)) return { risk: 'readonly', confirmation: 'none', reasons: ['the argv command is a recognized repository-local read operation'] };
+  return { risk: 'workspace_write', confirmation: 'authorization', reasons: ['unrecognized argv behavior is conservatively treated as a workspace write'] };
+}
+
+function classifyShellCommand(
   command: string,
   defaultBranch?: string,
 ): RepositoryCommandClassification {

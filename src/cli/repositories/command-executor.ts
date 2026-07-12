@@ -12,10 +12,11 @@ import {
 } from './command-classifier';
 import {
   assertCommandPathOperandsStayInRepository,
+  assertRepositoryCommandInputAllowed,
   type RepositoryCommandExternalPathUsage,
-  assertRepositoryCommandAllowed,
   resolveRepositoryCommandCwd,
 } from './command-scope';
+import { commandValue, type CanonicalRepositoryCommand, type RepositoryCommandValue } from './command-normalization';
 import { loadExternalFilesystemGrants } from '../../runtime/safe-tooling/external-filesystem';
 import type { RepositoryRecord } from './types';
 import { readRepositoryAccessPolicy } from '../../runtime/control-plane/governance/access-policy';
@@ -30,7 +31,7 @@ export type {
 } from './command-classifier';
 
 export interface ExecuteRepositoryCommandInput {
-  command: string;
+  command: string | readonly string[];
   cwd?: string;
   authorization?: RepositoryCommandAuthorization;
   approvalToken?: string;
@@ -60,7 +61,7 @@ export interface RepositoryCommandExecution {
   repoId: string;
   checkoutId: string;
   cwd: string;
-  command: string;
+  command: RepositoryCommandValue;
   classification: RepositoryCommandClassification;
   approvalToken: string;
   authorization?: RepositoryCommandAuthorization;
@@ -175,20 +176,25 @@ function collectOutput(maxOutputBytes: number): {
   };
 }
 
-async function runShellCommand(
-  command: string,
+async function runCanonicalCommand(
+  command: CanonicalRepositoryCommand,
   cwd: string,
   timeoutMs: number,
   maxOutputBytes: number,
   hooks: RepositoryCommandAsyncHooks = {},
 ): Promise<SpawnCommandResult> {
-  const shell = process.platform === 'win32' ? 'cmd.exe' : '/bin/sh';
-  const shellArgs = process.platform === 'win32' ? ['/d', '/s', '/c', command] : ['-c', command];
+  const executable = command.kind === 'argv'
+    ? command.executable!
+    : process.platform === 'win32' ? 'cmd.exe' : '/bin/sh';
+  const args = command.kind === 'argv'
+    ? [...(command.args ?? [])]
+    : process.platform === 'win32' ? ['/d', '/s', '/c', command.shellCommand!] : ['-c', command.shellCommand!];
+  const display = typeof command.value === 'string' ? command.value : JSON.stringify(command.value);
   const stdoutCollector = collectOutput(maxOutputBytes);
   const stderrCollector = collectOutput(maxOutputBytes);
 
   return await new Promise<SpawnCommandResult>((resolve) => {
-    const child = spawn(shell, shellArgs, {
+    const child = spawn(executable, args, {
       cwd,
       env: commandEnvironment(),
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -204,7 +210,7 @@ async function runShellCommand(
       settled = true;
       if (timeoutHandle) clearTimeout(timeoutHandle);
       const stderrParts = [stderrCollector.complete()];
-      if (timedOut) stderrParts.push(`process timed out after ${timeoutMs}ms: ${redactProcessOutput(command)}`);
+      if (timedOut) stderrParts.push(`process timed out after ${timeoutMs}ms: ${redactProcessOutput(display)}`);
       if (spawnError) stderrParts.push(redactProcessOutput(spawnError));
       resolve({
         ok: exitCode === 0 && !timedOut && !spawnError,
@@ -328,7 +334,7 @@ function repositorySnapshot(root: string): RepositoryCommandSnapshot {
 function approvalToken(
   repository: RepositoryRecord,
   relativeCwd: string,
-  command: string,
+  command: RepositoryCommandValue,
   classification: RepositoryCommandClassification,
   snapshot: RepositoryCommandSnapshot,
   externalPathUsages: RepositoryCommandExternalPathUsage[],
@@ -363,16 +369,20 @@ function prepareRepositoryCommandExecution(
   repository: RepositoryRecord,
   input: ExecuteRepositoryCommandInput,
   controllerHome?: string,
-): { root: string; cwd: string; command: string; timeoutMs: number; maxOutputBytes: number; before: RepositoryCommandSnapshot; execution: RepositoryCommandExecution; executable: boolean; externalPathUsages: RepositoryCommandExternalPathUsage[] } {
+): { root: string; cwd: string; command: CanonicalRepositoryCommand; timeoutMs: number; maxOutputBytes: number; before: RepositoryCommandSnapshot; execution: RepositoryCommandExecution; executable: boolean; externalPathUsages: RepositoryCommandExternalPathUsage[] } {
   const { root, cwd, relativeCwd } = resolveRepositoryCommandCwd(repository, input.cwd);
-  const command = assertRepositoryCommandAllowed(input.command);
+  const command = assertRepositoryCommandInputAllowed(input.command);
   const externalGrants = loadExternalFilesystemGrants(root).grants;
   const externalPathUsages = assertCommandPathOperandsStayInRepository(command, cwd, root, externalGrants);
   const classification = classifyRepositoryCommand(command, repository.defaultBranch);
   const before = repositorySnapshot(root);
-  const token = approvalToken(repository, relativeCwd, command, classification, before, externalPathUsages);
+  const commandForPersistence = commandValue(command);
+  const token = approvalToken(repository, relativeCwd, commandForPersistence, classification, before, externalPathUsages);
   const permission = controllerHome ? readRepositoryAccessPolicy(controllerHome, repository.repoId) : undefined;
-  const risk = classification.risk === 'readonly' ? 'readonly' : classification.risk === 'remote_write' ? 'remote_write' : classification.risk === 'destructive' ? 'destructive' : /^\s*git\s+/i.test(command) ? 'local_git' : 'workspace_write';
+  const isGit = command.kind === 'argv'
+    ? command.executable?.split(/[\\/]/).at(-1)?.toLowerCase() === 'git'
+    : /^\s*git\s+/i.test(command.shellCommand!);
+  const risk = classification.risk === 'readonly' ? 'readonly' : classification.risk === 'remote_write' ? 'remote_write' : classification.risk === 'destructive' ? 'destructive' : isGit ? 'local_git' : 'workspace_write';
   const delegated = input.authorizationDecision ?? (controllerHome ? decideAuthorization({
     controllerHome,
     accessMode: permission?.mode ?? 'request',
@@ -381,14 +391,14 @@ function prepareRepositoryCommandExecution(
     currentRepositoryId: repository.repoId,
     permissionSnapshotVersion: permission?.revision ?? 1,
     approvalToken: token,
-    command,
+    command: commandForPersistence,
     cwd: relativeCwd,
     ...(input.sessionId ? { sessionId: input.sessionId } : {}),
     ...(input.principalId ? { principalId: input.principalId } : {}),
     ...(input.workId ? { workId: input.workId, boundWorkId: input.workId } : {}),
   }) : undefined);
   const resolved = controllerHome && input.approvalRequestId
-    ? assertResolvedAuthorization({ controllerHome, repositoryId: repository.repoId, approvalRequestId: input.approvalRequestId, sessionId: input.sessionId, principalId: input.principalId, workId: input.workId, permissionSnapshotVersion: permission?.revision ?? 1, command })
+    ? assertResolvedAuthorization({ controllerHome, repositoryId: repository.repoId, approvalRequestId: input.approvalRequestId, sessionId: input.sessionId, principalId: input.principalId, workId: input.workId, permissionSnapshotVersion: permission?.revision ?? 1, command: commandForPersistence })
     : undefined;
   const effectiveDecision: AuthorizationDecision | undefined = resolved
     ? { decision: 'allow', source: 'user_confirmation', reason: 'Resolved approval request matches the exact command and current permission snapshot.' }
@@ -398,7 +408,7 @@ function prepareRepositoryCommandExecution(
     repoId: repository.repoId,
     checkoutId: repository.activeCheckoutId,
     cwd: relativeCwd,
-    command: redactProcessOutput(command),
+    command: commandForPersistence,
     classification,
     approvalToken: token,
     authorization: input.authorization,
@@ -472,9 +482,13 @@ export function executeRepositoryCommand(
     auditCommand(controllerHome, repository, base);
     return base;
   }
-  const shell = process.platform === 'win32' ? 'cmd.exe' : '/bin/sh';
-  const shellArgs = process.platform === 'win32' ? ['/d', '/s', '/c', command] : ['-c', command];
-  const result = spawnSync(shell, shellArgs, {
+  const executableName = command.kind === 'argv'
+    ? command.executable!
+    : process.platform === 'win32' ? 'cmd.exe' : '/bin/sh';
+  const commandArgs = command.kind === 'argv'
+    ? [...(command.args ?? [])]
+    : process.platform === 'win32' ? ['/d', '/s', '/c', command.shellCommand!] : ['-c', command.shellCommand!];
+  const result = spawnSync(executableName, commandArgs, {
     cwd,
     env: commandEnvironment(),
     encoding: 'utf-8',
@@ -531,7 +545,7 @@ export async function executeRepositoryCommandAsync(
     auditCommand(controllerHome, repository, base);
     return base;
   }
-  const result = await runShellCommand(command, cwd, timeoutMs, maxOutputBytes, hooks);
+  const result = await runCanonicalCommand(command, cwd, timeoutMs, maxOutputBytes, hooks);
   const after = repositorySnapshot(root);
   const execution: RepositoryCommandExecution = {
     ...base,

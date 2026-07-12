@@ -7,6 +7,7 @@ import { withControllerLock } from '../../cli/repositories/locks';
 import { readJsonFile, writeJsonAtomic } from '../shared/json-files';
 import { readSchedulerHealthSnapshot } from './global-scheduler/scheduler';
 import { cleanupControllerRuntimeState } from './runtime-cleanup';
+import type { ControllerStartupRecoveryResult } from './startup-recovery';
 
 export interface ControllerDaemonStatus {
   schemaVersion: 1;
@@ -17,6 +18,8 @@ export interface ControllerDaemonStatus {
   error?: string;
   gatewaySeparated?: boolean;
   workerIsolation?: boolean;
+  degraded?: boolean;
+  recovery?: ControllerStartupRecoveryResult;
 }
 
 function daemonPidPath(controllerHome: string): string { return join(ensureControllerHome(controllerHome), 'daemon', 'controller.pid'); }

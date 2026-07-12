@@ -1,5 +1,6 @@
 import type { ControllerAgent, TaskRisk } from "../controller/types";
 import type { ControllerCheckSnapshot } from "../controller/check-runner";
+import type { RepositoryCommandValue } from "../repositories/command-normalization";
 
 export type LocalBridgeApproval = "auto" | "confirm" | "manual-only";
 export type LocalExecutionPreference = "auto" | "workspace" | "worktree";
@@ -77,7 +78,7 @@ export interface RepositoryCommandPayload {
   repoId: string;
   checkoutId?: string;
   requestId?: string;
-  command: string;
+  command: RepositoryCommandValue;
   cwd?: string;
   approvalToken?: string;
   approvalRequestId?: string;
