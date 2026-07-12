@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { execFileSync } from 'child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { controllerServiceStatus } from '../../src/cli/controller/lifecycle';
@@ -45,5 +45,23 @@ describe('controller runtime status', () => {
     expect(status.authority.runtimeState.authority).toBe('controller-home');
     expect(status.restartRequired).toBe(true);
     expect(status.restartReasons.some((reason) => reason.includes('runtime commit'))).toBe(true);
+  });
+
+  test('ignores workflow artifacts when computing runtime source dirtiness', () => {
+    const repoRoot = tempRoot('repo-harness-runtime-dirty-repo-');
+    writeFileSync(join(repoRoot, 'package.json'), JSON.stringify({ name: 'status-fixture' }, null, 2));
+    git(repoRoot, 'init', '-b', 'main');
+    git(repoRoot, 'config', 'user.email', 'test@example.com');
+    git(repoRoot, 'config', 'user.name', 'Repo Harness Test');
+    git(repoRoot, 'add', 'package.json');
+    git(repoRoot, 'commit', '-m', 'init');
+
+    mkdirSync(join(repoRoot, 'tasks', 'issues'), { recursive: true });
+    writeFileSync(join(repoRoot, 'tasks', 'issues', 'ISS-test.issue.md'), '# pending\n');
+    expect(collectRuntimeSourceIdentity(repoRoot).dirty).toBe(false);
+
+    mkdirSync(join(repoRoot, 'src'), { recursive: true });
+    writeFileSync(join(repoRoot, 'src', 'new-runtime-file.ts'), 'export const ready = true;\n');
+    expect(collectRuntimeSourceIdentity(repoRoot).dirty).toBe(true);
   });
 });

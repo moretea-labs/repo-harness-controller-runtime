@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import { existsSync, mkdirSync, readFileSync, realpathSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync } from 'fs';
 import { join } from 'path';
 import { spawnSync } from 'child_process';
 import { ensureControllerHome } from '../../cli/repositories/controller-home';
@@ -66,6 +66,28 @@ function detectDefaultBranch(root: string): string {
   return gitText(root, ['branch', '--show-current']) ?? 'main';
 }
 
+function runtimeSourceStatusPaths(root: string): string[] {
+  const paths = [
+    'src',
+    'package.json',
+    'bun.lock',
+    'bun.lockb',
+    'bunfig.toml',
+  ].filter((entry) => existsSync(join(root, entry)));
+  try {
+    for (const entry of readdirSync(root)) {
+      if (/^tsconfig(?:\..+)?\.json$/.test(entry) && existsSync(join(root, entry))) paths.push(entry);
+    }
+  } catch (_error) {
+    return paths.length > 0 ? [...new Set(paths)] : ['.'];
+  }
+  return paths.length > 0 ? [...new Set(paths)] : ['.'];
+}
+
+function runtimeSourceDirty(root: string): boolean {
+  return Boolean(gitText(root, ['status', '--porcelain=v1', '--untracked-files=all', '--', ...runtimeSourceStatusPaths(root)]));
+}
+
 export function runtimeGenerationPath(controllerHome: string): string {
   return join(ensureControllerHome(controllerHome), 'system', 'runtime-generation.json');
 }
@@ -83,7 +105,7 @@ export function collectRuntimeSourceIdentity(repoRoot: string): RuntimeSourceIde
     commit: gitText(canonicalRoot, ['rev-parse', '--verify', 'HEAD']),
     defaultBranch,
     defaultBranchCommit: gitText(canonicalRoot, ['rev-parse', '--verify', defaultBranch]),
-    dirty: Boolean(gitText(canonicalRoot, ['status', '--porcelain'])),
+    dirty: runtimeSourceDirty(canonicalRoot),
     observedAt: nowIso(),
   };
 }
