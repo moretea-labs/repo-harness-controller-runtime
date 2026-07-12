@@ -19,7 +19,7 @@ For a shared editable installation, keep the repo-harness checkout at a stable p
 
 ```bash
 repo-harness mcp setup chatgpt --repo .
-repo-harness mcp keepalive --repo . --profile controller --toolset core --enable-dev-runner --dev-runner-agents codex,claude --tunnel quick
+repo-harness mcp keepalive --repo . --profile controller --toolset advanced --enable-dev-runner --dev-runner-agents codex,claude --tunnel quick
 ```
 
 The `controller` profile starts a localhost-only visual controller at `http://127.0.0.1:8766/` by default. It is separate from the public MCP tunnel. Use it to launch ready Tasks, create small Codex/Claude sessions, approve local Jobs, inspect live logs, and run named checks. Add `--open-local-ui` to open it automatically, or `--no-local-ui` to disable it.
@@ -60,14 +60,14 @@ Quick tunnels are useful for one-off smoke tests, but their URL may change. For 
 cloudflared tunnel login
 cloudflared tunnel create repo-harness-mcp
 cloudflared tunnel route dns repo-harness-mcp <named-tunnel-host>
-repo-harness mcp keepalive --repo . --profile controller --toolset core --enable-dev-runner --dev-runner-agents codex,claude --tunnel named --cloudflare-tunnel-name repo-harness-mcp --public-endpoint https://<named-tunnel-host>/mcp
+repo-harness mcp keepalive --repo . --profile controller --toolset advanced --enable-dev-runner --dev-runner-agents codex,claude --tunnel named --cloudflare-tunnel-name repo-harness-mcp --public-endpoint https://<named-tunnel-host>/mcp
 ```
 
 If Cloudflare is managed outside repo-harness, keep repo-harness on the fixed public origin without owning the tunnel process:
 
 ```bash
 repo-harness mcp setup chatgpt --repo . --endpoint https://<named-tunnel-host>/mcp
-repo-harness mcp keepalive --repo . --profile controller --toolset core --enable-dev-runner --dev-runner-agents codex,claude --tunnel none --public-endpoint https://<named-tunnel-host>/mcp
+repo-harness mcp keepalive --repo . --profile controller --toolset advanced --enable-dev-runner --dev-runner-agents codex,claude --tunnel none --public-endpoint https://<named-tunnel-host>/mcp
 ```
 
 Regenerate this guide with the stable endpoint:

@@ -35,9 +35,9 @@ export function buildRuntimeCommand(): Command {
     .option('--log-file <path>', 'Combined runtime log file')
     .option('--json', 'Output JSON')
     .action(async (opts: { controllerHome?: string; repo?: string; logFile?: string; json?: boolean }) => {
-      const home = ensureControllerHome(opts.controllerHome);
-      const repositories = listRepositories(home, { includeRemoved: true });
       const service = await controllerServiceStatus(opts);
+      const home = ensureControllerHome(service.controllerHome);
+      const repositories = listRepositories(home, { includeRemoved: true });
       if (opts.json) {
         output({
           service,

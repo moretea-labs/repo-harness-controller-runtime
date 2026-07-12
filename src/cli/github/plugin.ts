@@ -3,6 +3,7 @@ import { dirname, join } from "path";
 import { getGitHubStatus, publishIssueToGitHub, refreshGitHubIssue, closeGitHubIssue } from "./github";
 import type { ControllerIssue } from "../controller/types";
 import { tryAppendControllerWorklogEvent } from "../controller/worklog";
+import { resolveRepoPreferredControllerHome } from "../repositories/controller-home";
 import { listRepositories, updateRepository } from "../repositories/registry";
 import type { RepositoryRecord } from "../repositories/types";
 
@@ -87,7 +88,8 @@ function loadLegacyGitHubPluginConfig(repoRoot: string): GitHubPluginConfig | un
 }
 
 function findRepositoryRecord(repoRoot: string): RepositoryRecord | undefined {
-  return listRepositories().find((record) =>
+  const controllerHome = resolveRepoPreferredControllerHome(repoRoot);
+  return listRepositories(controllerHome).find((record) =>
     record.canonicalRoot === repoRoot
     || record.localRoot === repoRoot
     || record.checkouts.some((checkout) => checkout.canonicalRoot === repoRoot || checkout.localRoot === repoRoot));
@@ -111,6 +113,7 @@ function configFromRepository(record: RepositoryRecord | undefined): GitHubPlugi
 function syncRepositoryGitHubConfig(repoRoot: string, config: GitHubPluginConfig): void {
   const record = findRepositoryRecord(repoRoot);
   if (!record) return;
+  const controllerHome = resolveRepoPreferredControllerHome(repoRoot);
   const current = record.github;
   const repository = config.repository?.trim();
   const effectiveRepository = repository
@@ -135,7 +138,7 @@ function syncRepositoryGitHubConfig(repoRoot: string, config: GitHubPluginConfig
       cloudAgentSupported: current?.cloudAgentSupported,
       authenticationCapability: current?.authenticationCapability ?? "unknown",
     },
-  });
+  }, controllerHome);
 }
 
 export function loadGitHubPluginConfig(repoRoot: string): GitHubPluginConfig {
