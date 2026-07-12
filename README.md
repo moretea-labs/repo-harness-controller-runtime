@@ -16,6 +16,75 @@
 
 它面向真实项目，而不是一次性的聊天会话：计划、任务状态、执行证据、检查结果和 handoff 都与仓库关联，后续会话可以继续推进。当前运行时采用薄网关、持久 Job、全局调度器、每仓库 Repo Actor、独立 Worker 和 Evidence Plane。
 
+## 系统架构
+
+```mermaid
+flowchart TB
+    Client["ChatGPT / Local UI / CLI"]
+    Gateway["MCP Gateway / Local Bridge<br/>认证、参数校验、仓库路由、持久化受理"]
+    Home[("Controller Home<br/>Repository Registry、Jobs、Events、Projections")]
+    Daemon["Controller Daemon<br/>恢复、调度、自动任务与跨仓库编排"]
+    Scheduler["Global Scheduler<br/>容量、公平性、依赖与资源协调"]
+    Actor["Per-Repository Actor<br/>仓库级顺序、冲突判断、Claims / Leases"]
+    Worker["Isolated Worker<br/>一个有界 Job / 独立进程"]
+    Worktree["Repository Checkout / Worktree<br/>Direct Edit、Command、Agent、Git"]
+    Verify["Checks / Verification / Release Gates"]
+    Evidence[("Evidence / Artifacts / Materialized Projections")]
+    Plugins["Plugins / External Providers<br/>GitHub、Gmail、Calendar、Tasks 等"]
+
+    Client --> Gateway
+    Gateway -->|persist before execute| Home
+    Gateway -->|durable acknowledgement| Client
+    Home <--> Daemon
+    Daemon --> Scheduler
+    Scheduler --> Actor
+    Actor -->|resource lease| Worker
+    Worker --> Worktree
+    Worker --> Verify
+    Worker --> Evidence
+    Verify --> Evidence
+    Evidence --> Home
+    Gateway -->|bounded status / result| Evidence
+    Worker -. policy-typed action .-> Plugins
+```
+
+架构边界：Gateway 只负责短请求和持久化受理，不持有长任务；Controller Daemon 与 Repo Actor 负责调度和仓库级安全；Worker 在隔离进程与 checkout/worktree 内执行；Controller Home 保存可恢复的运行事实，Evidence Plane 为验证、审查和后续会话提供依据。完整权威说明见 [当前架构总览](docs/architecture/current/system-overview.md)、[架构不变量](docs/architecture/current/architecture-invariants.md) 与 [运行目录映射](docs/architecture/current/runtime-directory-map.md)。
+
+## 架构流程
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as ChatGPT / User
+    participant G as MCP Gateway
+    participant C as Controller
+    participant R as Repo Actor
+    participant W as Isolated Worker
+    participant Git as Checkout / Worktree
+    participant E as Evidence Plane
+
+    U->>G: 自然语言目标与仓库作用域
+    G->>C: 创建或绑定 WorkContract，持久化 Job
+    G-->>U: 返回可恢复的 Work / Job 标识
+    C->>R: 评估依赖、冲突、资源声明与执行方式
+    R->>W: 分配 Lease 并启动有界 Worker
+    W->>Git: 调查源码并执行 Direct Edit / Command / Agent
+    W->>Git: 运行针对性 build、lint、test 或命名检查
+    W->>E: 写入事件、Diff、检查结果与 Artifacts
+    alt 验证通过
+        W->>Git: 提交，按策略合并并清理临时 worktree / branch
+        E-->>C: 发布完成证据与最终状态
+        C-->>G: 更新可查询 Projection
+        G-->>U: 返回结果摘要和证据引用
+    else 失败、冲突或高风险动作
+        W->>E: 保留失败证据和明确下一步
+        C-->>G: 标记重试、请求修改或等待授权
+        G-->>U: 返回可操作的决策请求
+    end
+```
+
+一次完整执行遵循“**先持久化、再执行；先验证、再完成**”：请求断开或 Controller 重启不会抹掉已受理工作；普通仓库可以并行推进，但同一仓库内由 Repo Actor、资源声明和 Lease 防止冲突；执行成功、验证成功、任务接受和发布就绪是彼此独立的状态。流程细节见 [调度与 Agent 策略](docs/architecture/current/dispatch-and-agent-strategy.md)、[Job 与 Run 生命周期](docs/architecture/current/job-and-run-lifecycle.md)、[验证与发布门禁](docs/architecture/current/verification-and-release-gates.md)。
+
 新用户建议按这个顺序进入：
 
 1. [公开使用指南](docs/public-usage-guide.zh-CN.md)
