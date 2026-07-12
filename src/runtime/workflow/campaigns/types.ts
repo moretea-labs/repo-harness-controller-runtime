@@ -206,7 +206,7 @@ export interface CampaignCounters {
 }
 
 export interface CampaignCleanupResource {
-  kind: 'job' | 'checkpoint' | 'worktree' | 'branch' | 'lease' | 'process';
+  kind: 'job' | 'checkpoint' | 'worktree' | 'branch' | 'checkout' | 'lease' | 'process';
   id: string;
   status: 'cleaned' | 'preserved' | 'missing' | 'failed';
   message?: string;

@@ -1,6 +1,6 @@
 import { existsSync, realpathSync } from 'fs';
 import { resolve } from 'path';
-import { getRepository } from '../../../cli/repositories/registry';
+import { getRepository, setRepositoryCheckoutLifecycle } from '../../../cli/repositories/registry';
 import { runProcess } from '../../../effects/process-runner';
 import { cancelExecutionJob, findExecutionJob } from '../../execution/jobs/store';
 import type { Campaign, CampaignCleanupReport, CampaignCleanupResource } from './types';
@@ -70,6 +70,28 @@ function cleanupManagedWorkspace(
   } else {
     resources.push({ kind: 'worktree', id: worktree, status: 'missing' });
     git(sourceRoot, ['worktree', 'prune', '--expire', 'now']);
+  }
+
+  const checkoutId = workspace.checkoutId;
+  if (!checkoutId) {
+    const message = `Managed Campaign ${campaign.campaignId} workspace has no checkout identity.`;
+    resources.push({ kind: 'checkout', id: worktree, status: 'failed', message });
+    leaks.push(message);
+  } else {
+    try {
+      setRepositoryCheckoutLifecycle({
+        repoId: campaign.repoId,
+        checkoutId,
+        lifecycle: 'removed',
+        reason: `Campaign ${campaign.campaignId} workspace cleanup completed.`,
+        controllerHome,
+      });
+      resources.push({ kind: 'checkout', id: checkoutId, status: 'cleaned' });
+    } catch (error) {
+      const message = `Failed to update checkout lifecycle: ${error instanceof Error ? error.message : String(error)}`;
+      resources.push({ kind: 'checkout', id: checkoutId, status: 'failed', message });
+      leaks.push(message);
+    }
   }
 
   if (branch) {

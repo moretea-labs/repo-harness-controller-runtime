@@ -4,7 +4,6 @@ import { join } from "path";
 
 const ROOT = join(import.meta.dir, "..");
 const HOOK_INPUT_ASSET = join(ROOT, "assets/hooks/hook-input.sh");
-const HOOK_INPUT_LIVE = join(ROOT, ".ai/hooks/hook-input.sh");
 
 function probeHookJsonGet(opts: {
   source: string;
@@ -28,7 +27,7 @@ function probeHookJsonGet(opts: {
   });
 }
 
-for (const source of [HOOK_INPUT_ASSET, HOOK_INPUT_LIVE]) {
+for (const source of [HOOK_INPUT_ASSET]) {
   describe(`hook_json_get (${source.replace(ROOT + "/", "")})`, () => {
     test("returns value when key is present in valid JSON", () => {
       const res = probeHookJsonGet({

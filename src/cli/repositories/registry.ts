@@ -21,6 +21,7 @@ import {
 } from './identity';
 import type {
   RepositoryCheckout,
+  RepositoryCheckoutLifecycle,
   RepositoryRecord,
   RepositoryRegistry,
   RepositoryStateStorageStrategy,
@@ -61,6 +62,19 @@ export interface AddRepositoryCheckoutInput {
   activate?: boolean;
 }
 
+export interface SetRepositoryCheckoutLifecycleInput {
+  repoId: string;
+  checkoutId: string;
+  lifecycle: RepositoryCheckoutLifecycle;
+  reason?: string;
+  controllerHome?: string;
+}
+
+export interface ReconcileRepositoryCheckoutsResult {
+  repository: RepositoryRecord;
+  archivedCheckoutIds: string[];
+}
+
 function validBranch(value: string | undefined): boolean {
   if (!value) return true;
   return /^(?!\/)(?!.*(?:\/\/|\.\.))(?!.*\/$)[A-Za-z0-9._/-]+$/.test(value);
@@ -68,6 +82,20 @@ function validBranch(value: string | undefined): boolean {
 
 function now(): string {
   return new Date().toISOString();
+}
+
+export function repositoryCheckoutLifecycle(checkout: RepositoryCheckout): RepositoryCheckoutLifecycle {
+  return checkout.lifecycle === 'removed' || checkout.lifecycle === 'archived'
+    ? checkout.lifecycle
+    : 'active';
+}
+
+function normalizeCheckout(checkout: RepositoryCheckout): RepositoryCheckout {
+  return { ...checkout, lifecycle: repositoryCheckoutLifecycle(checkout) };
+}
+
+function activeCheckouts(record: RepositoryRecord): RepositoryCheckout[] {
+  return record.checkouts.filter((checkout) => repositoryCheckoutLifecycle(checkout) === 'active');
 }
 
 function git(root: string, args: string[]): string | undefined {
@@ -105,7 +133,12 @@ export function loadRepositoryRegistry(controllerHome?: string): RepositoryRegis
     const parsed = JSON.parse(readFileSync(path, 'utf-8')) as Partial<RepositoryRegistry>;
     return {
       schemaVersion: 1,
-      repositories: Array.isArray(parsed.repositories) ? parsed.repositories : [],
+      repositories: Array.isArray(parsed.repositories)
+        ? parsed.repositories.map((record) => ({
+          ...record,
+          checkouts: Array.isArray(record.checkouts) ? record.checkouts.map(normalizeCheckout) : [],
+        }))
+        : [],
       updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : now(),
     };
   } catch (error) {
@@ -206,8 +239,9 @@ function defaultBranch(root: string): string | undefined {
 }
 
 function activeCheckout(record: RepositoryRecord): RepositoryCheckout {
-  return record.checkouts.find((checkout) => checkout.checkoutId === record.activeCheckoutId)
-    ?? record.checkouts[0]
+  const available = activeCheckouts(record);
+  return available.find((checkout) => checkout.checkoutId === record.activeCheckoutId)
+    ?? available[0]
     ?? {
       checkoutId: record.activeCheckoutId,
       localRoot: record.localRoot,
@@ -217,6 +251,7 @@ function activeCheckout(record: RepositoryRecord): RepositoryCheckout {
       createdAt: record.createdAt,
       updatedAt: record.updatedAt,
       lastSeenAt: record.lastSeenAt,
+      lifecycle: 'active',
     };
 }
 
@@ -330,6 +365,9 @@ export function selectRepositoryCheckout(record: RepositoryRecord, checkoutId?: 
   if (!checkoutId?.trim()) return record;
   const checkout = record.checkouts.find((candidate) => candidate.checkoutId === checkoutId.trim());
   if (!checkout) throw new Error(`checkout not found for ${record.repoId}: ${checkoutId}`);
+  if (repositoryCheckoutLifecycle(checkout) !== 'active') {
+    throw new Error(`CHECKOUT_NOT_ACTIVE: ${record.repoId}/${checkout.checkoutId} is ${repositoryCheckoutLifecycle(checkout)}`);
+  }
   return {
     ...record,
     localRoot: checkout.localRoot,
@@ -367,6 +405,7 @@ export function registerRepository(input: RegisterRepositoryInput): RepositoryRe
     createdAt: existing?.checkouts.find((value) => value.checkoutId === checkoutId)?.createdAt ?? timestamp,
     updatedAt: timestamp,
     lastSeenAt: timestamp,
+    lifecycle: 'active',
   };
   const restoringExisting = Boolean(existing && (existing.removedAt || existing.enabled === false));
   const enabled = input.enabled ?? (restoringExisting ? true : existing?.enabled ?? true);
@@ -429,6 +468,7 @@ export function addRepositoryCheckout(input: AddRepositoryCheckoutInput): Reposi
     createdAt: current.checkouts.find((value) => value.checkoutId === checkoutId)?.createdAt ?? timestamp,
     updatedAt: timestamp,
     lastSeenAt: timestamp,
+    lifecycle: 'active',
   };
   const activate = input.activate === true;
   const next: RepositoryRecord = {
@@ -448,6 +488,69 @@ export function addRepositoryCheckout(input: AddRepositoryCheckoutInput): Reposi
     stateStorageStrategy: next.stateStorageStrategy,
   });
   return next;
+}
+
+export function setRepositoryCheckoutLifecycle(input: SetRepositoryCheckoutLifecycleInput): RepositoryRecord {
+  const home = ensureControllerHome(input.controllerHome);
+  const registry = loadRepositoryRegistry(home);
+  const repositoryIndex = registry.repositories.findIndex((record) => record.repoId === input.repoId);
+  if (repositoryIndex < 0) throw new Error(`repository not found: ${input.repoId}`);
+  const repository = registry.repositories[repositoryIndex];
+  const checkoutIndex = repository.checkouts.findIndex((checkout) => checkout.checkoutId === input.checkoutId);
+  if (checkoutIndex < 0) throw new Error(`checkout not found for ${input.repoId}: ${input.checkoutId}`);
+  if (input.lifecycle !== 'active' && repository.activeCheckoutId === input.checkoutId) {
+    throw new Error(`CHECKOUT_ACTIVE_PROTECTED: ${input.repoId}/${input.checkoutId}`);
+  }
+  const timestamp = now();
+  const checkout = repository.checkouts[checkoutIndex];
+  const updated: RepositoryCheckout = {
+    ...checkout,
+    lifecycle: input.lifecycle,
+    updatedAt: timestamp,
+    lifecycleReason: input.lifecycle === 'active' ? undefined : input.reason?.trim() || checkout.lifecycleReason,
+    removedAt: input.lifecycle === 'removed' ? checkout.removedAt ?? timestamp : undefined,
+    archivedAt: input.lifecycle === 'archived' ? checkout.archivedAt ?? timestamp : undefined,
+  };
+  const next: RepositoryRecord = {
+    ...repository,
+    checkouts: repository.checkouts.map((candidate, index) => index === checkoutIndex ? updated : candidate),
+    updatedAt: timestamp,
+  };
+  registry.repositories[repositoryIndex] = next;
+  saveRepositoryRegistry(registry, home);
+  return next;
+}
+
+export function reconcileRepositoryCheckouts(repoId: string, controllerHome?: string): ReconcileRepositoryCheckoutsResult {
+  const home = ensureControllerHome(controllerHome);
+  const registry = loadRepositoryRegistry(home);
+  const repositoryIndex = registry.repositories.findIndex((record) => record.repoId === repoId);
+  if (repositoryIndex < 0) throw new Error(`repository not found: ${repoId}`);
+  const repository = registry.repositories[repositoryIndex];
+  const timestamp = now();
+  const archivedCheckoutIds: string[] = [];
+  const checkouts = repository.checkouts.map((checkout) => {
+    if (
+      checkout.checkoutId === repository.activeCheckoutId
+      || !checkout.worktree
+      || repositoryCheckoutLifecycle(checkout) !== 'active'
+      || existsSync(checkout.canonicalRoot)
+    ) return checkout;
+    archivedCheckoutIds.push(checkout.checkoutId);
+    return {
+      ...checkout,
+      lifecycle: 'archived' as const,
+      archivedAt: timestamp,
+      removedAt: undefined,
+      lifecycleReason: 'Managed worktree root no longer exists.',
+      updatedAt: timestamp,
+    };
+  });
+  if (archivedCheckoutIds.length === 0) return { repository, archivedCheckoutIds };
+  const next: RepositoryRecord = { ...repository, checkouts, updatedAt: timestamp };
+  registry.repositories[repositoryIndex] = next;
+  saveRepositoryRegistry(registry, home);
+  return { repository: next, archivedCheckoutIds };
 }
 
 export function updateRepository(repoId: string, patch: UpdateRepositoryInput, controllerHome?: string): RepositoryRecord {
@@ -575,6 +678,10 @@ export function refreshRepository(repoId: string, controllerHome?: string): Repo
     branch: git(canonicalRoot, ['branch', '--show-current']) ?? null,
     updatedAt: timestamp,
     lastSeenAt: timestamp,
+    lifecycle: 'active',
+    removedAt: undefined,
+    archivedAt: undefined,
+    lifecycleReason: undefined,
   };
   const refreshed: RepositoryRecord = {
     ...record,

@@ -34,12 +34,13 @@ describe("Bootstrap Script Contracts", () => {
     expect(metadata).toContain("default_prompt:");
   });
 
-  test("repo root should include routing docs and self-host hook implementation", () => {
+  test("repo root should include routing docs and use the central hook implementation", () => {
     expect(existsSync(join(ROOT, "CLAUDE.md"))).toBe(true);
     expect(existsSync(join(ROOT, "AGENTS.md"))).toBe(true);
     expect(existsSync(join(ROOT, ".claude/settings.json"))).toBe(false);
     expect(existsSync(join(ROOT, ".codex/hooks.json"))).toBe(false);
-    expect(existsSync(join(ROOT, ".ai/hooks/run-hook.sh"))).toBe(true);
+    expect(existsSync(join(ROOT, ".ai/hooks/run-hook.sh"))).toBe(false);
+    expect(existsSync(join(ROOT, "assets/hooks/run-hook.sh"))).toBe(true);
 
     const claude = read("CLAUDE.md");
     const agents = read("AGENTS.md");
@@ -57,11 +58,11 @@ describe("Bootstrap Script Contracts", () => {
   test("repo package should expose workflow verification scripts", () => {
     const pkg = JSON.parse(read("package.json"));
     const cliEntry = read("src/cli/index.ts");
-    expect(pkg.name).toBe("repo-harness");
-    expect(pkg.version).toBe("1.4.0");
+    expect(pkg.name).toBe("@moretea-labs/repo-harness-controller");
+    expect(pkg.version).toMatch(/^1\.4\.0(?:-rc\.\d+)?$/);
     expect(pkg.private).toBeUndefined();
-    expect(pkg.bin["repo-harness"]).toBe("src/cli/index.ts");
-    expect(pkg.bin["repo-harness-hook"]).toBe("src/cli/hook-entry.ts");
+    expect(pkg.bin["repo-harness"]).toBe("bin/repo-harness.mjs");
+    expect(pkg.bin["repo-harness-hook"]).toBe("bin/repo-harness-hook.mjs");
     expect(pkg.files).toContain("assets/");
     expect(pkg.files).not.toContain("docs/reference-configs/");
     expect(cliEntry).toContain("CLI_VERSION");
@@ -90,16 +91,16 @@ describe("Bootstrap Script Contracts", () => {
     expect(ciGate.indexOf(resume)).toBeLessThan(ciGate.indexOf("bash scripts/check-task-workflow.sh --strict"));
   });
 
-  test("release gate should delegate owned checks to the ci gate", () => {
+  test("release gate should delegate owned checks to the release-readiness gate", () => {
     const releaseGate = read("scripts/check-npm-release.sh");
-    const ciGate = read("scripts/check-ci.sh");
+    const readinessGate = read("scripts/check-release-readiness.sh");
     const pkg = JSON.parse(read("package.json"));
     expect(releaseGate).toContain('npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}"');
-    expect(releaseGate).toContain("bash scripts/check-ci.sh");
-    expect(releaseGate.indexOf("bash scripts/check-ci.sh")).toBeGreaterThan(
+    expect(releaseGate).toContain("bash scripts/check-release-readiness.sh");
+    expect(releaseGate.indexOf("bash scripts/check-release-readiness.sh")).toBeGreaterThan(
       releaseGate.indexOf('npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}"')
     );
-    expect(ciGate).toContain("bash scripts/check-tarball-install-smoke.sh");
+    expect(readinessGate).toContain("bash scripts/check-tarball-install-smoke.sh");
     expect(pkg.scripts["check:release-published"]).toBe("bash scripts/check-release-published.sh");
     expect(pkg.scripts["smoke:tarball-install"]).toBe("bash scripts/check-tarball-install-smoke.sh");
   });

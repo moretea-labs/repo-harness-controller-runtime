@@ -36,23 +36,22 @@ function collectFiles(root: string, current = root): string[] {
 }
 
 describe("workflow contract manifest", () => {
-  test("self-hosted runtime manifest should match the asset contract", () => {
-    const asset = readFileSync(join(ROOT, "assets/workflow-contract.v1.json"), "utf-8");
-    const runtime = readFileSync(join(ROOT, ".ai/harness/workflow-contract.json"), "utf-8");
-    expect(runtime).toBe(asset);
+  test("source repository keeps the workflow contract authoritative in packaged assets", () => {
+    const contractPath = join(ROOT, "assets/workflow-contract.v1.json");
+    const contract = loadWorkflowContract(contractPath);
+    expect(contract.version).toBe("1.4.0");
+    expect(contract.contractId).toBeTruthy();
+    expect(existsSync(join(ROOT, ".ai/harness/workflow-contract.json"))).toBe(false);
+    expect(contract.artifacts.requiredFiles).toContain(".ai/harness/workflow-contract.json");
   });
 
-  test("hook asset files should stay in parity with self-hosted .ai/hooks", () => {
-    const assetFiles = collectFiles(join(ROOT, "assets/hooks")).filter((file) => !["./settings.template.json", "./codex.hooks.template.json"].includes(file));
-    const allRuntimeFiles = collectFiles(join(ROOT, ".ai/hooks"));
-
-    expect(allRuntimeFiles).toEqual(assetFiles);
-
-    for (const relPath of allRuntimeFiles) {
-      const assetContent = readFileSync(join(ROOT, "assets/hooks", relPath.slice(2)), "utf-8");
-      const runtimeContent = readFileSync(join(ROOT, ".ai/hooks", relPath.slice(2)), "utf-8");
-      expect(runtimeContent).toBe(assetContent);
-    }
+  test("central hook assets are complete without a tracked self-host runtime copy", () => {
+    const assetFiles = collectFiles(join(ROOT, "assets/hooks"));
+    expect(assetFiles).toContain("./run-hook.sh");
+    expect(assetFiles).toContain("./hook-input.sh");
+    expect(assetFiles).toContain("./lib/session-state.sh");
+    expect(assetFiles).toContain("./lib/workflow-state.sh");
+    expect(existsSync(join(ROOT, ".ai/hooks"))).toBe(false);
   });
 
   test("helper inventory should come from the workflow contract", () => {

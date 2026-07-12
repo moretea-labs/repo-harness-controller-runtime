@@ -3559,6 +3559,7 @@ export async function callMcpTool(
           payload: {
             checkId: String(args.check_id ?? ""),
             timeoutMs: typeof args.timeout_ms === "number" ? args.timeout_ms : undefined,
+            requestId: typeof args.request_id === "string" ? args.request_id.trim() || undefined : undefined,
           },
         });
         const result = job.status === "approved"

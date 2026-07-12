@@ -39,5 +39,5 @@ test('install script supports explicit Node fallback without forcing Bun install
   const install = readFileSync('install.sh', 'utf8');
   assert.match(install, /REPO_HARNESS_INSTALL_RUNTIME/);
   assert.match(install, /npm install -g/);
-  assert.match(install, /Node\.js 20\+/);
+  assert.match(install, /Node\.js 20\.10 or newer/);
 });

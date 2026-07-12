@@ -1,4 +1,4 @@
-import { listRepositories } from '../../cli/repositories/registry';
+import { listRepositories, reconcileRepositoryCheckouts } from '../../cli/repositories/registry';
 import { reconcileLocalBridgeJobs } from '../../cli/local-bridge/job-store';
 import { rebuildExecutionJobIndexes } from '../execution/jobs/store';
 import { reconcileExecutionJobs } from './global-scheduler/reconciliation';
@@ -8,7 +8,7 @@ import { CONTROLLER_SCOPE_REPO_ID } from '../../cli/repositories/controller-home
 
 export interface ControllerRecoveryError {
   repoId: string;
-  phase: 'execution-indexes' | 'execution-jobs' | 'local-jobs' | 'leases' | 'projection';
+  phase: 'checkouts' | 'execution-indexes' | 'execution-jobs' | 'local-jobs' | 'leases' | 'projection';
   code: string;
   message: string;
 }
@@ -16,6 +16,7 @@ export interface ControllerRecoveryError {
 export interface ControllerRecoveryRepositoryResult {
   repoId: string;
   degraded: boolean;
+  archivedCheckoutIds?: string[];
   executionIndexesRebuilt?: boolean;
   executionJobs?: ReturnType<typeof reconcileExecutionJobs>;
   localJobs?: ReturnType<typeof reconcileLocalBridgeJobs>;
@@ -57,6 +58,9 @@ export function reconcileControllerStartup(controllerHome: string): ControllerSt
         return undefined;
       }
     };
+
+    result.archivedCheckoutIds = run('checkouts', () =>
+      reconcileRepositoryCheckouts(repository.repoId, controllerHome).archivedCheckoutIds);
 
     // Rebuild from records first so a lost/stale active or request index
     // cannot hide accepted work from reconciliation or idempotency lookup.

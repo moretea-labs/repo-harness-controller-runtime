@@ -1,5 +1,6 @@
 export type RepositoryType = 'git' | 'bare' | 'local-git' | 'unknown';
 export type RepositoryStateStorageStrategy = 'controller-home' | 'repository-local' | 'hybrid';
+export type RepositoryCheckoutLifecycle = 'active' | 'removed' | 'archived';
 export type LocalProjectBootstrapMode = 'init_git_only' | 'init_git_and_register' | 'replace_registration';
 
 export interface GitHubRepositoryMapping {
@@ -27,6 +28,11 @@ export interface RepositoryCheckout {
   createdAt: string;
   updatedAt: string;
   lastSeenAt: string;
+  /** Missing on legacy records and interpreted as active. */
+  lifecycle?: RepositoryCheckoutLifecycle;
+  removedAt?: string;
+  archivedAt?: string;
+  lifecycleReason?: string;
 }
 
 export interface RepositoryRecord {
