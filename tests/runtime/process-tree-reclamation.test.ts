@@ -190,7 +190,7 @@ describe('worker process-tree reclamation', () => {
     expect(refreshed.error?.retryable).toBe(false);
   });
 
-  test('stale heartbeats do not leave a live worker running forever', async () => {
+  test('keeps a live synchronous worker running until its durable deadline', async () => {
     const controllerHome = tempRoot('repo-harness-stale-heartbeat-home-');
     const { leaderPid, childPid } = await spawnDetachedProcessTree();
     const created = createExecutionJob(controllerHome, {
@@ -215,12 +215,12 @@ describe('worker process-tree reclamation', () => {
     const result = await reconcileExecutionJobsAsync(controllerHome);
     const refreshed = getExecutionJob(controllerHome, 'repo-a', created.jobId);
 
-    expect(result.terminal).toBe(1);
-    expect(refreshed.status).toBe('failed');
-    expect(refreshed.error?.code).toBe('WORKER_LOST');
-    expect(refreshed.error?.details?.["workerLostReason"]).toBe('stale_heartbeat');
-    expect(isProcessAlive(leaderPid)).toBe(false);
-    expect(isProcessAlive(childPid)).toBe(false);
+    expect(result.terminal).toBe(0);
+    expect(result.requeued).toBe(0);
+    expect(refreshed.status).toBe('running');
+    expect(refreshed.workerPid).toBe(leaderPid);
+    expect(isProcessAlive(leaderPid)).toBe(true);
+    expect(isProcessAlive(childPid)).toBe(true);
   });
 
   test('scheduler shutdown waits for spawned worker trees before returning', async () => {

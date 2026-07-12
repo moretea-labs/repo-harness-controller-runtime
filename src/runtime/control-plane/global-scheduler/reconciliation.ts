@@ -58,7 +58,11 @@ function workerLossContext(job: ExecutionJob): {
     return { workerLost: true, heartbeatAgeMs: ageMs, reason: 'process_missing' };
   }
   if (ageMs >= WORKER_HEARTBEAT_STALE_MS) {
-    return { workerLost: true, heartbeatAgeMs: ageMs, reason: 'stale_heartbeat' };
+    // Some bounded tool implementations (notably xcodebuild via spawnSync)
+    // legitimately block the Worker's JavaScript timer while the OS process is
+    // still alive. A stale heartbeat is therefore degraded observability, not
+    // proof of worker loss. The durable Job deadline remains the hard bound.
+    return { workerLost: false, heartbeatAgeMs: ageMs, reason: 'stale_heartbeat' };
   }
   return { workerLost: false, heartbeatAgeMs: ageMs, reason: 'process_missing' };
 }
