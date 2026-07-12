@@ -8,6 +8,7 @@ import {
   OPTIONAL_INTERACTIVE_DEVELOPMENT_TOOLS,
   buildLocalConnectorStatus,
   evaluateConnectorFreshness,
+  observeLocalMcpRuntime,
 } from '../../src/cli/local-bridge/connector-freshness';
 import {
   buildCommandCenter,
@@ -33,6 +34,7 @@ import {
   CONTROLLER_TOOL_SURFACE_VERSION,
   controllerToolSurfaceFingerprint,
 } from '../../src/cli/controller/runtime-config';
+import { writeMcpRuntimeState, writeMcpServiceLocalConfig, writeMcpServiceRuntimeState } from '../../src/cli/mcp/auth';
 
 const roots: string[] = [];
 
@@ -273,5 +275,65 @@ describe('connector freshness diagnostics', () => {
     expect(report.status).toBe('unable_to_verify_chatgpt_snapshot');
     expect(report.fingerprintMatches).toBeNull();
     expect(report.severity).toBe('info');
+  });
+
+  test('observeLocalMcpRuntime prefers controller-home runtime over divergent legacy runtime', async () => {
+    const { repoRoot, controllerHome } = fixture();
+    const previousControllerHome = process.env.REPO_HARNESS_CONTROLLER_HOME;
+    process.env.REPO_HARNESS_CONTROLLER_HOME = controllerHome;
+    writeMcpServiceLocalConfig(controllerHome, {
+      version: 1,
+      server: { host: '127.0.0.1', port: 9 },
+      profile: 'controller',
+      toolset: 'advanced',
+    });
+    writeMcpServiceRuntimeState(controllerHome, {
+      version: 1,
+      repo: repoRoot,
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      status: 'running',
+      tunnelMode: 'none',
+      server: {
+        endpoint: 'http://127.0.0.1:8765/mcp',
+        running: true,
+        healthy: true,
+        restartCount: 0,
+        toolSurface: CONTROLLER_TOOL_SURFACE,
+        schemaVersion: CONTROLLER_SCHEMA_VERSION,
+        toolSurfaceVersion: CONTROLLER_TOOL_SURFACE_VERSION,
+        toolSurfaceFingerprint: 'service-fingerprint',
+        toolCount: 124,
+      },
+    });
+    writeMcpRuntimeState(repoRoot, {
+      version: 1,
+      repo: repoRoot,
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      status: 'running',
+      tunnelMode: 'none',
+      server: {
+        endpoint: 'http://127.0.0.1:8765/mcp',
+        running: true,
+        healthy: true,
+        restartCount: 0,
+        toolSurface: CONTROLLER_TOOL_SURFACE,
+        schemaVersion: CONTROLLER_SCHEMA_VERSION,
+        toolSurfaceVersion: CONTROLLER_TOOL_SURFACE_VERSION,
+        toolSurfaceFingerprint: 'legacy-fingerprint',
+        toolCount: 89,
+      },
+    });
+
+    try {
+      const observation = await observeLocalMcpRuntime(repoRoot, { refreshRuntimeFile: false });
+      expect(observation?.source).toBe('runtime_file');
+      expect(observation?.toolSurfaceFingerprint).toBe('service-fingerprint');
+      expect(observation?.toolCount).toBe(124);
+    } finally {
+      if (previousControllerHome === undefined) delete process.env.REPO_HARNESS_CONTROLLER_HOME;
+      else process.env.REPO_HARNESS_CONTROLLER_HOME = previousControllerHome;
+    }
   });
 });

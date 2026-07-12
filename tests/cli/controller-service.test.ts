@@ -204,4 +204,27 @@ describe("controller service lifecycle", () => {
     const logPath = join(repoRoot, ".ai", "local", "logs", "repo-harness-controller.log");
     expect(readFileSync(logPath, "utf-8")).toContain("[repo-harness mcp keepalive] Repo:");
   }, 30_000);
+
+  test("status warns when repo-local legacy MCP config diverges from controller-home config", async () => {
+    const { repoRoot, controllerHome } = await createFixture();
+    mkdirSync(join(controllerHome, "mcp"), { recursive: true });
+    writeFileSync(
+      join(controllerHome, "mcp", "mcp.local.json"),
+      `${JSON.stringify({
+        version: 1,
+        profile: "controller",
+        toolset: "advanced",
+        server: { host: "127.0.0.1", port: 8765 },
+        auth: { mode: "oauth" },
+        chatgpt: { endpoint: "https://controller.example.test/mcp" },
+        localController: { enabled: true, host: "127.0.0.1", port: 8766, autoOpen: false },
+        devMode: { agentRunner: true, allowedAgents: ["codex"], timeoutMs: 3_600_000, maxTimeoutMs: 43_200_000 },
+      }, null, 2)}\n`,
+    );
+
+    const status = runCli(controllerHome, ["controller", "service", "status", "--repo", repoRoot, "--json"]);
+    expect(status.status).toBe(0);
+    const payload = JSON.parse(status.stdout) as { warnings?: string[] };
+    expect(payload.warnings?.some((line) => line.includes("Legacy repo-local MCP config diverges from controllerHome"))).toBe(true);
+  });
 });

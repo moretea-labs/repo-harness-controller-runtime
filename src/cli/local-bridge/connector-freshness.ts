@@ -15,8 +15,16 @@ import {
   CONTROLLER_TOOL_SURFACE_VERSION,
   controllerToolSurfaceFingerprint,
 } from '../controller/runtime-config';
-import { loadMcpLocalConfig, loadMcpRuntimeState, writeMcpRuntimeState } from '../mcp/auth';
+import {
+  loadMcpLocalConfig,
+  loadMcpRuntimeState,
+  loadMcpServiceLocalConfig,
+  loadMcpServiceRuntimeState,
+  writeMcpRuntimeState,
+  writeMcpServiceRuntimeState,
+} from '../mcp/auth';
 import { PREFERRED_FACADE_TOOL_NAMES, DEFAULT_CONTROLLER_TOOL_NAMES } from '../mcp/toolset-names';
+import { resolveRepoPreferredControllerHome } from '../repositories/controller-home';
 import type { PlainStatusTone } from './console-view-models';
 
 export const EXPECTED_FACADE_TOOLS = [...PREFERRED_FACADE_TOOL_NAMES] as const;
@@ -111,8 +119,8 @@ export interface ConnectorFreshnessReport {
 }
 
 const DEFAULT_HOW_TO_FIX = [
-  '重启 controller：npm run controller:restart',
-  '检查状态：npm run controller:status',
+  '重启 controller：bun run controller:restart',
+  '检查状态：bun run controller:status',
   '在 ChatGPT 中刷新/重连 MCP Connector',
   '重新打开 Local Controller UI',
   '若仍异常，运行 console smoke / connector status 自检',
@@ -159,7 +167,8 @@ function runtimeFingerprintMatches(
 const LIVE_HEALTH_TIMEOUT_MS = 800;
 
 function localMcpHealthUrl(repoRoot: string): string | null {
-  const config = loadMcpLocalConfig(repoRoot);
+  const controllerHome = resolveRepoPreferredControllerHome(repoRoot);
+  const config = loadMcpServiceLocalConfig(controllerHome, repoRoot) ?? loadMcpLocalConfig(repoRoot);
   const host = (config?.server?.host ?? '127.0.0.1').trim() || '127.0.0.1';
   const port = typeof config?.server?.port === 'number' && config.server.port > 0
     ? config.server.port
@@ -193,6 +202,7 @@ export async function observeLocalMcpRuntime(
   repoRoot: string,
   opts: { refreshRuntimeFile?: boolean } = {},
 ): Promise<ConnectorRuntimeObservation | null> {
+  const controllerHome = resolveRepoPreferredControllerHome(repoRoot);
   const healthUrl = localMcpHealthUrl(repoRoot);
   if (healthUrl) {
     const live = await fetchJsonHealth(healthUrl);
@@ -208,7 +218,7 @@ export async function observeLocalMcpRuntime(
       };
       if (opts.refreshRuntimeFile !== false) {
         try {
-          refreshRuntimeFileFromLive(repoRoot, live, observation);
+          refreshRuntimeFileFromLive(repoRoot, controllerHome, live, observation);
         } catch {
           // Best-effort only; diagnostics must not fail on file write races.
         }
@@ -217,7 +227,7 @@ export async function observeLocalMcpRuntime(
     }
   }
 
-  const file = loadMcpRuntimeState(repoRoot);
+  const file = loadMcpServiceRuntimeState(controllerHome, repoRoot) ?? loadMcpRuntimeState(repoRoot);
   if (!file?.server) return null;
   // Ignore dead snapshots — they commonly lag behind controller:restart.
   if (file.server.healthy !== true) return null;
@@ -234,10 +244,11 @@ export async function observeLocalMcpRuntime(
 
 function refreshRuntimeFileFromLive(
   repoRoot: string,
+  controllerHome: string,
   live: Record<string, unknown>,
   observation: ConnectorRuntimeObservation,
 ): void {
-  const existing = loadMcpRuntimeState(repoRoot);
+  const existing = loadMcpServiceRuntimeState(controllerHome, repoRoot) ?? loadMcpRuntimeState(repoRoot);
   if (!existing) return;
   const now = new Date().toISOString();
   const next = {
@@ -270,7 +281,12 @@ function refreshRuntimeFileFromLive(
     existing.status === 'stopped'
     || existing.server.healthy !== true
     || existing.server.toolSurfaceFingerprint !== observation.toolSurfaceFingerprint;
-  if (stale) writeMcpRuntimeState(repoRoot, next);
+  if (!stale) return;
+  if (loadMcpServiceRuntimeState(controllerHome, repoRoot)) {
+    writeMcpServiceRuntimeState(controllerHome, next);
+    return;
+  }
+  writeMcpRuntimeState(repoRoot, next);
 }
 
 export function evaluateConnectorFreshness(input: EvaluateConnectorFreshnessInput): ConnectorFreshnessReport {
@@ -332,7 +348,7 @@ export function evaluateConnectorFreshness(input: EvaluateConnectorFreshnessInpu
       reconnectRecommended: false,
       suggestedActions: [
         '重启 controller/MCP 后重新打开 Local Controller UI',
-        '运行 npm run controller:status',
+        '运行 bun run controller:status',
       ],
       howToFix: [...DEFAULT_HOW_TO_FIX],
       warnings: ['本地 MCP 工具列表为空或不可用。'],
@@ -353,13 +369,13 @@ export function evaluateConnectorFreshness(input: EvaluateConnectorFreshnessInpu
       restartRecommended: true,
       reconnectRecommended: false,
       suggestedActions: [
-        '重启 controller/MCP：npm run controller:restart',
+        '重启 controller/MCP：bun run controller:restart',
         '确认 tools/list 包含 rh_status / rh_inbox / rh_context / rh_work',
         '重新运行 connector status / smoke 自检',
       ],
       howToFix: [
-        '重启 controller：npm run controller:restart',
-        '检查状态：npm run controller:status',
+        '重启 controller：bun run controller:restart',
+        '检查状态：bun run controller:status',
         '确认本地 tools/list 含 rh_status / rh_inbox / rh_context / rh_work',
         '重新打开 Local Controller UI',
         '运行 connector status 自检',
@@ -432,9 +448,9 @@ export function evaluateConnectorFreshness(input: EvaluateConnectorFreshnessInpu
       restartRecommended: true,
       reconnectRecommended: true,
       suggestedActions: [
-        '重启 controller/MCP：npm run controller:restart',
+        '重启 controller/MCP：bun run controller:restart',
         '重启后若 ChatGPT 仍看不到 rh_*，再重连 Connector',
-        '运行 npm run controller:status 确认健康',
+        '运行 bun run controller:status 确认健康',
       ],
       howToFix: [...DEFAULT_HOW_TO_FIX],
       warnings: [

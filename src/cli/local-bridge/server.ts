@@ -2975,7 +2975,7 @@ export async function startLocalBridgeServer(
       const repoRoot = requestRepositoryRoot(request, options, controllerHome);
       const previous = getAgentJob(repoRoot, request.params.runId);
       if (previous.agent !== "github-copilot") {
-        const mcpConfig = loadMcpLocalConfig(repoRoot);
+        const mcpConfig = loadMcpServiceLocalConfig(controllerHome, repoRoot) ?? loadMcpLocalConfig(repoRoot);
         const health = classifyLocalExecutorHealth(
           previous.agent,
           {
@@ -2995,12 +2995,13 @@ export async function startLocalBridgeServer(
         typeof request.body?.timeoutMs === "number"
           ? request.body.timeoutMs
           : undefined;
+      const mcpConfig = loadMcpServiceLocalConfig(controllerHome, repoRoot) ?? loadMcpLocalConfig(repoRoot);
       response.status(202).json(
         retryAgentJob(repoRoot, request.params.runId, {
           timeoutMs,
           executorPolicy: {
-            agentRunner: loadMcpLocalConfig(repoRoot)?.devMode?.agentRunner === true,
-            allowedAgents: ((loadMcpLocalConfig(repoRoot)?.devMode?.allowedAgents ?? []).filter(
+            agentRunner: mcpConfig?.devMode?.agentRunner === true,
+            allowedAgents: ((mcpConfig?.devMode?.allowedAgents ?? []).filter(
               (entry): entry is "codex" | "claude" => entry === "codex" || entry === "claude",
             )),
           },
