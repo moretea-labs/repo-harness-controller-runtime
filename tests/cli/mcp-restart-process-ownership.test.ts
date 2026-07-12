@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  decideMcpPortOwnership,
+  isExpectedLocalControllerHealth,
+} from '../../src/cli/mcp/keepalive';
+import {
   buildMcpRestartKeepaliveArgs,
   buildMcpRestartKeepaliveEnv,
   isPeerMcpProcessForBinding,
@@ -49,6 +53,30 @@ describe('mcp restart process ownership', () => {
   test('does not detect the current controller home as stale', () => {
     const command = '/usr/bin/bun /repos/current/src/runtime/control-plane/daemon-entry.ts --controller-home /repos/current/_ops/controller-home';
     expect(isStaleControllerDaemonForRestart(command, '/repos/current')).toBe(false);
+  });
+
+  test('treats generation-mismatched MCP ownership as incompatible', () => {
+    const decision = decideMcpPortOwnership({
+      health: {
+        status: 'ok',
+        server: 'repo-harness-mcp',
+        toolSurface: 'controller-chatgpt-bridge-v8',
+        schemaVersion: 8,
+        toolSurfaceVersion: 8,
+        toolset: 'full',
+        profile: 'controller',
+        generation: 'runtime-old',
+      },
+      expected: {
+        toolSurface: 'controller-chatgpt-bridge-v8',
+        schemaVersion: 8,
+        toolSurfaceVersion: 8,
+        toolset: 'full',
+        profile: 'controller',
+        generation: 'runtime-new',
+      },
+    });
+    expect(decision.action).toBe('abort');
   });
 
   test('passes the resolved controller home and proxy bypass to detached keepalive restarts', () => {
@@ -105,6 +133,16 @@ describe('mcp restart process ownership', () => {
     expect(requiredRestartSmokeTools('core')).toContain('rh_status');
     expect(requiredRestartSmokeTools('core')).not.toContain('controller_capabilities');
     expect(requiredRestartSmokeTools('full')).toContain('controller_capabilities');
+  });
+
+  test('requires matching generation for local controller health', () => {
+    expect(isExpectedLocalControllerHealth({
+      status: 'ok',
+      toolSurface: 'controller-chatgpt-bridge-v8',
+      schemaVersion: 8,
+      toolSurfaceVersion: 8,
+      generation: 'runtime-a',
+    }, { generation: 'runtime-b' })).toBe(false);
   });
 });
 

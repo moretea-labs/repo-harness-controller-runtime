@@ -14,6 +14,8 @@ import { listControllerChecks, runControllerCheck } from '../controller/check-ru
 import { createMcpToolContext, type MultiRepositoryMcpToolContext } from '../mcp/multi-repository';
 import { readControllerDaemonStatus } from '../../runtime/control-plane/daemon-client';
 import { readSchedulerHealthSnapshot } from '../../runtime/control-plane/global-scheduler/scheduler';
+import { collectRuntimeSourceIdentity, evaluateRuntimeSourceDrift, readRuntimeGeneration } from '../../runtime/control-plane/runtime-generation';
+import { readSchedulerHealthSnapshot } from '../../runtime/control-plane/global-scheduler/scheduler';
 import {
   getAssistantPluginManifest,
   listAssistantPluginManifests,
@@ -668,6 +670,8 @@ function controllerAccessStateView(ctx: ConsoleFacadeContext): AccessStateViewMo
     toolsetLocked: toolCtx.toolsetLocked,
   });
   const repositoryPolicy = readRepositoryAccessPolicy(ctx.controllerHome, ctx.repository.repoId);
+  const runtimeGeneration = readRuntimeGeneration(ctx.controllerHome);
+  const drift = evaluateRuntimeSourceDrift(runtimeGeneration?.source, collectRuntimeSourceIdentity(ctx.repository.canonicalRoot));
   return {
     configuredAccessMode: configured.configuredAccessMode,
     configuredAccessModeLabel: accessModeDescriptor(configured.configuredAccessMode).shortLabel,
@@ -680,7 +684,7 @@ function controllerAccessStateView(ctx: ConsoleFacadeContext): AccessStateViewMo
     reconnectRequired: false,
     schemaRefreshRequired: false,
     toolSchemaStable: true,
-    restartRequired: false,
+    restartRequired: drift.restartRequired,
     repositoryPolicyMode: repositoryPolicy.mode,
     repositoryPolicyLabel: accessModeDescriptor(repositoryPolicy.mode).shortLabel,
     toolGroups: accessToolGroups(effective.effectiveAccessMode),

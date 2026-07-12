@@ -6,6 +6,7 @@ import { writeJsonAtomic } from '../shared/json-files';
 import { bootstrapManagedRuntimeEnv } from '../shared/managed-env';
 import { controllerDaemonOwnsPidFile } from './daemon-ownership';
 import { GlobalScheduler } from './global-scheduler/scheduler';
+import { collectRuntimeSourceIdentity, rotateRuntimeGeneration, type RuntimeGenerationRecord } from './runtime-generation';
 import { reconcileControllerStartup, type ControllerStartupRecoveryResult } from './startup-recovery';
 
 function option(name: string): string | undefined {
@@ -20,7 +21,7 @@ export function startControllerDaemon(controllerHome: string): void {
   const startedAt = new Date().toISOString();
   for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => abort.abort());
 
-  const recovery = publishReadyAfterStartupRecovery(controllerHome, startedAt);
+  const runtime = publishReadyAfterStartupRecovery(controllerHome, startedAt);
 
   const scheduler = new GlobalScheduler(controllerHome, {}, {
     controllerPid: process.pid,
@@ -29,14 +30,33 @@ export function startControllerDaemon(controllerHome: string): void {
   scheduler.run(abort.signal)
     .catch((error) => {
       if (controllerDaemonOwnsPidFile(pidPath, process.pid)) {
-        writeJsonAtomic(statePath, { schemaVersion: 1, status: 'failed', pid: process.pid, error: error instanceof Error ? error.message : String(error), updatedAt: new Date().toISOString(), degraded: true, recovery });
+        writeJsonAtomic(statePath, {
+          schemaVersion: 1,
+          status: 'failed',
+          pid: process.pid,
+          error: error instanceof Error ? error.message : String(error),
+          updatedAt: new Date().toISOString(),
+          degraded: true,
+          recovery: runtime,
+          generation: runtime.generationRecord.generation,
+          source: runtime.generationRecord.source,
+        });
       }
       process.exitCode = 1;
     })
     .finally(() => {
       if (!controllerDaemonOwnsPidFile(pidPath, process.pid)) return;
       rmSync(pidPath, { force: true });
-      writeJsonAtomic(statePath, { schemaVersion: 1, status: 'stopped', pid: process.pid, stoppedAt: new Date().toISOString(), degraded: recovery.degraded, recovery });
+      writeJsonAtomic(statePath, {
+        schemaVersion: 1,
+        status: 'stopped',
+        pid: process.pid,
+        stoppedAt: new Date().toISOString(),
+        degraded: runtime.degraded,
+        recovery: runtime,
+        generation: runtime.generationRecord.generation,
+        source: runtime.generationRecord.source,
+      });
     });
 }
 
@@ -44,9 +64,12 @@ export function publishReadyAfterStartupRecovery(
   controllerHome: string,
   startedAt: string,
   recover: (home: string) => ControllerStartupRecoveryResult = reconcileControllerStartup,
-): ControllerStartupRecoveryResult {
+): ControllerStartupRecoveryResult & {
+  generationRecord: RuntimeGenerationRecord;
+} {
   const statePath = join(controllerHome, 'daemon', 'state.json');
   const pidPath = join(controllerHome, 'daemon', 'controller.pid');
+  const generation = rotateRuntimeGeneration(controllerHome, collectRuntimeSourceIdentity(process.cwd()));
   // The controller is observably starting while recovery is synchronous. A
   // gateway must never see ready before durable truth has been reconciled.
   writeJsonAtomic(statePath, {
@@ -57,6 +80,8 @@ export function publishReadyAfterStartupRecovery(
     controllerHome,
     gatewaySeparated: true,
     workerIsolation: true,
+    generation: generation.generation,
+    source: generation.source,
   });
   writeFileSync(pidPath, `${process.pid}\n`, 'utf8');
 
@@ -82,8 +107,10 @@ export function publishReadyAfterStartupRecovery(
     workerIsolation: true,
     degraded: recovery.degraded,
     recovery,
+    generation: generation.generation,
+    source: generation.source,
   });
-  return recovery;
+  return { ...recovery, generationRecord: generation };
 }
 
 if (import.meta.main || /[\\/]daemon-entry\.ts$/.test(process.argv[1] ?? '')) {

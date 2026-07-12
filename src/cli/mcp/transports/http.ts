@@ -10,6 +10,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { buildMultiRepositoryToolDefinitions, createMcpToolContext, createRepoHarnessMcpServerFromContext, type McpServerOptions } from '../server';
 import {
   loadMcpServiceLocalConfig,
+  loadMcpServiceRuntimeState,
   mcpServiceOAuthTokenStoreFallbackPaths,
   mcpServiceOAuthTokenStorePath,
   parseMcpHttpAuthMode,
@@ -19,6 +20,7 @@ import {
   type McpHttpAuthMode,
 } from '../auth';
 import { createMcpOAuthProvider, McpOAuthTokenStore } from '../oauth';
+import { isExpectedLocalControllerHealth } from '../keepalive';
 import { resolveMcpRepoRoot } from '../repo';
 import { buildMcpToolDefinitions } from '../tools';
 import { resolveControllerHome } from '../../repositories/controller-home';
@@ -28,8 +30,9 @@ import {
   exposedControllerToolDefinitions,
 } from '../toolset';
 import { ensureControllerDaemon, readControllerDaemonStatus } from '../../../runtime/control-plane/daemon-client';
-import { rebuildRepositoryProjection } from '../../../runtime/projections/materialized-view';
-import { getRepository } from '../../repositories/registry';
+import { readRepositoryProjectionSnapshot, rebuildRepositoryProjection } from '../../../runtime/projections/materialized-view';
+import { readRuntimeGeneration } from '../../../runtime/control-plane/runtime-generation';
+import { getRepository, listRepositories } from '../../repositories/registry';
 import {
   CONTROLLER_SCHEMA_VERSION,
   CONTROLLER_TOOL_SURFACE,
@@ -160,6 +163,27 @@ function getPublicOrigin(req: Request, configuredOrigin: string | undefined): st
   const proto = (req.headers['x-forwarded-proto'] as string | undefined) ?? 'https';
   const host = (req.headers['x-forwarded-host'] as string | undefined) ?? req.headers.host ?? '127.0.0.1:8765';
   return `${proto}://${host}`;
+}
+
+function localControllerHealthUrl(host: string, port: number): string {
+  return `http://${host === '::1' ? '[::1]' : host}:${port}/health`;
+}
+
+async function jsonHealth(url: string): Promise<Record<string, unknown> | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 2_000);
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: { accept: 'application/json' },
+    });
+    if (!response.ok) return null;
+    return await response.json() as Record<string, unknown>;
+  } catch (_error) {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export function isAllowedMcpOAuthRedirectUri(redirectUri: string): boolean {
@@ -720,6 +744,12 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   };
   const runtimeControllerHome = 'controllerHome' in toolContext ? toolContext.controllerHome : undefined;
   if (runtimeControllerHome) ensureControllerDaemon(runtimeControllerHome);
+  const runtimeGeneration = runtimeControllerHome ? readRuntimeGeneration(runtimeControllerHome) : undefined;
+  const localControllerConfig = {
+    enabled: serviceConfig?.localController?.enabled ?? profile === 'controller',
+    host: serviceConfig?.localController?.host ?? '127.0.0.1',
+    port: serviceConfig?.localController?.port ?? 8766,
+  };
   const compatibilityToolDefinitions = buildMcpToolDefinitions(toolContext.policy, { enableChatgptBrowser: opts.enableChatgptBrowser === true });
   const toolSurface = toolContext.policy.profile === 'controller' ? CONTROLLER_TOOL_SURFACE : `${toolContext.policy.profile}-legacy-v1`;
   const toolSurfaceSchemaVersion = toolContext.policy.profile === 'controller' ? CONTROLLER_SCHEMA_VERSION : 1;
@@ -748,6 +778,8 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
       toolSurfaceFingerprint: fingerprint,
       runtimeToolSurfaceFingerprint: fingerprint,
       toolCount: toolDefinitions.length,
+      generation: runtimeGeneration?.generation,
+      source: runtimeGeneration?.source,
     };
   };
 
@@ -776,6 +808,8 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
       toolSurfaceVersion,
       toolSurfaceFingerprint: health?.toolSurfaceFingerprint,
       runtimeToolSurfaceFingerprint: health?.runtimeToolSurfaceFingerprint,
+      generation: health?.generation,
+      source: health?.source,
       toolset: health?.toolset ?? 'full',
       toolCount: health?.toolCount ?? compatibilityToolDefinitions.length,
       compatibilityToolCount: compatibilityToolDefinitions.length,
@@ -808,17 +842,61 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
     });
   });
 
-  app.get('/ready', (_req, res) => {
+  app.get('/ready', async (_req, res) => {
     if (!runtimeControllerHome) {
       res.status(200).json({ ready: true, profile: toolContext.policy.profile, gateway: 'ready', controllerDaemon: 'not-required' });
       return;
     }
     const daemon = readControllerDaemonStatus(runtimeControllerHome);
-    const ready = daemon.status === 'ready';
+    const runtimeState = loadMcpServiceRuntimeState(runtimeControllerHome, repoRoot);
+    const repositories = listRepositories(runtimeControllerHome).filter((repository) => repository.enabled && !repository.removedAt);
+    const staleRepositories = repositories
+      .filter((repository) => readRepositoryProjectionSnapshot(runtimeControllerHome, repository.repoId).stale)
+      .map((repository) => repository.repoId);
+    const localBridgeHealth = localControllerConfig.enabled
+      ? await jsonHealth(localControllerHealthUrl(localControllerConfig.host, localControllerConfig.port))
+      : null;
+    const localBridgeReady = !localControllerConfig.enabled || isExpectedLocalControllerHealth(localBridgeHealth, {
+      repoRoot,
+      generation: runtimeGeneration?.generation,
+    });
+    const daemonReady = daemon.status === 'ready' && daemon.degraded !== true;
+    const projectionReady = staleRepositories.length === 0;
+    const publicConfigured = Boolean(runtimeState?.tunnel?.publicEndpoint);
+    const publicReady = !publicConfigured || runtimeState?.tunnel?.healthy === true;
+    const connectorReady = !publicConfigured || (
+      publicReady
+      && runtimeState?.tunnel?.connectorNeedsReconnect !== true
+      && (!runtimeGeneration?.generation || runtimeState?.generation === runtimeGeneration.generation)
+      && (!runtimeGeneration?.generation || runtimeState?.server.generation === runtimeGeneration.generation)
+    );
+    const ready = daemonReady && projectionReady && localBridgeReady;
     res.status(ready ? 200 : 503).json({
       ready,
-      gateway: { status: 'ready', thin: true, eventLoopIsolatedFromWorkers: true },
+      generation: runtimeGeneration?.generation,
+      source: runtimeGeneration?.source,
+      gateway: { status: ready ? 'ready' : 'degraded', thin: true, eventLoopIsolatedFromWorkers: true },
       controllerDaemon: daemon,
+      localBridge: {
+        enabled: localControllerConfig.enabled,
+        ready: localBridgeReady,
+        endpoint: `http://${localControllerConfig.host === '::1' ? '[::1]' : localControllerConfig.host}:${localControllerConfig.port}/`,
+      },
+      projections: {
+        ready: projectionReady,
+        repositoryCount: repositories.length,
+        staleRepositories,
+      },
+      publicReadiness: {
+        configured: publicConfigured,
+        ready: publicReady,
+        endpoint: runtimeState?.tunnel?.publicEndpoint,
+      },
+      connectorReadiness: {
+        configured: publicConfigured,
+        ready: connectorReady,
+        connectorNeedsReconnect: runtimeState?.tunnel?.connectorNeedsReconnect === true,
+      },
     });
   });
 

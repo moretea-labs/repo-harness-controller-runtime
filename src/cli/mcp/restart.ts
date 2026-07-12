@@ -19,6 +19,7 @@ import { applyDirectNetworkProxyBypass, withDirectNetworkProxyBypass } from './p
 import { resolveMcpRepoRoot } from './repo';
 import { runMcpDoctor, runMcpSetupChatgpt, runMcpSetupCodex, type McpSetupResult } from './setup';
 import { CONTROLLER_TOOL_SURFACE } from '../controller/runtime-config';
+import { restartControllerService } from '../controller/lifecycle';
 import { ensureRepoPreferredControllerHome } from '../repositories/controller-home';
 import { getGitHubPluginStatus, loadGitHubPluginConfig, saveGitHubPluginConfig } from '../github/plugin';
 
@@ -834,37 +835,23 @@ export async function runMcpRestart(opts: McpRestartOptions): Promise<McpSetupRe
     lines.push(`[repo-harness restart] GitHub plugin: enabled=${String(github.enabled)} sync_mode=${github.syncMode} include_tasks=${String(github.includeTasks)}`);
   }
 
-  lines.push(...bootoutRepoLaunchAgents(launchAgents));
-  const stoppedPids = await stopRepoHarnessProcesses(config, runtimeBefore);
+  const restarted = await restartControllerService({
+    repo: repoRoot,
+    controllerHome,
+    logFile: config.stderrLogPath,
+  });
+  let keepalivePid: number | undefined = restarted.status.mcpRuntime?.server.pid;
+  lines.push(`[repo-harness restart] launchd_managed=${launchAgents.length > 0 ? "true" : "false"}`);
   lines.push(
-    stoppedPids.length > 0
-      ? `[repo-harness restart] stopped old repo-local MCP processes: ${stoppedPids.join(' ')}`
-      : '[repo-harness restart] no old repo-local MCP processes found',
+    restarted.cleanedPids.length > 0
+      ? `[repo-harness restart] cleaned runtime pids: ${restarted.cleanedPids.join(' ')}`
+      : '[repo-harness restart] cleaned runtime pids: none',
   );
-
-  let keepalivePid: number | undefined;
-  if (launchAgents.length > 0) {
-    lines.push(...bootstrapRepoLaunchAgents(launchAgents));
-  } else {
-    const cli = resolveSelfCliInvocation();
-    const keepaliveArgs = [...cli.args, ...buildMcpRestartKeepaliveArgs(config)];
-    keepalivePid = spawnDetached(
-      cli.command,
-      keepaliveArgs,
-      repoRoot,
-      config.stdoutLogPath,
-      config.stderrLogPath,
-      buildMcpRestartKeepaliveEnv({ controllerHome: config.controllerHome ?? controllerHome }),
-    );
-    lines.push(`[repo-harness restart] keepalive_pid=${keepalivePid}`);
-  }
+  lines.push(`[repo-harness restart] supervisor_pid=${String(restarted.status.supervisor.pid ?? 'unknown')}`);
+  if (keepalivePid) lines.push(`[repo-harness restart] keepalive_pid=${keepalivePid}`);
 
   const localHealth = await waitForMcpHealth(config);
   await waitForLocalController(config);
-  if (keepalivePid === undefined) {
-    keepalivePid = collectKeepalivePids(repoRoot)[0];
-  }
-
   const toolsSmoke = opts.skipToolsSmoke === true ? undefined : await runToolsSmoke(config);
   const publicCheck = opts.skipPublicCheck === true ? undefined : await verifyPublicSurface(config);
   const doctor = parseDoctorReport(runMcpDoctor({ repo: repoRoot, json: true }));

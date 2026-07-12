@@ -147,6 +147,7 @@ import { loadMcpLocalConfig, loadMcpServiceLocalConfig, loadMcpServiceRuntimeSta
 import { loadRepositoryRegistry, registerRepository, removeRepository, resolveRepositorySelection } from "../repositories/registry";
 import { resolveControllerHome } from "../repositories/controller-home";
 import { ensureControllerDaemon, readControllerDaemonStatus } from "../../runtime/control-plane/daemon-client";
+import { readRuntimeGeneration } from "../../runtime/control-plane/runtime-generation";
 import { findExecutionJob, listExecutionJobs } from "../../runtime/execution/jobs/store";
 import { rebuildRepositoryProjection, readRepositoryProjectionSnapshot } from "../../runtime/projections/materialized-view";
 import { getAssistantPluginManifest, listAssistantPluginManifests, submitAssistantPluginAction } from "../../runtime/plugins/store";
@@ -965,6 +966,7 @@ export async function startLocalBridgeServer(
   app.get("/health", (_request, response) => {
     const exposure = controllerExposureSnapshot(mcpExposureContext);
     const fingerprint = controllerToolSurfaceFingerprint(exposure.toolNames);
+    const runtime = readRuntimeGeneration(controllerHome);
     response.json({
       status: "ok",
       localOnly: true,
@@ -973,6 +975,8 @@ export async function startLocalBridgeServer(
       toolSurfaceVersion: CONTROLLER_TOOL_SURFACE_VERSION,
       toolSurfaceFingerprint: fingerprint,
       runtimeToolSurfaceFingerprint: fingerprint,
+      generation: runtime?.generation,
+      source: runtime?.source,
       toolset: exposure.access.effectiveToolset,
       configuredAccessMode: exposure.access.configuredAccessMode,
       effectiveAccessMode: exposure.access.effectiveAccessMode,

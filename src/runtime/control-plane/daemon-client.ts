@@ -6,6 +6,7 @@ import { ensureControllerHome } from '../../cli/repositories/controller-home';
 import { withControllerLock } from '../../cli/repositories/locks';
 import { readJsonFile, writeJsonAtomic } from '../shared/json-files';
 import { readSchedulerHealthSnapshot } from './global-scheduler/scheduler';
+import { readRuntimeGeneration, type RuntimeSourceIdentity } from './runtime-generation';
 import { cleanupControllerRuntimeState } from './runtime-cleanup';
 import type { ControllerStartupRecoveryResult } from './startup-recovery';
 
@@ -20,6 +21,10 @@ export interface ControllerDaemonStatus {
   workerIsolation?: boolean;
   degraded?: boolean;
   recovery?: ControllerStartupRecoveryResult;
+  generation?: string;
+  source?: RuntimeSourceIdentity;
+  restartRequired?: boolean;
+  restartReasons?: string[];
 }
 
 function daemonPidPath(controllerHome: string): string { return join(ensureControllerHome(controllerHome), 'daemon', 'controller.pid'); }
@@ -41,27 +46,35 @@ function schedulerHeartbeatHealthy(controllerHome: string): boolean {
 
 export function readControllerDaemonStatus(controllerHome: string): ControllerDaemonStatus {
   const home = ensureControllerHome(controllerHome);
+  const generation = readRuntimeGeneration(home);
   const state = readJsonFile<ControllerDaemonStatus>(daemonStatePath(home), { schemaVersion: 1, status: 'unavailable' });
+  const withGeneration: ControllerDaemonStatus = {
+    ...state,
+    generation: state.generation ?? generation?.generation,
+    source: state.source ?? generation?.source,
+  };
   let pid = state.pid;
   try { pid = Number(readFileSync(daemonPidPath(home), 'utf8').trim()) || pid; } catch { /* no pid */ }
-  if ((state.status === 'ready' || state.status === 'starting') && !pidAlive(pid)) return { ...state, status: 'stopped', pid };
-  if (state.status === 'ready' && !schedulerHeartbeatHealthy(home)) {
-    const startedAt = state.startedAt ? Date.parse(state.startedAt) : Number.NaN;
+  if ((withGeneration.status === 'ready' || withGeneration.status === 'starting') && !pidAlive(pid)) {
+    return { ...withGeneration, status: 'stopped', pid };
+  }
+  if (withGeneration.status === 'ready' && !schedulerHeartbeatHealthy(home)) {
+    const startedAt = withGeneration.startedAt ? Date.parse(withGeneration.startedAt) : Number.NaN;
     if (Number.isFinite(startedAt) && Date.now() - startedAt < DAEMON_STARTUP_GRACE_MS) {
-      return { ...state, status: 'starting', pid };
+      return { ...withGeneration, status: 'starting', pid };
     }
     // A stale scheduler heartbeat is degraded runtime state, not proof that the
     // daemon process is dead. Keep the live PID authoritative so callers do not
     // spawn a second daemon and invalidate Workers owned by the first one.
     return {
-      ...state,
+      ...withGeneration,
       status: 'ready',
       pid,
       degraded: true,
-      error: state.error ?? 'SCHEDULER_HEARTBEAT_STALE',
+      error: withGeneration.error ?? 'SCHEDULER_HEARTBEAT_STALE',
     };
   }
-  return { ...state, pid };
+  return { ...withGeneration, pid };
 }
 
 export function ensureControllerDaemon(controllerHome: string): ControllerDaemonStatus {

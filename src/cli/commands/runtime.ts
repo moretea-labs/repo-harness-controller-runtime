@@ -1,5 +1,12 @@
 import { Command } from 'commander';
 import { ensureControllerHome } from '../repositories/controller-home';
+import {
+  controllerServiceStatus,
+  formatControllerServiceStatus,
+  restartControllerService,
+  startControllerService,
+  stopControllerService,
+} from '../controller/lifecycle';
 import { ensureControllerDaemon, readControllerDaemonStatus } from '../../runtime/control-plane/daemon-client';
 import { findExecutionJob, listActiveExecutionJobs, listExecutionJobs } from '../../runtime/execution/jobs/store';
 import { readJobEvents } from '../../runtime/evidence/event-ledger';
@@ -15,32 +22,61 @@ export function buildRuntimeCommand(): Command {
   const command = new Command('runtime').description('Manage the separated Gateway, Controller Daemon, durable Jobs, Repo Actors, and Workers');
 
   command.command('start')
-    .description('Start the Controller Daemon if it is not already running')
+    .description('Start the unified runtime supervisor')
     .option('--controller-home <path>', 'Controller state root')
-    .action((opts: { controllerHome?: string }) => output(ensureControllerDaemon(ensureControllerHome(opts.controllerHome))));
+    .option('--repo <path>', 'Repository root')
+    .option('--log-file <path>', 'Combined runtime log file')
+    .action(async (opts: { controllerHome?: string; repo?: string; logFile?: string }) => output(await startControllerService(opts)));
 
   command.command('status')
-    .description('Show daemon readiness, active durable Jobs, and per-repository materialized projections')
+    .description('Show unified runtime readiness, active durable Jobs, and per-repository materialized projections')
     .option('--controller-home <path>', 'Controller state root')
-    .action((opts: { controllerHome?: string }) => {
+    .option('--repo <path>', 'Repository root')
+    .option('--log-file <path>', 'Combined runtime log file')
+    .option('--json', 'Output JSON')
+    .action(async (opts: { controllerHome?: string; repo?: string; logFile?: string; json?: boolean }) => {
       const home = ensureControllerHome(opts.controllerHome);
       const repositories = listRepositories(home, { includeRemoved: true });
-      output({
-        daemon: readControllerDaemonStatus(home),
-        activeJobs: listActiveExecutionJobs(home),
-        repositories: repositories.map((repository) => rebuildRepositoryProjection(home, repository.repoId)),
-      });
+      const service = await controllerServiceStatus(opts);
+      if (opts.json) {
+        output({
+          service,
+          daemon: readControllerDaemonStatus(home),
+          activeJobs: listActiveExecutionJobs(home),
+          repositories: repositories.map((repository) => rebuildRepositoryProjection(home, repository.repoId)),
+        });
+        return;
+      }
+      console.log(formatControllerServiceStatus(service));
     });
 
   command.command('stop')
-    .description('Stop the Controller Daemon; running Workers retain durable Job state for reconciliation')
+    .description('Stop the unified runtime supervisor')
     .option('--controller-home <path>', 'Controller state root')
-    .action((opts: { controllerHome?: string }) => {
-      const home = ensureControllerHome(opts.controllerHome);
-      const status = readControllerDaemonStatus(home);
-      if (!status.pid) return output({ stopped: false, reason: 'daemon is not running', status });
-      process.kill(status.pid, 'SIGTERM');
-      output({ stopped: true, pid: status.pid });
+    .option('--repo <path>', 'Repository root')
+    .option('--log-file <path>', 'Combined runtime log file')
+    .action(async (opts: { controllerHome?: string; repo?: string; logFile?: string }) => output(await stopControllerService(opts)));
+
+  command.command('restart')
+    .description('Restart the unified runtime supervisor')
+    .option('--controller-home <path>', 'Controller state root')
+    .option('--repo <path>', 'Repository root')
+    .option('--log-file <path>', 'Combined runtime log file')
+    .action(async (opts: { controllerHome?: string; repo?: string; logFile?: string }) => output(await restartControllerService(opts)));
+
+  command.command('doctor')
+    .description('Run a bounded runtime diagnosis view')
+    .option('--controller-home <path>', 'Controller state root')
+    .option('--repo <path>', 'Repository root')
+    .option('--log-file <path>', 'Combined runtime log file')
+    .option('--json', 'Output JSON')
+    .action(async (opts: { controllerHome?: string; repo?: string; logFile?: string; json?: boolean }) => {
+      const service = await controllerServiceStatus(opts);
+      if (opts.json) {
+        output({ status: service }, true);
+        return;
+      }
+      output(formatControllerServiceStatus(service), false);
     });
 
   command.command('job')

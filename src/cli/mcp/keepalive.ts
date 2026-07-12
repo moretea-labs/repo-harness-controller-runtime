@@ -25,6 +25,7 @@ import {
 } from '../controller/runtime-config';
 import { controllerExposureSnapshot } from './toolset';
 import { applyDirectNetworkProxyBypass, withDirectNetworkProxyBypass } from './proxy-env';
+import { collectRuntimeSourceIdentity, ensureRuntimeGeneration } from '../../runtime/control-plane/runtime-generation';
 
 export interface McpKeepaliveOptions extends McpServerOptions {
   repo?: string;
@@ -89,6 +90,7 @@ export interface McpExpectedHealthIdentity {
   toolset: string;
   profile: string;
   repoId?: string;
+  generation?: string;
 }
 
 export type McpPortOwnershipDecision =
@@ -122,7 +124,8 @@ export function decideMcpPortOwnership(input: {
       || health.runtimeToolSurfaceFingerprint === input.expected.runtimeToolSurfaceFingerprint)
     && health.toolset === input.expected.toolset
     && health.profile === input.expected.profile
-    && (input.expected.repoId === undefined || health.repoId === input.expected.repoId);
+    && (input.expected.repoId === undefined || health.repoId === input.expected.repoId)
+    && (input.expected.generation === undefined || health.generation === input.expected.generation);
 
   const previousPid = input.previousOwnedPid;
   const previousInstanceId = input.previousOwnedInstanceId?.trim();
@@ -337,12 +340,16 @@ async function jsonHealth(url: string): Promise<Record<string, unknown> | null> 
   }
 }
 
-export function isExpectedLocalControllerHealth(payload: Record<string, unknown> | null, _repoRoot = process.cwd()): boolean {
+export function isExpectedLocalControllerHealth(
+  payload: Record<string, unknown> | null,
+  opts: { repoRoot?: string; generation?: string } = {},
+): boolean {
   return payload?.status === 'ok'
     && payload.toolSurface === CONTROLLER_TOOL_SURFACE
     && payload.schemaVersion === CONTROLLER_SCHEMA_VERSION
     && payload.toolSurfaceVersion === CONTROLLER_TOOL_SURFACE_VERSION
-    && typeof _repoRoot === 'string';
+    && (opts.generation === undefined || payload.generation === opts.generation)
+    && typeof (opts.repoRoot ?? process.cwd()) === 'string';
 }
 
 function attachLineLogging(
@@ -382,6 +389,8 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
 
   const repoRoot = resolveMcpRepoRoot(rawOpts.repo ?? '.');
   const controllerHome = ensureRepoPreferredControllerHome(repoRoot, rawOpts.controllerHome);
+  const runtimeSource = collectRuntimeSourceIdentity(repoRoot);
+  const runtimeGeneration = ensureRuntimeGeneration(controllerHome, runtimeSource);
   const serviceConfig = loadMcpServiceLocalConfig(controllerHome, repoRoot);
   const profile = rawOpts.profile ?? serviceConfig?.profile ?? 'controller';
   const localConfig = serviceConfig;
@@ -402,6 +411,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
         runtimeToolSurfaceFingerprint: fingerprint,
         toolset: exposure.access.effectiveToolset,
         profile,
+        generation: runtimeGeneration.generation,
       };
     }
     return {
@@ -411,6 +421,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
       toolset: parseMcpToolset(rawOpts.toolset ?? localConfig?.toolset ?? 'advanced', profile),
       profile,
       repoId: repositoryIdentity(repoRoot),
+      generation: runtimeGeneration.generation,
     };
   };
   const previousRuntime = loadMcpServiceRuntimeState(controllerHome, repoRoot);
@@ -490,12 +501,16 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
     updatedAt: nowIso(),
     status: 'starting',
     tunnelMode,
+    generation: runtimeGeneration.generation,
+    source: runtimeGeneration.source,
     localController: localUiEnabled ? {
       endpoint: `http://${localUiHost === '::1' ? '[::1]' : localUiHost}:${localUiPort}/`,
       running: false,
+      generation: runtimeGeneration.generation,
     } : undefined,
     server: {
       endpoint: localEndpoint(host, port),
+      generation: runtimeGeneration.generation,
       running: false,
       healthy: false,
       restartCount: 0,
@@ -550,6 +565,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
         localHealth.toolset === expected.toolset ? null : `toolset ${String(localHealth.toolset ?? 'missing')} != ${expected.toolset}`,
         localHealth.profile === profile ? null : `profile ${String(localHealth.profile ?? 'missing')} != ${profile}`,
         expected.repoId === undefined || localHealth.repoId === expected.repoId ? null : `repository identity ${String(localHealth.repoId ?? 'missing')} != ${expected.repoId}`,
+        expected.generation === undefined || localHealth.generation === expected.generation ? null : `generation ${String(localHealth.generation ?? 'missing')} != ${expected.generation}`,
       ].filter(Boolean).join('; ')
       : '';
     runtime.server.healthy = localHealth?.status === 'ok' && mismatch.length === 0;
@@ -559,6 +575,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
     runtime.server.toolSurfaceVersion = typeof localHealth?.toolSurfaceVersion === 'number' ? localHealth.toolSurfaceVersion : undefined;
     runtime.server.toolSurfaceFingerprint = typeof localHealth?.toolSurfaceFingerprint === 'string' ? localHealth.toolSurfaceFingerprint : undefined;
     runtime.server.runtimeToolSurfaceFingerprint = typeof localHealth?.runtimeToolSurfaceFingerprint === 'string' ? localHealth.runtimeToolSurfaceFingerprint : undefined;
+    runtime.server.generation = typeof localHealth?.generation === 'string' ? localHealth.generation : runtimeGeneration.generation;
     runtime.server.toolset = localHealth?.toolset === 'core' || localHealth?.toolset === 'advanced' || localHealth?.toolset === 'full'
       ? localHealth.toolset
       : undefined;
@@ -782,6 +799,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
         running: true,
         pid: process.pid,
         startedAt: nowIso(),
+        generation: runtimeGeneration.generation,
       };
       console.error(`[repo-harness mcp keepalive] Local Controller: ${localBridge.url}`);
       persistRuntime();
@@ -790,6 +808,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
       runtime.localController = {
         endpoint: `http://${localUiHost === '::1' ? '[::1]' : localUiHost}:${localUiPort}/`,
         running: false,
+        generation: runtimeGeneration.generation,
         error: message,
       };
       recordError('local-controller', message);
@@ -805,18 +824,23 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
 
     const endpoint = `http://${localUiHost === '::1' ? '[::1]' : localUiHost}:${localUiPort}/`;
     const health = await jsonHealth(localControllerHealthUrl(localUiHost, localUiPort));
-    const healthy = isExpectedLocalControllerHealth(health);
+    const healthy = isExpectedLocalControllerHealth(health, {
+      repoRoot,
+      generation: runtimeGeneration.generation,
+    });
     runtime.localController = healthy
       ? {
           endpoint,
           running: true,
           ...(localBridge ? { pid: process.pid } : {}),
           startedAt: runtime.localController?.startedAt ?? nowIso(),
+          generation: runtimeGeneration.generation,
         }
       : {
           endpoint,
           running: false,
           ...(localBridge ? { pid: process.pid } : {}),
+          generation: runtimeGeneration.generation,
           error: `health check failed at ${localControllerHealthUrl(localUiHost, localUiPort)}`,
         };
     return healthy;

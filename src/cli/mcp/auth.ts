@@ -51,10 +51,24 @@ export interface McpRuntimeState {
   updatedAt: string;
   status: McpRuntimeStatus;
   tunnelMode: McpRuntimeTunnelMode;
+  generation?: string;
+  source?: {
+    repoId: string;
+    checkoutId: string;
+    repoRoot: string;
+    canonicalRoot: string;
+    branch: string | null;
+    commit?: string;
+    defaultBranch: string;
+    defaultBranchCommit?: string;
+    dirty: boolean;
+    observedAt: string;
+  };
   server: {
     endpoint: string;
     pid?: number;
     instanceId?: string;
+    generation?: string;
     running: boolean;
     healthy: boolean;
     restartCount: number;
@@ -86,6 +100,7 @@ export interface McpRuntimeState {
     running: boolean;
     pid?: number;
     startedAt?: string;
+    generation?: string;
     error?: string;
   };
   tunnel?: {
@@ -165,6 +180,61 @@ export function mcpControllerHomeRuntimeStatePath(controllerHome: string): strin
   return mcpControllerHomePath(controllerHome, 'mcp.runtime.json');
 }
 
+function controllerHomeMcpPaths(controllerHome: string): string[] {
+  return [
+    mcpControllerHomeLocalConfigPath(controllerHome),
+    mcpControllerHomeTokenPath(controllerHome),
+    mcpControllerHomeOAuthPath(controllerHome),
+    mcpControllerHomeOAuthTokenStorePath(controllerHome),
+    mcpControllerHomeRuntimeStatePath(controllerHome),
+  ];
+}
+
+export interface McpRuntimeAuthority {
+  authority: 'controller-home' | 'legacy';
+  path: string;
+  controllerHomePresent: boolean;
+  legacyPresent: boolean;
+  warning?: string;
+}
+
+export function controllerHomeHasAuthoritativeMcpState(controllerHome: string): boolean {
+  return controllerHomeMcpPaths(controllerHome).some((path) => existsSync(path));
+}
+
+export function resolveMcpRuntimeAuthority(
+  controllerHome: string,
+  legacyRepoRoot: string | undefined,
+  kind: 'local-config' | 'runtime-state',
+): McpRuntimeAuthority {
+  const controllerHomePresent = controllerHomeHasAuthoritativeMcpState(controllerHome);
+  const legacyPath = kind === 'local-config'
+    ? (legacyRepoRoot ? mcpLocalConfigPath(legacyRepoRoot) : undefined)
+    : (legacyRepoRoot ? mcpRuntimeStatePath(legacyRepoRoot) : undefined);
+  const legacyPresent = Boolean(legacyPath && existsSync(legacyPath));
+  const path = kind === 'local-config'
+    ? mcpControllerHomeLocalConfigPath(controllerHome)
+    : mcpControllerHomeRuntimeStatePath(controllerHome);
+  if (controllerHomePresent || !legacyPresent) {
+    return {
+      authority: 'controller-home',
+      path,
+      controllerHomePresent,
+      legacyPresent,
+      warning: controllerHomePresent && legacyPresent
+        ? 'Controller Home is authoritative; legacy .repo-harness/mcp.* remains compatibility-only.'
+        : undefined,
+    };
+  }
+  return {
+    authority: 'legacy',
+    path: legacyPath!,
+    controllerHomePresent,
+    legacyPresent,
+    warning: 'Using legacy .repo-harness/mcp.* because controllerHome does not have live MCP state yet.',
+  };
+}
+
 function readJsonFile<T>(path: string): T | null {
   if (!existsSync(path)) return null;
   try {
@@ -201,13 +271,17 @@ export function loadMcpRuntimeState(repoRoot: string): McpRuntimeState | null {
 }
 
 export function loadMcpServiceLocalConfig(controllerHome: string, legacyRepoRoot?: string): McpLocalConfig | null {
-  return readJsonFile<McpLocalConfig>(mcpControllerHomeLocalConfigPath(controllerHome))
-    ?? (legacyRepoRoot ? loadMcpLocalConfig(legacyRepoRoot) : null);
+  const controllerValue = readJsonFile<McpLocalConfig>(mcpControllerHomeLocalConfigPath(controllerHome));
+  if (controllerValue) return controllerValue;
+  if (controllerHomeHasAuthoritativeMcpState(controllerHome)) return null;
+  return legacyRepoRoot ? loadMcpLocalConfig(legacyRepoRoot) : null;
 }
 
 export function loadMcpServiceRuntimeState(controllerHome: string, legacyRepoRoot?: string): McpRuntimeState | null {
-  return readJsonFile<McpRuntimeState>(mcpControllerHomeRuntimeStatePath(controllerHome))
-    ?? (legacyRepoRoot ? loadMcpRuntimeState(legacyRepoRoot) : null);
+  const controllerValue = readJsonFile<McpRuntimeState>(mcpControllerHomeRuntimeStatePath(controllerHome));
+  if (controllerValue) return controllerValue;
+  if (controllerHomeHasAuthoritativeMcpState(controllerHome)) return null;
+  return legacyRepoRoot ? loadMcpRuntimeState(legacyRepoRoot) : null;
 }
 
 export function writeMcpLocalConfig(repoRoot: string, config: McpLocalConfig): string {

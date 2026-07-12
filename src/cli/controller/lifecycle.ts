@@ -4,16 +4,36 @@ import { createConnection } from "net";
 import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
 import { listAgentJobs, reconcileAgentJobs } from "../agent-jobs/job-manager";
+import { bootstrapRepoLaunchAgents, bootoutRepoLaunchAgents, findRepoLaunchAgents } from "./launch-agents";
 import { listLocalBridgeJobs, reconcileLocalBridgeJobs } from "../local-bridge/job-store";
-import { loadMcpLocalConfig, loadMcpRuntimeState, loadMcpServiceLocalConfig, loadMcpServiceRuntimeState, mcpControllerHomeLocalConfigPath, mcpControllerHomeRuntimeStatePath, mcpRuntimeStatePath, type McpRuntimeState } from "../mcp/auth";
+import {
+  loadMcpLocalConfig,
+  loadMcpRuntimeState,
+  loadMcpServiceLocalConfig,
+  loadMcpServiceRuntimeState,
+  mcpControllerHomeLocalConfigPath,
+  mcpControllerHomeRuntimeStatePath,
+  mcpRuntimeStatePath,
+  resolveMcpRuntimeAuthority,
+  type McpRuntimeAuthority,
+  type McpRuntimeState,
+} from "../mcp/auth";
 import { inferMcpTunnelMode, isExpectedLocalControllerHealth, normalizeKeepalivePublicEndpoint, resolveSelfCliInvocation } from "../mcp/keepalive";
 import { withDirectNetworkProxyBypass } from "../mcp/proxy-env";
 import { resolveMcpRepoRoot } from "../mcp/repo";
 import { resolveRepoPreferredControllerHome } from "../repositories/controller-home";
 import { loadRepositoryRegistry } from "../repositories/registry";
+import { listActiveExecutionJobs } from "../../runtime/execution/jobs/store";
+import { listRepositories } from "../repositories/registry";
 import { runProcess } from "../../effects/process-runner";
 import { ensureControllerDaemon, readControllerDaemonStatus, type ControllerDaemonStatus } from "../../runtime/control-plane/daemon-client";
-import { listActiveExecutionJobs } from "../../runtime/execution/jobs/store";
+import {
+  collectRuntimeSourceIdentity,
+  evaluateRuntimeSourceDrift,
+  readRuntimeGeneration,
+  type RuntimeSourceIdentity,
+} from "../../runtime/control-plane/runtime-generation";
+import { readRepositoryProjectionSnapshot } from "../../runtime/projections/materialized-view";
 import { isProcessAlive, terminateProcessTree } from "../../runtime/shared/process-tree";
 
 const DEFAULT_START_TIMEOUT_MS = 20_000;
@@ -72,6 +92,16 @@ export interface ControllerServiceHealth {
   localController: boolean;
 }
 
+export interface ControllerServiceReadiness {
+  gateway: boolean;
+  daemon: boolean;
+  scheduler: boolean;
+  localController: boolean;
+  projection: boolean;
+  public: boolean;
+  connector: boolean;
+}
+
 export interface ControllerServiceStatus {
   repoRoot: string;
   packageVersion: string;
@@ -82,6 +112,12 @@ export interface ControllerServiceStatus {
   runtimeStatePath: string;
   logPath: string;
   running: boolean;
+  ready: boolean;
+  readiness: ControllerServiceReadiness;
+  restartRequired: boolean;
+  restartReasons: string[];
+  runtimeGeneration?: string;
+  runtimeSource?: RuntimeSourceIdentity;
   supervisor: {
     pid?: number;
     alive: boolean;
@@ -97,6 +133,10 @@ export interface ControllerServiceStatus {
     localControllerReachable: boolean;
     mcpOwners: string[];
     localControllerOwners: string[];
+  };
+  authority: {
+    localConfig: McpRuntimeAuthority;
+    runtimeState: McpRuntimeAuthority;
   };
   orphanedProcesses: ControllerServiceProcess[];
   infos: string[];
@@ -430,7 +470,14 @@ export function buildControllerServiceEnv(
   };
 }
 
-async function healthSummary(repoRoot: string, host: string, mcpPort: number, localControllerHost: string, localControllerPort: number): Promise<{
+async function healthSummary(
+  repoRoot: string,
+  host: string,
+  mcpPort: number,
+  localControllerHost: string,
+  localControllerPort: number,
+  generation?: string,
+): Promise<{
   health: ControllerServiceHealth;
   mcpReachable: boolean;
   localControllerReachable: boolean;
@@ -444,7 +491,7 @@ async function healthSummary(repoRoot: string, host: string, mcpPort: number, lo
   return {
     health: {
       mcp: mcpHealth?.status === "ok",
-      localController: isExpectedLocalControllerHealth(localControllerHealth, repoRoot),
+      localController: isExpectedLocalControllerHealth(localControllerHealth, { repoRoot, generation }),
     },
     mcpReachable,
     localControllerReachable,
@@ -503,12 +550,32 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
   const state = loadControllerServiceState(repoRoot);
   const serviceRuntime = loadMcpServiceRuntimeState(config.controllerHome, repoRoot);
   const runtime = serviceRuntime ?? loadMcpRuntimeState(repoRoot);
+  const authority = {
+    localConfig: resolveMcpRuntimeAuthority(config.controllerHome, repoRoot, "local-config"),
+    runtimeState: resolveMcpRuntimeAuthority(config.controllerHome, repoRoot, "runtime-state"),
+  };
+  const runtimeGeneration = readRuntimeGeneration(config.controllerHome);
+  const currentSource = collectRuntimeSourceIdentity(repoRoot);
+  const sourceDrift = evaluateRuntimeSourceDrift(runtimeGeneration?.source, currentSource);
   const runtimeStatePath = serviceRuntime
     ? mcpControllerHomeRuntimeStatePath(config.controllerHome)
     : mcpRuntimeStatePath(repoRoot);
-  const supervisorAlive = isPidAlive(state?.supervisor.pid);
+  const supervisorPid = state?.supervisor.pid ?? runtime?.server.pid;
+  const supervisorAlive = isPidAlive(supervisorPid);
   const daemon = readControllerDaemonStatus(config.controllerHome);
-  const ports = await healthSummary(repoRoot, config.mcpHost, config.mcpPort, config.localControllerHost, config.localControllerPort);
+  const ports = await healthSummary(
+    repoRoot,
+    config.mcpHost,
+    config.mcpPort,
+    config.localControllerHost,
+    config.localControllerPort,
+    runtimeGeneration?.generation,
+  );
+  const repositories = listRepositories(config.controllerHome)
+    .filter((repository) => repository.enabled && !repository.removedAt);
+  const staleProjectionRepos = repositories
+    .filter((repository) => readRepositoryProjectionSnapshot(config.controllerHome, repository.repoId).stale)
+    .map((repository) => repository.repoId);
   const processes = collectControllerServiceProcesses(repoRoot, state, config.controllerHome);
   const trackedChildPids = trackedActiveChildProcessPids(repoRoot, config.controllerHome);
   const orphanedProcesses = classifyDetachedControllerServiceProcesses(processes, {
@@ -519,6 +586,31 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
   const infos: string[] = [];
   const warnings: string[] = [];
   const problems: string[] = [];
+  const restartReasons = [...sourceDrift.reasons];
+  const daemonReady = daemon.status === "ready" && daemon.degraded !== true;
+  const publicReady = !runtime?.tunnel?.publicEndpoint || runtime?.tunnel?.healthy === true;
+  const connectorReady = !runtime?.tunnel?.publicEndpoint || (
+    publicReady
+    && runtime?.tunnel?.connectorNeedsReconnect !== true
+    && (!runtimeGeneration?.generation || runtime?.generation === runtimeGeneration.generation)
+    && (!runtimeGeneration?.generation || runtime?.server.generation === runtimeGeneration.generation)
+  );
+  const projectionReady = staleProjectionRepos.length === 0;
+  const readiness: ControllerServiceReadiness = {
+    gateway: ports.health.mcp,
+    daemon: daemonReady,
+    scheduler: daemonReady,
+    localController: ports.health.localController,
+    projection: projectionReady,
+    public: publicReady,
+    connector: connectorReady,
+  };
+  const ready = supervisorAlive
+    && readiness.gateway
+    && readiness.daemon
+    && readiness.scheduler
+    && readiness.localController
+    && readiness.projection;
 
   if (!process.versions.bun) warnings.push("Bun runtime is not active; start and restart commands require `bun`.");
   if (!adoptedRepo(repoRoot)) warnings.push("Repository does not look adopted yet (`.ai/harness/policy.json` or `tasks/current.md` missing).");
@@ -526,9 +618,12 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
     warnings.push(`Lifecycle state was started by repo-harness ${state.packageVersion}; current CLI is ${config.packageVersion}. Use restart to refresh the stack.`);
   }
   const legacyConfigDivergence = summarizeLegacyMcpConfigMismatch(repoRoot, config.controllerHome);
+  if (authority.localConfig.warning) warnings.push(authority.localConfig.warning);
+  if (authority.runtimeState.warning) warnings.push(authority.runtimeState.warning);
   if (legacyConfigDivergence.length > 0) {
     (controllerHomeConfigAuthoritative(config.controllerHome) ? infos : warnings).push(...legacyConfigDivergence);
   }
+  if (sourceDrift.restartRequired) warnings.push(...sourceDrift.reasons.map((reason) => `restart required: ${reason}`));
   if (state?.supervisor.pid && !supervisorAlive) problems.push(`Supervisor PID ${state.supervisor.pid} is no longer alive; a previous start likely exited unexpectedly.`);
   if (ports.mcpReachable && !ports.health.mcp) {
     problems.push(`MCP port ${config.mcpPort} is in use but /health is not reporting a healthy repo-harness surface.`);
@@ -536,7 +631,10 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
   if (ports.localControllerReachable && !ports.health.localController) {
     problems.push(`Local Controller port ${config.localControllerPort} is in use but /health is not reporting the expected local-only controller surface.`);
   }
-  if (daemon.status === "failed") problems.push(`Controller daemon is unhealthy: ${daemon.error ?? "unknown error"}`);
+  if (daemon.status === "failed" || daemon.degraded) problems.push(`Controller daemon is unhealthy: ${daemon.error ?? "unknown error"}`);
+  if (runtime?.server.healthMismatch) problems.push(`MCP runtime generation/tool surface mismatch: ${runtime.server.healthMismatch}`);
+  if (!projectionReady) problems.push(`Runtime projection is stale for ${staleProjectionRepos.join(", ")}.`);
+  if (!connectorReady && runtime?.tunnel?.publicEndpoint) problems.push("Connector readiness is stale; public endpoint changed or generation drifted.");
   if (orphanedProcesses.length > 0) warnings.push(`Detected ${orphanedProcesses.length} detached repo-harness process(es) outside the tracked supervisor.`);
 
   return {
@@ -549,10 +647,16 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
     runtimeStatePath,
     logPath: config.logPath,
     running: supervisorAlive && ports.health.mcp && ports.health.localController,
+    ready,
+    readiness,
+    restartRequired: sourceDrift.restartRequired,
+    restartReasons,
+    runtimeGeneration: runtimeGeneration?.generation,
+    runtimeSource: runtimeGeneration?.source,
     supervisor: {
-      pid: state?.supervisor.pid,
+      pid: supervisorPid,
       alive: supervisorAlive,
-      staleState: Boolean(state?.supervisor.pid && !supervisorAlive),
+      staleState: Boolean(supervisorPid && !supervisorAlive),
     },
     daemon,
     mcpRuntime: runtime,
@@ -565,6 +669,7 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
       mcpOwners: listPortOwners(config.mcpPort),
       localControllerOwners: listPortOwners(config.localControllerPort),
     },
+    authority,
     orphanedProcesses,
     infos,
     warnings,
@@ -576,15 +681,16 @@ async function waitForHealthyStart(repoRoot: string, timeoutMs: number, logPath:
   const deadline = Date.now() + Math.max(2_000, timeoutMs);
   let latest = await controllerServiceStatus({ repo: repoRoot, logFile: logPath, controllerHome });
   while (Date.now() < deadline) {
-    if (latest.health.mcp && latest.health.localController && latest.supervisor.alive) return latest;
+    if (latest.ready && latest.supervisor.alive) return latest;
     await sleep(HEALTH_POLL_INTERVAL_MS);
     latest = await controllerServiceStatus({ repo: repoRoot, logFile: logPath, controllerHome });
   }
   const tail = readLogTail(logPath);
   const lines = [
     `Controller stack did not become healthy within ${timeoutMs}ms.`,
-    `MCP health: ${latest.health.mcp ? "ok" : "not ready"}`,
+    `Gateway health: ${latest.health.mcp ? "ok" : "not ready"}`,
     `Local Controller health: ${latest.health.localController ? "ok" : "not ready"}`,
+    `Ready state: ${latest.ready ? "ok" : "degraded"}`,
     `Supervisor PID: ${latest.supervisor.pid ?? "missing"}`,
   ];
   if (tail) lines.push("", "Recent log tail:", tail);
@@ -665,6 +771,7 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
   reconcileAgentJobs(repoRoot);
   reconcileLocalBridgeJobs(repoRoot);
   ensureControllerDaemon(config.controllerHome);
+  const launchAgents = findRepoLaunchAgents(repoRoot);
 
   const cli = resolveSelfCliInvocation();
   const serviceEnv = buildControllerServiceEnv(config.controllerHome);
@@ -688,50 +795,54 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
     config.logPath,
     serviceEnv,
   );
-  let pid: number;
+  let pid: number | undefined;
   try {
-    const keepaliveArgs = [
-      ...cli.args,
-      "mcp",
-      "keepalive",
-      "--repo",
-      repoRoot,
-      "--controller-home",
-      config.controllerHome,
-      "--host",
-      config.mcpHost,
-      "--port",
-      String(config.mcpPort),
-      "--profile",
-      config.profile,
-      "--auth",
-      config.authMode,
-      "--toolset",
-      config.toolset,
-      "--no-local-ui",
-      "--tunnel",
-      config.tunnelMode,
-    ];
-    if (config.enableDevRunner) {
-      keepaliveArgs.push("--enable-dev-runner");
-      if (config.devRunnerAgents.length > 0) {
-        keepaliveArgs.push("--dev-runner-agents", config.devRunnerAgents.join(","));
+    if (launchAgents.length > 0) {
+      bootstrapRepoLaunchAgents(launchAgents);
+    } else {
+      const keepaliveArgs = [
+        ...cli.args,
+        "mcp",
+        "keepalive",
+        "--repo",
+        repoRoot,
+        "--controller-home",
+        config.controllerHome,
+        "--host",
+        config.mcpHost,
+        "--port",
+        String(config.mcpPort),
+        "--profile",
+        config.profile,
+        "--auth",
+        config.authMode,
+        "--toolset",
+        config.toolset,
+        "--no-local-ui",
+        "--tunnel",
+        config.tunnelMode,
+      ];
+      if (config.enableDevRunner) {
+        keepaliveArgs.push("--enable-dev-runner");
+        if (config.devRunnerAgents.length > 0) {
+          keepaliveArgs.push("--dev-runner-agents", config.devRunnerAgents.join(","));
+        }
+        if (config.devRunnerTimeoutMs) {
+          keepaliveArgs.push("--dev-runner-timeout-ms", String(config.devRunnerTimeoutMs));
+        }
+        if (config.devRunnerMaxTimeoutMs) {
+          keepaliveArgs.push("--dev-runner-max-timeout-ms", String(config.devRunnerMaxTimeoutMs));
+        }
       }
-      if (config.devRunnerTimeoutMs) {
-        keepaliveArgs.push("--dev-runner-timeout-ms", String(config.devRunnerTimeoutMs));
-      }
-      if (config.devRunnerMaxTimeoutMs) {
-        keepaliveArgs.push("--dev-runner-max-timeout-ms", String(config.devRunnerMaxTimeoutMs));
-      }
+      if (config.publicEndpoint) keepaliveArgs.push("--public-endpoint", config.publicEndpoint);
+      pid = spawnDetached(
+        cli.command,
+        keepaliveArgs,
+        repoRoot,
+        config.logPath,
+        serviceEnv,
+      );
     }
-    if (config.publicEndpoint) keepaliveArgs.push("--public-endpoint", config.publicEndpoint);
-    pid = spawnDetached(
-      cli.command,
-      keepaliveArgs,
-      repoRoot,
-      config.logPath,
-      serviceEnv,
-    );
   } catch (error) {
     await stopPid(localControllerPid, opts.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS);
     throw error;
@@ -764,6 +875,20 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
   });
 
   status = await waitForHealthyStart(repoRoot, opts.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS, config.logPath, config.controllerHome);
+  if (launchAgents.length > 0) {
+    const persisted = loadControllerServiceState(repoRoot);
+    if (persisted) {
+      writeControllerServiceState(repoRoot, {
+        ...persisted,
+        updatedAt: nowIso(),
+        supervisor: {
+          ...persisted.supervisor,
+          pid: status.mcpRuntime?.server.pid,
+        },
+      });
+      status = await controllerServiceStatus({ repo: repoRoot, logFile: config.logPath, controllerHome: config.controllerHome });
+    }
+  }
   return { action: "started", cleanedPids: cleaned, status };
 }
 
@@ -772,6 +897,8 @@ export async function stopControllerService(opts: ControllerServiceOptions = {})
   const config = resolveServiceConfig(repoRoot, opts.logFile, opts.controllerHome);
   const state = loadControllerServiceState(repoRoot);
   const status = await controllerServiceStatus({ repo: repoRoot, logFile: config.logPath, controllerHome: config.controllerHome });
+  const launchAgents = findRepoLaunchAgents(repoRoot);
+  if (launchAgents.length > 0) bootoutRepoLaunchAgents(launchAgents);
   const processes = collectControllerServiceProcesses(repoRoot, state, config.controllerHome);
   const stoppable = processes.filter((entry) => entry.kind !== "unknown" || entry.command.includes(repoRoot));
   if (stoppable.length === 0) {
@@ -841,16 +968,20 @@ export async function controllerServiceLogs(opts: ControllerServiceOptions & { t
 
 export function formatControllerServiceStatus(status: ControllerServiceStatus): string {
   const lines = [
-    `Controller stack: ${status.running ? "running" : "not running"}`,
+    `Controller stack: ${status.running ? (status.ready ? "running" : "running (degraded)") : "not running"}`,
     `Repo: ${status.repoRoot}`,
     `Version: ${status.packageVersion}${status.bunVersion ? ` (Bun ${status.bunVersion})` : ""}`,
+    `Runtime generation: ${status.runtimeGeneration ?? "missing"}`,
+    `Runtime authority: ${status.authority.runtimeState.authority} (${status.authority.runtimeState.path})`,
     `Supervisor: ${status.supervisor.alive ? `pid=${status.supervisor.pid}` : status.supervisor.pid ? `stale pid=${status.supervisor.pid}` : "not running"}`,
     `Controller daemon: ${status.daemon.status}${status.daemon.pid ? ` pid=${status.daemon.pid}` : ""}`,
     `MCP: port=${status.ports.mcp} health=${status.health.mcp ? "ok" : status.ports.mcpReachable ? "conflict" : "down"}`,
     `Local Controller: port=${status.ports.localController} health=${status.health.localController ? "ok" : status.ports.localControllerReachable ? "conflict" : "down"}`,
+    `Readiness: gateway=${status.readiness.gateway ? "ok" : "down"} daemon=${status.readiness.daemon ? "ok" : "degraded"} projection=${status.readiness.projection ? "ok" : "stale"} connector=${status.readiness.connector ? "ok" : "stale"} public=${status.readiness.public ? "ok" : "stale"}`,
     `Log: ${status.logPath}`,
   ];
   if (status.infos.length > 0) lines.push("", ...status.infos.map((line) => `info: ${line}`));
+  if (status.restartRequired) lines.push(`Restart required: ${status.restartReasons.join("; ")}`);
   if (status.warnings.length > 0) lines.push("", ...status.warnings.map((line) => `warning: ${line}`));
   if (status.problems.length > 0) lines.push("", ...status.problems.map((line) => `problem: ${line}`));
   return lines.join("\n");
