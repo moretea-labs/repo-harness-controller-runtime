@@ -7,6 +7,7 @@ import { GlobalScheduler } from '../../src/runtime/control-plane/global-schedule
 import { reconcileExecutionJobsAsync } from '../../src/runtime/control-plane/global-scheduler/reconciliation';
 import { createExecutionJob, cancelExecutionJob, getExecutionJob, updateExecutionJob } from '../../src/runtime/execution/jobs/store';
 import { isProcessAlive, isProcessStatAlive, listProcessTreeMembers, terminateProcessTree } from '../../src/runtime/shared/process-tree';
+import { acquireExecutionLeases, listActiveLeases } from '../../src/runtime/resources/leases/store';
 
 const roots: string[] = [];
 const trackedPids = new Set<number>();
@@ -203,6 +204,15 @@ describe('worker process-tree reclamation', () => {
       resourceClaims: [{ resourceKey: 'repo-state', mode: 'read' }],
       maxAttempts: 1,
     }).job;
+    const acquired = acquireExecutionLeases(
+      controllerHome,
+      'repo-a',
+      created.jobId,
+      created.resourceClaims,
+      5_000,
+    );
+    expect(acquired.acquired).toBe(true);
+    const originalExpiry = Date.parse(acquired.leases[0].expiresAt);
     updateExecutionJob(controllerHome, 'repo-a', created.jobId, (job) => ({
       ...job,
       status: 'running',
@@ -210,6 +220,12 @@ describe('worker process-tree reclamation', () => {
       attempt: 1,
       startedAt: new Date(Date.now() - 70_000).toISOString(),
       heartbeatAt: new Date(Date.now() - 70_000).toISOString(),
+      leaseRefs: acquired.leases.map((lease) => ({
+        leaseId: lease.leaseId,
+        resourceKey: lease.resourceKey,
+        fencingToken: lease.fencingToken,
+        expiresAt: lease.expiresAt,
+      })),
     }));
 
     const result = await reconcileExecutionJobsAsync(controllerHome);
@@ -219,6 +235,9 @@ describe('worker process-tree reclamation', () => {
     expect(result.requeued).toBe(0);
     expect(refreshed.status).toBe('running');
     expect(refreshed.workerPid).toBe(leaderPid);
+    const renewed = listActiveLeases(controllerHome, 'repo-a');
+    expect(renewed).toHaveLength(1);
+    expect(Date.parse(renewed[0].expiresAt)).toBeGreaterThan(originalExpiry + 20_000);
     expect(isProcessAlive(leaderPid)).toBe(true);
     expect(isProcessAlive(childPid)).toBe(true);
   });

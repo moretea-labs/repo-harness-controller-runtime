@@ -1,7 +1,7 @@
 import { listActiveExecutionJobs, transitionExecutionJob } from '../../execution/jobs/store';
 import type { ExecutionJob } from '../../execution/jobs/types';
 import { readOperationReceipt } from '../../execution/jobs/receipt-store';
-import { releaseExecutionLeases } from '../../resources/leases/store';
+import { releaseExecutionLeases, renewExecutionLeases } from '../../resources/leases/store';
 import { isProcessAlive, terminateProcessTree, terminateProcessTreeSync, type ProcessTreeTerminationResult } from '../../shared/process-tree';
 import { settleScheduledExecution } from '../../workflow/schedules/settlement';
 
@@ -67,8 +67,10 @@ function workerLossContext(job: ExecutionJob): {
   return { workerLost: false, heartbeatAgeMs: ageMs, reason: 'process_missing' };
 }
 
+type WorkerLossReason = 'missing_worker' | 'stale_heartbeat' | 'process_missing' | 'lease_lost';
+
 function workerLostMessage(
-  reason: 'missing_worker' | 'stale_heartbeat' | 'process_missing',
+  reason: WorkerLossReason,
   heartbeatAge: number,
   terminal: boolean,
 ): string {
@@ -77,7 +79,9 @@ function workerLostMessage(
     : 'Worker heartbeat was missing.';
   const processMissing = reason === 'missing_worker'
     ? 'Worker PID was missing.'
-    : 'Worker process was no longer alive.';
+    : reason === 'lease_lost'
+      ? 'Worker no longer owned the expected fenced lease set.'
+      : 'Worker process was no longer alive.';
   if (reason === 'stale_heartbeat') {
     return terminal
       ? `${staleHeartbeat} The job reached its final retry and was marked failed.`
@@ -121,10 +125,20 @@ function reconcileExecutionJobsWith(
 
     const deadlineElapsed = Boolean(job.deadlineAt && Date.parse(job.deadlineAt) <= Date.now());
     const loss = workerLossContext(job);
-    if (!deadlineElapsed && !loss.workerLost) continue;
+    let lossReason: WorkerLossReason = loss.reason;
+    if (!deadlineElapsed && !loss.workerLost) {
+      try {
+        if (job.leaseRefs.length > 0) {
+          renewExecutionLeases(controllerHome, job.repoId, job.jobId, 30_000, job.leaseRefs);
+        }
+        continue;
+      } catch {
+        lossReason = 'lease_lost';
+      }
+    }
 
     const termination = terminateWorker(job.workerPid);
-    const outcome = finalizeRunningJob(controllerHome, job, deadlineElapsed, termination, loss.reason, loss.heartbeatAgeMs);
+    const outcome = finalizeRunningJob(controllerHome, job, deadlineElapsed, termination, lossReason, loss.heartbeatAgeMs);
     requeued += outcome.requeued;
     terminal += outcome.terminal;
     recovered += outcome.recovered;
@@ -157,10 +171,20 @@ async function reconcileExecutionJobsAsyncWith(
 
     const deadlineElapsed = Boolean(job.deadlineAt && Date.parse(job.deadlineAt) <= Date.now());
     const loss = workerLossContext(job);
-    if (!deadlineElapsed && !loss.workerLost) continue;
+    let lossReason: WorkerLossReason = loss.reason;
+    if (!deadlineElapsed && !loss.workerLost) {
+      try {
+        if (job.leaseRefs.length > 0) {
+          renewExecutionLeases(controllerHome, job.repoId, job.jobId, 30_000, job.leaseRefs);
+        }
+        continue;
+      } catch {
+        lossReason = 'lease_lost';
+      }
+    }
 
     const termination = await terminateWorker(job.workerPid);
-    const outcome = finalizeRunningJob(controllerHome, job, deadlineElapsed, termination, loss.reason, loss.heartbeatAgeMs);
+    const outcome = finalizeRunningJob(controllerHome, job, deadlineElapsed, termination, lossReason, loss.heartbeatAgeMs);
     requeued += outcome.requeued;
     terminal += outcome.terminal;
     recovered += outcome.recovered;
@@ -173,7 +197,7 @@ function finalizeRunningJob(
   job: ExecutionJob,
   deadlineElapsed: boolean,
   termination: ProcessTreeTerminationResult,
-  workerLostReason: 'missing_worker' | 'stale_heartbeat' | 'process_missing',
+  workerLostReason: WorkerLossReason,
   heartbeatAge: number,
 ): { requeued: number; terminal: number; recovered: number } {
   const receiptRecovery = recoverCompletedReceipt(controllerHome, job);
