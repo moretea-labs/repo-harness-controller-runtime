@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 5,
+  "id": "ISS-20260712-14BA0C",
+  "title": "Fix Campaign dispatch and durable Run closure",
+  "slug": "fix-campaign-dispatch-and-durable-run-closure",
+  "kind": "investigation",
+  "status": "planned",
+  "summary": "Work directly in the canonical current checkout on main. First fix Campaign quick-agent dispatch so task title/objective are propagated and workspace.mode=current with arguments.isolate=false is honored instead of being forced to an isolated worktree. Add regression tests. Then implement durable Run closure: explicit integration/cleanup state, no premature succeeded terminal state, restart-resumable and idempotent finish, safe worktree/temporary branch cleanup, preservation with explicit reasons for dirty/active/protected/unknown/unmerged cases, historical orphan reconciliation, main-occupancy diagnosis, and Needs Attention projection. Inspect exact relevant source only, run focused tests, package:check:type and package:check:controller-v8, commit locally on main, leave clean, do not push.",
+  "goals": [
+    "Work directly in the canonical current checkout on main. First fix Campaign quick-agent dispatch so task title/objective are propagated and workspace.mode=current with arguments.isolate=false is honored instead of being forced to an isolated worktree. Add regression tests. Then implement durable Run closure: explicit integration/cleanup state, no premature succeeded terminal state, restart-resumable and idempotent finish, safe worktree/temporary branch cleanup, preservation with explicit reasons for dirty/active/protected/unknown/unmerged cases, historical orphan reconciliation, main-occupancy diagnosis, and Needs Attention projection. Inspect exact relevant source only, run focused tests, package:check:type and package:check:controller-v8, commit locally on main, leave clean, do not push."
+  ],
+  "nonGoals": [
+    "Do not make unrelated changes outside the declared Task scope."
+  ],
+  "acceptanceCriteria": [
+    "Campaign direct-current quick agent works",
+    "Run closure is durable and safe",
+    "Tests pass",
+    "Local main commit created",
+    "No push"
+  ],
+  "relatedArtifacts": [],
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Fix Campaign dispatch and durable Run closure",
+      "objective": "Work directly in the canonical current checkout on main. First fix Campaign quick-agent dispatch so task title/objective are propagated and workspace.mode=current with arguments.isolate=false is honored instead of being forced to an isolated worktree. Add regression tests. Then implement durable Run closure: explicit integration/cleanup state, no premature succeeded terminal state, restart-resumable and idempotent finish, safe worktree/temporary branch cleanup, preservation with explicit reasons for dirty/active/protected/unknown/unmerged cases, historical orphan reconciliation, main-occupancy diagnosis, and Needs Attention projection. Inspect exact relevant source only, run focused tests, package:check:type and package:check:controller-v8, commit locally on main, leave clean, do not push.",
+      "status": "blocked",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src/runtime/workflow/campaigns/**",
+        "src/cli/agent-jobs/**",
+        "src/runtime/execution/**",
+        "src/runtime/integration/**",
+        "src/runtime/recovery/**",
+        "src/runtime/projections/**",
+        "src/cli/repositories/**",
+        "src/cli/controller/**",
+        "src/cli/local-bridge/**",
+        "tests/runtime/**",
+        "tests/cli/**",
+        "docs/**",
+        "package.json"
+      ],
+      "forbiddenPaths": [
+        "_ops/**",
+        ".ai/harness/**",
+        "node_modules/**"
+      ],
+      "checks": [
+        "package:check:type",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "Campaign direct-current quick agent works",
+        "Run closure is durable and safe",
+        "Tests pass",
+        "Local main commit created",
+        "No push"
+      ],
+      "risk": "low",
+      "recommendedAgent": "codex",
+      "notes": [
+        "Accepted RUN-iss-20260712-14ba0c-t1-1783858648854-274c91fd for asynchronous launch.",
+        "Dispatched RUN-iss-20260712-14ba0c-t1-1783858648854-274c91fd to codex.",
+        "RUN-iss-20260712-14ba0c-t1-1783858648854-274c91fd ended as unknown; explicit retry is required. worker process is no longer running and no result file was produced"
+      ],
+      "runIds": [
+        "RUN-iss-20260712-14ba0c-t1-1783858648854-274c91fd"
+      ],
+      "createdAt": "2026-07-12T12:17:28.847Z",
+      "updatedAt": "2026-07-12T12:29:08.884Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    }
+  ],
+  "createdAt": "2026-07-12T12:17:28.847Z",
+  "updatedAt": "2026-07-12T12:29:08.884Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+}
