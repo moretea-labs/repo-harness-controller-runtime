@@ -30,7 +30,7 @@ import {
   exposedControllerToolDefinitions,
 } from '../toolset';
 import { ensureControllerDaemon, readControllerDaemonStatus } from '../../../runtime/control-plane/daemon-client';
-import { readRepositoryProjectionSnapshot, rebuildRepositoryProjection } from '../../../runtime/projections/materialized-view';
+import { projectionBlocksReadiness, readRepositoryProjectionSnapshot, rebuildRepositoryProjection } from '../../../runtime/projections/materialized-view';
 import { readRuntimeGeneration } from '../../../runtime/control-plane/runtime-generation';
 import { getRepository, listRepositories } from '../../repositories/registry';
 import {
@@ -850,9 +850,16 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
     const daemon = readControllerDaemonStatus(runtimeControllerHome);
     const runtimeState = loadMcpServiceRuntimeState(runtimeControllerHome, repoRoot);
     const repositories = listRepositories(runtimeControllerHome).filter((repository) => repository.enabled && !repository.removedAt);
-    const staleRepositories = repositories
-      .filter((repository) => readRepositoryProjectionSnapshot(runtimeControllerHome, repository.repoId).stale)
-      .map((repository) => repository.repoId);
+    const projectionSnapshots = repositories.map((repository) => ({
+      repoId: repository.repoId,
+      snapshot: readRepositoryProjectionSnapshot(runtimeControllerHome, repository.repoId),
+    }));
+    const staleRepositories = projectionSnapshots
+      .filter(({ snapshot }) => snapshot.stale)
+      .map(({ repoId }) => repoId);
+    const blockingStaleRepositories = projectionSnapshots
+      .filter(({ snapshot }) => projectionBlocksReadiness(snapshot))
+      .map(({ repoId }) => repoId);
     const localBridgeHealth = localControllerConfig.enabled
       ? await jsonHealth(localControllerHealthUrl(localControllerConfig.host, localControllerConfig.port))
       : null;
@@ -861,7 +868,7 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
       generation: runtimeGeneration?.generation,
     });
     const daemonReady = daemon.status === 'ready' && daemon.degraded !== true;
-    const projectionReady = staleRepositories.length === 0;
+    const projectionReady = blockingStaleRepositories.length === 0;
     const publicConfigured = Boolean(runtimeState?.tunnel?.publicEndpoint);
     const publicReady = !publicConfigured || runtimeState?.tunnel?.healthy === true;
     const connectorReady = !publicConfigured || (
@@ -886,6 +893,7 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
         ready: projectionReady,
         repositoryCount: repositories.length,
         staleRepositories,
+        blockingStaleRepositories,
       },
       publicReadiness: {
         configured: publicConfigured,

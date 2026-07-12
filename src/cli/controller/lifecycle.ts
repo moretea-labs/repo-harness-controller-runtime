@@ -33,7 +33,7 @@ import {
   readRuntimeGeneration,
   type RuntimeSourceIdentity,
 } from "../../runtime/control-plane/runtime-generation";
-import { readRepositoryProjectionSnapshot } from "../../runtime/projections/materialized-view";
+import { projectionBlocksReadiness, readRepositoryProjectionSnapshot } from "../../runtime/projections/materialized-view";
 import { isProcessAlive, terminateProcessTree } from "../../runtime/shared/process-tree";
 
 const DEFAULT_START_TIMEOUT_MS = 20_000;
@@ -573,9 +573,16 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
   );
   const repositories = listRepositories(config.controllerHome)
     .filter((repository) => repository.enabled && !repository.removedAt);
-  const staleProjectionRepos = repositories
-    .filter((repository) => readRepositoryProjectionSnapshot(config.controllerHome, repository.repoId).stale)
-    .map((repository) => repository.repoId);
+  const projectionSnapshots = repositories.map((repository) => ({
+    repoId: repository.repoId,
+    snapshot: readRepositoryProjectionSnapshot(config.controllerHome, repository.repoId),
+  }));
+  const staleProjectionRepos = projectionSnapshots
+    .filter(({ snapshot }) => snapshot.stale)
+    .map(({ repoId }) => repoId);
+  const blockingStaleProjectionRepos = projectionSnapshots
+    .filter(({ snapshot }) => projectionBlocksReadiness(snapshot))
+    .map(({ repoId }) => repoId);
   const processes = collectControllerServiceProcesses(repoRoot, state, config.controllerHome);
   const trackedChildPids = trackedActiveChildProcessPids(repoRoot, config.controllerHome);
   const orphanedProcesses = classifyDetachedControllerServiceProcesses(processes, {
@@ -595,7 +602,7 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
     && (!runtimeGeneration?.generation || runtime?.generation === runtimeGeneration.generation)
     && (!runtimeGeneration?.generation || runtime?.server.generation === runtimeGeneration.generation)
   );
-  const projectionReady = staleProjectionRepos.length === 0;
+  const projectionReady = blockingStaleProjectionRepos.length === 0;
   const readiness: ControllerServiceReadiness = {
     gateway: ports.health.mcp,
     daemon: daemonReady,
@@ -633,7 +640,10 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
   }
   if (daemon.status === "failed" || daemon.degraded) problems.push(`Controller daemon is unhealthy: ${daemon.error ?? "unknown error"}`);
   if (runtime?.server.healthMismatch) problems.push(`MCP runtime generation/tool surface mismatch: ${runtime.server.healthMismatch}`);
-  if (!projectionReady) problems.push(`Runtime projection is stale for ${staleProjectionRepos.join(", ")}.`);
+  if (!projectionReady) problems.push(`Runtime projection is stale for ${blockingStaleProjectionRepos.join(", ")}.`);
+  if (staleProjectionRepos.length > 0 && blockingStaleProjectionRepos.length === 0) {
+    infos.push(`Ignoring stale idle runtime projections for ${staleProjectionRepos.join(", ")}.`);
+  }
   if (!connectorReady && runtime?.tunnel?.publicEndpoint) problems.push("Connector readiness is stale; public endpoint changed or generation drifted.");
   if (orphanedProcesses.length > 0) warnings.push(`Detected ${orphanedProcesses.length} detached repo-harness process(es) outside the tracked supervisor.`);
 

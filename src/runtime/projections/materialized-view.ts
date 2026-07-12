@@ -111,6 +111,15 @@ export interface RepositoryRuntimeProjectionSnapshot {
   persisted: boolean;
 }
 
+export function projectionBlocksReadiness(snapshot: RepositoryRuntimeProjectionSnapshot): boolean {
+  return snapshot.stale && (
+    snapshot.projection.activeJobs.length > 0
+    || snapshot.projection.queueDepth > 0
+    || snapshot.projection.runningWorkers > 0
+    || snapshot.projection.activeLeases > 0
+  );
+}
+
 export function readRepositoryProjectionSnapshot(
   controllerHome: string,
   repoId: string,
