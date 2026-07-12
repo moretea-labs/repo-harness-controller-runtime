@@ -119,6 +119,7 @@ import {
   dismissHandoffItem,
   getHandoffItem,
   listCapabilityDescriptors,
+  summarizeCapabilityGroups,
   listHandoffItems,
   normalizeCheckIds,
   resolveHandoffItem,
@@ -1524,6 +1525,14 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             repoId: repository.repoId,
             readiness: readinessWithToolSurface,
             capabilityCount: capabilities.length,
+            capabilityGroups: summarizeCapabilityGroups(manifests),
+            toolArchitecture: {
+              facadeTools: ['rh_access', 'rh_status', 'rh_inbox', 'rh_context', 'rh_work'],
+              atomicTypedToolsRetained: true,
+              internalHandlersRetained: true,
+              domainSchemaLoading: 'static_stable_surface',
+              dynamicDomainSchemaLoadingSupported: false,
+            },
             pendingHandoffCount: pendingHandoffs.length,
             activeWorkCount: activeWork.length,
             toolSurface: exposure.actualToolNames,
@@ -1651,8 +1660,22 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             normalizedChecks,
             invalidCheckIdsAreNotFailures: true,
             capabilities: detailLevel === 'summary'
-              ? capabilities.map((entry) => ({ capabilityId: entry.capabilityId, domain: entry.domain, exposedVia: entry.exposedVia }))
+              ? capabilities.map((entry) => ({
+                capabilityId: entry.capabilityId,
+                domain: entry.domain,
+                group: entry.group,
+                exposedVia: entry.exposedVia,
+                schemaExposure: entry.schemaExposure,
+              }))
               : capabilities,
+            capabilityGroups: summarizeCapabilityGroups(manifests),
+            toolArchitecture: {
+              facadeTools: ['rh_access', 'rh_status', 'rh_inbox', 'rh_context', 'rh_work'],
+              atomicTypedToolsRetained: true,
+              internalHandlersRetained: true,
+              domainSchemaLoading: 'static_stable_surface',
+              dynamicDomainSchemaLoadingSupported: false,
+            },
             work: work && detailLevel === 'summary'
               ? { workId: work.workId, status: work.status, mode: work.mode, objective: work.objective.slice(0, 240) }
               : work,

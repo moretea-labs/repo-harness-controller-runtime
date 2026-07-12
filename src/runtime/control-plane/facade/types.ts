@@ -14,6 +14,23 @@ export type FacadeDetailLevel = 'summary' | 'detail' | 'raw';
 export const CAPABILITY_DOMAINS = ['repository', 'plugin', 'controller', 'evidence', 'maintenance'] as const;
 export type CapabilityDomain = (typeof CAPABILITY_DOMAINS)[number];
 
+export const CAPABILITY_GROUPS = [
+  'controller',
+  'repository-core',
+  'git',
+  'issue-task',
+  'campaign',
+  'browser',
+  'ios',
+  'plugin',
+  'evidence',
+  'runtime-maintenance',
+] as const;
+export type CapabilityGroup = (typeof CAPABILITY_GROUPS)[number];
+
+export const CAPABILITY_SCHEMA_EXPOSURES = ['stable_static', 'plugin_manifest'] as const;
+export type CapabilitySchemaExposure = (typeof CAPABILITY_SCHEMA_EXPOSURES)[number];
+
 export const CAPABILITY_OPERATION_CLASSES = ['read', 'write', 'execute', 'verify', 'finalize'] as const;
 export type CapabilityOperationClass = (typeof CAPABILITY_OPERATION_CLASSES)[number];
 
@@ -274,10 +291,22 @@ export interface WorkContractStore {
 export interface CapabilityDescriptor {
   capabilityId: string;
   domain: CapabilityDomain;
+  group: CapabilityGroup;
   operationClass: CapabilityOperationClass;
   risk: CapabilityRisk;
   exposedVia: FacadeTool;
+  schemaExposure: CapabilitySchemaExposure;
   summary: string;
+}
+
+export interface CapabilityGroupSummary {
+  group: CapabilityGroup;
+  capabilityCount: number;
+  domains: CapabilityDomain[];
+  facadeTools: FacadeTool[];
+  operationClasses: CapabilityOperationClass[];
+  risks: CapabilityRisk[];
+  schemaExposures: CapabilitySchemaExposure[];
 }
 
 export interface PolicyDecision {

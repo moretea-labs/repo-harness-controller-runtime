@@ -72,6 +72,7 @@ import {
   runControllerCheckAsync,
 } from "../controller/check-runner";
 import { normalizeCheckIds } from '../../runtime/control-plane/facade/check-normalization';
+import { listCapabilityDescriptors, summarizeCapabilityGroups } from '../../runtime/control-plane/facade/capability-registry';
 import {
   getControllerTimeline,
   getProjectProgress,
@@ -3011,6 +3012,7 @@ export async function callMcpTool(
           enableChatgptBrowser: ctx.enableChatgptBrowser === true,
         });
         const preferredTools: string[] = [...PREFERRED_FACADE_TOOL_NAMES];
+        const capabilityDescriptors = listCapabilityDescriptors();
         const connectorSnapshot = Array.isArray(args.connector_tool_names)
           ? args.connector_tool_names.map(String)
           : Array.isArray(args.connectorToolNames)
@@ -3103,9 +3105,18 @@ export async function callMcpTool(
             note: "Requested timeout values are validated explicitly and are never silently reduced to the default.",
           },
           preferredTools,
+          capabilityGroups: summarizeCapabilityGroups(),
+          toolArchitecture: {
+            facadeTools: preferredTools,
+            atomicTypedToolsRetained: true,
+            internalHandlersRetained: true,
+            domainSchemaLoading: 'static_stable_surface',
+            dynamicDomainSchemaLoadingSupported: false,
+            capabilityDescriptorCount: capabilityDescriptors.length,
+          },
           toolExposure: {
             preferred: preferredTools,
-            note: "Prefer rh_status/rh_inbox/rh_context/rh_work for ChatGPT control-plane work. Older tools remain available as advanced/compatibility.",
+            note: "Prefer the five rh_* workflow facades for orchestration. Typed repository, Git, Issue/Task, Campaign, plugin, browser, iOS, artifact, and recovery tools remain available because the current MCP transport cannot load domain schemas per conversation.",
             advanced: expectedTools.filter((tool) => !preferredTools.includes(tool)).slice(0, 40),
             compatibilityRetained: true,
           },

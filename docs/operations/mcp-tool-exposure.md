@@ -23,6 +23,18 @@ Configure via CLI flags, `REPO_HARNESS_MCP_TOOLSET`, or Controller Home MCP conf
 
 MCP `tools/list`, call validation, `/health`, `controller_ready`, `rh_status`, Connector freshness, and the Local Controller UI derive from this contract. Readiness cannot be `ready` while required tools are missing.
 
+## Three-layer tool contract
+
+The current implementation separates orchestration from capability without deleting product functions:
+
+1. **Workflow facade:** `rh_status`, `rh_access`, `rh_inbox`, `rh_context`, and `rh_work` are the preferred ChatGPT control-plane entry points.
+2. **Typed atomic tools:** repository inspection, Direct Edit, command, Git, Work/Job, Issue/Task, Campaign, plugin, browser, iOS, artifact, and recovery handlers remain public because their schemas preserve operation-specific validation and evidence.
+3. **Internal handlers and capability registry:** capabilities are grouped as `controller`, `repository-core`, `git`, `issue-task`, `campaign`, `browser`, `ios`, `plugin`, `evidence`, and `runtime-maintenance`. `rh_status`, `rh_context`, and `controller_capabilities` expose this metadata.
+
+The MCP transport currently publishes a static stable schema. It does **not** support loading a domain schema only after ChatGPT selects that domain. Therefore capability grouping improves selection and documentation, but it must not be described as dynamic tool loading. A future transport-level implementation may reduce the discovered schema while retaining the same internal handlers.
+
+Capability metadata changes do not change `tools/list`; restart the Controller to load new code, but reconnect/rescan ChatGPT only when tool names or input schemas change.
+
 ## Permissions
 
 Request/Full Access is an execution-policy decision below tool discovery. Switching access mode does not change the schema, does not require an MCP restart, and does not require reconnecting ChatGPT.

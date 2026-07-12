@@ -34,7 +34,7 @@ Client
      Evidence Plane + Materialized Projections
 ```
 
-The processes communicate through atomic file-backed state. Gateway restart does not cancel accepted Jobs. Worker exit does not take down Gateway or Daemon. Daemon restart reconstructs ownership from Job, Lease and index state.
+The processes communicate through atomic file-backed state. Gateway restart does not cancel accepted Jobs. Worker exit does not take down Gateway or Daemon. Daemon restart persists `starting`, rebuilds durable indexes and projections, reconciles Jobs, Local Jobs and Leases, and publishes `ready` only after bounded startup recovery returns. Partial recovery publishes structured degraded state instead of silently claiming health.
 
 ## 3. Thin Gateway
 
@@ -96,7 +96,7 @@ Long work runs after the Actor releases its short transaction lock.
 - reconciliation;
 - Schedule occurrences.
 
-Every Job has `requestId`, `semanticKey`, repository identity, deadline, attempts, Claims, Lease references and evidence IDs. Repeated request IDs return the same Job unless the semantic key differs, in which case admission fails explicitly.
+Every Job has `requestId`, `semanticKey`, repository identity, deadline, attempts, Claims, Lease references and evidence IDs. Repeated request IDs return the same Job unless the semantic key differs, in which case admission fails explicitly. Repository command input has one canonical boundary: typed argv arrays preserve executable and argument boundaries end to end and execute without a shell; legacy command strings remain supported only through an explicit compatibility shell boundary. Preview, policy classification, scope checks, approval digests, durable payloads, Workers and the executor consume the same representation.
 
 Worker processes heartbeat the Job and renew Leases. Fenced writes reject stale ownership. Result bodies are bounded; oversized results become addressable Artifacts.
 

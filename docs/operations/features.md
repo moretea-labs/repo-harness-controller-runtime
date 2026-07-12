@@ -31,7 +31,7 @@ These features are part of the default local setup:
 
 ## Tool exposure
 
-The default `advanced` toolset exposes one stable, repair-capable schema capped at 128 tools. `core` is a compatibility alias for the same schema. `full` exposes every historical definition and should be reserved for legacy integrations or deep compatibility diagnosis.
+The default `advanced` toolset exposes one stable, repair-capable schema capped at 128 tools. `core` is a compatibility alias for the same schema. `full` exposes every historical definition and should be reserved for legacy integrations or deep compatibility diagnosis. Five workflow facades sit above typed atomic tools and internal handlers; capability metadata groups the existing functions by domain. The current MCP transport does not dynamically load domain schemas, so grouping does not remove or hide the typed tools.
 
 ## Execution choices
 

@@ -31,7 +31,7 @@ repo-harness 不依赖编码 Agent 或外部插件也能使用。先完成核心
 
 ## 工具暴露
 
-默认 `advanced` 暴露固定、可修复且不超过 128 个工具的 schema；`core` 是同一 schema 的兼容别名。`full` 会暴露全部历史定义，只用于旧集成或深度兼容诊断。
+默认 `advanced` 暴露固定、可修复且不超过 128 个工具的 schema；`core` 是同一 schema 的兼容别名。`full` 会暴露全部历史定义，只用于旧集成或深度兼容诊断。五个工作流 facade 位于强类型原子工具和内部 handler 之上，capability 元数据按领域对现有能力分组。当前 MCP transport 尚不支持会话内动态加载领域 schema，因此分组不会删除或隐藏这些强类型工具。
 
 ## 如何选择执行方式
 

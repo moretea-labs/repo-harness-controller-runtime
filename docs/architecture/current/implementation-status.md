@@ -35,6 +35,8 @@ The migration preserves the existing Issue, Task, Run, Edit Session, Local Job, 
 | Global fair scheduler | Implemented | priority aging, persisted repository fairness, global/repository quotas |
 | Provider and host budgets | Implemented | Worker, Agent provider, Heavy Check, memory and CPU-load admission limits |
 | Durable reconciliation | Implemented | heartbeat, deadline, Operation Receipt recovery, safe retry and ambiguous-mutation stop |
+| Startup recovery before readiness | Implemented | `starting` is persisted; ExecutionJob indexes, Jobs, Local Jobs, Leases and projections reconcile before `ready`; repository/phase failures publish degraded state |
+| Canonical repository command input | Implemented | typed argv is validated and direct-spawned without shell reparsing; legacy strings use one explicit compatibility shell boundary |
 | Active/recent/request indexes | Implemented | Execution Job, Agent Run, Task-to-Run, pending integration, Local Job, Occurrence, Portfolio and Finding indexes |
 | Schedule, Trigger, Decision and Occurrence | Implemented | interval/manual/UTC cron/calendar/condition/event/dependency triggers, bounded Occurrence and persisted Decision |
 | Schedule safety policy | Implemented | Shadow Mode, max-active, daily budget, cooldown, exponential backoff, failure circuit breaker and stop conditions |
@@ -58,6 +60,8 @@ The public MCP surface is stable and profile-compatible:
 - `full` exposes every historical definition for exhaustive compatibility diagnosis.
 
 The five preferred orchestration facades are `rh_status`, `rh_access`, `rh_inbox`, `rh_context`, and `rh_work`. Direct Edit, command, Git, Work/Job, Agent, Campaign, plugin, browser, iOS, artifact, and recovery entry points are also available in the stable schema. Request/Full Access changes execution approval only and never changes `tools/list` or requires reconnecting.
+
+Capability descriptors now identify domain group, operation class, risk, facade route, and schema source. `rh_status`, `rh_context`, and `controller_capabilities` report grouped metadata for controller, repository-core, Git, Issue/Task, Campaign, Browser, iOS, plugin, evidence, and runtime-maintenance capabilities. This is a three-layer contract—workflow facade, typed atomic tools, internal handlers—not dynamic tool loading. The current MCP transport still exposes a static schema, so reconnecting is only necessary when tool names or input schemas change.
 
 Potentially long or mutating calls acknowledge a durable Job, and their result remains available through `get_job` or bounded artifacts.
 

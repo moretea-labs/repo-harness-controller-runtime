@@ -74,19 +74,20 @@ Gateway restart must not cancel Workers.
 
 The Controller Daemon owns scheduling decisions, Repo Actors, reconciliation, Schedule delivery, and Lease management.
 
-After restart it must:
+After restart it must persist `starting`, run bounded synchronous recovery, and publish `ready` only after that recovery returns:
 
 ```text
-load repository registry
-load active Job/Run/Occurrence/Lease indexes
-rebuild missing indexes when necessary
-recreate logical Repo Actors
-reconcile active ownership
-resume fair scheduling
-redeliver due Schedule windows idempotently
+load enabled repository registry
+rebuild ExecutionJob active and requestId indexes from durable records
+reconcile running/active ExecutionJobs and dead workers
+reconcile Local Bridge compatibility Jobs
+remove or classify expired Leases
+rebuild every repository materialized projection from durable truth
+publish ready, including degraded state and structured recovery errors
+resume fair scheduling and normal asynchronous observation
 ```
 
-The Controller must not assume every persisted `running` entity is still running. It verifies Lease, heartbeat, process/provider state, and durable result evidence.
+Projection rebuild is unconditional on daemon restart, so a stale persisted projection is repaired even when a dirty marker was lost. Recovery failures are isolated by repository and phase: one broken repository does not prevent healthy repositories from recovering, and a failure in one phase does not silently skip later Lease or projection repair. The Controller must not assume every persisted `running` entity is still running. It verifies Lease, heartbeat, process/provider state, and durable result evidence.
 
 ## 6. Repo Actor Recovery
 

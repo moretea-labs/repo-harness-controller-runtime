@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { normalizeCheckIds, classifyVerificationOutcome } from '../../src/runtime/control-plane/facade/check-normalization';
-import { listCapabilityDescriptors } from '../../src/runtime/control-plane/facade/capability-registry';
+import { listCapabilityDescriptors, summarizeCapabilityGroups } from '../../src/runtime/control-plane/facade/capability-registry';
 import { evaluatePolicyGate } from '../../src/runtime/control-plane/facade/policy-gate';
 import { buildFacadeResult } from '../../src/runtime/control-plane/facade/facade-result';
 import { validateSuggestedNextActions } from '../../src/runtime/control-plane/facade/suggested-actions';
@@ -191,6 +191,21 @@ describe('handoff and facade contracts', () => {
     expect(capabilities.map((entry) => entry.capabilityId)).toContain('controller.self_healing');
     expect(capabilities.map((entry) => entry.capabilityId)).toContain('controller.codex_delegation');
     expect(new Set(capabilities.map((entry) => entry.exposedVia))).toEqual(new Set(['rh_context', 'rh_inbox', 'rh_status', 'rh_work']));
+    expect(new Set(capabilities.map((entry) => entry.group))).toEqual(new Set([
+      'browser',
+      'campaign',
+      'controller',
+      'evidence',
+      'git',
+      'ios',
+      'issue-task',
+      'repository-core',
+      'runtime-maintenance',
+    ]));
+    expect(capabilities.every((entry) => entry.schemaExposure === 'stable_static')).toBe(true);
+    const groups = summarizeCapabilityGroups([]);
+    expect(groups.find((entry) => entry.group === 'git')).toMatchObject({ capabilityCount: 1, facadeTools: ['rh_work'] });
+    expect(groups.find((entry) => entry.group === 'ios')).toMatchObject({ capabilityCount: 1, facadeTools: ['rh_work'] });
   });
 
   test('policy gate preserves bounded direct edit and blocks raw secret access', () => {
