@@ -63,6 +63,27 @@ export interface ExecutionJobLeaseRef {
   expiresAt: string;
 }
 
+export interface ExecutionJobTimings {
+  durablePersistedAt?: string;
+  schedulerNotifiedAt?: string;
+  schedulerObservedAt?: string;
+  leaseCreatedAt?: string;
+  workerRunningAt?: string;
+}
+
+export type ExecutionOperationMode = 'readonly' | 'mutating' | 'remote_write' | 'destructive';
+
+export interface ExecutionOperationMetadata {
+  mode: ExecutionOperationMode;
+  idempotent: boolean;
+  replayable: boolean;
+  timeoutMs: number;
+  retryPolicy: 'none' | 'safe_retry' | 'idempotent_request';
+  approvalPolicy: 'none' | 'request' | 'required';
+  lockScope: string[];
+  resourceClaims: ResourceClaimSpec[];
+}
+
 export interface ExecutionJobOutcome {
   process?: { exitCode?: number | null; timedOut?: boolean; stdoutPath?: string; stderrPath?: string };
   policy?: { decision: 'allowed' | 'approval_required' | 'rejected'; repositoryChanged?: boolean; changedPaths?: string[] };
@@ -95,6 +116,8 @@ export interface ExecutionJob {
   workerPid?: number;
   attempt: number;
   maxAttempts: number;
+  timings?: ExecutionJobTimings;
+  operationMetadata?: ExecutionOperationMetadata;
   result?: Record<string, unknown>;
   outcome?: ExecutionJobOutcome;
   error?: { code: string; message: string; retryable: boolean; details?: Record<string, unknown> };
@@ -114,6 +137,7 @@ export interface CreateExecutionJobInput {
   dependencies?: string[];
   timeoutMs?: number;
   maxAttempts?: number;
+  operationMetadata?: ExecutionOperationMetadata;
 }
 
 export interface ExecutionJobEvent {

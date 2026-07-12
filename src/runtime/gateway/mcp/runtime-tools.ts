@@ -1759,9 +1759,9 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           repo_id: repository.repoId,
           request_id: requestId,
           ...(typeof args.timeout_ms === 'number' ? { timeout_ms: args.timeout_ms } : {}),
-        });
+        }, { allowReadOnly: true });
         if (!routed?.structuredContent || routed.isError) {
-          throw new Error(`WORK_OPERATION_NOT_DURABLE: ${operation} is unknown, read-only, or not eligible for durable execution`);
+          throw new Error(`WORK_OPERATION_NOT_DURABLE: ${operation} is unknown or not eligible for durable execution`);
         }
         const accepted = routed.structuredContent as Record<string, unknown>;
         const workId = String(accepted.jobId ?? '').trim();

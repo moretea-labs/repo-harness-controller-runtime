@@ -51,11 +51,13 @@ export async function waitForSchedulerWakeSignal(
     let settled = false;
     let watcher: ReturnType<typeof watch> | undefined;
     let timer: NodeJS.Timeout | undefined;
+    let poller: NodeJS.Timeout | undefined;
 
     const finish = (result: 'wakeup' | 'timeout' | 'aborted') => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      if (poller) clearInterval(poller);
       watcher?.close();
       signal?.removeEventListener('abort', onAbort);
       resolve(result);
@@ -67,7 +69,14 @@ export async function waitForSchedulerWakeSignal(
     };
 
     signal?.addEventListener('abort', onAbort, { once: true });
-    watcher = watch(dirname(path), maybeWake);
+    try {
+      watcher = watch(dirname(path), maybeWake);
+      watcher.on?.('error', maybeWake);
+    } catch {
+      watcher = undefined;
+    }
+    poller = setInterval(maybeWake, Math.min(50, Math.max(10, Math.floor(timeoutMs / 10) || 25)));
+    poller.unref?.();
     timer = setTimeout(() => finish('timeout'), Math.max(0, timeoutMs));
     timer.unref?.();
     maybeWake();

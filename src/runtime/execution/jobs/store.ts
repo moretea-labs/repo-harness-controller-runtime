@@ -367,6 +367,11 @@ export function createExecutionJob(controllerHome: string, input: CreateExecutio
       deadlineAt: new Date(Date.now() + timeoutMs).toISOString(),
       attempt: 0,
       maxAttempts: Math.max(1, Math.min(input.maxAttempts ?? 1, 10)),
+      operationMetadata: input.operationMetadata,
+      timings: {
+        durablePersistedAt: createdAt,
+        schedulerNotifiedAt: createdAt,
+      },
       evidenceIds: [],
     };
     writeJsonAtomic(jobPath(home, job.repoId, job.jobId), job);
@@ -498,6 +503,11 @@ export function claimExecutionJobForDispatch(
         workerPid: undefined,
         heartbeatAt: undefined,
         leaseRefs,
+        timings: {
+          ...current.timings,
+          schedulerObservedAt: now(),
+          leaseCreatedAt: leaseRefs.length > 0 ? now() : current.timings?.leaseCreatedAt,
+        },
       },
       eventType: 'job_dispatched',
       eventData,
@@ -523,6 +533,10 @@ export function attachExecutionWorker(
         workerPid,
         heartbeatAt: timestamp,
         startedAt: current.startedAt ?? timestamp,
+        timings: {
+          ...current.timings,
+          workerRunningAt: timestamp,
+        },
       },
       eventType: 'job_running',
       eventData: { workerPid },

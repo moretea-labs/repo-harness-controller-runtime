@@ -9,7 +9,7 @@ import { repositoryToolDefinitions } from '../../../cli/mcp/repository-tools';
 import { resolveRepositorySelection } from '../../../cli/repositories/registry';
 import { ensureRepositoryRuntimeStorage } from '../../../cli/repositories/runtime-storage';
 import { createExecutionJob, getExecutionJob } from '../../execution/jobs/store';
-import type { ExecutionJobPriority, ExecutionJobType } from '../../execution/jobs/types';
+import type { ExecutionJobPriority, ExecutionJobType, ExecutionOperationMetadata } from '../../execution/jobs/types';
 import { waitForExecutionJob } from '../../execution/jobs/wait';
 import { ensureControllerDaemon } from '../../control-plane/daemon-client';
 import { buildAcceptedQueuedDigest, buildJobOperationDigest } from '../../control-plane/facade/operation-digest';
@@ -69,11 +69,12 @@ function shouldCreateDurableJob(
   ctx: MultiRepositoryMcpToolContext,
   name: string,
   args: Record<string, unknown> = {},
+  opts: { allowReadOnly?: boolean } = {},
 ): boolean {
   const definition = toolDefinition(ctx, name);
   if (!definition) return false;
   if (name.startsWith('repository_') && DIRECT_REPOSITORY_TOOLS.has(name)) return false;
-  if (definition.annotations?.readOnlyHint === true) return false;
+  if (definition.annotations?.readOnlyHint === true && opts.allowReadOnly !== true) return false;
   if (DIRECT_HOT_READ_TOOLS.has(name)) return false;
   // Interactive development path: sync by default unless caller opts into async queueing.
   if (INTERACTIVE_SYNC_WRITE_TOOLS.has(name) && !wantsAsyncExecution(args)) return false;
@@ -116,6 +117,49 @@ function automaticRequestId(name: string, repoId: string, args: Record<string, u
   return `mcp:auto:${name}:${repoId}:${hashArguments(args)}:${window}`;
 }
 
+function validateDurableArguments(name: string, definition: McpToolDefinition, args: Record<string, unknown>): void {
+  const schema = definition.inputSchema as { required?: unknown; properties?: Record<string, unknown>; additionalProperties?: unknown };
+  const required = Array.isArray(schema.required) ? schema.required.filter((value): value is string => typeof value === 'string') : [];
+  const missing = required.filter((key) => args[key] === undefined || args[key] === null || args[key] === '');
+  if (missing.length > 0) {
+    throw new Error(`INVALID_ARGUMENT: ${name} is missing required argument(s): ${missing.join(', ')}`);
+  }
+  if (schema.additionalProperties === false && schema.properties) {
+    const allowed = new Set(Object.keys(schema.properties));
+    const unexpected = Object.keys(args).filter((key) => !allowed.has(key));
+    if (unexpected.length > 0) {
+      throw new Error(`INVALID_ARGUMENT: ${name} received unsupported argument(s): ${unexpected.join(', ')}`);
+    }
+  }
+}
+
+function operationMetadataForTool(
+  definition: McpToolDefinition,
+  claims: ReturnType<typeof claimsForMcpOperation>,
+  timeoutMs: number,
+): ExecutionOperationMetadata {
+  const destructive = definition.annotations?.destructiveHint === true;
+  const remoteWrite = claims.some((claim) => claim.resourceKey.startsWith('remote:'));
+  const readOnly = definition.annotations?.readOnlyHint === true || claims.length === 0;
+  const mode = destructive
+    ? 'destructive'
+    : remoteWrite
+      ? 'remote_write'
+      : readOnly
+        ? 'readonly'
+        : 'mutating';
+  return {
+    mode,
+    idempotent: readOnly,
+    replayable: readOnly,
+    timeoutMs,
+    retryPolicy: readOnly ? 'safe_retry' : 'idempotent_request',
+    approvalPolicy: destructive ? 'required' : remoteWrite || !readOnly ? 'request' : 'none',
+    lockScope: claims.map((claim) => claim.resourceKey),
+    resourceClaims: claims,
+  };
+}
+
 export function injectDurableCommandFields(tool: McpToolDefinition): McpToolDefinition {
   const schema = tool.inputSchema as { type?: unknown; properties?: Record<string, unknown>; [key: string]: unknown };
   if (schema.type !== 'object') return tool;
@@ -151,8 +195,10 @@ export async function routeDurableMcpCall(
   ctx: MultiRepositoryMcpToolContext,
   name: string,
   args: Record<string, unknown>,
+  opts: { allowReadOnly?: boolean } = {},
 ): Promise<CallToolResult | undefined> {
-  if (!shouldCreateDurableJob(ctx, name, args)) return undefined;
+  const definition = toolDefinition(ctx, name);
+  if (!definition || !shouldCreateDurableJob(ctx, name, args, opts)) return undefined;
 
   const restoringDisabledRepository = name === 'repository_update'
     && typeof args.repo_id === 'string'
@@ -187,8 +233,20 @@ export async function routeDurableMcpCall(
     workerArgs.command = commandValue(normalizeRepositoryCommand(workerArgs.command));
   }
   delete workerArgs.request_id;
+  delete workerArgs.apply_mode;
+  delete workerArgs.wait;
+  delete workerArgs.wait_ms;
+  delete workerArgs.await_result;
+  delete workerArgs.wait_for_result;
+  validateDurableArguments(name, definition, workerArgs);
   const semanticKey = `${isRepositoryTool ? 'repository-tool' : 'mcp-tool'}:${name}:${repoId}:${hashArguments(workerArgs)}`;
   const claims = claimsForMcpOperation(name, workerArgs, repoId, checkoutId);
+  const timeoutMs = typeof args.timeout_ms === 'number' ? args.timeout_ms : undefined;
+  const operationMetadata = operationMetadataForTool(
+    definition,
+    claims,
+    Math.max(1_000, Math.min(timeoutMs ?? 15 * 60_000, 24 * 60 * 60_000)),
+  );
   // Refresh and fence the daemon before persisting work. Creating the Job first
   // can leave a newly submitted operation associated with a stale Controller
   // epoch when the long-lived Gateway survives a daemon restart.
@@ -213,8 +271,9 @@ export async function routeDurableMcpCall(
       runnerMaxTimeoutMs: ctx.policy.execution.runnerMaxTimeoutMs,
     },
     resourceClaims: claims,
-    timeoutMs: typeof args.timeout_ms === 'number' ? args.timeout_ms : undefined,
+    timeoutMs,
     maxAttempts: 2,
+    operationMetadata,
   });
   if (wantsWaitForResult(args)) {
     const waited = await waitForExecutionJob({
