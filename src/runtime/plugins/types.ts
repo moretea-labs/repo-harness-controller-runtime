@@ -119,8 +119,11 @@ export interface AssistantPluginActionExecutionInput {
   jobId?: string;
 }
 
+export type AssistantPluginScope = 'repository' | 'controller';
+
 export interface AssistantPluginAdapter {
   pluginId: string;
+  scope?: AssistantPluginScope;
   buildManifest(previousRevision?: number, previousUpdatedAt?: string, repoRoot?: string): AssistantPluginManifest;
   executeAction(input: AssistantPluginActionExecutionInput): Promise<Record<string, unknown>>;
 }

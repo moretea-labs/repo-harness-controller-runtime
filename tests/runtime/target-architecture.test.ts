@@ -200,7 +200,7 @@ describe('target architecture runtime', () => {
     expect(invalidation?.message).toContain('LEASE_EXPIRED');
   });
 
-  test('treats a stale controller heartbeat as lost worker ownership', () => {
+  test('keeps running worker ownership while a live daemon PID has a stale scheduler heartbeat', () => {
     const controllerHome = home();
     const startedAt = new Date(Date.now() - 60_000).toISOString();
     const created = createExecutionJob(controllerHome, {
@@ -248,8 +248,7 @@ describe('target architecture runtime', () => {
       controllerStartedAt: startedAt,
       currentParentPid: process.pid,
     });
-    expect(invalidation?.code).toBe('CONTROLLER_UNAVAILABLE');
-    expect(invalidation?.message).toContain('Controller daemon is failed');
+    expect(invalidation).toBeUndefined();
   });
 
   test('scheduler wake signals interrupt idle backoff waits', async () => {

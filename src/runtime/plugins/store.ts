@@ -1,7 +1,7 @@
 import { createHash } from 'crypto';
 import { join } from 'path';
 import type { RepositoryRecord } from '../../cli/repositories/types';
-import { repositoryControllerRoot } from '../../cli/repositories/controller-home';
+import { CONTROLLER_SCOPE_REPO_ID, controllerSystemRoot, repositoryControllerRoot } from '../../cli/repositories/controller-home';
 import { createExecutionJob } from '../execution/jobs/store';
 import type { ExecutionJob, ResourceClaimSpec } from '../execution/jobs/types';
 import { appendRuntimeEvent } from '../evidence/event-ledger';
@@ -13,6 +13,7 @@ import { githubPluginAdapter } from './github-adapter';
 import { browserPluginAdapter } from './browser-adapter';
 import { appStoreConnectPluginAdapter } from './app-store-connect-adapter';
 import { iosPluginAdapter } from './ios-adapter';
+import { localSystemPluginAdapter } from './local-system-adapter';
 import { AssistantPluginError, toAssistantPluginError } from './errors';
 import type {
   AssistantPluginAdapter,
@@ -32,10 +33,38 @@ const PLUGIN_ADAPTERS = new Map<string, AssistantPluginAdapter>([
   [gmailPluginAdapter.pluginId, gmailPluginAdapter],
   [googleCalendarPluginAdapter.pluginId, googleCalendarPluginAdapter],
   [googleTasksPluginAdapter.pluginId, googleTasksPluginAdapter],
+  [localSystemPluginAdapter.pluginId, localSystemPluginAdapter],
 ]);
 
 function now(): string {
   return new Date().toISOString();
+}
+
+export function controllerPluginRepository(controllerHome: string): RepositoryRecord {
+  const root = controllerSystemRoot(controllerHome);
+  const timestamp = now();
+  return {
+    schemaVersion: 1,
+    repoId: CONTROLLER_SCOPE_REPO_ID,
+    displayName: 'Controller local system',
+    canonicalRoot: root,
+    localRoot: root,
+    activeCheckoutId: 'controller',
+    checkouts: [],
+    defaultBranch: 'none',
+    repositoryType: 'local-git',
+    enabled: true,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    lastSeenAt: timestamp,
+    configurationPath: join(root, 'local-system', 'targets.json'),
+    stateStorageStrategy: 'controller-home',
+  };
+}
+
+function adapterMatchesRepository(adapter: AssistantPluginAdapter, repository: RepositoryRecord): boolean {
+  const scope = adapter.scope ?? 'repository';
+  return repository.repoId === CONTROLLER_SCOPE_REPO_ID ? scope === 'controller' : scope === 'repository';
 }
 
 function pluginsRoot(controllerHome: string, repoId: string): string {
@@ -93,7 +122,7 @@ function readStoredManifest(controllerHome: string, repoId: string, pluginId: st
 
 function computeManifest(controllerHome: string, repository: RepositoryRecord, pluginId: string): AssistantPluginManifest {
   const adapter = PLUGIN_ADAPTERS.get(pluginId);
-  if (!adapter) throw new Error(`PLUGIN_NOT_FOUND: ${pluginId}`);
+  if (!adapter || !adapterMatchesRepository(adapter, repository)) throw new Error(`PLUGIN_NOT_FOUND: ${pluginId}`);
   const previous = readStoredManifest(controllerHome, repository.repoId, pluginId);
   const built = adapter.buildManifest(previous?.revision ?? 0, previous?.updatedAt, repository.canonicalRoot);
   const changed = !previous || fingerprintManifest(previous) !== fingerprintManifest(built);
@@ -117,14 +146,17 @@ function writeRegistry(controllerHome: string, repoId: string, manifests: Assist
 }
 
 function mapResourceClaims(action: AssistantPluginActionDescriptor, repository: RepositoryRecord): ResourceClaimSpec[] {
+  const controllerScoped = repository.repoId === CONTROLLER_SCOPE_REPO_ID;
   return action.resourceClaims.map((claim) => ({
-    resourceKey: claim.resource === 'remote'
-      ? `remote:${repository.repoId}`
-      : claim.resource === 'workspace'
-        ? `workspace:${repository.activeCheckoutId}`
-        : claim.resource === 'git-refs'
-          ? `git-refs:${repository.repoId}`
-          : 'repo-state',
+    resourceKey: controllerScoped
+      ? `controller-system:${claim.resource}`
+      : claim.resource === 'remote'
+        ? `remote:${repository.repoId}`
+        : claim.resource === 'workspace'
+          ? `workspace:${repository.activeCheckoutId}`
+          : claim.resource === 'git-refs'
+            ? `git-refs:${repository.repoId}`
+            : `repo-state:${repository.repoId}`,
     mode: claim.mode,
   }));
 }
@@ -212,8 +244,9 @@ export function listAssistantPluginManifests(
   controllerHome: string,
   repository: RepositoryRecord,
 ): AssistantPluginManifest[] {
-  return [...PLUGIN_ADAPTERS.keys()]
-    .map((pluginId) => computeManifest(controllerHome, repository, pluginId))
+  return [...PLUGIN_ADAPTERS.values()]
+    .filter((adapter) => adapterMatchesRepository(adapter, repository))
+    .map((adapter) => computeManifest(controllerHome, repository, adapter.pluginId))
     .sort((left, right) => left.pluginId.localeCompare(right.pluginId));
 }
 

@@ -280,8 +280,8 @@ function actions(): AssistantPluginActionDescriptor[] {
       actionId: 'capture_screenshot',
       title: 'Capture simulator screenshot',
       description: 'Capture a simulator screenshot into controller artifact storage.',
-      readOnly: true,
-      risk: 'readonly',
+      readOnly: false,
+      risk: 'workspace_write',
       confirmation: 'none',
       defaultTimeoutMs: 60_000,
       cancellable: true,
@@ -323,6 +323,8 @@ function actions(): AssistantPluginActionDescriptor[] {
           app_path: { type: 'string' },
           screenshot_label: { type: 'string' },
           skip_build: { type: 'boolean' },
+          launch_wait_ms: { type: 'number' },
+          cleanup_policy: { type: 'string', enum: ['keep', 'shutdown_on_success', 'shutdown_always'] },
         },
         additionalProperties: false,
       },
@@ -415,17 +417,20 @@ export async function executeIosPluginAction(input: AssistantPluginActionExecuti
     case 'capture_screenshot': {
       const udid = stringValue(input.args.udid);
       if (!udid) throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', 'udid is required.', { retryable: false });
+      const screenshot = iosSimulatorScreenshot(repository, {
+        udid,
+        label: stringValue(input.args.label),
+        artifactRoot,
+      });
       return {
-        ...iosSimulatorScreenshot(repository, {
-          udid,
-          label: stringValue(input.args.label),
-          artifactRoot,
-        }),
+        ...screenshot,
+        artifactCandidates: screenshot && 'absolutePath' in screenshot && typeof screenshot.absolutePath === 'string'
+          ? [{ kind: 'ios_simulator_screenshot', mediaType: 'image/png', path: screenshot.absolutePath }]
+          : [],
       };
     }
-    case 'smoke_review':
-      return {
-        ...iosSmokeReview(repository, {
+    case 'smoke_review': {
+      const review = iosSmokeReview(repository, {
           scheme: stringValue(input.args.scheme),
           bundleId: stringValue(input.args.bundle_id),
           udid: stringValue(input.args.udid),
@@ -436,9 +441,26 @@ export async function executeIosPluginAction(input: AssistantPluginActionExecuti
           appPath: stringValue(input.args.app_path),
           screenshotLabel: stringValue(input.args.screenshot_label),
           skipBuild: input.args.skip_build === true,
-          artifactRoot,
-        }),
+          launchWaitMs: typeof input.args.launch_wait_ms === 'number' ? input.args.launch_wait_ms : undefined,
+          cleanupPolicy: ['keep', 'shutdown_on_success', 'shutdown_always'].includes(String(input.args.cleanup_policy))
+            ? input.args.cleanup_policy as 'keep' | 'shutdown_on_success' | 'shutdown_always'
+            : undefined,
+        artifactRoot,
+      });
+      const screenshotPath = review.screenshot && typeof review.screenshot === 'object' && 'absolutePath' in review.screenshot
+        ? String((review.screenshot as { absolutePath?: string }).absolutePath ?? '')
+        : '';
+      const logPath = review.logs && typeof review.logs === 'object' && 'absolutePath' in review.logs
+        ? String((review.logs as { absolutePath?: string }).absolutePath ?? '')
+        : '';
+      return {
+        ...review,
+        artifactCandidates: [
+          ...(screenshotPath ? [{ kind: 'ios_simulator_screenshot', mediaType: 'image/png', path: screenshotPath }] : []),
+          ...(logPath ? [{ kind: 'ios_simulator_log', mediaType: 'text/plain', path: logPath }] : []),
+        ],
       };
+    }
     // Internal helpers kept for completeness / direct use
     case 'install': {
       const udid = stringValue(input.args.udid);

@@ -60,6 +60,23 @@ describe('Campaign workspace isolation', () => {
     expect(selectRepositoryCheckout(registered, workspace.checkoutId).canonicalRoot).toBe(workspace.root!);
   });
 
+  test('ignores only missing historical checkout paths when creating a new workspace', () => {
+    const { controllerHome, repository } = fixture();
+    const stale = ensureCampaignWorkspace(controllerHome, repository, {
+      requestId: 'campaign-request-stale',
+      title: 'Stale managed checkout',
+    });
+    rmSync(stale.root!, { recursive: true, force: true });
+
+    const next = ensureCampaignWorkspace(controllerHome, repository, {
+      requestId: 'campaign-request-after-stale',
+      title: 'Workspace after stale checkout',
+    });
+    expect(next.mode).toBe('isolated');
+    expect(next.checkoutId).not.toBe(stale.checkoutId);
+    expect(next.root).toBeTruthy();
+  });
+
   test('routes Execution Jobs to their recorded checkout rather than the active workspace', async () => {
     const { controllerHome, repository } = fixture();
     const workspace = ensureCampaignWorkspace(controllerHome, repository, {

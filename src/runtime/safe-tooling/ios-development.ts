@@ -15,6 +15,7 @@ export interface IosDevelopmentHooks {
   platform?: () => NodeJS.Platform;
   runCommand?: (command: string, args: string[], options?: { cwd?: string; timeoutMs?: number }) => IosCommandResult;
   now?: () => Date;
+  sleep?: (ms: number) => void;
 }
 
 let hooks: IosDevelopmentHooks = {};
@@ -37,6 +38,17 @@ function platform(): NodeJS.Platform {
 
 function now(): Date {
   return hooks.now?.() ?? new Date();
+}
+
+function sleep(ms: number): void {
+  const bounded = Math.max(0, Math.min(Math.trunc(ms), 30_000));
+  if (bounded === 0) return;
+  if (hooks.sleep) {
+    hooks.sleep(bounded);
+    return;
+  }
+  const signal = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(signal, 0, 0, bounded);
 }
 
 function runCommand(command: string, args: string[], options: { cwd?: string; timeoutMs?: number } = {}): IosCommandResult {
@@ -213,11 +225,52 @@ export function iosSimulatorBoot(input: { udid: string; openSimulator?: boolean;
   if (unsupported) return unsupported;
   const udid = String(input.udid ?? '').trim();
   if (!udid) throw new Error('IOS_SIMULATOR_UDID_REQUIRED');
-  const boot = runCommand('xcrun', ['simctl', 'boot', udid], { timeoutMs: input.timeoutMs ?? 60_000 });
+  const timeoutMs = input.timeoutMs ?? 60_000;
+  const boot = runCommand('xcrun', ['simctl', 'boot', udid], { timeoutMs });
   const alreadyBooted = /Unable to boot|current state: Booted|already booted/i.test(boot.stderr + boot.stdout);
-  if (!boot.ok && !alreadyBooted) return { ready: false, booted: false, error: { code: 'SIMULATOR_BOOT_FAILED', message: boot.stderr || boot.stdout }, command: boot.command };
+  if (!boot.ok && !alreadyBooted) {
+    return { ready: false, booted: false, error: { code: 'SIMULATOR_BOOT_FAILED', message: boot.stderr || boot.stdout }, command: boot.command };
+  }
+  const readiness = runCommand('xcrun', ['simctl', 'bootstatus', udid, '-b'], { timeoutMs });
+  if (!readiness.ok) {
+    return {
+      ready: false,
+      booted: true,
+      udid,
+      alreadyBooted,
+      ownership: alreadyBooted ? 'reused' : 'started_by_work',
+      command: boot.command,
+      readinessCommand: readiness.command,
+      error: { code: 'SIMULATOR_BOOTSTATUS_FAILED', message: readiness.stderr || readiness.stdout },
+    };
+  }
   if (input.openSimulator !== false) runCommand('open', ['-a', 'Simulator']);
-  return { ready: true, booted: true, udid, alreadyBooted };
+  return {
+    ready: true,
+    booted: true,
+    udid,
+    alreadyBooted,
+    ownership: alreadyBooted ? 'reused' : 'started_by_work',
+    command: boot.command,
+    readinessCommand: readiness.command,
+  };
+}
+
+export function iosSimulatorShutdown(input: { udid: string; timeoutMs?: number }) {
+  const unsupported = assertDarwin();
+  if (unsupported) return unsupported;
+  const udid = String(input.udid ?? '').trim();
+  if (!udid) throw new Error('IOS_SIMULATOR_UDID_REQUIRED');
+  const result = runCommand('xcrun', ['simctl', 'shutdown', udid], { timeoutMs: input.timeoutMs ?? 60_000 });
+  const alreadyShutdown = /current state: Shutdown|already shutdown|Unable to shutdown/i.test(result.stderr + result.stdout);
+  return {
+    ready: result.ok || alreadyShutdown,
+    shutdown: result.ok || alreadyShutdown,
+    udid,
+    alreadyShutdown,
+    command: result.command,
+    error: result.ok || alreadyShutdown ? undefined : { code: 'SIMULATOR_SHUTDOWN_FAILED', message: result.stderr || result.stdout },
+  };
 }
 
 export function iosAppBuild(repository: RepositoryRecord, input: { scheme?: string; udid?: string; workspace?: string; project?: string; configuration?: string; timeoutMs?: number; simulatorName?: string }) {
@@ -230,7 +283,9 @@ export function iosAppBuild(repository: RepositoryRecord, input: { scheme?: stri
   if (!scheme) throw new Error('IOS_SCHEME_REQUIRED: provide scheme or share at least one Xcode scheme');
   const workspace = safeRepoRelativePath(repository.canonicalRoot, input.workspace ?? listedReady.workspace);
   const project = safeRepoRelativePath(repository.canonicalRoot, input.project ?? listedReady.project);
-  const derivedDataPath = safeArtifactDir(repository, 'DerivedData');
+  const derivedDataRoot = safeArtifactDir(repository, 'DerivedData');
+  const derivedDataPath = join(derivedDataRoot, `${timestamp()}-${sanitize(scheme)}`);
+  mkdirSync(derivedDataPath, { recursive: true });
   const args = ['build'];
   if (workspace) args.push('-workspace', workspace);
   else if (project) args.push('-project', project);
@@ -239,24 +294,28 @@ export function iosAppBuild(repository: RepositoryRecord, input: { scheme?: stri
   else args.push('-destination', 'platform=iOS Simulator,name=' + (input.simulatorName ?? 'iPhone 16 Pro'));
   args.push('-derivedDataPath', derivedDataPath);
   const result = runCommand('xcodebuild', args, { cwd: repository.canonicalRoot, timeoutMs: input.timeoutMs ?? 10 * 60_000 });
-  const builtApps = findBuiltApps(repository);
+  const builtApps = findBuiltApps(repository, derivedDataPath);
+  const selected = selectBuiltAppProduct(scheme, builtApps);
+  const productError = result.ok ? selected.error : undefined;
   return {
-    ready: result.ok,
-    ok: result.ok,
+    ready: result.ok && Boolean(selected.appPath),
+    ok: result.ok && Boolean(selected.appPath),
     scheme,
     configuration: input.configuration ?? 'Debug',
     derivedDataPath: relative(repository.canonicalRoot, derivedDataPath),
-    appPath: builtApps[0],
+    appPath: selected.appPath,
     builtApps,
     command: result.command,
     stdout: boundedText(result.stdout),
     stderr: boundedText(result.stderr),
-    error: result.ok ? undefined : { code: 'IOS_BUILD_FAILED', message: (result.stderr || result.stdout).slice(0, 2000) },
+    error: result.ok
+      ? productError
+      : { code: 'IOS_BUILD_FAILED', message: (result.stderr || result.stdout).slice(0, 2000) },
   };
 }
 
-function findBuiltApps(repository: RepositoryRecord): string[] {
-  const root = resolve(repository.canonicalRoot, '.repo-harness', 'ios', 'DerivedData');
+function findBuiltApps(repository: RepositoryRecord, buildRoot: string): string[] {
+  const root = resolve(buildRoot);
   const apps: string[] = [];
   function visit(dir: string, depth: number) {
     if (depth > 8 || apps.length > 25) return;
@@ -270,6 +329,34 @@ function findBuiltApps(repository: RepositoryRecord): string[] {
   }
   visit(root, 0);
   return apps.sort();
+}
+
+function normalizedProductName(value: string): string {
+  return value.replace(/\.app$/i, '').replace(/[^a-z0-9]+/gi, '').toLowerCase();
+}
+
+function selectBuiltAppProduct(scheme: string, builtApps: string[]): {
+  appPath?: string;
+  error?: { code: string; message: string; candidates?: string[] };
+} {
+  const productionCandidates = builtApps.filter((candidate) => {
+    const name = basename(candidate);
+    return !/(?:tests?|uitests?|xctrunner|runner|testhost)\.app$/i.test(name);
+  });
+  if (productionCandidates.length === 0) {
+    return { error: { code: 'IOS_BUILD_PRODUCT_MISSING', message: 'Build succeeded but no application product was found in this build-specific DerivedData directory.' } };
+  }
+  const normalizedScheme = normalizedProductName(scheme);
+  const exact = productionCandidates.filter((candidate) => normalizedProductName(basename(candidate)) === normalizedScheme);
+  if (exact.length === 1) return { appPath: exact[0] };
+  if (productionCandidates.length === 1) return { appPath: productionCandidates[0] };
+  return {
+    error: {
+      code: 'IOS_BUILD_PRODUCT_AMBIGUOUS',
+      message: `Build produced multiple application products for scheme ${scheme}; pass a more specific scheme or product configuration.`,
+      candidates: productionCandidates,
+    },
+  };
 }
 
 function readBuiltAppBundleId(repository: RepositoryRecord, appPath: string): string | undefined {
@@ -322,7 +409,17 @@ export function iosAppLaunch(input: { udid: string; bundleId: string; arguments?
   if (!udid || !bundleId) throw new Error('IOS_LAUNCH_ARGUMENTS_REQUIRED');
   const launchArgs = Array.isArray(input.arguments) ? input.arguments.map(String).slice(0, 20) : [];
   const result = runCommand('xcrun', ['simctl', 'launch', udid, bundleId, ...launchArgs], { timeoutMs: 60_000 });
-  return { ready: result.ok, launched: result.ok, udid, bundleId, stdout: result.stdout.trim(), error: result.ok ? undefined : { code: 'IOS_LAUNCH_FAILED', message: result.stderr || result.stdout } };
+  const waitMs = Math.max(0, Math.min(Math.trunc(input.waitMs ?? 1_500), 15_000));
+  if (result.ok) sleep(waitMs);
+  return {
+    ready: result.ok,
+    launched: result.ok,
+    udid,
+    bundleId,
+    waitMs,
+    stdout: result.stdout.trim(),
+    error: result.ok ? undefined : { code: 'IOS_LAUNCH_FAILED', message: result.stderr || result.stdout },
+  };
 }
 
 export function iosSimulatorScreenshot(repository: RepositoryRecord, input: { udid: string; label?: string; artifactRoot?: string }) {
@@ -399,6 +496,8 @@ export interface IosSmokeReviewInput {
   appPath?: string;
   screenshotLabel?: string;
   skipBuild?: boolean;
+  launchWaitMs?: number;
+  cleanupPolicy?: 'keep' | 'shutdown_on_success' | 'shutdown_always';
   artifactRoot?: string;
 }
 
@@ -424,6 +523,20 @@ export function iosSmokeReview(repository: RepositoryRecord, input: IosSmokeRevi
   const commands: string[][] = [];
   let blockedStage: IosSmokeStageId | undefined;
   let overallStatus: 'passed' | 'failed' = 'passed';
+  const cleanupPolicy = input.cleanupPolicy ?? 'keep';
+  let simulatorOwnership: 'reused' | 'started_by_work' | undefined;
+  let simulatorCleanup: ReturnType<typeof iosSimulatorShutdown> | undefined;
+
+  const cleanupSimulator = (successful: boolean) => {
+    if (simulatorOwnership !== 'started_by_work') return undefined;
+    if (cleanupPolicy === 'keep') return undefined;
+    if (cleanupPolicy === 'shutdown_on_success' && !successful) return undefined;
+    simulatorCleanup = iosSimulatorShutdown({ udid });
+    if (simulatorCleanup && 'command' in simulatorCleanup && Array.isArray(simulatorCleanup.command)) {
+      commands.push(simulatorCleanup.command as string[]);
+    }
+    return simulatorCleanup;
+  };
 
   const failRemaining = (fromIndex: number, reason: string) => {
     const remaining: IosSmokeStageId[] = [
@@ -641,6 +754,10 @@ export function iosSmokeReview(repository: RepositoryRecord, input: IosSmokeRevi
   }
   const boot = iosSimulatorBoot({ udid });
   if (boot && 'command' in boot && Array.isArray(boot.command)) commands.push(boot.command as string[]);
+  if (boot && 'readinessCommand' in boot && Array.isArray(boot.readinessCommand)) commands.push(boot.readinessCommand as string[]);
+  simulatorOwnership = 'ownership' in boot && (boot.ownership === 'reused' || boot.ownership === 'started_by_work')
+    ? boot.ownership
+    : undefined;
   if (!boot.ready) {
     overallStatus = 'failed';
     blockedStage = 'simulator_preparation';
@@ -651,14 +768,21 @@ export function iosSmokeReview(repository: RepositoryRecord, input: IosSmokeRevi
       { command: 'command' in boot ? boot.command as string[] : undefined, evidence: boot as unknown as Record<string, unknown> },
     ));
     failRemaining(4, 'Skipped because simulator_preparation failed.');
+    cleanupSimulator(false);
     return {
       ready: false, overallStatus, blockedStage, stages, artifacts, commands,
       discovery: discovered, schemes: schemesList, scheme: selectedScheme, build: buildResult, udid, boot,
+      simulatorOwnership, cleanupPolicy, simulatorCleanup,
     };
   }
   stages.push(stagePassed('simulator_preparation', `Simulator ${udid} is booted.`, {
     command: 'command' in boot ? boot.command as string[] : undefined,
-    evidence: { udid, alreadyBooted: 'alreadyBooted' in boot ? boot.alreadyBooted : undefined },
+    evidence: {
+      udid,
+      alreadyBooted: 'alreadyBooted' in boot ? boot.alreadyBooted : undefined,
+      ownership: simulatorOwnership,
+      cleanupPolicy,
+    },
   }));
 
   // 5. install
@@ -673,9 +797,11 @@ export function iosSmokeReview(repository: RepositoryRecord, input: IosSmokeRevi
       { evidence: install as unknown as Record<string, unknown> },
     ));
     failRemaining(5, 'Skipped because install failed.');
+    cleanupSimulator(false);
     return {
       ready: false, overallStatus, blockedStage, stages, artifacts, commands,
       discovery: discovered, schemes: schemesList, scheme: selectedScheme, build: buildResult, udid, boot, install,
+      simulatorOwnership, cleanupPolicy, simulatorCleanup,
     };
   }
   stages.push(stagePassed('install', `Installed ${appPath} on ${udid}.`, {
@@ -694,12 +820,14 @@ export function iosSmokeReview(repository: RepositoryRecord, input: IosSmokeRevi
       { evidence: { appPath } },
     ));
     failRemaining(6, 'Skipped because launch failed.');
+    cleanupSimulator(false);
     return {
       ready: false, overallStatus, blockedStage, stages, artifacts, commands,
       discovery: discovered, schemes: schemesList, scheme: selectedScheme, build: buildResult, udid, boot, install,
+      simulatorOwnership, cleanupPolicy, simulatorCleanup,
     };
   }
-  const launch = iosAppLaunch({ udid, bundleId });
+  const launch = iosAppLaunch({ udid, bundleId, waitMs: input.launchWaitMs });
   if (!launch.ready) {
     overallStatus = 'failed';
     blockedStage = 'launch';
@@ -710,10 +838,11 @@ export function iosSmokeReview(repository: RepositoryRecord, input: IosSmokeRevi
       { evidence: launch as unknown as Record<string, unknown> },
     ));
     failRemaining(6, 'Skipped because launch failed.');
+    cleanupSimulator(false);
     return {
       ready: false, overallStatus, blockedStage, stages, artifacts, commands,
       discovery: discovered, schemes: schemesList, scheme: selectedScheme, build: buildResult,
-      udid, bundleId, boot, install, launch,
+      udid, bundleId, boot, install, launch, simulatorOwnership, cleanupPolicy, simulatorCleanup,
     };
   }
   stages.push(stagePassed('launch', `Launched ${bundleId} on ${udid}.`, {
@@ -789,6 +918,7 @@ export function iosSmokeReview(repository: RepositoryRecord, input: IosSmokeRevi
   }
 
   const failed = stages.find((stage) => stage.status === 'failed');
+  cleanupSimulator(overallStatus === 'passed');
   return {
     ready: overallStatus === 'passed',
     overallStatus,
@@ -808,10 +938,13 @@ export function iosSmokeReview(repository: RepositoryRecord, input: IosSmokeRevi
     launch,
     screenshot,
     logs,
+    simulatorOwnership,
+    cleanupPolicy,
+    simulatorCleanup,
   };
 }
 
-export function iosUiSmokeTest(repository: RepositoryRecord, input: { udid?: string; simulatorName?: string; scheme?: string; bundleId?: string; workspace?: string; project?: string; configuration?: string; appPath?: string; screenshotLabel?: string }) {
+export function iosUiSmokeTest(repository: RepositoryRecord, input: { udid?: string; simulatorName?: string; scheme?: string; bundleId?: string; workspace?: string; project?: string; configuration?: string; appPath?: string; screenshotLabel?: string; launchWaitMs?: number; cleanupPolicy?: 'keep' | 'shutdown_on_success' | 'shutdown_always' }) {
   const review = iosSmokeReview(repository, input);
   return {
     ready: review.ready,

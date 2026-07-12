@@ -53,7 +53,7 @@ import type { TaskRisk } from '../../../cli/controller/types';
 import { controllerContextProjectionAgeMs, readControllerContextProjection } from '../../projections/controller-context';
 import { loadMcpRuntimeState } from '../../../cli/mcp/auth';
 import { redactMcpText } from '../../../cli/mcp/redaction';
-import { getAssistantPluginManifest, listAssistantPluginManifests, submitAssistantPluginAction } from '../../plugins/store';
+import { controllerPluginRepository, getAssistantPluginManifest, listAssistantPluginManifests, submitAssistantPluginAction } from '../../plugins/store';
 import {
   listWebTargets,
   mergeAllowedDomains,
@@ -529,14 +529,14 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
     max_candidates: { type: 'number' },
     confirm_repair: { type: 'boolean' },
   }, ['confirm_repair'], false),
-  definition('list_plugins', 'List personal-assistant plugin manifests, lifecycle state, health, and action discovery for one repository.', {
+  definition('list_plugins', 'List repository plugins, or controller-scoped plugins when repo_id is omitted.', {
     repo_id: repoId,
   }),
-  definition('get_plugin', 'Read one personal-assistant plugin manifest including action schemas and policy requirements.', {
+  definition('get_plugin', 'Read one repository or controller-scoped plugin manifest including action schemas and policy requirements.', {
     repo_id: repoId,
     plugin_id: { type: 'string' },
   }, ['plugin_id']),
-  definition('plugin_action_execute', 'Submit one typed personal-assistant plugin action through the durable execution layer.', {
+  definition('plugin_action_execute', 'Submit one typed repository or controller-scoped plugin action through the durable execution layer.', {
     repo_id: repoId,
     plugin_id: { type: 'string' },
     action_id: { type: 'string' },
@@ -2708,12 +2708,33 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         return result({ ...applied, runtimeStorage, projection });
       }
       case 'list_plugins': {
-        const repository = selected(ctx, args);
-        return result({ plugins: listAssistantPluginManifests(ctx.controllerHome, repository).map(summarizePlugin) });
+        const controllerRepository = controllerPluginRepository(ctx.controllerHome);
+        const controllerPlugins = listAssistantPluginManifests(ctx.controllerHome, controllerRepository).map(summarizePlugin);
+        let repositoryPlugins: ReturnType<typeof summarizePlugin>[] = [];
+        let repositoryId: string | undefined;
+        try {
+          const repository = selected(ctx, args);
+          repositoryId = repository.repoId;
+          repositoryPlugins = listAssistantPluginManifests(ctx.controllerHome, repository).map(summarizePlugin);
+        } catch (error) {
+          if (typeof args.repo_id === 'string' && args.repo_id.trim()) throw error;
+        }
+        return result({
+          scope: repositoryPlugins.length > 0 ? 'combined' : 'controller',
+          repositoryId,
+          plugins: [...repositoryPlugins, ...controllerPlugins]
+            .sort((left, right) => String(left.pluginId).localeCompare(String(right.pluginId))),
+        });
       }
       case 'get_plugin': {
-        const repository = selected(ctx, args);
-        return result({ plugin: summarizePlugin(getAssistantPluginManifest(ctx.controllerHome, repository, String(args.plugin_id ?? '').trim())) });
+        const pluginId = String(args.plugin_id ?? '').trim();
+        const repository = pluginId === 'local_system'
+          ? controllerPluginRepository(ctx.controllerHome)
+          : selected(ctx, args);
+        return result({
+          scope: repository.repoId === '__controller__' ? 'controller' : 'repository',
+          plugin: summarizePlugin(getAssistantPluginManifest(ctx.controllerHome, repository, pluginId)),
+        });
       }
       case 'assistant_readiness': {
         const repository = selected(ctx, args);
@@ -2869,9 +2890,12 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         return result({ ...applied });
       }
       case 'plugin_action_execute': {
-        const repository = selected(ctx, args);
+        const pluginId = String(args.plugin_id ?? '').trim();
+        const repository = pluginId === 'local_system'
+          ? controllerPluginRepository(ctx.controllerHome)
+          : selected(ctx, args);
         const submitted = submitAssistantPluginAction(ctx.controllerHome, repository, {
-          pluginId: String(args.plugin_id ?? '').trim(),
+          pluginId,
           actionId: String(args.action_id ?? '').trim(),
           requestId: String(args.request_id ?? '').trim(),
           args: args.arguments && typeof args.arguments === 'object' && !Array.isArray(args.arguments)
@@ -2893,14 +2917,18 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             confirmation: submitted.action.confirmation,
             requiredConfirmationText: submitted.action.requiredConfirmationText,
           },
+          scope: repository.repoId === '__controller__' ? 'controller' : 'repository',
           job: summarizeWork(submitted.job, repository.canonicalRoot),
           daemon: { status: daemon.status, pid: daemon.pid },
           next: `Call get_job with job_id ${submitted.job.jobId}.`,
         });
       }
       case 'toolchain_plugin_summary': {
-        const repository = selected(ctx, args);
-        const manifest = getAssistantPluginManifest(ctx.controllerHome, repository, String(args.plugin_id ?? '').trim());
+        const pluginId = String(args.plugin_id ?? '').trim();
+        const repository = pluginId === 'local_system'
+          ? controllerPluginRepository(ctx.controllerHome)
+          : selected(ctx, args);
+        const manifest = getAssistantPluginManifest(ctx.controllerHome, repository, pluginId);
         return result({
           plugin: summarizePluginForLowInterception(manifest),
           nonOpaque: true,

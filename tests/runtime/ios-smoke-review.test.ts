@@ -5,6 +5,9 @@ import { join } from 'path';
 import { spawnSync } from 'child_process';
 import { registerRepository } from '../../src/cli/repositories/registry';
 import {
+  iosAppBuild,
+  iosAppLaunch,
+  iosSimulatorBoot,
   iosSmokeReview,
   resetIosDevelopmentHooksForTest,
   setIosDevelopmentHooksForTest,
@@ -54,40 +57,57 @@ function mockRunner(handlers: Record<string, { ok?: boolean; stdout?: string; st
 }
 
 describe('iOS staged smoke review', () => {
-  it('aggregates success across all stages and records screenshot artifacts', () => {
+  it('aggregates success, waits for simulator readiness, and cleans up only its own simulator', () => {
     const { repository } = fixture();
-    const appDir = join(repository.canonicalRoot, '.repo-harness/ios/DerivedData/Build/Products/Debug-iphonesimulator/App.app');
-    mkdirSync(appDir, { recursive: true });
-    writeFileSync(join(appDir, 'Info.plist'), 'x');
+    const commands: string[][] = [];
+    const sleeps: number[] = [];
 
     setIosDevelopmentHooksForTest({
       platform: () => 'darwin',
       now: () => new Date('2026-07-09T10:00:00.000Z'),
-      runCommand: mockRunner({
-        'xcodebuild -list': {
-          stdout: JSON.stringify({ project: { schemes: ['App'] } }),
-        },
-        'xcodebuild build': { ok: true, stdout: '** BUILD SUCCEEDED **' },
-        'simctl list devices': {
-          stdout: JSON.stringify({
-            devices: {
-              'com.apple.CoreSimulator.SimRuntime.iOS-18-0': [
-                { name: 'iPhone 16 Pro', udid: 'UDID-1', state: 'Shutdown', isAvailable: true },
-              ],
-            },
-          }),
-        },
-        'simctl boot': { ok: true },
-        'simctl install': { ok: true },
-        'simctl launch': { ok: true, stdout: 'UDID-1: com.example.App' },
-        'simctl io': { ok: true },
-        'simctl spawn': { ok: true, stdout: 'log line' },
-        'plutil -extract': { ok: true, stdout: 'com.example.App\n' },
-      }),
+      sleep: (ms) => sleeps.push(ms),
+      runCommand: (command, args) => {
+        commands.push([command, ...args]);
+        const joined = [command, ...args].join(' ');
+        if (joined.includes('xcodebuild -list')) {
+          return { ok: true, status: 0, stdout: JSON.stringify({ project: { schemes: ['App'] } }), stderr: '', command: [command, ...args] };
+        }
+        if (joined.includes('xcodebuild build')) {
+          const derivedIndex = args.indexOf('-derivedDataPath');
+          const derivedDataPath = args[derivedIndex + 1];
+          const appDir = join(derivedDataPath, 'Build/Products/Debug-iphonesimulator/App.app');
+          mkdirSync(appDir, { recursive: true });
+          writeFileSync(join(appDir, 'Info.plist'), 'x');
+          return { ok: true, status: 0, stdout: '** BUILD SUCCEEDED **', stderr: '', command: [command, ...args] };
+        }
+        if (joined.includes('simctl list devices')) {
+          return {
+            ok: true,
+            status: 0,
+            stdout: JSON.stringify({ devices: { r: [{ name: 'iPhone 16 Pro', udid: 'UDID-1', state: 'Shutdown', isAvailable: true }] } }),
+            stderr: '',
+            command: [command, ...args],
+          };
+        }
+        if (joined.includes('plutil -extract')) {
+          return { ok: true, status: 0, stdout: 'com.example.App\n', stderr: '', command: [command, ...args] };
+        }
+        if (joined.includes('simctl launch')) {
+          return { ok: true, status: 0, stdout: 'UDID-1: com.example.App', stderr: '', command: [command, ...args] };
+        }
+        if (joined.includes('simctl spawn')) {
+          return { ok: true, status: 0, stdout: 'log line', stderr: '', command: [command, ...args] };
+        }
+        return { ok: true, status: 0, stdout: '', stderr: '', command: [command, ...args] };
+      },
     });
 
-    // Pretend build produced the app path by placing it before review; smoke review also finds built apps.
-    const review = iosSmokeReview(repository, { scheme: 'App', simulatorName: 'iPhone 16 Pro' });
+    const review = iosSmokeReview(repository, {
+      scheme: 'App',
+      simulatorName: 'iPhone 16 Pro',
+      launchWaitMs: 250,
+      cleanupPolicy: 'shutdown_on_success',
+    });
     expect(review.overallStatus).toBe('passed');
     expect(review.stages.map((stage) => stage.stage)).toEqual([
       'project_discovery',
@@ -101,6 +121,11 @@ describe('iOS staged smoke review', () => {
     ]);
     expect(review.stages.every((stage) => stage.status === 'passed')).toBe(true);
     expect(review.artifacts.some((path) => path.includes('screenshots') || path.includes('screenshot'))).toBe(true);
+    expect(review.simulatorOwnership).toBe('started_by_work');
+    expect(review.simulatorCleanup && 'shutdown' in review.simulatorCleanup ? review.simulatorCleanup.shutdown : false).toBe(true);
+    expect(sleeps).toEqual([250]);
+    expect(commands.some((command) => command.join(' ') === 'xcrun simctl bootstatus UDID-1 -b')).toBe(true);
+    expect(commands.some((command) => command.join(' ') === 'xcrun simctl shutdown UDID-1')).toBe(true);
   });
 
   it('returns build-stage failure only when xcodebuild fails', () => {
@@ -181,5 +206,76 @@ describe('iOS staged smoke review', () => {
     expect(result.overallStatus).toBe('failed');
     expect(result.blockedStage).toBe('build');
     expect(Array.isArray(result.stages)).toBe(true);
+  });
+
+  it('keeps a reused simulator even when cleanup is requested', () => {
+    const { repository } = fixture();
+    const commands: string[][] = [];
+    setIosDevelopmentHooksForTest({
+      platform: () => 'darwin',
+      runCommand: (command, args) => {
+        commands.push([command, ...args]);
+        const joined = [command, ...args].join(' ');
+        if (joined.includes('simctl boot ')) {
+          return { ok: false, status: 1, stdout: '', stderr: 'current state: Booted', command: [command, ...args] };
+        }
+        return { ok: true, status: 0, stdout: '', stderr: '', command: [command, ...args] };
+      },
+    });
+
+    const boot = iosSimulatorBoot({ udid: 'UDID-REUSED', openSimulator: false });
+    expect(boot.ready).toBe(true);
+    expect('ownership' in boot ? boot.ownership : undefined).toBe('reused');
+    expect(commands.some((command) => command.join(' ') === 'xcrun simctl bootstatus UDID-REUSED -b')).toBe(true);
+  });
+
+  it('uses a build-specific DerivedData directory and rejects ambiguous app products', () => {
+    const { repository } = fixture();
+    const buildRoots: string[] = [];
+    setIosDevelopmentHooksForTest({
+      platform: () => 'darwin',
+      now: () => new Date('2026-07-09T10:00:00.000Z'),
+      runCommand: (command, args) => {
+        const joined = [command, ...args].join(' ');
+        if (joined.includes('xcodebuild -list')) {
+          return { ok: true, status: 0, stdout: JSON.stringify({ project: { schemes: ['App'] } }), stderr: '', command: [command, ...args] };
+        }
+        if (joined.includes('xcodebuild build')) {
+          const root = args[args.indexOf('-derivedDataPath') + 1];
+          buildRoots.push(root);
+          for (const name of ['One.app', 'Two.app', 'AppUITests-Runner.app']) {
+            mkdirSync(join(root, 'Build/Products/Debug-iphonesimulator', name), { recursive: true });
+          }
+          return { ok: true, status: 0, stdout: 'ok', stderr: '', command: [command, ...args] };
+        }
+        return { ok: true, status: 0, stdout: '', stderr: '', command: [command, ...args] };
+      },
+    });
+
+    const build = iosAppBuild(repository, { scheme: 'App', simulatorName: 'iPhone 16 Pro' });
+    expect(build.ready).toBe(false);
+    expect(build.error?.code).toBe('IOS_BUILD_PRODUCT_AMBIGUOUS');
+    expect(buildRoots).toHaveLength(1);
+    expect('derivedDataPath' in build ? build.derivedDataPath : '').toContain('DerivedData/');
+    expect('builtApps' in build ? build.builtApps.some((path: string) => path.includes('AppUITests-Runner.app')) : false).toBe(true);
+  });
+
+  it('honors the bounded post-launch wait and classifies screenshots as controlled writes', () => {
+    const sleeps: number[] = [];
+    setIosDevelopmentHooksForTest({
+      platform: () => 'darwin',
+      sleep: (ms) => sleeps.push(ms),
+      runCommand: (command, args) => ({ ok: true, status: 0, stdout: 'launched', stderr: '', command: [command, ...args] }),
+    });
+    const launched = iosAppLaunch({ udid: 'UDID-1', bundleId: 'com.example.App', waitMs: 99_999 });
+    expect(launched.ready).toBe(true);
+    expect('waitMs' in launched ? launched.waitMs : undefined).toBe(15_000);
+    expect(sleeps).toEqual([15_000]);
+
+    const manifest = buildIosPluginManifest();
+    const screenshot = manifest.actions.find((action) => action.actionId === 'capture_screenshot');
+    expect(screenshot?.readOnly).toBe(false);
+    expect(screenshot?.risk).toBe('workspace_write');
+    expect(screenshot?.confirmation).toBe('none');
   });
 });

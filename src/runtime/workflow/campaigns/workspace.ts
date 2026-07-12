@@ -146,7 +146,11 @@ export function ensureCampaignWorkspace(
         controllerHome,
         activate: false,
       });
-      const checkout = record.checkouts.find((candidate) => realpathSync(candidate.canonicalRoot) === realpathSync(path));
+      const canonicalWorkspacePath = realpathSync(path);
+      const checkout = record.checkouts.find((candidate) =>
+        existsSync(candidate.canonicalRoot)
+        && realpathSync(candidate.canonicalRoot) === canonicalWorkspacePath,
+      );
       if (!checkout) throw new Error(`CAMPAIGN_WORKSPACE_CHECKOUT_NOT_REGISTERED: ${path}`);
       const selected = selectRepositoryCheckout(record, checkout.checkoutId);
       if (!manifest) {

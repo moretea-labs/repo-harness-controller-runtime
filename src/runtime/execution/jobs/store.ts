@@ -641,7 +641,6 @@ export function resumeExecutionJobAfterApproval(
     outcome: undefined,
     workerPid: undefined,
     leaseRefs: [],
-    dispatchedAt: undefined,
     startedAt: undefined,
     heartbeatAt: undefined,
     finishedAt: undefined,

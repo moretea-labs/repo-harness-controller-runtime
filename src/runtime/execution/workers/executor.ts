@@ -13,6 +13,10 @@ import { recordCandidateFinding, updateCandidateFinding } from '../../workflow/f
 import { writeControllerContextProjection } from '../../projections/controller-context';
 import { triggerWorkspaceAgent } from '../../workflow/campaigns/workspace-agent';
 import { executeAssistantPluginAction } from '../../plugins/store';
+import { CONTROLLER_SCOPE_REPO_ID, controllerSystemRoot, repositoryControllerRoot } from '../../../cli/repositories/controller-home';
+import { writeExecutionArtifact } from '../../evidence/artifact-store';
+import { existsSync } from 'fs';
+import { isAbsolute, relative, resolve, sep } from 'path';
 import { isAssistantPluginError } from '../../plugins/errors';
 
 
@@ -111,13 +115,74 @@ function errorCode(message: string): string {
   return index > 0 ? message.slice(0, index) : 'WORKER_EXECUTION_FAILED';
 }
 
+function materializePluginArtifacts(
+  controllerHome: string,
+  job: ExecutionJob,
+  pluginResult: Record<string, unknown>,
+): Record<string, unknown> {
+  const resultValue = pluginResult.result;
+  if (!resultValue || typeof resultValue !== 'object' || Array.isArray(resultValue)) return pluginResult;
+  const resultRecord = resultValue as Record<string, unknown>;
+  const candidates = Array.isArray(resultRecord.artifactCandidates) ? resultRecord.artifactCandidates : [];
+  if (candidates.length === 0) return pluginResult;
+  const allowedRoot = repositoryControllerRoot(controllerHome, job.repoId);
+  const artifacts = candidates.slice(0, 10).flatMap((candidate) => {
+    if (!candidate || typeof candidate !== 'object') return [];
+    const record = candidate as Record<string, unknown>;
+    const path = typeof record.path === 'string' ? record.path : '';
+    if (!path) return [];
+    const resolved = resolve(path);
+    if (!existsSync(resolved)) return [];
+    const rel = relative(allowedRoot, resolved);
+    if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return [];
+    const artifact = writeExecutionArtifact(controllerHome, job, 'evidence', {
+      artifactType: typeof record.kind === 'string' ? record.kind : 'plugin_artifact',
+      mediaType: typeof record.mediaType === 'string' ? record.mediaType : 'application/octet-stream',
+      path: resolved,
+      boundedToControllerStorage: true,
+    });
+    return [{ artifactId: artifact.artifactId, kind: record.kind, mediaType: record.mediaType }];
+  });
+  return {
+    ...pluginResult,
+    result: { ...resultRecord, artifactCandidates: undefined, artifacts },
+  };
+}
+
 export async function executeExecutionJob(controllerHome: string, job: ExecutionJob): Promise<WorkerExecutionResult> {
   try {
     if (job.origin.surface === 'schedule' || (job.origin.surface === 'system' && job.payload.portfolioWorkflowId)) {
       assertAutomatedOperationAllowed(job.payload.operation, job.payload.arguments ?? {});
     }
-    if (job.repoId === '__controller__' && job.payload.target !== 'repository-tool') {
-      throw new Error('CONTROLLER_JOB_INVALID: controller-scoped jobs must target repository tools');
+    if (
+      job.repoId === CONTROLLER_SCOPE_REPO_ID
+      && job.payload.target === 'runtime'
+      && job.payload.operation === 'plugin_action_execute'
+    ) {
+      const args = job.payload.arguments ?? {};
+      const pluginId = String(args.pluginId ?? '').trim();
+      const actionId = String(args.actionId ?? '').trim();
+      const actionArguments = args.actionArguments && typeof args.actionArguments === 'object' && !Array.isArray(args.actionArguments)
+        ? args.actionArguments as Record<string, unknown>
+        : {};
+      if (pluginId !== 'local_system') throw new Error('CONTROLLER_PLUGIN_INVALID: only local_system is controller-scoped');
+      if (!actionId) throw new Error('PLUGIN_ACTION_ID_REQUIRED');
+      const repoRoot = controllerSystemRoot(controllerHome);
+      const pluginResult = await executeAssistantPluginAction({
+        controllerHome,
+        repoId: CONTROLLER_SCOPE_REPO_ID,
+        repoRoot,
+        pluginId,
+        actionId,
+        requestId: job.requestId,
+        args: actionArguments,
+        origin: job.origin,
+        jobId: job.jobId,
+      });
+      return { ok: true, result: materializePluginArtifacts(controllerHome, job, pluginResult), repoRoot };
+    }
+    if (job.repoId === CONTROLLER_SCOPE_REPO_ID && job.payload.target !== 'repository-tool') {
+      throw new Error('CONTROLLER_JOB_INVALID: controller-scoped Jobs must use a typed controller plugin or an existing controller repository-tool operation');
     }
     if (job.payload.target === 'repository-tool') {
       const output = await callRepositoryTool(controllerHome, job.payload.operation, job.payload.arguments ?? {});
@@ -260,7 +325,7 @@ export async function executeExecutionJob(controllerHome: string, job: Execution
         origin: job.origin,
         jobId: job.jobId,
       });
-      return { ok: true, result: pluginResult, repoRoot };
+      return { ok: true, result: materializePluginArtifacts(controllerHome, job, pluginResult), repoRoot };
     }
 
     if (job.type === 'release-gate') {

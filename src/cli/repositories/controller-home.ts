@@ -31,7 +31,7 @@ export function resolveRepoPreferredControllerHome(repoRoot?: string, explicit?:
 
 export function ensureControllerHome(explicit?: string): string {
   const home = resolveControllerHome(explicit);
-  for (const child of ['', 'repositories', 'locks', 'indexes', 'audit', 'mcp', 'sessions', 'work-handles']) {
+  for (const child of ['', 'repositories', 'system', 'locks', 'indexes', 'audit', 'mcp', 'sessions', 'work-handles']) {
     mkdirSync(join(home, child), { recursive: true });
   }
   return home;
@@ -41,8 +41,16 @@ export function ensureRepoPreferredControllerHome(repoRoot?: string, explicit?: 
   return ensureControllerHome(resolveRepoPreferredControllerHome(repoRoot, explicit));
 }
 
+export const CONTROLLER_SCOPE_REPO_ID = '__controller__';
+
+export function controllerSystemRoot(controllerHome: string): string {
+  return join(resolveControllerHome(controllerHome), 'system');
+}
+
 export function repositoryControllerRoot(controllerHome: string, repoId: string): string {
-  return join(resolveControllerHome(controllerHome), 'repositories', repoId);
+  return repoId === CONTROLLER_SCOPE_REPO_ID
+    ? controllerSystemRoot(controllerHome)
+    : join(resolveControllerHome(controllerHome), 'repositories', repoId);
 }
 
 export function ensureRepositoryControllerLayout(controllerHome: string, repoId: string): string {

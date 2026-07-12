@@ -4,6 +4,7 @@ import { rebuildExecutionJobIndexes } from '../execution/jobs/store';
 import { reconcileExecutionJobs } from './global-scheduler/reconciliation';
 import { listActiveLeases } from '../resources/leases/store';
 import { rebuildRepositoryProjection } from '../projections/materialized-view';
+import { CONTROLLER_SCOPE_REPO_ID } from '../../cli/repositories/controller-home';
 
 export interface ControllerRecoveryError {
   repoId: string;
@@ -72,6 +73,33 @@ export function reconcileControllerStartup(controllerHome: string): ControllerSt
     });
     recovered.push(result);
   }
+  // Controller-scoped plugin work uses the same durable Job and lease stores,
+  // but it is intentionally absent from the Repository Registry. Reconcile it
+  // explicitly so a daemon restart cannot strand local_system work.
+  const controllerResult: ControllerRecoveryRepositoryResult = {
+    repoId: CONTROLLER_SCOPE_REPO_ID,
+    degraded: false,
+  };
+  const runController = <T>(phase: ControllerRecoveryError['phase'], action: () => T): T | undefined => {
+    try {
+      return action();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      controllerResult.degraded = true;
+      errors.push({ repoId: CONTROLLER_SCOPE_REPO_ID, phase, code: errorCode(error), message });
+      return undefined;
+    }
+  };
+  controllerResult.executionIndexesRebuilt = runController('execution-indexes', () => {
+    rebuildExecutionJobIndexes(controllerHome, [CONTROLLER_SCOPE_REPO_ID]);
+    return true;
+  });
+  controllerResult.executionJobs = runController('execution-jobs', () =>
+    reconcileExecutionJobs(controllerHome, CONTROLLER_SCOPE_REPO_ID));
+  controllerResult.activeLeases = runController('leases', () =>
+    listActiveLeases(controllerHome, CONTROLLER_SCOPE_REPO_ID).length);
+  recovered.push(controllerResult);
+
   return {
     completedAt: new Date().toISOString(),
     repositories: recovered,

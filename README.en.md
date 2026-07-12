@@ -191,6 +191,8 @@ Start with [Tutorial 2: Connect ChatGPT](docs/tutorials/02-connect-chatgpt.md). 
 
 If multiple repositories are registered, keep `repoId` and `checkoutId` explicit. The controller is a global service, but repository writes still route through repository- and checkout-scoped identities. The public MCP endpoint is distinct from the localhost-only Local Controller UI at `127.0.0.1:8766`.
 
+For occasional CPU diagnosis, application opening, or non-repository file work, use the controller-scoped `local_system` plugin without registering a repository. File actions require an expiring authorized target and reject path escape, overwrite, and deletion. See [Local System Assistant](docs/operations/local-system-assistant.md).
+
 See the [documentation hub](docs/README.md), or switch to [README.md](README.md) for Simplified Chinese.
 
 ## Make one repository the default in a ChatGPT Project
