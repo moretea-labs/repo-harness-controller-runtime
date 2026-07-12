@@ -8,6 +8,7 @@ import {
   iosAppBuild,
   iosAppLaunch,
   iosSimulatorBoot,
+  iosSimulatorLogTail,
   iosSmokeReview,
   resetIosDevelopmentHooksForTest,
   setIosDevelopmentHooksForTest,
@@ -258,6 +259,43 @@ describe('iOS staged smoke review', () => {
     expect(buildRoots).toHaveLength(1);
     expect('derivedDataPath' in build ? build.derivedDataPath : '').toContain('DerivedData/');
     expect('builtApps' in build ? build.builtApps.some((path: string) => path.includes('AppUITests-Runner.app')) : false).toBe(true);
+  });
+
+  it('falls back to the host unified log when simctl cannot resolve the simulator user', () => {
+    const { repository } = fixture();
+    const commands: string[][] = [];
+    setIosDevelopmentHooksForTest({
+      platform: () => 'darwin',
+      now: () => new Date('2026-07-09T10:00:00.000Z'),
+      runCommand: (command, args) => {
+        commands.push([command, ...args]);
+        if (command === 'xcrun' && args.slice(0, 3).join(' ') === 'simctl spawn UDID-1') {
+          return {
+            ok: false,
+            status: 1,
+            stdout: '',
+            stderr: 'getpwuid_r did not find a match for uid 501',
+            command: [command, ...args],
+          };
+        }
+        if (command === '/usr/bin/log') {
+          return {
+            ok: true,
+            status: 0,
+            stdout: 'YaoZhunShi fallback log line',
+            stderr: '',
+            command: [command, ...args],
+          };
+        }
+        return { ok: true, status: 0, stdout: '', stderr: '', command: [command, ...args] };
+      },
+    });
+
+    const logs = iosSimulatorLogTail(repository, { udid: 'UDID-1', process: 'YaoZhunShi' });
+    expect(logs.ready).toBe(true);
+    expect('source' in logs ? logs.source : undefined).toBe('host_unified_log_fallback');
+    expect('content' in logs ? logs.content : '').toContain('fallback log line');
+    expect(commands.map((command) => command[0])).toEqual(['xcrun', '/usr/bin/log']);
   });
 
   it('honors the bounded post-launch wait and classifies screenshots as controlled writes', () => {

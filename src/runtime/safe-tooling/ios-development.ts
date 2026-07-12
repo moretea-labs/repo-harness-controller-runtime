@@ -447,7 +447,20 @@ export function iosSimulatorLogTail(repository: RepositoryRecord, input: { udid:
   if (unsupported) return unsupported;
   const udid = String(input.udid ?? '').trim();
   const predicate = input.process ? `process == "${String(input.process).replace(/"/g, '')}"` : 'process != ""';
-  const result = runCommand('xcrun', ['simctl', 'spawn', udid, 'log', 'show', '--last', input.last ?? '2m', '--predicate', predicate], { timeoutMs: 60_000 });
+  const last = input.last ?? '2m';
+  const simulatorResult = runCommand(
+    'xcrun',
+    ['simctl', 'spawn', udid, 'log', 'show', '--last', last, '--predicate', predicate],
+    { timeoutMs: 30_000 },
+  );
+  const hostResult = simulatorResult.ok
+    ? undefined
+    : runCommand(
+        '/usr/bin/log',
+        ['show', '--style', 'compact', '--last', last, '--predicate', predicate],
+        { timeoutMs: 30_000 },
+      );
+  const result = hostResult?.ok ? hostResult : simulatorResult;
   const text = boundedText(result.stdout || result.stderr, input.maxBytes ?? 20_000);
   const dir = safeArtifactDir(repository, 'logs', input.artifactRoot);
   const file = join(dir, `${timestamp()}-${sanitize(input.process ?? udid)}.log`);
@@ -459,7 +472,14 @@ export function iosSimulatorLogTail(repository: RepositoryRecord, input: { udid:
     content: text.content,
     truncated: text.truncated,
     command: result.command,
-    error: result.ok ? undefined : { code: 'IOS_LOG_TAIL_FAILED', message: result.stderr || result.stdout },
+    attempts: [simulatorResult.command, ...(hostResult ? [hostResult.command] : [])],
+    source: hostResult?.ok ? 'host_unified_log_fallback' : 'simulator_unified_log',
+    error: result.ok ? undefined : {
+      code: 'IOS_LOG_TAIL_FAILED',
+      message: [simulatorResult.stderr || simulatorResult.stdout, hostResult?.stderr || hostResult?.stdout]
+        .filter(Boolean)
+        .join('\n--- fallback ---\n'),
+    },
   };
 }
 
