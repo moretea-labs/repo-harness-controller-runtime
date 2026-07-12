@@ -32,7 +32,10 @@ export interface OperationDigest {
   statusLabel: string;
   summary: string;
   terminal: boolean;
+  /** Whether the execution result itself was accepted. Queuing a request is not result acceptance. */
   accepted?: boolean;
+  requestAccepted?: boolean;
+  resultAccepted?: boolean | null;
   operation?: string;
   workId?: string;
   jobId?: string;
@@ -61,7 +64,7 @@ export function classifyUserFacingError(input: {
   const message = (input.message ?? '').toLowerCase();
   const blob = `${code} ${message} ${input.status ?? ''}`;
 
-  if (input.acceptance || blob.includes('acceptance') || blob.includes('valid_fail') || blob.includes('check failed')) {
+  if (input.acceptance || blob.includes('acceptance') || blob.includes('valid_fail') || blob.includes('check failed') || blob.includes('] failed') || blob.includes('expected ') && blob.includes(' got ')) {
     return 'acceptance_failure';
   }
   if (blob.includes('invalid_check_id') || blob.includes('check not found') || blob.includes('check_id')) {
@@ -145,7 +148,7 @@ export function statusLabelForPhase(phase: UserFacingPhase): string {
   }
 }
 
-function defaultNextActions(phase: UserFacingPhase, jobId?: string): SuggestedNextAction[] {
+function defaultNextActions(phase: UserFacingPhase, jobId?: string, errorClass?: UserFacingErrorClass): SuggestedNextAction[] {
   if (phase === 'queued' || phase === 'running' || phase === 'waiting') {
     return [{
       label: '查看任务状态',
@@ -158,6 +161,16 @@ function defaultNextActions(phase: UserFacingPhase, jobId?: string): SuggestedNe
     }];
   }
   if (phase === 'failed' || phase === 'timed_out') {
+    if (errorClass === 'acceptance_failure' || errorClass === 'invalid_check_id' || errorClass === 'policy_denied') {
+      return [{
+        label: errorClass === 'policy_denied' ? '检查策略限制' : '修复代码或检查契约',
+        tool: 'rh_context',
+        operation: 'get',
+        payload: jobId ? { work_id: jobId } : undefined,
+        risk: 'readonly',
+        confidence: 'high',
+      }];
+    }
     return [{
       label: '诊断环境（dry-run）',
       tool: 'rh_work',
@@ -278,7 +291,9 @@ export function buildJobOperationDigest(job: ExecutionJob, options: {
     statusLabel: statusLabelForPhase(phase),
     summary: bound(summary, 500),
     terminal,
-    accepted: true,
+    accepted: phase === 'succeeded',
+    requestAccepted: true,
+    resultAccepted: terminal ? phase === 'succeeded' : null,
     operation,
     workId: job.jobId,
     jobId: job.jobId,
@@ -287,7 +302,7 @@ export function buildJobOperationDigest(job: ExecutionJob, options: {
     evidenceRefs: job.evidenceIds.slice(-5).map((id) => ({ title: 'evidence', summary: id })),
     errorClass,
     errorMessage,
-    suggestedNextActions: defaultNextActions(phase, job.jobId),
+    suggestedNextActions: defaultNextActions(phase, job.jobId, errorClass),
     rawAvailable: false,
   };
 }
@@ -344,7 +359,9 @@ export function buildSyncOperationDigest(input: {
     statusLabel: statusLabelForPhase(phase),
     summary: bound(input.summary, 500),
     terminal: true,
-    accepted: true,
+    accepted: input.ok,
+    requestAccepted: true,
+    resultAccepted: input.ok,
     operation: input.operation,
     changedFiles: (input.changedFiles ?? []).slice(0, 30),
     errorClass: input.errorClass,

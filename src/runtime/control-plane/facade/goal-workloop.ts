@@ -882,18 +882,20 @@ export function stopGoalWorkloop(ctx: GoalWorkloopContext, input: GoalWorkloopSt
     continuationPrompt: input.reason
       ? `Stopped: ${input.reason}`.slice(0, 2_000)
       : work.continuationPrompt,
-    // Evidence is retained; worktree is not force-deleted without authorization.
-    worktreeRef: destructiveCleanup ? undefined : work.worktreeRef,
+    // Authorization is not proof of cleanup. Preserve the reference until a real
+    // cleanup handler verifies ownership, cleanliness and successful removal.
+    worktreeRef: work.worktreeRef,
   });
 
   return buildFacadeResult({
     status: 'ok',
-    summary: `WorkContract ${work.workId} cancelled/stopped. Evidence retained. Worktree cleanup ${destructiveCleanup ? 'authorized' : 'not performed'}.`,
+    summary: `WorkContract ${work.workId} cancelled/stopped. Evidence retained. Worktree cleanup ${destructiveCleanup ? 'authorized but pending verification' : 'not performed'}.`,
     data: {
       work: summarizeWorkContract(updated),
       finalStatus: 'cancelled',
       evidenceRetained: true,
-      worktreeDeleted: destructiveCleanup && Boolean(work.worktreeRef),
+      worktreeDeleted: false,
+      cleanupPending: destructiveCleanup && Boolean(work.worktreeRef),
       destructiveCleanupAuthorized: destructiveCleanup,
     },
     evidenceRefs: work.evidenceRefs.slice(0, 5),

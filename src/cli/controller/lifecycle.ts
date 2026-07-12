@@ -36,7 +36,7 @@ import {
 import { projectionBlocksReadiness, readRepositoryProjectionSnapshot } from "../../runtime/projections/materialized-view";
 import { isProcessAlive, terminateProcessTree } from "../../runtime/shared/process-tree";
 
-const DEFAULT_START_TIMEOUT_MS = 20_000;
+const DEFAULT_START_TIMEOUT_MS = 60_000;
 const DEFAULT_STOP_TIMEOUT_MS = 8_000;
 const HEALTH_TIMEOUT_MS = 2_000;
 const HEALTH_POLL_INTERVAL_MS = 250;
@@ -700,7 +700,9 @@ async function waitForHealthyStart(repoRoot: string, timeoutMs: number, logPath:
     `Controller stack did not become healthy within ${timeoutMs}ms.`,
     `Gateway health: ${latest.health.mcp ? "ok" : "not ready"}`,
     `Local Controller health: ${latest.health.localController ? "ok" : "not ready"}`,
-    `Ready state: ${latest.ready ? "ok" : "degraded"}`,
+    `Ready state: ${latest.ready ? "ok" : "recovering/degraded"}`,
+    `Daemon state: ${latest.daemon.status}${latest.daemon.degraded ? " (degraded)" : ""}`,
+    `Runtime projection: ${latest.readiness.projection ? "ready" : "recovering/stale"}`,
     `Supervisor PID: ${latest.supervisor.pid ?? "missing"}`,
   ];
   if (tail) lines.push("", "Recent log tail:", tail);
@@ -884,7 +886,10 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
     },
   });
 
-  status = await waitForHealthyStart(repoRoot, opts.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS, config.logPath, config.controllerHome);
+  const configuredStartTimeout = Number(process.env.REPO_HARNESS_CONTROLLER_START_TIMEOUT_MS);
+  const startTimeoutMs = opts.startTimeoutMs
+    ?? (Number.isFinite(configuredStartTimeout) && configuredStartTimeout >= 2_000 ? Math.trunc(configuredStartTimeout) : DEFAULT_START_TIMEOUT_MS);
+  status = await waitForHealthyStart(repoRoot, startTimeoutMs, config.logPath, config.controllerHome);
   if (launchAgents.length > 0) {
     const persisted = loadControllerServiceState(repoRoot);
     if (persisted) {

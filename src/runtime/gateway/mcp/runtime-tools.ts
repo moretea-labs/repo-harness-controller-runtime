@@ -1183,6 +1183,28 @@ function summarizeWork(job: ExecutionJob, repoRoot?: string): Record<string, unk
   };
 }
 
+function summarizeWorkListItem(job: ExecutionJob): Record<string, unknown> {
+  const digest = buildJobOperationDigest(job);
+  return {
+    workId: job.jobId,
+    requestId: job.requestId,
+    operation: typeof job.payload?.operation === 'string' ? job.payload.operation : job.type,
+    status: job.status,
+    phase: digest.phase,
+    statusLabel: digest.statusLabel,
+    summary: digest.summary,
+    terminal: digest.terminal,
+    resumable: !digest.terminal || digest.phase === 'needs_attention',
+    errorClass: digest.errorClass,
+    changedFileCount: digest.changedFiles?.length ?? 0,
+    evidenceCount: job.evidenceIds.length,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    suggestedNextAction: digest.suggestedNextActions[0],
+    detailPointer: { tool: 'work_get', work_id: job.jobId },
+  };
+}
+
 function resolveWorkJob(
   ctx: MultiRepositoryMcpToolContext,
   repoId: string,
@@ -1514,6 +1536,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             schemaStableAcrossAccessModes: exposure.schemaStableAcrossAccessModes,
           },
         };
+        const liveGit = gitSnapshot(repository.canonicalRoot);
         const manifests = listAssistantPluginManifests(ctx.controllerHome, repository);
         const capabilities = listCapabilityDescriptors(manifests);
         const pendingHandoffs = listHandoffItems({ ...store, status: 'pending', limit: 20 });
@@ -1525,6 +1548,13 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             operation,
             repoId: repository.repoId,
             readiness: readinessWithToolSurface,
+            repositoryState: {
+              ...liveGit,
+              observedAt: new Date().toISOString(),
+              sourceSnapshotStale: readiness.daemon.source?.observedAt
+                ? Date.now() - Date.parse(readiness.daemon.source.observedAt) > 30_000
+                : true,
+            },
             capabilityCount: capabilities.length,
             capabilityGroups: summarizeCapabilityGroups(manifests),
             toolArchitecture: {
@@ -1647,12 +1677,26 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         const store = { controllerHome: ctx.controllerHome, repoId: repository.repoId };
         const workId = typeof args.work_id === 'string' ? args.work_id : undefined;
         const work = workId ? getWorkContract(store, workId) : undefined;
+        const executionJob = workId && !work ? (() => { try { return getExecutionJob(ctx.controllerHome, repository.repoId, workId); } catch { return undefined; } })() : undefined;
+        if (workId && !work && !executionJob) {
+          const facade = buildFacadeResult({
+            status: 'not_found',
+            summary: `Work ${workId} not found in this repository.`,
+            data: { operation, repoId: repository.repoId, workId },
+            suggestedNextActions: [],
+          });
+          return result(facade as unknown as Record<string, unknown>, true);
+        }
+        const activeContracts = operation === 'list' || !workId ? listWorkContracts({ ...store, status: 'active', limit: 20 }) : [];
+        const recentJobs = operation === 'list' || !workId ? listExecutionJobs(ctx.controllerHome, repository.repoId, 20) : [];
         const detailLevel = args.detail_level === 'detail' || args.detail_level === 'raw' ? args.detail_level : 'summary';
         const facade = buildFacadeResult({
           status: 'ok',
           summary: work
             ? `Bounded context for work ${work.workId}.`
-            : 'Bounded repository context is available through registered checks and internal capabilities.',
+            : executionJob
+              ? `Bounded context for execution job ${executionJob.jobId}.`
+              : 'Bounded repository context and active work summaries are available.',
           data: {
             operation,
             repoId: repository.repoId,
@@ -1680,6 +1724,11 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             work: work && detailLevel === 'summary'
               ? { workId: work.workId, status: work.status, mode: work.mode, objective: work.objective.slice(0, 240) }
               : work,
+            executionJob: executionJob ? summarizeWorkListItem(executionJob) : undefined,
+            activeWork: activeContracts.map((entry) => ({
+              workId: entry.workId, status: entry.status, mode: entry.mode, objective: entry.objective.slice(0, 240),
+            })),
+            recentExecutionJobs: recentJobs.map(summarizeWorkListItem),
           },
           warnings: normalizedChecks.warnings,
           evidenceRefs: work?.evidenceRefs?.slice(0, 5) ?? [],
@@ -1687,10 +1736,10 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             label: 'Choose work mode',
             tool: 'rh_work',
             operation: 'start',
-            risk: 'readonly',
+            risk: 'workspace_write',
             confidence: 'medium',
           }],
-          detailLevel: detailLevel === 'raw' ? 'detail' : detailLevel,
+          detailLevel,
           rawAvailable: detailLevel === 'raw',
         });
         return result(facade as unknown as Record<string, unknown>);
@@ -1832,7 +1881,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
       case 'work_list': {
         const repository = selected(ctx, args);
         const jobs = listExecutionJobs(ctx.controllerHome, repository.repoId, typeof args.limit === 'number' ? args.limit : 50);
-        return result({ works: jobs.map((job) => summarizeWork(job, repository.canonicalRoot)) });
+        return result({ detailLevel: 'summary', works: jobs.map(summarizeWorkListItem), next: 'Call work_get for bounded details.' });
       }
       case 'work_cancel': {
         const repository = selected(ctx, args);

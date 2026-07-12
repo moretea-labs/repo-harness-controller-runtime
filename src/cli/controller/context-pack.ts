@@ -322,9 +322,12 @@ export function buildControllerContextPack(
   const explicitKnownPaths = knownPaths.filter((path) => !looksLikeGlob(path));
   const includeGlobs = cleanList([...(options.includeGlobs ?? []), ...knownGlobs]);
   const excludeGlobs = cleanList(options.excludeGlobs);
-  const focus = issueTaskFocus(repoRoot, options.issueId, options.taskId);
+  // Independent investigations must not inherit an unrelated repository focus.
+  // Only bind Issue/Task context when the caller explicitly requests it.
+  const hasExplicitFocus = Boolean(options.issueId || options.taskId);
+  const focus = hasExplicitFocus ? issueTaskFocus(repoRoot, options.issueId, options.taskId) : {};
   const git = gitSnapshot(repoRoot);
-  const compactTask = ledgerTask(repoRoot, focus.issue?.id, focus.task?.id);
+  const compactTask = hasExplicitFocus ? ledgerTask(repoRoot, focus.issue?.id, focus.task?.id) : undefined;
   const allowedPathGlobs = cleanList(compactTask?.allowedPaths);
   const taskChecks = cleanList(compactTask?.checks);
   const goalParts = [
