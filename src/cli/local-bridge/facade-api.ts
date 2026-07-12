@@ -15,7 +15,6 @@ import { createMcpToolContext, type MultiRepositoryMcpToolContext } from '../mcp
 import { readControllerDaemonStatus } from '../../runtime/control-plane/daemon-client';
 import { readSchedulerHealthSnapshot } from '../../runtime/control-plane/global-scheduler/scheduler';
 import { collectRuntimeSourceIdentity, evaluateRuntimeSourceDrift, readRuntimeGeneration } from '../../runtime/control-plane/runtime-generation';
-import { readSchedulerHealthSnapshot } from '../../runtime/control-plane/global-scheduler/scheduler';
 import {
   getAssistantPluginManifest,
   listAssistantPluginManifests,
