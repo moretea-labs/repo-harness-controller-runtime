@@ -1,5 +1,22 @@
 import { FACADE_TOOLS, type EvidenceRef, type FacadeTool, type SuggestedNextAction } from './types';
 
+function expectedActionRisk(action: SuggestedNextAction): SuggestedNextAction['risk'] | undefined {
+  if (action.tool !== 'rh_work') return undefined;
+  switch (action.operation) {
+    case 'start':
+    case 'continue':
+    case 'verify':
+    case 'repair':
+    case 'stop':
+    case 'delegate':
+      return 'workspace_write';
+    case 'finalize':
+      return 'local_repo_write';
+    default:
+      return undefined;
+  }
+}
+
 const ALLOWED_FACADE_OPERATIONS: Record<FacadeTool, readonly string[]> = {
   rh_access: ['get', 'preview', 'set'],
   rh_status: ['list', 'get', 'repair'],
