@@ -1033,7 +1033,10 @@ function controllerReadiness(ctx: MultiRepositoryMcpToolContext, repository = ct
   const scheduler = readSchedulerHealthSnapshot(ctx.controllerHome);
   const projection = repository ? readRepositoryProjectionSnapshot(ctx.controllerHome, repository.repoId).projection : undefined;
   const localBridge = repository ? loadMcpRuntimeState(repository.canonicalRoot)?.localController : undefined;
-  const inferredLocalBridge = repository ? inferLocalControllerProcess(repository.canonicalRoot) : undefined;
+  // Process-table scans are expensive (~100ms+). Only fall back when runtime state is missing.
+  const inferredLocalBridge = repository && !(localBridge?.running)
+    ? inferLocalControllerProcess(repository.canonicalRoot)
+    : undefined;
   const schedulerHeartbeatAgeMs = ageMs(scheduler.lastTickAt);
   const dispatchHeartbeatAgeMs = ageMs(scheduler.lastDispatchAt);
   const schedulerFresh = daemon.status === 'ready'
@@ -1548,10 +1551,16 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             schemaStableAcrossAccessModes: exposure.schemaStableAcrossAccessModes,
           },
         };
-        const manifests = listAssistantPluginManifests(ctx.controllerHome, repository);
+        const detailLevel = args.detail_level === 'detail' ? 'detail' : 'summary';
+        // Always prefer stored plugin manifests on rh_status get. Live host probes
+        // (Xcode/simctl, etc.) must not stall Managed MCP gateways on reconnect/status.
+        const manifests = listAssistantPluginManifests(ctx.controllerHome, repository, {
+          preferStored: true,
+        });
         const capabilities = listCapabilityDescriptors(manifests);
         const pendingHandoffs = listHandoffItems({ ...store, status: 'pending', limit: 20 });
         const activeWork = listWorkContracts({ ...store, status: 'active', limit: 20 });
+        const preferredFacadeTools = ['rh_access', 'rh_status', 'rh_inbox', 'rh_context', 'rh_work'] as const;
         const facade = buildFacadeResult({
           status: effectiveReady ? 'ok' : 'blocked',
           summary: effectiveReady ? 'Controller and MCP tool surface are ready for bounded work.' : 'Controller or MCP tool surface needs attention before work.',
@@ -1570,7 +1579,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             capabilityCount: capabilities.length,
             capabilityGroups: summarizeCapabilityGroups(manifests),
             toolArchitecture: {
-              facadeTools: ['rh_access', 'rh_status', 'rh_inbox', 'rh_context', 'rh_work'],
+              facadeTools: [...preferredFacadeTools],
               atomicTypedToolsRetained: true,
               internalHandlersRetained: true,
               domainSchemaLoading: 'static_stable_surface',
@@ -1578,7 +1587,10 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             },
             pendingHandoffCount: pendingHandoffs.length,
             activeWorkCount: activeWork.length,
-            toolSurface: exposure.actualToolNames,
+            // Summary keeps the stable facade surface only; detail expands to the full registered schema.
+            toolSurface: detailLevel === 'detail'
+              ? exposure.actualToolNames
+              : preferredFacadeTools.filter((name) => exposure.actualToolNames.includes(name)),
             toolSurfaceStatus: readinessWithToolSurface.toolSurface,
             access: exposure.access,
           },
@@ -1595,8 +1607,8 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             risk: 'readonly',
             confidence: 'medium',
           }],
-          rawAvailable: false,
-          detailLevel: args.detail_level === 'detail' ? 'detail' : 'summary',
+          rawAvailable: detailLevel === 'detail',
+          detailLevel,
         });
         return result(facade as unknown as Record<string, unknown>, facade.status !== 'ok');
       }
@@ -1681,11 +1693,9 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         if (!allowedFacadeOperations('rh_context').includes(operation)) {
           return invalidFacadeOperation('rh_context', operation);
         }
-        const manifests = listAssistantPluginManifests(ctx.controllerHome, repository);
         const checks = listControllerChecks(repository.canonicalRoot);
         const requested = Array.isArray(args.requested_check_ids) ? args.requested_check_ids.map(String) : [];
         const normalizedChecks = normalizeCheckIds(requested, checks);
-        const capabilities = listCapabilityDescriptors(manifests);
         const store = { controllerHome: ctx.controllerHome, repoId: repository.repoId };
         const workId = typeof args.work_id === 'string' ? args.work_id : undefined;
         const work = workId ? getWorkContract(store, workId) : undefined;
@@ -1702,6 +1712,10 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         const activeContracts = operation === 'list' || !workId ? listWorkContracts({ ...store, status: 'active', limit: 20 }) : [];
         const recentJobs = operation === 'list' || !workId ? listExecutionJobs(ctx.controllerHome, repository.repoId, 20) : [];
         const detailLevel = args.detail_level === 'detail' || args.detail_level === 'raw' ? args.detail_level : 'summary';
+        const manifests = listAssistantPluginManifests(ctx.controllerHome, repository, {
+          preferStored: true,
+        });
+        const capabilities = listCapabilityDescriptors(manifests);
         const facade = buildFacadeResult({
           status: 'ok',
           summary: work

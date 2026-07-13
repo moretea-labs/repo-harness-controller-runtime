@@ -240,13 +240,37 @@ function denyAutomatedWrite(manifest: AssistantPluginManifest, action: Assistant
   throw new Error(`EXTERNAL_EFFECT_AUTHORIZATION_REQUIRED: ${manifest.pluginId}/${action.actionId} cannot run from ${origin.surface}`);
 }
 
+export type ListAssistantPluginManifestsOptions = {
+  /**
+   * Prefer previously persisted manifests for connector/status hot paths.
+   * Live adapter rebuild (including host probes such as Xcode) runs only when
+   * no stored manifest exists, or when forceRefresh is true.
+   */
+  preferStored?: boolean;
+  forceRefresh?: boolean;
+};
+
+function listAssistantPluginIds(repository: RepositoryRecord): string[] {
+  return [...PLUGIN_ADAPTERS.values()]
+    .filter((adapter) => adapterMatchesRepository(adapter, repository))
+    .map((adapter) => adapter.pluginId)
+    .sort((left, right) => left.localeCompare(right));
+}
+
 export function listAssistantPluginManifests(
   controllerHome: string,
   repository: RepositoryRecord,
+  options: ListAssistantPluginManifestsOptions = {},
 ): AssistantPluginManifest[] {
-  return [...PLUGIN_ADAPTERS.values()]
-    .filter((adapter) => adapterMatchesRepository(adapter, repository))
-    .map((adapter) => computeManifest(controllerHome, repository, adapter.pluginId))
+  const preferStored = options.preferStored === true && options.forceRefresh !== true;
+  return listAssistantPluginIds(repository)
+    .map((pluginId) => {
+      if (preferStored) {
+        const stored = readStoredManifest(controllerHome, repository.repoId, pluginId);
+        if (stored) return stored;
+      }
+      return computeManifest(controllerHome, repository, pluginId);
+    })
     .sort((left, right) => left.pluginId.localeCompare(right.pluginId));
 }
 

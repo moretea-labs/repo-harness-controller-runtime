@@ -5,6 +5,7 @@ import { join } from 'path';
 import { spawnSync } from 'child_process';
 import { registerRepository } from '../../src/cli/repositories/registry';
 import {
+  clearIosXcodeStatusCacheForTest,
   iosProjectDiscover,
   iosSimulatorScreenshot,
   iosSimulatorsList,
@@ -53,6 +54,30 @@ describe('iOS development safe tooling', () => {
     const simulators = iosSimulatorsList();
     expect(simulators.ready).toBe(true);
     expect(simulators.ready && 'devices' in simulators ? simulators.devices?.[0]?.name : undefined).toBe('iPhone 16 Pro');
+  });
+
+  it('caches host Xcode probes on the hot path and still allows force refresh', () => {
+    let probeCount = 0;
+    setIosDevelopmentHooksForTest({
+      platform: () => 'darwin',
+      runCommand(command, args) {
+        probeCount += 1;
+        const joined = [command, ...args].join(' ');
+        if (joined === 'xcode-select -p') return { ok: true, status: 0, stdout: '/Applications/Xcode.app/Contents/Developer\n', stderr: '', command: [command, ...args] };
+        if (joined === 'xcodebuild -version') return { ok: true, status: 0, stdout: 'Xcode 18.0\n', stderr: '', command: [command, ...args] };
+        if (joined.startsWith('xcrun simctl help')) return { ok: true, status: 0, stdout: 'simctl\n', stderr: '', command: [command, ...args] };
+        return { ok: false, status: 1, stdout: '', stderr: 'unexpected', command: [command, ...args] };
+      },
+    });
+
+    expect(iosXcodeStatus().ready).toBe(true);
+    const firstProbes = probeCount;
+    expect(firstProbes).toBe(3);
+    expect(iosXcodeStatus().ready).toBe(true);
+    expect(probeCount).toBe(firstProbes);
+    clearIosXcodeStatusCacheForTest();
+    expect(iosXcodeStatus({ forceRefresh: true }).ready).toBe(true);
+    expect(probeCount).toBe(firstProbes + 3);
   });
 
   it('discovers projects and writes screenshots only under bounded artifact paths', () => {

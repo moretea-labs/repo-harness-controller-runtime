@@ -113,9 +113,21 @@ describe('facade MCP surface wiring', () => {
       detailLevel: 'summary',
     });
     const toolSurface = (payload.data as { toolSurface: string[] }).toolSurface;
-    for (const name of PREFERRED_FACADE_TOOL_NAMES) expect(toolSurface).toContain(name);
+    // Summary keeps the preferred facade surface only; full schema is detail-level.
+    expect(toolSurface).toEqual([...PREFERRED_FACADE_TOOL_NAMES]);
     expect((payload.data as { toolSurfaceStatus: { missingTools: string[] } }).toolSurfaceStatus.missingTools).toEqual([]);
     expect(JSON.stringify(payload)).not.toMatch(/stdout|stderr|Bearer |private_key/i);
+
+    const detail = structured(await callRuntimeTool(ctx, 'rh_status', {
+      repo_id: repository.repoId,
+      operation: 'get',
+      detail_level: 'detail',
+    }));
+    const detailSurface = (detail.data as { toolSurface: string[] }).toolSurface;
+    for (const name of PREFERRED_FACADE_TOOL_NAMES) expect(detailSurface).toContain(name);
+    expect(detailSurface.length).toBeGreaterThan(PREFERRED_FACADE_TOOL_NAMES.length);
+    expect(detail.rawAvailable).toBe(true);
+    expect(detail.detailLevel).toBe('detail');
   });
 
   test('rh_inbox list/get/resolve returns bounded FacadeResult', async () => {

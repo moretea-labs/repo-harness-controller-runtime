@@ -20,12 +20,30 @@ export interface IosDevelopmentHooks {
 
 let hooks: IosDevelopmentHooks = {};
 
+/** Host Xcode/simctl probes are expensive (spawnSync). Cache them for hot MCP reads. */
+const XCODE_STATUS_TTL_MS = 60_000;
+const PROJECT_DISCOVER_TTL_MS = 30_000;
+let xcodeStatusCache:
+  | { expiresAt: number; value: ReturnType<typeof probeIosXcodeStatus> }
+  | undefined;
+const projectDiscoverCache = new Map<string, { expiresAt: number; value: ReturnType<typeof probeIosProjectDiscover> }>();
+
 export function setIosDevelopmentHooksForTest(next: IosDevelopmentHooks): void {
   hooks = next;
+  xcodeStatusCache = undefined;
+  projectDiscoverCache.clear();
 }
 
 export function resetIosDevelopmentHooksForTest(): void {
   hooks = {};
+  xcodeStatusCache = undefined;
+  projectDiscoverCache.clear();
+}
+
+/** Test helper: drop cached Xcode probe results without clearing hooks. */
+export function clearIosXcodeStatusCacheForTest(): void {
+  xcodeStatusCache = undefined;
+  projectDiscoverCache.clear();
 }
 
 export function iosDevelopmentPlatform(): NodeJS.Platform {
@@ -122,12 +140,15 @@ function boundedText(value: string, maxBytes = 20_000): { content: string; trunc
   return { content: buffer.subarray(Math.max(0, buffer.byteLength - maxBytes)).toString('utf-8'), truncated: true };
 }
 
-export function iosXcodeStatus() {
+function probeIosXcodeStatus() {
   const unsupported = assertDarwin();
   if (unsupported) return unsupported;
-  const xcodeSelect = runCommand('xcode-select', ['-p']);
-  const xcodebuild = runCommand('xcodebuild', ['-version']);
-  const simctl = runCommand('xcrun', ['simctl', 'help']);
+  // Bound each probe tightly: MCP hot paths must not inherit the default 30s spawn timeout.
+  const probeTimeoutMs = 3_000;
+  const xcodeSelect = runCommand('xcode-select', ['-p'], { timeoutMs: probeTimeoutMs });
+  const xcodebuild = runCommand('xcodebuild', ['-version'], { timeoutMs: probeTimeoutMs });
+  // `simctl help` is enough to prove the binary is wired; avoid heavier inventory probes on hot paths.
+  const simctl = runCommand('xcrun', ['simctl', 'help'], { timeoutMs: probeTimeoutMs });
   return {
     ready: xcodeSelect.ok && xcodebuild.ok && simctl.ok,
     platform: platform(),
@@ -140,6 +161,22 @@ export function iosXcodeStatus() {
       ...(simctl.ok ? [] : [{ code: 'SIMCTL_UNAVAILABLE', message: simctl.stderr || simctl.stdout }]),
     ],
   };
+}
+
+export function iosXcodeStatus(options: { forceRefresh?: boolean } = {}) {
+  if (!options.forceRefresh && xcodeStatusCache && xcodeStatusCache.expiresAt > Date.now()) {
+    return xcodeStatusCache.value;
+  }
+  const value = probeIosXcodeStatus();
+  // Only cache successful host probes and structured unsupported-platform results.
+  // Leave failed/partial host states short-lived so recoveries are noticed quickly.
+  const cacheable = !('ready' in value) || value.ready === true || ('error' in value && (value as { error?: { code?: string } }).error?.code === 'IOS_DEPENDENCY_UNAVAILABLE');
+  if (cacheable) {
+    xcodeStatusCache = { expiresAt: Date.now() + XCODE_STATUS_TTL_MS, value };
+  } else {
+    xcodeStatusCache = undefined;
+  }
+  return value;
 }
 
 export function iosSimulatorsList(input: { runtime?: string; name?: string } = {}) {
@@ -181,7 +218,7 @@ function findFiles(root: string, suffix: string, maxDepth = 3): string[] {
   return results.sort();
 }
 
-export function iosProjectDiscover(repository: RepositoryRecord) {
+function probeIosProjectDiscover(repository: RepositoryRecord) {
   const root = repository.canonicalRoot;
   const workspaces = findFiles(root, '.xcworkspace').map((path) => relative(root, path));
   const projects = findFiles(root, '.xcodeproj').map((path) => relative(root, path));
@@ -197,6 +234,17 @@ export function iosProjectDiscover(repository: RepositoryRecord) {
     infoPlists,
     defaultContainer: workspaces[0] ? { type: 'workspace', path: workspaces[0] } : projects[0] ? { type: 'project', path: projects[0] } : packageSwift ? { type: 'package', path: packageSwift } : undefined,
   };
+}
+
+export function iosProjectDiscover(repository: RepositoryRecord, options: { forceRefresh?: boolean } = {}) {
+  const root = resolve(repository.canonicalRoot);
+  if (!options.forceRefresh) {
+    const cached = projectDiscoverCache.get(root);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+  }
+  const value = probeIosProjectDiscover({ ...repository, canonicalRoot: root });
+  projectDiscoverCache.set(root, { expiresAt: Date.now() + PROJECT_DISCOVER_TTL_MS, value });
+  return value;
 }
 
 export function iosSchemesList(repository: RepositoryRecord, input: { workspace?: string; project?: string } = {}) {
