@@ -9,7 +9,8 @@ import {
   rmSync,
   writeFileSync,
 } from 'fs';
-import { dirname, join, resolve } from 'path';
+import { dirname, join, relative, resolve } from 'path';
+import { tmpdir } from 'os';
 import { ensureControllerHome, ensureRepositoryControllerLayout, resolveControllerHome } from './controller-home';
 import {
   inferDisplayName,
@@ -82,6 +83,31 @@ function validBranch(value: string | undefined): boolean {
 
 function now(): string {
   return new Date().toISOString();
+}
+
+function comparablePath(value: string): string {
+  const resolved = resolve(value);
+  return process.platform === 'darwin' && resolved.startsWith('/var/')
+    ? `/private${resolved}`
+    : resolved;
+}
+
+function pathInside(parent: string, candidate: string): boolean {
+  const rel = relative(comparablePath(parent), comparablePath(candidate));
+  return rel === '' || (!rel.startsWith('..') && !rel.startsWith('/'));
+}
+
+function registrationPathPolicy(home: string, canonicalRoot: string): void {
+  const systemTemp = realpathSync(tmpdir());
+  const controllerIsEphemeral = pathInside(systemTemp, home);
+  if (!controllerIsEphemeral && pathInside(systemTemp, canonicalRoot)) {
+    throw new Error(`REPOSITORY_EPHEMERAL_PATH_DENIED: ${canonicalRoot}`);
+  }
+  const managedWorktrees = join(home, 'repositories');
+  const segments = relative(managedWorktrees, canonicalRoot).split(/[/\\]+/).filter(Boolean);
+  if (segments.length >= 3 && segments[1] === 'worktrees') {
+    throw new Error(`REPOSITORY_MANAGED_WORKTREE_DENIED: ${canonicalRoot}`);
+  }
 }
 
 export function repositoryCheckoutLifecycle(checkout: RepositoryCheckout): RepositoryCheckoutLifecycle {
@@ -380,6 +406,7 @@ export function registerRepository(input: RegisterRepositoryInput): RepositoryRe
   const home = ensureControllerHome(input.controllerHome);
   if (!input.path?.trim()) throw new Error('REPOSITORY_PATH_REQUIRED');
   const canonicalRoot = resolveGitRoot(input.path);
+  registrationPathPolicy(home, canonicalRoot);
   if (input.defaultBranch && !validBranch(input.defaultBranch.trim())) throw new Error(`BRANCH_INVALID: ${input.defaultBranch}`);
   const requestedRemote = input.remoteUrl?.trim();
   const rawRemote = requestedRemote || git(canonicalRoot, ['config', '--get', 'remote.origin.url']);
