@@ -272,6 +272,41 @@ export function syncAssistantPluginRegistry(
   };
 }
 
+export function isDirectPluginReadAction(action: AssistantPluginActionDescriptor): boolean {
+  return action.readOnly === true
+    && action.risk === 'readonly'
+    && action.confirmation === 'none'
+    && action.idempotent === true;
+}
+
+export async function executeAssistantPluginReadDirect(
+  controllerHome: string,
+  repository: RepositoryRecord,
+  request: AssistantPluginActionRequest,
+): Promise<{ manifest: AssistantPluginManifest; action: AssistantPluginActionDescriptor; result: Record<string, unknown> }> {
+  const manifest = getAssistantPluginManifest(controllerHome, repository, request.pluginId);
+  const action = actionForManifest(manifest, request.actionId);
+  if (!manifest.enabled && action.actionId !== 'configure') {
+    throw new Error(`PLUGIN_DISABLED: ${request.pluginId} is disabled`);
+  }
+  if (!isDirectPluginReadAction(action)) {
+    throw new Error(`PLUGIN_DIRECT_READ_NOT_ALLOWED: ${request.pluginId}/${request.actionId}`);
+  }
+  const normalizedArgs = validateActionArguments(action, request.args ?? {});
+  enforceConfirmation(action, { ...request, args: normalizedArgs });
+  const result = await executeAssistantPluginAction({
+    controllerHome,
+    repoId: repository.repoId,
+    repoRoot: repository.canonicalRoot,
+    pluginId: request.pluginId,
+    actionId: request.actionId,
+    requestId: request.requestId,
+    args: normalizedArgs,
+    origin: request.origin,
+  });
+  return { manifest, action, result };
+}
+
 export function submitAssistantPluginAction(
   controllerHome: string,
   repository: RepositoryRecord,

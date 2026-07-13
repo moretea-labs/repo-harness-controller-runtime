@@ -17,9 +17,20 @@ import { claimsForMcpOperation } from './resource-policy';
 import { commandValue, normalizeRepositoryCommand } from '../../../cli/repositories/command-normalization';
 
 const DIRECT_REPOSITORY_TOOLS = new Set(['repository_list', 'repository_get', 'repository_workbench', 'repository_command_preview']);
+/** High-frequency bounded reads execute in the current MCP request. */
 const DIRECT_HOT_READ_TOOLS = new Set([
   'get_task_run', 'get_task_run_events', 'get_task_run_log',
+  'get_job', 'list_jobs',
+  'work_get', 'work_list', 'work_status_digest', 'work_result_summary',
+  'controller_ready', 'repository_runtime_snapshot',
+  'rh_status', 'rh_context', 'rh_inbox',
+  'controller_context', 'controller_context_pack',
+  'repository_git_status', 'repository_git_diff', 'git_diff_paths',
 ]);
+
+export function isDirectHotReadTool(name: string): boolean {
+  return DIRECT_HOT_READ_TOOLS.has(name);
+}
 /** Small interactive development writes: run synchronously by default so ChatGPT/GUI get immediate results. */
 const INTERACTIVE_SYNC_WRITE_TOOLS = new Set([
   'repository_safe_patch_apply',
@@ -40,14 +51,13 @@ function wantsAsyncExecution(args: Record<string, unknown>): boolean {
   return args.apply_mode === 'async' || args.mode === 'async' || args.async === true;
 }
 
-function wantsWaitForResult(args: Record<string, unknown>): boolean {
+export function wantsWaitForResult(args: Record<string, unknown>): boolean {
   return args.wait === true
     || args.await_result === true
-    || args.wait_for_result === true
-    || typeof args.wait_ms === 'number';
+    || args.wait_for_result === true;
 }
 
-function waitTimeoutMs(args: Record<string, unknown>): number {
+export function waitTimeoutMs(args: Record<string, unknown>): number {
   if (typeof args.wait_ms === 'number' && Number.isFinite(args.wait_ms)) {
     return Math.max(200, Math.min(Math.trunc(args.wait_ms), 120_000));
   }
@@ -69,13 +79,14 @@ function shouldCreateDurableJob(
   ctx: MultiRepositoryMcpToolContext,
   name: string,
   args: Record<string, unknown> = {},
-  opts: { allowReadOnly?: boolean } = {},
+  opts: { allowReadOnly?: boolean; forceDurable?: boolean } = {},
 ): boolean {
   const definition = toolDefinition(ctx, name);
   if (!definition) return false;
+  if (opts.forceDurable === true) return true;
   if (name.startsWith('repository_') && DIRECT_REPOSITORY_TOOLS.has(name)) return false;
   if (definition.annotations?.readOnlyHint === true && opts.allowReadOnly !== true) return false;
-  if (DIRECT_HOT_READ_TOOLS.has(name)) return false;
+  if (isDirectHotReadTool(name)) return false;
   // Interactive development path: sync by default unless caller opts into async queueing.
   if (INTERACTIVE_SYNC_WRITE_TOOLS.has(name) && !wantsAsyncExecution(args)) return false;
   return true;
@@ -184,7 +195,7 @@ export function injectDurableCommandFields(tool: McpToolDefinition): McpToolDefi
         },
         wait_ms: {
           type: 'number',
-          description: 'Max wait for terminal job result when wait=true. Default 15000, max 120000.',
+          description: 'Max wait for terminal job result. Only used when wait=true; never enables waiting by itself. Default 15000, max 120000.',
         },
       },
     },
@@ -195,7 +206,7 @@ export async function routeDurableMcpCall(
   ctx: MultiRepositoryMcpToolContext,
   name: string,
   args: Record<string, unknown>,
-  opts: { allowReadOnly?: boolean } = {},
+  opts: { allowReadOnly?: boolean; forceDurable?: boolean } = {},
 ): Promise<CallToolResult | undefined> {
   const definition = toolDefinition(ctx, name);
   if (!definition || !shouldCreateDurableJob(ctx, name, args, opts)) return undefined;
@@ -307,7 +318,7 @@ export async function routeDurableMcpCall(
       changedFiles: digest.changedFiles,
       suggestedNextActions: digest.suggestedNextActions,
       next: waited.timedOut
-        ? `Still ${waited.job.status}. Call get_job/work_get with wait=true again, or inspect job_id ${waited.job.jobId}.`
+        ? `Still ${waited.job.status}. Poll get_job/work_get without waiting; use work_wait only when blocking is explicitly required.`
         : digest.summary,
     });
   }
@@ -334,6 +345,6 @@ export async function routeDurableMcpCall(
     phase: digest.phase,
     statusLabel: digest.statusLabel,
     suggestedNextActions: digest.suggestedNextActions,
-    next: `Call get_job with job_id ${created.job.jobId} and wait=true for a terminal result digest.`,
+    next: `Continue independent work, then poll get_job/work_get without waiting. Use work_wait only when blocking is explicitly required.`,
   });
 }

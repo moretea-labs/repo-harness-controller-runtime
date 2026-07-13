@@ -53,7 +53,7 @@ import type { TaskRisk } from '../../../cli/controller/types';
 import { controllerContextProjectionAgeMs, readControllerContextProjection } from '../../projections/controller-context';
 import { loadMcpRuntimeState } from '../../../cli/mcp/auth';
 import { redactMcpText } from '../../../cli/mcp/redaction';
-import { controllerPluginRepository, getAssistantPluginManifest, listAssistantPluginManifests, submitAssistantPluginAction } from '../../plugins/store';
+import { controllerPluginRepository, executeAssistantPluginReadDirect, getAssistantPluginManifest, isDirectPluginReadAction, listAssistantPluginManifests, submitAssistantPluginAction } from '../../plugins/store';
 import {
   listWebTargets,
   mergeAllowedDomains,
@@ -1820,7 +1820,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           repo_id: repository.repoId,
           request_id: requestId,
           ...(typeof args.timeout_ms === 'number' ? { timeout_ms: args.timeout_ms } : {}),
-        }, { allowReadOnly: true });
+        }, { allowReadOnly: true, forceDurable: true });
         if (!routed?.structuredContent || routed.isError) {
           throw new Error(`WORK_OPERATION_NOT_DURABLE: ${operation} is unknown or not eligible for durable execution`);
         }
@@ -1838,7 +1838,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         if (!job) return result({ error: { code: 'WORK_NOT_FOUND', message: 'No Work matched this repository and identifier.', errorClass: 'not_found', summary: '未找到对应任务。' } }, true);
         let timedOut = false;
         let waitedMs = 0;
-        if (args.wait === true || typeof args.wait_ms === 'number') {
+        if (args.wait === true) {
           const waited = await waitForExecutionJob({
             controllerHome: ctx.controllerHome,
             repoId: repository.repoId,
@@ -1849,7 +1849,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           timedOut = waited.timedOut;
           waitedMs = waited.waitedMs;
         }
-        const digest = buildJobOperationDigest(job, { waited: args.wait === true || typeof args.wait_ms === 'number', stillRunning: timedOut });
+        const digest = buildJobOperationDigest(job, { waited: args.wait === true, stillRunning: timedOut });
         return result({
           work: summarizeWork(job, repository.canonicalRoot),
           digest,
@@ -2232,7 +2232,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             ? 'Raw job state is intentionally not returned through MCP. Use the bounded job summary, events, and get_artifact evidence instead.'
             : digest.terminal
               ? digest.summary
-              : 'Job is still active. Call get_job with wait=true for a terminal digest, or use get_artifact for bounded evidence.',
+              : 'Job is still active. Poll get_job without waiting, or use work_wait only when blocking is explicitly required.',
         }, digest.phase === 'failed' || digest.phase === 'timed_out');
       }
       case 'get_artifact': {
@@ -2955,18 +2955,41 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         const repository = pluginId === 'local_system'
           ? controllerPluginRepository(ctx.controllerHome)
           : selected(ctx, args);
-        const submitted = submitAssistantPluginAction(ctx.controllerHome, repository, {
+        const actionId = String(args.action_id ?? '').trim();
+        const requestId = String(args.request_id ?? '').trim();
+        const actionArguments = args.arguments && typeof args.arguments === 'object' && !Array.isArray(args.arguments)
+          ? args.arguments as Record<string, unknown>
+          : {};
+        const request = {
           pluginId,
-          actionId: String(args.action_id ?? '').trim(),
-          requestId: String(args.request_id ?? '').trim(),
-          args: args.arguments && typeof args.arguments === 'object' && !Array.isArray(args.arguments)
-            ? args.arguments as Record<string, unknown>
-            : {},
+          actionId,
+          requestId,
+          args: actionArguments,
           timeoutMs: typeof args.timeout_ms === 'number' ? args.timeout_ms : undefined,
           confirmAuthorization: args.confirm_authorization === true,
           confirmationText: typeof args.confirmation_text === 'string' ? args.confirmation_text : undefined,
-          origin: { surface: 'mcp', actor: 'plugin_action_execute', correlationId: String(args.request_id ?? '').trim() },
-        });
+          origin: { surface: 'mcp' as const, actor: 'plugin_action_execute', correlationId: requestId },
+        };
+        const manifest = getAssistantPluginManifest(ctx.controllerHome, repository, pluginId);
+        const action = manifest.actions.find((entry) => entry.actionId === actionId);
+        if (action && isDirectPluginReadAction(action)) {
+          const direct = await executeAssistantPluginReadDirect(ctx.controllerHome, repository, request);
+          return result({
+            accepted: true,
+            direct: true,
+            durable: false,
+            plugin: summarizePlugin(direct.manifest),
+            action: {
+              actionId: direct.action.actionId,
+              risk: direct.action.risk,
+              confirmation: direct.action.confirmation,
+            },
+            scope: repository.repoId === '__controller__' ? 'controller' : 'repository',
+            result: direct.result,
+            next: 'Continue with the returned bounded result; no Job polling is required.',
+          });
+        }
+        const submitted = submitAssistantPluginAction(ctx.controllerHome, repository, request);
         const daemon = ensureControllerDaemon(ctx.controllerHome);
         return result({
           accepted: true,
