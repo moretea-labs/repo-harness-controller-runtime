@@ -70,7 +70,15 @@ export function classifyUserFacingError(input: {
   if (blob.includes('invalid_check_id') || blob.includes('check not found') || blob.includes('check_id')) {
     if (blob.includes('invalid') || blob.includes('not found') || blob.includes('not registered')) return 'invalid_check_id';
   }
-  if (blob.includes('approval') || blob.includes('authorization') || blob.includes('confirm')) return 'approval_required';
+  if (
+    blob.includes('approval_required')
+    || blob.includes('approval required')
+    || blob.includes('requires approval')
+    || blob.includes('waiting_for_approval')
+    || blob.includes('awaiting approval')
+    || blob.includes('authorization required')
+    || blob.includes('confirm authorization')
+  ) return 'approval_required';
   if (blob.includes('handoff') || blob.includes('needs_review') || blob.includes('human_attention')) return 'handoff_required';
   if (blob.includes('timed_out') || blob.includes('timed out') || blob.includes('timeout')) return 'timeout';
   if (blob.includes('stale connector') || blob.includes('tool surface') || blob.includes('fingerprint') || blob.includes('reconnect')) {

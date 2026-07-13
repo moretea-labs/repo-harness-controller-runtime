@@ -42,6 +42,25 @@ describe('controller context pack directory expansion', () => {
     expect(pack.deniedPaths).toContainEqual({ path: 'src/nested/link.txt', reason: 'symbolic links are not followed' });
   });
 
+  test('excludes runtime storage and backup files from search by default', () => {
+    const root = fixture();
+    mkdirSync(join(root, '_ops/controller-home/atomic-backups'), { recursive: true });
+    mkdirSync(join(root, '.ai/harness/edit-sessions/old/backups'), { recursive: true });
+    writeFileSync(join(root, '_ops/controller-home/atomic-backups/stale.ts.bak'), 'runtime-only-marker\n');
+    writeFileSync(join(root, '.ai/harness/edit-sessions/old/backups/stale.ts.bak'), 'runtime-only-marker\n');
+
+    const pack = buildControllerContextPack(root, getMcpPolicy('controller', { repoRoot: root }), {
+      searchTerms: ['runtime-only-marker'],
+      maxFiles: 10,
+      maxSnippets: 10,
+    });
+
+    expect(pack.search.excludeGlobs).toContain('_ops/**');
+    expect(pack.search.excludeGlobs).toContain('.ai/harness/**');
+    expect(pack.search.excludeGlobs).toContain('**/*.bak');
+    expect(pack.files.every((file) => !file.path.startsWith('_ops/') && !file.path.startsWith('.ai/harness/'))).toBe(true);
+  });
+
   test('keeps enumeration bounded and reports truncation instead of silently dropping files', () => {
     const root = fixture();
     for (let index = 0; index < 50; index += 1) {

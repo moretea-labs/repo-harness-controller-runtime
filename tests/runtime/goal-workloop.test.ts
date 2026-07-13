@@ -10,7 +10,7 @@ import {
   stopGoalWorkloop,
   verifyGoalWorkloop,
 } from '../../src/runtime/control-plane/facade/goal-workloop';
-import { getWorkContract, listWorkContracts } from '../../src/runtime/control-plane/facade/work-contract-store';
+import { getWorkContract, listWorkContracts, reconcileStaleWorkContracts } from '../../src/runtime/control-plane/facade/work-contract-store';
 import { listHandoffItems } from '../../src/runtime/control-plane/facade/handoff-inbox-store';
 
 const roots: string[] = [];
@@ -213,6 +213,37 @@ describe('goal workloop engine', () => {
     expect(finalized.status).toBe('blocked');
     expect((finalized.data as { finalStatus: string }).finalStatus).toBe('waiting_for_review');
     expect(getWorkContract(ctx.workStore, workId)?.status).toBe('waiting_for_review');
+  });
+
+  test('reconciles stale running work only when no execution owner remains', () => {
+    const { ctx } = fixture();
+    const started = startGoalWorkloop(ctx, {
+      objective: 'Stale recoverable work',
+      modeInput: { scopeClear: true, expectedFiles: 5, expectedChangedLines: 250 },
+    });
+    const workId = (started.data as { work: { workId: string } }).work.workId;
+
+    const owned = reconcileStaleWorkContracts(ctx.workStore, {
+      activeExecutionJobs: 1,
+      activeLocalJobs: 0,
+      activeLeases: 0,
+      staleAfterMs: 60_000,
+      now: '2026-07-09T03:00:00.000Z',
+    });
+    expect(owned.reconciled).toBe(0);
+    expect(owned.skippedForActiveOwnership).toBe(true);
+    expect(getWorkContract(ctx.workStore, workId)?.status).toBe('running');
+
+    const reconciled = reconcileStaleWorkContracts(ctx.workStore, {
+      activeExecutionJobs: 0,
+      activeLocalJobs: 0,
+      activeLeases: 0,
+      staleAfterMs: 60_000,
+      now: '2026-07-09T03:00:00.000Z',
+    });
+    expect(reconciled.workIds).toEqual([workId]);
+    expect(getWorkContract(ctx.workStore, workId)?.status).toBe('waiting_for_review');
+    expect(getWorkContract(ctx.workStore, workId)?.evidenceRefs[0]?.title).toBe('runtime reconciliation required');
   });
 
   test('isolated worktree is opt-in or selected only for parallel work', () => {

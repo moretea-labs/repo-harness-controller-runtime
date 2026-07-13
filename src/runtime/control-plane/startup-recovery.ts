@@ -1,14 +1,15 @@
 import { listRepositories, reconcileRepositoryCheckouts } from '../../cli/repositories/registry';
-import { reconcileLocalBridgeJobs } from '../../cli/local-bridge/job-store';
-import { rebuildExecutionJobIndexes } from '../execution/jobs/store';
+import { listLocalBridgeJobs, reconcileLocalBridgeJobs } from '../../cli/local-bridge/job-store';
+import { listExecutionJobs, rebuildExecutionJobIndexes } from '../execution/jobs/store';
 import { reconcileExecutionJobs } from './global-scheduler/reconciliation';
 import { listActiveLeases } from '../resources/leases/store';
 import { rebuildRepositoryProjection } from '../projections/materialized-view';
 import { CONTROLLER_SCOPE_REPO_ID } from '../../cli/repositories/controller-home';
+import { reconcileStaleWorkContracts } from './facade/work-contract-store';
 
 export interface ControllerRecoveryError {
   repoId: string;
-  phase: 'checkouts' | 'execution-indexes' | 'execution-jobs' | 'local-jobs' | 'leases' | 'projection';
+  phase: 'checkouts' | 'execution-indexes' | 'execution-jobs' | 'local-jobs' | 'leases' | 'work-contracts' | 'projection';
   code: string;
   message: string;
 }
@@ -21,6 +22,7 @@ export interface ControllerRecoveryRepositoryResult {
   executionJobs?: ReturnType<typeof reconcileExecutionJobs>;
   localJobs?: ReturnType<typeof reconcileLocalBridgeJobs>;
   activeLeases?: number;
+  workContracts?: ReturnType<typeof reconcileStaleWorkContracts>;
   projectionRebuilt?: boolean;
 }
 
@@ -71,6 +73,17 @@ export function reconcileControllerStartup(controllerHome: string): ControllerSt
     result.executionJobs = run('execution-jobs', () => reconcileExecutionJobs(controllerHome, repository.repoId));
     result.localJobs = run('local-jobs', () => reconcileLocalBridgeJobs(repository.canonicalRoot));
     result.activeLeases = run('leases', () => listActiveLeases(controllerHome, repository.repoId).length);
+    result.workContracts = run('work-contracts', () => {
+      const activeExecutionJobs = listExecutionJobs(controllerHome, repository.repoId, 500)
+        .filter((job) => ['queued', 'dispatched', 'running', 'waiting_for_approval'].includes(job.status)).length;
+      const activeLocalJobs = listLocalBridgeJobs(repository.canonicalRoot, 500)
+        .filter((job) => ['approved', 'dispatched', 'running'].includes(job.status)).length;
+      const activeLeases = listActiveLeases(controllerHome, repository.repoId).length;
+      return reconcileStaleWorkContracts(
+        { controllerHome, repoId: repository.repoId },
+        { activeExecutionJobs, activeLocalJobs, activeLeases },
+      );
+    });
     result.projectionRebuilt = run('projection', () => {
       rebuildRepositoryProjection(controllerHome, repository.repoId);
       return true;

@@ -12,6 +12,17 @@ const DEFAULT_MAX_SNIPPETS = 20;
 const DEFAULT_SNIPPET_CONTEXT_BEFORE = 12;
 const DEFAULT_SNIPPET_CONTEXT_AFTER = 28;
 const DEFAULT_MAX_CHARS_PER_SNIPPET = 8000;
+const DEFAULT_SEARCH_EXCLUDE_GLOBS = [
+  ".git/**",
+  "_ops/**",
+  ".repo-harness/**",
+  ".ai/harness/**",
+  "node_modules/**",
+  "dist/**",
+  "coverage/**",
+  "**/*.bak",
+] as const;
+const MAX_TOTAL_SEARCHED_FILES = 2_000;
 
 const STOPWORDS = new Set([
   "about", "after", "again", "also", "and", "around", "because", "before", "between", "change", "code", "config",
@@ -321,7 +332,10 @@ export function buildControllerContextPack(
   const knownGlobs = knownPaths.filter(looksLikeGlob);
   const explicitKnownPaths = knownPaths.filter((path) => !looksLikeGlob(path));
   const includeGlobs = cleanList([...(options.includeGlobs ?? []), ...knownGlobs]);
-  const excludeGlobs = cleanList(options.excludeGlobs);
+  // Runtime state, generated artifacts and backup files are never useful source
+  // evidence. Exclude them by default so a broad investigation cannot scan the
+  // controller home or return stale backup code. Caller exclusions remain additive.
+  const excludeGlobs = cleanList([...DEFAULT_SEARCH_EXCLUDE_GLOBS, ...(options.excludeGlobs ?? [])]);
   // Independent investigations must not inherit an unrelated repository focus.
   // Only bind Issue/Task context when the caller explicitly requests it.
   const hasExplicitFocus = Boolean(options.issueId || options.taskId);
@@ -363,17 +377,25 @@ export function buildControllerContextPack(
   }
 
   const searchIncludeGlobs = includeGlobs.length > 0 ? includeGlobs : allowedPathGlobs;
+  // SearchRepository reports files scanned per query. Enforce one shared budget
+  // across all terms instead of allowing every token to rescan up to 10k files.
+  let remainingSearchFileBudget = MAX_TOTAL_SEARCHED_FILES;
   for (const term of terms) {
     if (candidates.size >= maxFiles && terms.length > 1) break;
+    if (remainingSearchFileBudget <= 0) {
+      searchTruncated = true;
+      break;
+    }
     const search = searchRepository(repoRoot, policy, {
       query: term,
       includeGlobs: searchIncludeGlobs,
       excludeGlobs,
       maxResults: Math.max(maxFiles * 4, 12),
-      maxFiles: 10_000,
+      maxFiles: remainingSearchFileBudget,
       caseSensitive: false,
     });
     scannedFiles += search.scannedFiles;
+    remainingSearchFileBudget = Math.max(0, remainingSearchFileBudget - search.scannedFiles);
     policyDeniedFiles += search.policyDeniedFiles;
     skippedLargeFiles += search.skippedLargeFiles;
     skippedBinaryFiles += search.skippedBinaryFiles;

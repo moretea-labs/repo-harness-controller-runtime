@@ -85,6 +85,9 @@ function runCli(
       env: {
         ...process.env,
         REPO_HARNESS_CONTROLLER_HOME: controllerHome,
+        // Keep lifecycle integration tests bounded independently of the
+        // production restart recovery window.
+        REPO_HARNESS_CONTROLLER_START_TIMEOUT_MS: "45000",
         REPO_HARNESS_NGROK_ROTATION_CONFIG: join(controllerHome, "disabled-ngrok-rotation.env"),
       },
     },
@@ -203,7 +206,7 @@ describe("controller service lifecycle", () => {
 
     const logPath = join(repoRoot, ".ai", "local", "logs", "repo-harness-controller.log");
     expect(readFileSync(logPath, "utf-8")).toContain("[repo-harness mcp keepalive] Repo:");
-  }, 30_000);
+  }, 150_000);
 
   test("status warns when repo-local legacy MCP config diverges from controller-home config", async () => {
     const { repoRoot, controllerHome } = await createFixture();

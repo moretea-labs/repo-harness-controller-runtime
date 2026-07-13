@@ -43,6 +43,10 @@ describe('operation digest usability', () => {
     expect(classifyUserFacingError({ acceptance: true })).toBe('acceptance_failure');
     expect(classifyUserFacingError({ message: 'COMMAND_POLICY_DENIED by worker policy' })).toBe('policy_denied');
     expect(classifyUserFacingError({ message: '[mcp-compatibility] FAILED: expected 128 got 124' })).toBe('acceptance_failure');
+    expect(classifyUserFacingError({
+      message: '(pass) removes ordinary approval gates\n(fail) controller lifecycle timed out',
+    })).toBe('timeout');
+    expect(classifyUserFacingError({ message: 'approval required before execution' })).toBe('approval_required');
   });
 
   test('queued accept digest suggests wait next action', () => {

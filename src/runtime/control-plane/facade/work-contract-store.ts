@@ -48,6 +48,21 @@ export interface ListWorkContractOptions extends WorkContractStoreOptions {
   detailLevel?: 'summary' | 'detail' | 'raw';
 }
 
+export interface WorkContractReconciliationInput {
+  activeExecutionJobs: number;
+  activeLocalJobs: number;
+  activeLeases: number;
+  staleAfterMs?: number;
+  now?: string;
+}
+
+export interface WorkContractReconciliationResult {
+  scanned: number;
+  reconciled: number;
+  skippedForActiveOwnership: boolean;
+  workIds: string[];
+}
+
 export interface WorkContractSummary {
   workId: string;
   repoId: string;
@@ -176,6 +191,72 @@ export function listWorkContracts(options: ListWorkContractOptions): WorkContrac
     })
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
     .slice(0, limit);
+}
+
+export function reconcileStaleWorkContracts(
+  options: WorkContractStoreOptions,
+  input: WorkContractReconciliationInput,
+): WorkContractReconciliationResult {
+  const store = readWorkContractStore(options);
+  const running = store.contracts.filter((contract) => contract.status === 'running');
+  const activeOwnership = input.activeExecutionJobs > 0 || input.activeLocalJobs > 0 || input.activeLeases > 0;
+  if (activeOwnership || running.length === 0) {
+    return {
+      scanned: running.length,
+      reconciled: 0,
+      skippedForActiveOwnership: activeOwnership,
+      workIds: [],
+    };
+  }
+
+  const now = input.now ?? nowIso(options);
+  const nowMs = Date.parse(now);
+  const staleAfterMs = Math.max(60_000, Math.trunc(input.staleAfterMs ?? 30 * 60_000));
+  if (!Number.isFinite(nowMs)) {
+    return { scanned: running.length, reconciled: 0, skippedForActiveOwnership: false, workIds: [] };
+  }
+
+  const workIds: string[] = [];
+  const contracts = store.contracts.map((contract) => {
+    if (contract.status !== 'running') return contract;
+    const updatedMs = Date.parse(contract.updatedAt);
+    if (!Number.isFinite(updatedMs) || nowMs - updatedMs < staleAfterMs) return contract;
+    workIds.push(contract.workId);
+    const evidence: EvidenceRef = {
+      title: 'runtime reconciliation required',
+      summary: 'Work was marked running but no active Execution Job, Local Job, or lease owns this repository. Automatic replay was not attempted.',
+      detailLevel: 'summary',
+    };
+    const inspectAction: SuggestedNextAction = {
+      label: 'Inspect reconciled work',
+      tool: 'rh_context',
+      operation: 'get',
+      payload: { work_id: contract.workId },
+      risk: 'readonly',
+      confidence: 'high',
+      reason: 'Review retained evidence before continuing, finalizing, or stopping this stale work.',
+    };
+    return {
+      ...contract,
+      status: 'waiting_for_review' as const,
+      updatedAt: now,
+      evidenceRefs: [evidence, ...contract.evidenceRefs].slice(0, contract.evidencePolicy.maxEvidenceRefs),
+      suggestedNextActions: [inspectAction, ...contract.suggestedNextActions]
+        .filter((action, index, actions) => actions.findIndex((candidate) => candidate.tool === action.tool && candidate.operation === action.operation) === index)
+        .slice(0, 8),
+      continuationPrompt: `Runtime reconciliation paused stale running work ${contract.workId}; inspect evidence and decide whether to continue, finalize, or stop.`.slice(0, 2_000),
+    };
+  });
+
+  if (workIds.length > 0) {
+    writeWorkContractStore(options, { schemaVersion: 1, updatedAt: now, contracts });
+  }
+  return {
+    scanned: running.length,
+    reconciled: workIds.length,
+    skippedForActiveOwnership: false,
+    workIds,
+  };
 }
 
 export function getWorkContract(options: WorkContractStoreOptions, workId: string): WorkContract | undefined {
