@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'fs';
+import { readFileSync, mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { createCampaign, getCampaign, setCampaignStatus, updateCampaign } from '../../src/runtime/workflow/campaigns/store';
@@ -8,6 +8,8 @@ import { submitCampaignReview } from '../../src/runtime/workflow/campaigns/revie
 import { getExecutionJob, listExecutionJobs, transitionExecutionJob } from '../../src/runtime/execution/jobs/store';
 import { listActiveLeases } from '../../src/runtime/resources/leases/store';
 import { acquireControllerLock, releaseControllerLock } from '../../src/cli/repositories/locks';
+
+const ROOT = join(import.meta.dir, "../..");
 
 const homes: string[] = [];
 function home(): string {
@@ -375,4 +377,14 @@ describe('Workspace Agent campaign supervisor', () => {
     expect(campaign.pauseReason).toContain('requires attention');
   });
 
+});
+
+
+test("campaign polling is bounded and scheduler dispatch precedes campaign maintenance", () => {
+  const engine = readFileSync(join(ROOT, "src/runtime/workflow/campaigns/engine.ts"), "utf-8");
+  expect(engine).toContain("REPO_HARNESS_ACTIVE_CAMPAIGN_RECONCILE_INTERVAL_MS ?? 15_000");
+  expect(engine).not.toContain("if (active) campaign.nextReconcileAt = new Date(Date.now() + 2_000)");
+
+  const scheduler = readFileSync(join(ROOT, "src/runtime/control-plane/global-scheduler/scheduler.ts"), "utf-8");
+  expect(scheduler.indexOf("global-scheduler-dispatch")).toBeLessThan(scheduler.indexOf("tickCampaigns(this.controllerHome"));
 });

@@ -25,6 +25,7 @@ const config = JSON.parse(
 const prompt = readFileSync(config.promptPath, "utf-8");
 const meta = JSON.parse(readFileSync(config.metaPath, "utf-8")) as AgentJobMeta;
 const MAX_STREAM_BYTES = 4 * 1024 * 1024;
+const AGENT_NO_PROGRESS_TIMEOUT_MS = Math.max(60_000, Number(process.env.REPO_HARNESS_AGENT_NO_PROGRESS_TIMEOUT_MS ?? 10 * 60_000));
 const OWNERSHIP_POLL_INTERVAL_MS = Math.max(
   50,
   config.ownershipPollIntervalMs ?? 5_000,
@@ -536,6 +537,14 @@ heartbeat = setInterval(() => {
     return;
   }
   try {
+    const progressAt = current.progress?.lastActivityAt ? Date.parse(current.progress.lastActivityAt) : Number.NaN;
+    const silentStartup = (current.progress?.phase === "starting" || current.progress?.phase === "inspecting")
+      && stdoutBytes === 0
+      && stderrBytes === 0;
+    if (silentStartup && Number.isFinite(progressAt) && Date.now() - progressAt >= AGENT_NO_PROGRESS_TIMEOUT_MS) {
+      beginFailClosed(`Agent made no observable progress for ${AGENT_NO_PROGRESS_TIMEOUT_MS}ms during ${current.progress?.phase}.`);
+      return;
+    }
     current.lastHeartbeatAt = new Date().toISOString();
     persistMeta(current);
     event(

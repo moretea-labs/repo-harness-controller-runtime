@@ -342,23 +342,6 @@ export class GlobalScheduler {
       tickPortfolioWorkflows(this.controllerHome);
       this.lastPortfolioTick = now;
     }
-    if (now - this.lastCampaignTick >= 1_000) {
-      tickCampaigns(this.controllerHome, repositories.map((repo) => repo.repoId));
-      this.lastCampaignTick = now;
-    }
-    // Autonomous goal loop: one bounded transition per active GoalContract per tick.
-    // ChatGPT is not required to manually drive every continuation.
-    if (now - this.lastGoalLoopTick >= 5_000) {
-      try {
-        tickGoalLoopsForController(
-          this.controllerHome,
-          repositories.map((repo) => repo.repoId),
-        );
-      } catch (error) {
-        console.error('[repo-harness goal-loop] tick failed:', error);
-      }
-      this.lastGoalLoopTick = now;
-    }
     let activeJobs = 0;
     try {
       activeJobs = withControllerLock(
@@ -462,6 +445,24 @@ export class GlobalScheduler {
       // Another scheduler owns the global dispatch reservation. Fail closed and
       // leave all jobs queued for the next wake/tick rather than risking overrun.
       activeJobs = listActiveExecutionJobs(this.controllerHome).length;
+    }
+    // Dispatch is latency-sensitive. Run repository workflow maintenance only
+    // after queued Jobs have had a chance to claim capacity. Campaign and Goal
+    // state transitions still wake the scheduler immediately when they enqueue work.
+    if (now - this.lastCampaignTick >= 1_000) {
+      tickCampaigns(this.controllerHome, repositories.map((repo) => repo.repoId));
+      this.lastCampaignTick = now;
+    }
+    if (now - this.lastGoalLoopTick >= 5_000) {
+      try {
+        tickGoalLoopsForController(
+          this.controllerHome,
+          repositories.map((repo) => repo.repoId),
+        );
+      } catch (error) {
+        console.error('[repo-harness goal-loop] tick failed:', error);
+      }
+      this.lastGoalLoopTick = now;
     }
     this.persistState();
     return { activeJobs };

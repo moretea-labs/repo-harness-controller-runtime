@@ -465,6 +465,8 @@ function campaignNeedsReconcile(campaign: Campaign, timestamp = Date.now()): boo
   });
 }
 
+const ACTIVE_CAMPAIGN_RECONCILE_INTERVAL_MS = Math.max(2_000, Number(process.env.REPO_HARNESS_ACTIVE_CAMPAIGN_RECONCILE_INTERVAL_MS ?? 15_000));
+
 export function reconcileCampaign(controllerHome: string, repoId: string, campaignId: string): CampaignReconcileResult {
   let dispatched = 0;
   let checkpointsOpened = 0;
@@ -527,7 +529,7 @@ export function reconcileCampaign(controllerHome: string, repoId: string, campai
       .filter((value): value is string => Boolean(value))
       .map((value) => Date.parse(value))
       .filter(Number.isFinite);
-    if (active) campaign.nextReconcileAt = new Date(Date.now() + 2_000).toISOString();
+    if (active) campaign.nextReconcileAt = new Date(Date.now() + ACTIVE_CAMPAIGN_RECONCILE_INTERVAL_MS).toISOString();
     else if (retryTimes.length > 0) campaign.nextReconcileAt = new Date(Math.min(...retryTimes)).toISOString();
     else if (campaign.status === 'waiting_for_supervisor' && campaign.supervisor.mode !== 'pull') {
       const open = campaign.checkpoints.filter((checkpoint) => checkpoint.status === 'open');
@@ -535,7 +537,7 @@ export function reconcileCampaign(controllerHome: string, repoId: string, campai
       const monitorsActiveTrigger = open.some((checkpoint) => Boolean(checkpoint.triggerJobId));
       campaign.nextReconcileAt = explicitTimes.length > 0
         ? new Date(Math.min(...explicitTimes)).toISOString()
-        : monitorsActiveTrigger ? new Date(Date.now() + 2_000).toISOString() : undefined;
+        : monitorsActiveTrigger ? new Date(Date.now() + ACTIVE_CAMPAIGN_RECONCILE_INTERVAL_MS).toISOString() : undefined;
     } else campaign.nextReconcileAt = undefined;
     return campaign;
   }, {
