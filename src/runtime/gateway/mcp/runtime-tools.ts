@@ -1556,6 +1556,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
                 : undefined,
               sourceSnapshotStale: !readiness.daemon.source
                 || readiness.daemon.source.branch !== liveGit.branch
+                || readiness.daemon.source.commit !== liveGit.head
                 || readiness.daemon.source.dirty !== liveGit.dirty,
             },
             capabilityCount: capabilities.length,
