@@ -32,7 +32,7 @@ export interface OperationDigest {
   statusLabel: string;
   summary: string;
   terminal: boolean;
-  /** Whether the execution result itself was accepted. Queuing a request is not result acceptance. */
+  /** @deprecated Ambiguous legacy field. Prefer requestAccepted/resultAccepted. */
   accepted?: boolean;
   requestAccepted?: boolean;
   resultAccepted?: boolean | null;
@@ -84,6 +84,9 @@ export function classifyUserFacingError(input: {
   ) {
     return 'controller_unavailable';
   }
+  if (blob.includes('denied') || blob.includes('policy') || blob.includes('forbidden') || blob.includes('not allowed')) {
+    return 'policy_denied';
+  }
   if (
     input.infrastructure
     || blob.includes('infrastructure')
@@ -93,9 +96,6 @@ export function classifyUserFacingError(input: {
     || blob.includes('enoent')
   ) {
     return 'infrastructure_failure';
-  }
-  if (blob.includes('denied') || blob.includes('policy') || blob.includes('forbidden') || blob.includes('not allowed')) {
-    return 'policy_denied';
   }
   if (blob.includes('not found') || blob.includes('not_found')) return 'not_found';
   if (!code && !message.trim()) return 'unknown_failure';
@@ -291,7 +291,9 @@ export function buildJobOperationDigest(job: ExecutionJob, options: {
     statusLabel: statusLabelForPhase(phase),
     summary: bound(summary, 500),
     terminal,
-    accepted: phase === 'succeeded',
+    // Keep the legacy field for compatibility; callers must use resultAccepted
+    // to decide whether execution/verification succeeded.
+    accepted: true,
     requestAccepted: true,
     resultAccepted: terminal ? phase === 'succeeded' : null,
     operation,
@@ -323,6 +325,8 @@ export function buildAcceptedQueuedDigest(input: {
       : `已接受任务 ${input.jobId}（${input.operation ?? 'operation'}），正在排队。可用 wait 等待结果。`,
     terminal: false,
     accepted: true,
+    requestAccepted: true,
+    resultAccepted: null,
     operation: input.operation,
     workId: input.jobId,
     jobId: input.jobId,

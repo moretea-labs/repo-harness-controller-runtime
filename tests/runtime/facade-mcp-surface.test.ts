@@ -166,6 +166,28 @@ describe('facade MCP surface wiring', () => {
     expect((payload.data as { invalidCheckIdsAreNotFailures: boolean }).invalidCheckIdsAreNotFailures).toBe(true);
   });
 
+  test('rh_context distinguishes missing work ids and preserves raw detail level', async () => {
+    const { ctx, repository } = controllerFixture();
+    const missing = structured(await callRuntimeTool(ctx, 'rh_context', {
+      repo_id: repository.repoId,
+      operation: 'get',
+      work_id: 'work-does-not-exist',
+    }));
+    expect(missing.status).toBe('not_found');
+
+    const raw = structured(await callRuntimeTool(ctx, 'rh_context', {
+      repo_id: repository.repoId,
+      operation: 'list',
+      detail_level: 'raw',
+    }));
+    expect(raw.detailLevel).toBe('raw');
+    expect(raw.rawAvailable).toBe(true);
+    expect((raw.suggestedNextActions as Array<{ operation: string; risk: string }>)[0]).toMatchObject({
+      operation: 'start',
+      risk: 'workspace_write',
+    });
+  });
+
   test('rh_work start routes small/complex/high-risk modes', async () => {
     const { ctx, repository } = controllerFixture();
     const small = structured(await callRuntimeTool(ctx, 'rh_work', {

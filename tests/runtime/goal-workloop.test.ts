@@ -194,6 +194,7 @@ describe('goal workloop engine', () => {
     const stopped = stopGoalWorkloop(ctx, { workId: workId2, reason: 'user cancelled' });
     expect((stopped.data as { finalStatus: string; evidenceRetained: boolean }).finalStatus).toBe('cancelled');
     expect((stopped.data as { evidenceRetained: boolean }).evidenceRetained).toBe(true);
+    expect((stopped.data as { worktreeDeleted: boolean }).worktreeDeleted).toBe(false);
     expect(getWorkContract(ctx.workStore, workId2)?.evidenceRefs.length).toBeGreaterThan(0);
   });
   test('work contract alone cannot continue or finalize as successful execution', () => {

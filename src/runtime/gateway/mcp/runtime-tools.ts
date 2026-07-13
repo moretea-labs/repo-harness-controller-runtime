@@ -1551,9 +1551,12 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             repositoryState: {
               ...liveGit,
               observedAt: new Date().toISOString(),
-              sourceSnapshotStale: readiness.daemon.source?.observedAt
-                ? Date.now() - Date.parse(readiness.daemon.source.observedAt) > 30_000
-                : true,
+              sourceSnapshotAgeMs: readiness.daemon.source?.observedAt
+                ? Math.max(0, Date.now() - Date.parse(readiness.daemon.source.observedAt))
+                : undefined,
+              sourceSnapshotStale: !readiness.daemon.source
+                || readiness.daemon.source.branch !== liveGit.branch
+                || readiness.daemon.source.dirty !== liveGit.dirty,
             },
             capabilityCount: capabilities.length,
             capabilityGroups: summarizeCapabilityGroups(manifests),

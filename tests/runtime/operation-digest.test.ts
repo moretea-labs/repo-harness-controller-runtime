@@ -41,6 +41,8 @@ describe('operation digest usability', () => {
     expect(classifyUserFacingError({ message: 'timed out waiting' })).toBe('timeout');
     expect(classifyUserFacingError({ infrastructure: true, message: 'worker crashed' })).toBe('infrastructure_failure');
     expect(classifyUserFacingError({ acceptance: true })).toBe('acceptance_failure');
+    expect(classifyUserFacingError({ message: 'COMMAND_POLICY_DENIED by worker policy' })).toBe('policy_denied');
+    expect(classifyUserFacingError({ message: '[mcp-compatibility] FAILED: expected 128 got 124' })).toBe('acceptance_failure');
   });
 
   test('queued accept digest suggests wait next action', () => {
@@ -51,6 +53,8 @@ describe('operation digest usability', () => {
     });
     expect(digest.phase).toBe('queued');
     expect(digest.summary).toContain('已接受');
+    expect(digest.requestAccepted).toBe(true);
+    expect(digest.resultAccepted).toBeNull();
     expect(digest.suggestedNextActions.some((action) => action.label.includes('等待'))).toBe(true);
   });
 
@@ -63,6 +67,8 @@ describe('operation digest usability', () => {
     expect(digest.errorMessage).toBeTruthy();
     expect(digest.errorMessage?.length).toBeGreaterThan(5);
     expect(digest.errorClass).toBeTruthy();
+    expect(digest.requestAccepted).toBe(true);
+    expect(digest.resultAccepted).toBe(false);
   });
 
   test('succeeded job exposes changed files from result', () => {
@@ -74,6 +80,7 @@ describe('operation digest usability', () => {
     }));
     expect(digest.phase).toBe('succeeded');
     expect(digest.changedFiles).toEqual(['src/a.ts', 'src/b.ts']);
+    expect(digest.resultAccepted).toBe(true);
   });
 
   test('sync patch digest is terminal and bounded', () => {
