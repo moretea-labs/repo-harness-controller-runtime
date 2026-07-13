@@ -1510,21 +1510,33 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           return runFacadeRepair(ctx, repository, args);
         }
         const readiness = controllerReadiness(ctx, repository);
+        const liveGit = gitSnapshot(repository.canonicalRoot);
+        const sourceSnapshotStale = !readiness.daemon.source
+          || readiness.daemon.source.branch !== liveGit.branch
+          || readiness.daemon.source.commit !== liveGit.head
+          || readiness.daemon.source.dirty !== liveGit.dirty;
         // Dynamic import avoids a static cycle: toolset.ts composes runtimeToolDefinitions.
         const exposure = (await import('../../../cli/mcp/toolset')).controllerExposureSnapshot(ctx);
         const toolSurfaceReady = exposure.ready && exposure.missingToolNames.length === 0;
-        const effectiveReady = readiness.ready && toolSurfaceReady;
+        const effectiveReady = readiness.ready && toolSurfaceReady && !sourceSnapshotStale;
+        const readinessReasons = [...readiness.reasons];
+        if (!toolSurfaceReady) {
+          readinessReasons.push({
+            code: 'MCP_TOOL_SURFACE_INCOMPLETE',
+            message: `MCP schema mismatch: missing=${exposure.missingToolNames.length}, duplicates=${exposure.duplicateToolNames.length}.`,
+          });
+        }
+        if (sourceSnapshotStale) {
+          readinessReasons.push({
+            code: 'RUNTIME_SOURCE_SNAPSHOT_STALE',
+            message: `Controller runtime source does not match live checkout HEAD ${liveGit.head}; restart is required before mutating work.`,
+          });
+        }
         const readinessWithToolSurface = {
           ...readiness,
           ready: effectiveReady,
           state: effectiveReady ? readiness.state : 'degraded' as const,
-          reasons: toolSurfaceReady ? readiness.reasons : [
-            ...readiness.reasons,
-            {
-              code: 'MCP_TOOL_SURFACE_INCOMPLETE',
-              message: `MCP schema mismatch: missing=${exposure.missingToolNames.length}, duplicates=${exposure.duplicateToolNames.length}.`,
-            },
-          ],
+          reasons: readinessReasons,
           toolSurface: {
             ready: toolSurfaceReady,
             expectedToolCount: exposure.expectedToolNames.length,
@@ -1536,7 +1548,6 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             schemaStableAcrossAccessModes: exposure.schemaStableAcrossAccessModes,
           },
         };
-        const liveGit = gitSnapshot(repository.canonicalRoot);
         const manifests = listAssistantPluginManifests(ctx.controllerHome, repository);
         const capabilities = listCapabilityDescriptors(manifests);
         const pendingHandoffs = listHandoffItems({ ...store, status: 'pending', limit: 20 });
@@ -1554,10 +1565,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
               sourceSnapshotAgeMs: readiness.daemon.source?.observedAt
                 ? Math.max(0, Date.now() - Date.parse(readiness.daemon.source.observedAt))
                 : undefined,
-              sourceSnapshotStale: !readiness.daemon.source
-                || readiness.daemon.source.branch !== liveGit.branch
-                || readiness.daemon.source.commit !== liveGit.head
-                || readiness.daemon.source.dirty !== liveGit.dirty,
+              sourceSnapshotStale,
             },
             capabilityCount: capabilities.length,
             capabilityGroups: summarizeCapabilityGroups(manifests),

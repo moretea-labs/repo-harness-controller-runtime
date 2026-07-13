@@ -148,10 +148,19 @@ describe('browser plugin', () => {
       'await_file_transfer',
     ]));
 
-    for (const actionId of ['open_page', 'get_text', 'screenshot', 'close_page', 'list_sessions', 'extract_links']) {
+    for (const actionId of ['open_page', 'get_text', 'screenshot', 'list_sessions', 'extract_links']) {
       expect(actions[actionId]?.readOnly).toBe(true);
       expect(actions[actionId]?.risk).toBe('readonly');
       expect(actions[actionId]?.confirmation).toBe('none');
+    }
+
+    for (const actionId of ['create_session', 'close_session', 'close_page']) {
+      expect(actions[actionId]?.readOnly).toBe(false);
+      expect(actions[actionId]?.risk).toBe('workspace_write');
+      expect(actions[actionId]?.confirmation).toBe('authorization');
+      expect(actions[actionId]?.resourceClaims).toEqual(expect.arrayContaining([
+        { resource: 'repo-state', mode: 'write' },
+      ]));
     }
 
     expect(actions.click?.risk).toBe('remote_write');

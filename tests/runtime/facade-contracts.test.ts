@@ -101,6 +101,24 @@ describe('handoff and facade contracts', () => {
     expect(result.suggestedNextActions[0]?.tool).toBe('rh_inbox');
   });
 
+  test('normalizes rh_work suggested action risks instead of trusting caller metadata', () => {
+    const normalized = validateSuggestedNextActions([
+      { label: 'Continue', tool: 'rh_work', operation: 'continue', risk: 'readonly' },
+      { label: 'Finalize', tool: 'rh_work', operation: 'finalize', risk: 'readonly' },
+      { label: 'Read context', tool: 'rh_context', operation: 'get', risk: 'readonly' },
+    ]);
+
+    expect(normalized.actions.map((action) => action.risk)).toEqual([
+      'workspace_write',
+      'local_repo_write',
+      'readonly',
+    ]);
+    expect(normalized.warnings).toEqual(expect.arrayContaining([
+      expect.stringContaining('rh_work.continue risk readonly -> workspace_write'),
+      expect.stringContaining('rh_work.finalize risk readonly -> local_repo_write'),
+    ]));
+  });
+
   test('facade result defaults to bounded data without raw stdout/stderr/secrets', () => {
     const facade = buildFacadeResult({
       summary: 'ok',

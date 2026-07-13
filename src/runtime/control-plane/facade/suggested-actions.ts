@@ -64,28 +64,33 @@ export function validateSuggestedNextActions(
   options: SuggestedActionValidationOptions = {},
 ): SuggestedActionValidationResult {
   const warnings: string[] = [];
-  const valid = actions.filter((action) => {
+  const valid = actions.flatMap((action) => {
     if (!FACADE_TOOLS.includes(action.tool)) {
       warnings.push(`Dropped suggested action ${action.label}: unsupported facade tool ${String(action.tool)}.`);
-      return false;
+      return [];
     }
     if (!ALLOWED_FACADE_OPERATIONS[action.tool].includes(action.operation)) {
       warnings.push(`Dropped suggested action ${action.label}: unsupported ${action.tool}.${action.operation}.`);
-      return false;
+      return [];
     }
     if (!actionUsesKnownCheck(action, options.validCheckIds)) {
       warnings.push(`Dropped suggested action ${action.label}: invalid check_id ${String(action.payload?.check_id)}.`);
-      return false;
+      return [];
     }
     if (!actionUsesKnownHandoff(action, options.validHandoffIds)) {
       warnings.push(`Dropped suggested action ${action.label}: invalid handoff_id ${String(action.payload?.handoff_id)}.`);
-      return false;
+      return [];
     }
     if (!actionUsesKnownWork(action, options.validWorkIds)) {
       warnings.push(`Dropped suggested action ${action.label}: invalid work_id ${String(action.payload?.work_id)}.`);
-      return false;
+      return [];
     }
-    return true;
+    const expectedRisk = expectedActionRisk(action);
+    if (expectedRisk && action.risk !== expectedRisk) {
+      warnings.push(`Corrected suggested action ${action.label}: ${action.tool}.${action.operation} risk ${action.risk} -> ${expectedRisk}.`);
+      return [{ ...action, risk: expectedRisk }];
+    }
+    return [action];
   });
   return { actions: valid.slice(0, 8), warnings };
 }
