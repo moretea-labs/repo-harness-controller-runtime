@@ -5,7 +5,16 @@ import { assertFencingToken, releaseExecutionLeases, renewExecutionLeases } from
 import { recordExecutionEvidence } from '../../evidence/evidence-store';
 import { boundExecutionResult } from '../../evidence/artifact-store';
 import { executeExecutionJob } from './executor';
-import { markOperationCompleted, markOperationStarted } from '../jobs/receipt-store';
+import {
+  buildDelegatedExecutionResult,
+  childReferenceFromJob,
+  childReferenceFromReceipt,
+  childReferenceFromUnknown,
+  hasDurableChildReference,
+  isAgentDelegationOperation,
+  mergeChildReferences,
+} from '../jobs/child-reference';
+import { markOperationCompleted, markOperationStarted, readOperationReceipt } from '../jobs/receipt-store';
 import { markScheduledExecutionRunning } from '../../workflow/schedules/settlement';
 import { invalidateExecutionWorker } from './ownership';
 
@@ -31,29 +40,71 @@ let claimedLeaseRefs: Array<{ leaseId: string; fencingToken: number }> = [];
 let exitingForOwnershipLoss = false;
 let executionStarted = false;
 
+function recoverDelegatedChildIfPresent(message: string): boolean {
+  try {
+    const current = getExecutionJob(controllerHome, repoId, jobId);
+    if (current.status !== 'running' || current.workerPid !== process.pid) return false;
+    const receipt = readOperationReceipt(controllerHome, repoId, jobId);
+    const childReference = mergeChildReferences(
+      childReferenceFromReceipt(receipt),
+      childReferenceFromJob(current),
+    );
+    const agentDelegation = isAgentDelegationOperation(current.payload.operation)
+      || current.type === 'agent-run'
+      || current.type === 'dispatch-task';
+    if (!agentDelegation || !hasDurableChildReference(childReference) || !childReference) return false;
+    const result = receipt?.result
+      ?? buildDelegatedExecutionResult({ childReference });
+    markOperationCompleted(controllerHome, current, process.pid, {
+      outcome: 'succeeded',
+      result,
+      evidenceIds: receipt?.evidenceIds ?? current.evidenceIds,
+      childReference,
+    });
+    transitionExecutionJobFromWorker(
+      controllerHome,
+      repoId,
+      jobId,
+      { workerPid: process.pid, attempt: current.attempt, leaseRefs: current.leaseRefs },
+      'succeeded',
+      {
+        result,
+        error: undefined,
+        leaseRefs: [],
+      },
+      { recoveredDelegatedChild: true, ownershipMessage: message },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function exitForOwnershipLoss(message: string): never {
   if (heartbeat) clearInterval(heartbeat);
   if (!exitingForOwnershipLoss) {
     exitingForOwnershipLoss = true;
     try {
-      const current = getExecutionJob(controllerHome, repoId, jobId);
-      const mutating = executionStarted && current.resourceClaims.some((claim) => claim.mode !== 'read');
-      if (current.status === 'running' && current.workerPid === process.pid) {
-        transitionExecutionJobFromWorker(
-          controllerHome,
-          repoId,
-          jobId,
-          { workerPid: process.pid, attempt: current.attempt, leaseRefs: current.leaseRefs },
-          mutating ? 'human_attention_required' : 'failed',
-          {
-            error: {
-              code: mutating ? 'WORKER_OUTCOME_AMBIGUOUS' : 'WORKER_OWNERSHIP_LOST',
-              message,
-              retryable: !mutating,
+      if (!recoverDelegatedChildIfPresent(message)) {
+        const current = getExecutionJob(controllerHome, repoId, jobId);
+        const mutating = executionStarted && current.resourceClaims.some((claim) => claim.mode !== 'read');
+        if (current.status === 'running' && current.workerPid === process.pid) {
+          transitionExecutionJobFromWorker(
+            controllerHome,
+            repoId,
+            jobId,
+            { workerPid: process.pid, attempt: current.attempt, leaseRefs: current.leaseRefs },
+            mutating ? 'human_attention_required' : 'failed',
+            {
+              error: {
+                code: mutating ? 'WORKER_OUTCOME_AMBIGUOUS' : 'WORKER_OWNERSHIP_LOST',
+                message,
+                retryable: !mutating,
+              },
+              leaseRefs: [],
             },
-            leaseRefs: [],
-          },
-        );
+          );
+        }
       }
     } catch {
       // Ownership already moved or the Job is terminal.
@@ -143,11 +194,17 @@ async function main(): Promise<void> {
   );
   const evidenceIds = [...current.evidenceIds, evidence.evidenceId];
   const terminalError = execution.error ? { ...execution.error, details: bounded?.result } : undefined;
+  const childReference = mergeChildReferences(
+    childReferenceFromJob({ ...current, result: execution.ok ? bounded?.result : current.result }),
+    childReferenceFromReceipt(readOperationReceipt(controllerHome, repoId, jobId)),
+    childReferenceFromUnknown(execution.result),
+  );
   markOperationCompleted(controllerHome, current, process.pid, {
     outcome: execution.ok ? 'succeeded' : 'failed',
     result: execution.ok ? bounded?.result : undefined,
     error: terminalError,
     evidenceIds,
+    ...(childReference ? { childReference } : {}),
   });
   if (execution.ok) {
     transitionExecutionJobFromWorker(controllerHome, repoId, jobId, owner, 'succeeded', {
@@ -170,26 +227,28 @@ main()
   .catch((error) => {
     const message = error instanceof Error ? error.message : String(error);
     try {
-      const current = getExecutionJob(controllerHome, repoId, jobId);
-      const mutating = executionStarted && current.resourceClaims.some((claim) => claim.mode !== 'read');
-      if (current.status === 'running' && current.workerPid === process.pid) {
-        transitionExecutionJobFromWorker(
-          controllerHome,
-          repoId,
-          jobId,
-          { workerPid: process.pid, attempt: current.attempt, leaseRefs: current.leaseRefs },
-          mutating ? 'human_attention_required' : 'failed',
-          {
-            error: {
-              code: mutating ? 'WORKER_OUTCOME_AMBIGUOUS' : 'WORKER_CRASH',
-              message: mutating
-                ? `Worker failed after acquiring write ownership; automatic replay is blocked: ${message}`
-                : message,
-              retryable: !mutating,
+      if (!recoverDelegatedChildIfPresent(message)) {
+        const current = getExecutionJob(controllerHome, repoId, jobId);
+        const mutating = executionStarted && current.resourceClaims.some((claim) => claim.mode !== 'read');
+        if (current.status === 'running' && current.workerPid === process.pid) {
+          transitionExecutionJobFromWorker(
+            controllerHome,
+            repoId,
+            jobId,
+            { workerPid: process.pid, attempt: current.attempt, leaseRefs: current.leaseRefs },
+            mutating ? 'human_attention_required' : 'failed',
+            {
+              error: {
+                code: mutating ? 'WORKER_OUTCOME_AMBIGUOUS' : 'WORKER_CRASH',
+                message: mutating
+                  ? `Worker failed after acquiring write ownership; automatic replay is blocked: ${message}`
+                  : message,
+                retryable: !mutating,
+              },
+              leaseRefs: [],
             },
-            leaseRefs: [],
-          },
-        );
+          );
+        }
       }
     } catch { /* a replacement Worker owns the Job; stale Worker must not write */ }
     console.error(message);

@@ -252,11 +252,15 @@ export async function routeDurableMcpCall(
   validateDurableArguments(name, definition, workerArgs);
   const semanticKey = `${isRepositoryTool ? 'repository-tool' : 'mcp-tool'}:${name}:${repoId}:${hashArguments(workerArgs)}`;
   const claims = claimsForMcpOperation(name, workerArgs, repoId, checkoutId);
-  const timeoutMs = typeof args.timeout_ms === 'number' ? args.timeout_ms : undefined;
+  const agentDelegation = ['dispatch_task', 'launch_issue', 'dispatch_ready_tasks', 'retry_task_run', 'quick_agent_session'].includes(name);
+  // Parent Agent-delegation Jobs only accept the child Run; child timeout stays on the Agent Run.
+  const timeoutMs = agentDelegation
+    ? Math.min(typeof args.timeout_ms === 'number' ? args.timeout_ms : 120_000, 120_000)
+    : typeof args.timeout_ms === 'number' ? args.timeout_ms : undefined;
   const operationMetadata = operationMetadataForTool(
     definition,
     claims,
-    Math.max(1_000, Math.min(timeoutMs ?? 15 * 60_000, 24 * 60 * 60_000)),
+    Math.max(1_000, Math.min(timeoutMs ?? (agentDelegation ? 120_000 : 15 * 60_000), 24 * 60 * 60_000)),
   );
   // Refresh and fence the daemon before persisting work. Creating the Job first
   // can leave a newly submitted operation associated with a stale Controller

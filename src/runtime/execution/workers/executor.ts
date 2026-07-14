@@ -6,8 +6,19 @@ import { runtimePolicy } from '../../../cli/mcp/multi-repository';
 import { ensureRepositoryRuntimeStorage } from '../../../cli/repositories/runtime-storage';
 import { evaluateReleaseGate } from '../../release/release-gate';
 import { executeLocalBridgeJobInline, getLocalBridgeJob } from '../../../cli/local-bridge/job-store';
+import type { LocalBridgeJob } from '../../../cli/local-bridge/types';
 import { settleScheduledExecution } from '../../workflow/schedules/settlement';
 import type { ExecutionJob, ExecutionJobOutcome } from '../jobs/types';
+import {
+  buildDelegatedExecutionResult,
+  childReferenceFromUnknown,
+  hasDurableChildReference,
+  isAgentDelegationLocalAction,
+  isAgentDelegationOperation,
+  mergeChildReferences,
+  type ExecutionChildReference,
+} from '../jobs/child-reference';
+import { markOperationDelegated } from '../jobs/receipt-store';
 import { assertAutomatedOperationAllowed } from '../../control-plane/governance/external-effects';
 import { recordCandidateFinding, updateCandidateFinding } from '../../workflow/findings/store';
 import { writeControllerContextProjection } from '../../projections/controller-context';
@@ -19,6 +30,36 @@ import { existsSync } from 'fs';
 import { isAbsolute, relative, resolve, sep } from 'path';
 import { isAssistantPluginError } from '../../plugins/errors';
 
+function childReferenceFromLocalJob(
+  localJob: LocalBridgeJob,
+  requestId?: string,
+): ExecutionChildReference | undefined {
+  const fromResult = childReferenceFromUnknown(localJob.result);
+  return mergeChildReferences(fromResult, {
+    localJobId: localJob.jobId,
+    runId: localJob.runId,
+    issueId: localJob.issueId,
+    taskId: localJob.taskId,
+    requestId,
+    delegatedAt: new Date().toISOString(),
+  });
+}
+
+/**
+ * Accept a Local Job that hands off to an Agent Run. Parent Execution Jobs only
+ * need a durable child reference; they must not hold leases across the full Run.
+ */
+function acceptLegacyAgentLocalJob(repoRoot: string, jobId: string): LocalBridgeJob {
+  let current = getLocalBridgeJob(repoRoot, jobId);
+  const projectedExecutionPending = current.result
+    && typeof current.result.executionJobId === 'string'
+    && (current.status === 'dispatched' || (current.status === 'running' && current.ownerPid === undefined));
+  if (current.status === 'approved' || projectedExecutionPending) {
+    current = executeLocalBridgeJobInline(repoRoot, jobId);
+  }
+  // One refresh so projection from the linked Agent Run is current.
+  return getLocalBridgeJob(repoRoot, jobId);
+}
 
 async function settleLegacyLocalJob(repoRoot: string, jobId: string, timeoutMs = 15 * 60_000) {
   const started = Date.now();
@@ -36,6 +77,101 @@ async function settleLegacyLocalJob(repoRoot: string, jobId: string, timeoutMs =
     current = getLocalBridgeJob(repoRoot, jobId);
   }
   return current;
+}
+
+function shouldDelegateAgentLocalJob(job: ExecutionJob, localJob?: LocalBridgeJob): boolean {
+  if (isAgentDelegationOperation(job.payload.operation)) return true;
+  if (job.type === 'agent-run' || job.type === 'dispatch-task') return true;
+  if (localJob && isAgentDelegationLocalAction(localJob.action)) return true;
+  return false;
+}
+
+function delegatedWorkerResult(
+  controllerHome: string,
+  job: ExecutionJob,
+  localJob: LocalBridgeJob,
+  repoRoot: string,
+  baseRecord: Record<string, unknown> = {},
+): WorkerExecutionResult {
+  const childReference = childReferenceFromLocalJob(localJob, job.requestId);
+  if (!hasDurableChildReference(childReference) || !childReference) {
+    // Acceptance ran but no durable child pointer exists yet. Fail closed so
+    // reconciliation can retry safely when no write side-effect is proven.
+    if (localJob.status === 'failed' || localJob.status === 'cancelled' || localJob.status === 'timed_out') {
+      return {
+        ok: false,
+        result: { ...baseRecord, localJob },
+        outcome: localJob.outcome,
+        error: {
+          code: 'LEGACY_JOB_FAILED',
+          message: localJob.error ?? `Local Job ended as ${localJob.status}`,
+          retryable: false,
+          details: { localJob },
+        },
+        repoRoot,
+      };
+    }
+    return {
+      ok: false,
+      result: { ...baseRecord, localJob },
+      error: {
+        code: 'AGENT_DELEGATION_INCOMPLETE',
+        message: `Agent delegation for Local Job ${localJob.jobId} did not produce a durable child reference.`,
+        retryable: true,
+        details: { localJobId: localJob.jobId, status: localJob.status },
+      },
+      repoRoot,
+    };
+  }
+
+  markOperationDelegated(
+    controllerHome,
+    job,
+    process.pid,
+    childReference,
+    buildDelegatedExecutionResult({
+      childReference,
+      localJob: localJob as unknown as Record<string, unknown>,
+      extra: baseRecord,
+    }),
+  );
+
+  const awaitingApproval = approvalFromLocalJob(localJob);
+  if (awaitingApproval) {
+    return {
+      ok: false,
+      result: {
+        ...baseRecord,
+        ...buildDelegatedExecutionResult({
+          childReference,
+          localJob: localJob as unknown as Record<string, unknown>,
+        }),
+        approvalRequestId: awaitingApproval.approvalRequestId,
+        authorization: awaitingApproval.authorization,
+      },
+      outcome: localJob.outcome,
+      awaitingApproval,
+      repoRoot,
+    };
+  }
+
+  // Parent Job success means "delegation accepted", never "Task/Run finished".
+  return {
+    ok: true,
+    result: {
+      ...baseRecord,
+      ...buildDelegatedExecutionResult({
+        childReference,
+        localJob: localJob as unknown as Record<string, unknown>,
+      }),
+      status: localJob.status,
+    },
+    outcome: {
+      ...(localJob.outcome ?? {}),
+      process: localJob.outcome?.process,
+    },
+    repoRoot,
+  };
 }
 
 function settlementTimeoutMsForJob(job: ExecutionJob, record?: Record<string, unknown>): number {
@@ -58,11 +194,18 @@ function settlementTimeoutMsForJob(job: ExecutionJob, record?: Record<string, un
   return 15 * 60_000;
 }
 
+function stringField(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
 function legacyJobIdFromResult(record: Record<string, unknown>): string | undefined {
-  if (typeof record.jobId === 'string') return record.jobId;
+  const direct = stringField(record.jobId);
+  if (direct) return direct;
   const nested = record.job;
-  if (nested && typeof nested === 'object' && typeof (nested as Record<string, unknown>).jobId === 'string') {
-    return String((nested as Record<string, unknown>).jobId);
+  if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+    return stringField((nested as Record<string, unknown>).jobId);
   }
   return undefined;
 }
@@ -196,9 +339,8 @@ export async function executeExecutionJob(controllerHome: string, job: Execution
         };
       }
 
-      // repository_command_execute (and similar Local Job handoffs) must not let
-      // the outer durable Execution Job report succeeded while the child is still
-      // queued/running. Follow the Local Job to a true terminal state.
+      // Agent-delegation operations only accept/create the Local Job + Agent Run.
+      // Non-agent Local Job handoffs (commands/checks) still settle to a terminal state.
       const legacyJobId = legacyJobIdFromResult(record);
       if (legacyJobId && job.repoId !== '__controller__') {
         try {
@@ -207,6 +349,11 @@ export async function executeExecutionJob(controllerHome: string, job: Execution
             job.checkoutId,
           );
           const repoRoot = repository.canonicalRoot;
+          const preview = getLocalBridgeJob(repoRoot, legacyJobId);
+          if (shouldDelegateAgentLocalJob(job, preview)) {
+            const localJob = acceptLegacyAgentLocalJob(repoRoot, legacyJobId);
+            return delegatedWorkerResult(controllerHome, job, localJob, repoRoot, record);
+          }
           const localJob = await settleLegacyLocalJob(
             repoRoot,
             legacyJobId,
@@ -291,6 +438,11 @@ export async function executeExecutionJob(controllerHome: string, job: Execution
     if (job.payload.target === 'runtime' && job.payload.operation === 'legacy-local-job') {
       const localJobId = String(job.payload.arguments?.localJobId ?? '').trim();
       if (!localJobId) throw new Error('LEGACY_JOB_ID_REQUIRED');
+      const preview = getLocalBridgeJob(repoRoot, localJobId);
+      if (shouldDelegateAgentLocalJob(job, preview)) {
+        const localJob = acceptLegacyAgentLocalJob(repoRoot, localJobId);
+        return delegatedWorkerResult(controllerHome, job, localJob, repoRoot);
+      }
       const localJob = await settleLegacyLocalJob(
         repoRoot,
         localJobId,
@@ -384,6 +536,11 @@ export async function executeExecutionJob(controllerHome: string, job: Execution
     const legacyJobId = legacyJobIdFromResult(record);
     if (legacyJobId) {
       try {
+        const preview = getLocalBridgeJob(repoRoot, legacyJobId);
+        if (shouldDelegateAgentLocalJob(job, preview) || isAgentDelegationOperation(job.payload.operation)) {
+          const localJob = acceptLegacyAgentLocalJob(repoRoot, legacyJobId);
+          return delegatedWorkerResult(controllerHome, job, localJob, repoRoot, record);
+        }
         const localJob = await settleLegacyLocalJob(
           repoRoot,
           legacyJobId,
@@ -400,6 +557,32 @@ export async function executeExecutionJob(controllerHome: string, job: Execution
         }
       } catch {
         // Not every job-shaped response belongs to the Local Bridge compatibility projection.
+      }
+    }
+
+    // quick_agent_session / dispatch_task may return the Local Job inline without
+    // a top-level jobId when structuredContent uses { accepted, job }.
+    if (isAgentDelegationOperation(job.payload.operation) && !legacyJobId) {
+      const nestedJobId = legacyJobIdFromResult(record)
+        ?? (record.job && typeof record.job === 'object' ? stringField((record.job as Record<string, unknown>).jobId) : undefined);
+      if (nestedJobId) {
+        const localJob = acceptLegacyAgentLocalJob(repoRoot, nestedJobId);
+        return delegatedWorkerResult(controllerHome, job, localJob, repoRoot, record);
+      }
+      const inlineChild = childReferenceFromUnknown(record) ?? childReferenceFromUnknown(record.job);
+      if (hasDurableChildReference(inlineChild) && inlineChild) {
+        markOperationDelegated(
+          controllerHome,
+          job,
+          process.pid,
+          { ...inlineChild, requestId: inlineChild.requestId ?? job.requestId, delegatedAt: inlineChild.delegatedAt ?? new Date().toISOString() },
+          buildDelegatedExecutionResult({ childReference: inlineChild, extra: record }),
+        );
+        return {
+          ok: true,
+          result: buildDelegatedExecutionResult({ childReference: inlineChild, extra: record }),
+          repoRoot,
+        };
       }
     }
 

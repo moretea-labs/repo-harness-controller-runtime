@@ -1,6 +1,11 @@
 import { redactMcpText } from '../../cli/mcp/redaction';
 import type { ExecutionJob } from '../execution/jobs/types';
 import { buildJobOperationDigest } from '../control-plane/facade/operation-digest';
+import {
+  childReferenceFromJob,
+  hasDurableChildReference,
+  isAgentDelegationOperation,
+} from '../execution/jobs/child-reference';
 import type { SafeJobResultSummary } from './types';
 
 type SafeErrorClass = NonNullable<SafeJobResultSummary['safeError']>['class'];
@@ -125,6 +130,64 @@ function suggestedFixesFor(message: string, errorClass: SafeErrorClass): string[
   return ['Open the bounded job details only if the safe summary is insufficient.'];
 }
 
+function enrichDelegatedDigest(
+  job: ExecutionJob,
+  digest: ReturnType<typeof buildJobOperationDigest>,
+  repoRoot?: string,
+): ReturnType<typeof buildJobOperationDigest> {
+  if (!repoRoot) return digest;
+  const childReference = digest.childReference ?? childReferenceFromJob(job);
+  if (!hasDurableChildReference(childReference) || !childReference) return digest;
+  if (!(isAgentDelegationOperation(job.payload.operation) || job.type === 'agent-run' || job.type === 'dispatch-task')) {
+    return digest;
+  }
+  try {
+    // Lazy require keeps summary module free of circular import with job-store.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getLocalBridgeJob } = require('../../cli/local-bridge/job-store') as typeof import('../../cli/local-bridge/job-store');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getAgentJob } = require('../../cli/agent-jobs/job-manager') as typeof import('../../cli/agent-jobs/job-manager');
+    let childLocalJobStatus = digest.childLocalJobStatus;
+    let childRunStatus = digest.childRunStatus;
+    if (childReference.localJobId) {
+      try {
+        const localJob = getLocalBridgeJob(repoRoot, childReference.localJobId);
+        childLocalJobStatus = localJob.status;
+        if (localJob.runId) childReference.runId = localJob.runId;
+        if (localJob.issueId) childReference.issueId = localJob.issueId;
+        if (localJob.taskId) childReference.taskId = localJob.taskId;
+      } catch {
+        // Local Job may have been cleaned; Run remains the authority when present.
+      }
+    }
+    if (childReference.runId) {
+      try {
+        const run = getAgentJob(repoRoot, childReference.runId);
+        childRunStatus = run.status;
+      } catch {
+        // Run lookup failures leave the parent Job status authoritative for itself.
+      }
+    }
+    const summary = childRunStatus
+      ? `父 Job 已委派；子 Run ${childReference.runId} 状态 ${childRunStatus}。`
+      : childLocalJobStatus
+        ? `父 Job 已委派；Local Job ${childReference.localJobId} 状态 ${childLocalJobStatus}。`
+        : digest.summary;
+    return {
+      ...digest,
+      childReference,
+      childRunStatus,
+      childLocalJobStatus,
+      delegationAccepted: true,
+      summary,
+      // Parent terminal success never means the child Task passed acceptance.
+      resultAccepted: digest.terminal ? false : null,
+    };
+  } catch {
+    return digest;
+  }
+}
+
 export function summarizeExecutionJobForMcp(job: ExecutionJob, repoRoot?: string): Record<string, unknown> {
   const payloadArguments = job.payload.arguments && typeof job.payload.arguments === 'object'
     ? Object.keys(job.payload.arguments as Record<string, unknown>).slice(0, 20)
@@ -134,7 +197,7 @@ export function summarizeExecutionJobForMcp(job: ExecutionJob, repoRoot?: string
   const artifactRefs = collectArtifactRefs(job.result, job.error?.details);
   const evidenceIds = job.evidenceIds.slice(-20);
   const errorDetailsAvailable = job.error?.details !== undefined;
-  const rawDigest = buildJobOperationDigest(job);
+  const rawDigest = enrichDelegatedDigest(job, buildJobOperationDigest(job), repoRoot);
   const digest = JSON.parse(
     redactMcpText(scrubPathText(JSON.stringify(rawDigest), replacements)).text,
   ) as ReturnType<typeof buildJobOperationDigest>;
@@ -152,6 +215,10 @@ export function summarizeExecutionJobForMcp(job: ExecutionJob, repoRoot?: string
     errorMessage: digest.errorMessage ?? (job.error?.message ? sanitizeMessage(job.error.message, replacements) : undefined),
     changedFiles: digest.changedFiles,
     suggestedNextActions: digest.suggestedNextActions,
+    childReference: digest.childReference,
+    childRunStatus: digest.childRunStatus,
+    childLocalJobStatus: digest.childLocalJobStatus,
+    delegationAccepted: digest.delegationAccepted,
     digest,
     priority: job.priority,
     requestId: job.requestId,
