@@ -14,6 +14,7 @@ import { acquireExecutionLeases } from '../../src/runtime/resources/leases/store
 import { repositoryControllerRoot } from '../../src/cli/repositories/controller-home';
 import { readJsonFile, writeJsonAtomic } from '../../src/runtime/shared/json-files';
 import { markRepositoryProjectionDirty, readRepositoryProjectionDirty } from '../../src/runtime/projections/invalidation';
+import { rebuildRepositoryProjection } from '../../src/runtime/projections/materialized-view';
 
 const roots: string[] = [];
 const daemonPids: number[] = [];
@@ -129,6 +130,21 @@ describe('runtime recovery and repository argv boundary', () => {
     writeJsonAtomic(activePath, { ...active, jobs: [...active.jobs, { jobId: created.job.jobId, repoId: repository.repoId }] });
     reconcileControllerStartup(home);
     expect(readJsonFile<{ jobs: Array<{ jobId: string }> }>(activePath).jobs.some((job) => job.jobId === created.job.jobId)).toBe(false);
+  });
+
+  test('skips projection rebuild during startup recovery when persisted state is already clean', () => {
+    const home = tempRoot('runtime-recovery-clean-projection-home-');
+    const root = tempRoot('runtime-recovery-clean-projection-repo-');
+    const repository = seedRepo(home, root, 'clean-projection');
+    const persisted = rebuildRepositoryProjection(home, repository.repoId);
+    const projectionPath = join(repositoryControllerRoot(home, repository.repoId), 'projections', 'runtime.json');
+
+    const recovered = reconcileControllerStartup(home);
+    const repoRecovery = recovered.repositories.find((entry) => entry.repoId === repository.repoId);
+    const after = readJsonFile<{ revision: number }>(projectionPath);
+
+    expect(repoRecovery?.projectionRebuilt).toBe(false);
+    expect(after.revision).toBe(persisted.revision);
   });
 
   test('reconciles a dead worker and removes an expired lease before ready', () => {

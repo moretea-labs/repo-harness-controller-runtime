@@ -36,6 +36,16 @@ const PLUGIN_ADAPTERS = new Map<string, AssistantPluginAdapter>([
   [localSystemPluginAdapter.pluginId, localSystemPluginAdapter],
 ]);
 
+const PLUGIN_MANIFEST_CACHE_TTL_MS = 5_000;
+
+interface PluginManifestCacheEntry<T> {
+  createdAt: number;
+  value: T;
+}
+
+const pluginManifestListCache = new Map<string, PluginManifestCacheEntry<AssistantPluginManifest[]>>();
+const pluginManifestItemCache = new Map<string, PluginManifestCacheEntry<AssistantPluginManifest>>();
+
 function now(): string {
   return new Date().toISOString();
 }
@@ -65,6 +75,93 @@ export function controllerPluginRepository(controllerHome: string): RepositoryRe
 function adapterMatchesRepository(adapter: AssistantPluginAdapter, repository: RepositoryRecord): boolean {
   const scope = adapter.scope ?? 'repository';
   return repository.repoId === CONTROLLER_SCOPE_REPO_ID ? scope === 'controller' : scope === 'repository';
+}
+
+function cloneCacheValue<T>(value: T): T {
+  return structuredClone(value);
+}
+
+function listCacheKey(controllerHome: string, repoId: string, preferStored: boolean): string {
+  return `${controllerHome}::${repoId}::list::${preferStored ? 'stored' : 'live'}`;
+}
+
+function itemCacheKey(controllerHome: string, repoId: string, pluginId: string, preferStored: boolean): string {
+  return `${controllerHome}::${repoId}::item::${pluginId}::${preferStored ? 'stored' : 'live'}`;
+}
+
+function readPluginManifestCache<T>(
+  cache: Map<string, PluginManifestCacheEntry<T>>,
+  key: string,
+): T | undefined {
+  const cached = cache.get(key);
+  if (!cached) return undefined;
+  if (Date.now() - cached.createdAt > PLUGIN_MANIFEST_CACHE_TTL_MS) {
+    cache.delete(key);
+    return undefined;
+  }
+  return cloneCacheValue(cached.value);
+}
+
+function writePluginManifestCache<T>(
+  cache: Map<string, PluginManifestCacheEntry<T>>,
+  key: string,
+  value: T,
+): T {
+  cache.set(key, {
+    createdAt: Date.now(),
+    value: cloneCacheValue(value),
+  });
+  return cloneCacheValue(value);
+}
+
+function primePluginManifestItemCache(
+  controllerHome: string,
+  repoId: string,
+  manifests: AssistantPluginManifest[],
+  preferStored: boolean,
+): void {
+  for (const manifest of manifests) {
+    pluginManifestItemCache.set(itemCacheKey(controllerHome, repoId, manifest.pluginId, preferStored), {
+      createdAt: Date.now(),
+      value: cloneCacheValue(manifest),
+    });
+  }
+}
+
+function cacheAssistantPluginManifest(
+  controllerHome: string,
+  repoId: string,
+  manifest: AssistantPluginManifest,
+  preferStored: boolean,
+): void {
+  pluginManifestItemCache.set(itemCacheKey(controllerHome, repoId, manifest.pluginId, preferStored), {
+    createdAt: Date.now(),
+    value: cloneCacheValue(manifest),
+  });
+}
+
+function invalidateAssistantPluginManifestCache(
+  controllerHome: string,
+  repoId: string,
+  pluginId?: string,
+): void {
+  const prefix = `${controllerHome}::${repoId}::`;
+  for (const key of pluginManifestListCache.keys()) {
+    if (key.startsWith(prefix)) pluginManifestListCache.delete(key);
+  }
+  if (pluginId) {
+    pluginManifestItemCache.delete(itemCacheKey(controllerHome, repoId, pluginId, false));
+    pluginManifestItemCache.delete(itemCacheKey(controllerHome, repoId, pluginId, true));
+    return;
+  }
+  for (const key of pluginManifestItemCache.keys()) {
+    if (key.startsWith(prefix)) pluginManifestItemCache.delete(key);
+  }
+}
+
+export function clearAssistantPluginManifestCacheForTest(): void {
+  pluginManifestListCache.clear();
+  pluginManifestItemCache.clear();
 }
 
 function pluginsRoot(controllerHome: string, repoId: string): string {
@@ -118,6 +215,15 @@ function readStoredManifest(controllerHome: string, repoId: string, pluginId: st
   } catch {
     return undefined;
   }
+}
+
+function cachedManifestForRepository(
+  controllerHome: string,
+  repoId: string,
+  pluginId: string,
+): AssistantPluginManifest | undefined {
+  return readPluginManifestCache(pluginManifestItemCache, itemCacheKey(controllerHome, repoId, pluginId, true))
+    ?? readPluginManifestCache(pluginManifestItemCache, itemCacheKey(controllerHome, repoId, pluginId, false));
 }
 
 function computeManifest(controllerHome: string, repository: RepositoryRecord, pluginId: string): AssistantPluginManifest {
@@ -263,7 +369,12 @@ export function listAssistantPluginManifests(
   options: ListAssistantPluginManifestsOptions = {},
 ): AssistantPluginManifest[] {
   const preferStored = options.preferStored === true && options.forceRefresh !== true;
-  return listAssistantPluginIds(repository)
+  const cacheKey = listCacheKey(controllerHome, repository.repoId, preferStored);
+  if (options.forceRefresh !== true) {
+    const cached = readPluginManifestCache(pluginManifestListCache, cacheKey);
+    if (cached) return cached;
+  }
+  const manifests = listAssistantPluginIds(repository)
     .map((pluginId) => {
       if (preferStored) {
         const stored = readStoredManifest(controllerHome, repository.repoId, pluginId);
@@ -272,6 +383,8 @@ export function listAssistantPluginManifests(
       return computeManifest(controllerHome, repository, pluginId);
     })
     .sort((left, right) => left.pluginId.localeCompare(right.pluginId));
+  primePluginManifestItemCache(controllerHome, repository.repoId, manifests, preferStored);
+  return writePluginManifestCache(pluginManifestListCache, cacheKey, manifests);
 }
 
 export function getAssistantPluginManifest(
@@ -279,19 +392,48 @@ export function getAssistantPluginManifest(
   repository: RepositoryRecord,
   pluginId: string,
 ): AssistantPluginManifest {
-  return computeManifest(controllerHome, repository, pluginId);
+  const cacheKey = itemCacheKey(controllerHome, repository.repoId, pluginId, false);
+  const cached = readPluginManifestCache(pluginManifestItemCache, cacheKey);
+  if (cached) return cached;
+  const manifest = computeManifest(controllerHome, repository, pluginId);
+  return writePluginManifestCache(pluginManifestItemCache, cacheKey, manifest);
 }
 
 export function syncAssistantPluginRegistry(
   controllerHome: string,
   repository: RepositoryRecord,
 ): { manifests: AssistantPluginManifest[]; index: AssistantPluginRegistryIndex } {
-  const manifests = listAssistantPluginManifests(controllerHome, repository);
+  invalidateAssistantPluginManifestCache(controllerHome, repository.repoId);
+  const manifests = listAssistantPluginManifests(controllerHome, repository, { forceRefresh: true });
   for (const manifest of manifests) {
     writeJsonAtomic(manifestPath(controllerHome, repository.repoId, manifest.pluginId), manifest);
   }
   return {
     manifests,
+    index: writeRegistry(controllerHome, repository.repoId, manifests),
+  };
+}
+
+function syncAssistantPluginManifest(
+  controllerHome: string,
+  repository: RepositoryRecord,
+  pluginId: string,
+): { manifest: AssistantPluginManifest; index: AssistantPluginRegistryIndex } {
+  invalidateAssistantPluginManifestCache(controllerHome, repository.repoId, pluginId);
+  const manifest = computeManifest(controllerHome, repository, pluginId);
+  writeJsonAtomic(manifestPath(controllerHome, repository.repoId, manifest.pluginId), manifest);
+  cacheAssistantPluginManifest(controllerHome, repository.repoId, manifest, false);
+  cacheAssistantPluginManifest(controllerHome, repository.repoId, manifest, true);
+  const manifests = listAssistantPluginIds(repository)
+    .map((candidatePluginId) => {
+      if (candidatePluginId === pluginId) return manifest;
+      return readStoredManifest(controllerHome, repository.repoId, candidatePluginId)
+        ?? cachedManifestForRepository(controllerHome, repository.repoId, candidatePluginId);
+    })
+    .filter((entry): entry is AssistantPluginManifest => Boolean(entry))
+    .sort((left, right) => left.pluginId.localeCompare(right.pluginId));
+  return {
+    manifest,
     index: writeRegistry(controllerHome, repository.repoId, manifests),
   };
 }
@@ -402,8 +544,8 @@ export async function executeAssistantPluginAction(
   const normalizedArgs = validateActionArguments(action, input.args);
   try {
     const result = await adapter.executeAction({ ...input, args: normalizedArgs });
-    const synced = syncAssistantPluginRegistry(input.controllerHome, repository);
-    const nextManifest = synced.manifests.find((entry) => entry.pluginId === input.pluginId) ?? manifest;
+    const synced = syncAssistantPluginManifest(input.controllerHome, repository, input.pluginId);
+    const nextManifest = synced.manifest;
     appendRuntimeEvent(input.controllerHome, {
       repoId: input.repoId,
       entityType: 'plugin',
@@ -446,8 +588,8 @@ export async function executeAssistantPluginAction(
         actionId: input.actionId,
       },
     });
-    const refreshed = syncAssistantPluginRegistry(input.controllerHome, repository);
-    const nextManifest = refreshed.manifests.find((entry) => entry.pluginId === input.pluginId) ?? manifest;
+    const refreshed = syncAssistantPluginManifest(input.controllerHome, repository, input.pluginId);
+    const nextManifest = refreshed.manifest;
     appendRuntimeEvent(input.controllerHome, {
       repoId: input.repoId,
       entityType: 'plugin',

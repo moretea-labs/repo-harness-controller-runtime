@@ -30,7 +30,10 @@ import {
   type McpToolContext,
 } from "../../src/cli/mcp/tools";
 import { controllerToolSurfaceFingerprint } from "../../src/cli/controller/runtime-config";
-import { writeControllerContextProjection } from "../../src/runtime/projections/controller-context";
+import {
+  readControllerContextProjection,
+  writeControllerContextProjection,
+} from "../../src/runtime/projections/controller-context";
 import { exposedControllerToolDefinitions } from "../../src/cli/mcp/toolset";
 
 async function jsonTool(
@@ -949,6 +952,7 @@ describe("MCP controller profile", () => {
       });
       const context = await callRuntimeTool(multi, "controller_context", { repo_id: repository.repoId });
       const contextValue = JSON.parse(context!.content[0].text);
+      const refreshedProjection = readControllerContextProjection(multi.controllerHome, repository.repoId);
       expect(contextValue.contextProjection.refreshJobId).toBeUndefined();
       expect(contextValue.contextProjection.strategy).toBe("event-driven");
       expect(contextValue.contextProjection.readOnly).toBe(true);
@@ -956,6 +960,8 @@ describe("MCP controller profile", () => {
       expect(contextValue.taskLedgerStatus.kind).toBe("empty");
       expect(contextValue.git.branch).not.toBe("stale-branch-from-projection");
       expect(typeof contextValue.git.dirty).toBe("boolean");
+      expect(refreshedProjection?.payload.repoId).toBe(repository.repoId);
+      expect((refreshedProjection?.payload.git as { branch?: string } | undefined)?.branch).toBe(contextValue.git.branch);
 
       writeFileSync(join(repoRoot, "src/context-pack.ts"), "export const contextPackValue = 1;\n");
       const pack = await callRuntimeTool(multi, "controller_context_pack", {

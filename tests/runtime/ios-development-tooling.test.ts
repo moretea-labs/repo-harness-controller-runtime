@@ -80,6 +80,32 @@ describe('iOS development safe tooling', () => {
     expect(probeCount).toBe(firstProbes + 3);
   });
 
+  it('caches degraded Xcode probes briefly so repeated hot reads do not re-run failing host checks', () => {
+    let probeCount = 0;
+    let currentMs = 0;
+    setIosDevelopmentHooksForTest({
+      platform: () => 'darwin',
+      now: () => new Date(currentMs),
+      runCommand(command, args) {
+        probeCount += 1;
+        const joined = [command, ...args].join(' ');
+        if (joined === 'xcode-select -p') return { ok: true, status: 0, stdout: '/Applications/Xcode.app/Contents/Developer\n', stderr: '', command: [command, ...args] };
+        if (joined === 'xcodebuild -version') return { ok: false, status: 1, stdout: '', stderr: 'license not accepted', command: [command, ...args] };
+        if (joined.startsWith('xcrun simctl help')) return { ok: true, status: 0, stdout: 'simctl\n', stderr: '', command: [command, ...args] };
+        return { ok: false, status: 1, stdout: '', stderr: 'unexpected', command: [command, ...args] };
+      },
+    });
+
+    expect(iosXcodeStatus().ready).toBe(false);
+    expect(probeCount).toBe(3);
+    expect(iosXcodeStatus().ready).toBe(false);
+    expect(probeCount).toBe(3);
+
+    currentMs = 10_001;
+    expect(iosXcodeStatus().ready).toBe(false);
+    expect(probeCount).toBe(6);
+  });
+
   it('discovers projects and writes screenshots only under bounded artifact paths', () => {
     const { repository } = fixture();
     setIosDevelopmentHooksForTest({

@@ -7,6 +7,11 @@ import { registerRepository } from "../../src/cli/repositories/registry";
 import { buildAssistantReadinessReport } from "../../src/runtime/assistant/readiness";
 import { executeExecutionJob } from "../../src/runtime/execution/workers/executor";
 import {
+  resetIosDevelopmentHooksForTest,
+  setIosDevelopmentHooksForTest,
+} from "../../src/runtime/safe-tooling";
+import {
+  clearAssistantPluginManifestCacheForTest,
   listAssistantPluginManifests,
   submitAssistantPluginAction,
 } from "../../src/runtime/plugins/store";
@@ -23,6 +28,8 @@ afterEach(() => {
   delete process.env.REPO_HARNESS_GOOGLE_CALENDAR_ACCESS_TOKEN;
   delete process.env.REPO_HARNESS_GOOGLE_TASKS_ACCESS_TOKEN;
   globalThis.fetch = originalFetch;
+  resetIosDevelopmentHooksForTest();
+  clearAssistantPluginManifestCacheForTest();
 });
 
 function repoFixture() {
@@ -119,6 +126,34 @@ describe("personal assistant plugin runtime", () => {
     const events = ledgerEvents(controllerHome, repository.repoId);
     expect(events.some((event) => event.eventType === "plugin_action_requested" && event.data?.actionId === "configure")).toBe(true);
     expect(events.some((event) => event.eventType === "plugin_action_succeeded" && event.data?.actionId === "configure")).toBe(true);
+  });
+
+  test("refreshes only the touched plugin manifest after a durable action", async () => {
+    const { controllerHome, repository } = repoFixture();
+    let xcodeProbeCount = 0;
+    setIosDevelopmentHooksForTest({
+      platform: () => "darwin",
+      runCommand(command, args) {
+        xcodeProbeCount += 1;
+        return { ok: false, status: 1, stdout: "", stderr: `${command} ${args.join(" ")} should not run`, command: [command, ...args] };
+      },
+    });
+
+    const githubConfig = await executePluginAction(controllerHome, repository, {
+      pluginId: "github",
+      actionId: "configure",
+      requestId: "github-config-no-ios-refresh",
+      args: {
+        enabled: true,
+        repository: "owner/repo",
+        sync_mode: "checkpoint",
+      },
+      confirmAuthorization: true,
+      origin: { surface: "local-ui", actor: "test" },
+    });
+
+    expect(githubConfig.execution.ok).toBe(true);
+    expect(xcodeProbeCount).toBe(0);
   });
 
   test("exposes Gmail, Calendar, and Tasks capability schemas with separated scopes and guarded writes", async () => {

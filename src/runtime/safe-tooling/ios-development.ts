@@ -22,6 +22,7 @@ let hooks: IosDevelopmentHooks = {};
 
 /** Host Xcode/simctl probes are expensive (spawnSync). Cache them for hot MCP reads. */
 const XCODE_STATUS_TTL_MS = 60_000;
+const XCODE_STATUS_DEGRADED_TTL_MS = 10_000;
 const PROJECT_DISCOVER_TTL_MS = 30_000;
 let xcodeStatusCache:
   | { expiresAt: number; value: ReturnType<typeof probeIosXcodeStatus> }
@@ -56,6 +57,10 @@ function platform(): NodeJS.Platform {
 
 function now(): Date {
   return hooks.now?.() ?? new Date();
+}
+
+function currentTimeMs(): number {
+  return now().getTime();
 }
 
 function sleep(ms: number): void {
@@ -143,12 +148,16 @@ function boundedText(value: string, maxBytes = 20_000): { content: string; trunc
 function probeIosXcodeStatus() {
   const unsupported = assertDarwin();
   if (unsupported) return unsupported;
-  // Bound each probe tightly: MCP hot paths must not inherit the default 30s spawn timeout.
-  const probeTimeoutMs = 3_000;
+  // Bound each probe tightly: degraded local Xcode state must not monopolize hot MCP reads.
+  const probeTimeoutMs = 1_000;
   const xcodeSelect = runCommand('xcode-select', ['-p'], { timeoutMs: probeTimeoutMs });
-  const xcodebuild = runCommand('xcodebuild', ['-version'], { timeoutMs: probeTimeoutMs });
+  const xcodebuild = xcodeSelect.ok
+    ? runCommand('xcodebuild', ['-version'], { timeoutMs: probeTimeoutMs })
+    : { ok: false, status: 1, stdout: '', stderr: 'Skipped because xcode-select is unavailable.', command: ['xcodebuild', '-version'] };
   // `simctl help` is enough to prove the binary is wired; avoid heavier inventory probes on hot paths.
-  const simctl = runCommand('xcrun', ['simctl', 'help'], { timeoutMs: probeTimeoutMs });
+  const simctl = xcodeSelect.ok
+    ? runCommand('xcrun', ['simctl', 'help'], { timeoutMs: probeTimeoutMs })
+    : { ok: false, status: 1, stdout: '', stderr: 'Skipped because xcode-select is unavailable.', command: ['xcrun', 'simctl', 'help'] };
   return {
     ready: xcodeSelect.ok && xcodebuild.ok && simctl.ok,
     platform: platform(),
@@ -164,18 +173,15 @@ function probeIosXcodeStatus() {
 }
 
 export function iosXcodeStatus(options: { forceRefresh?: boolean } = {}) {
-  if (!options.forceRefresh && xcodeStatusCache && xcodeStatusCache.expiresAt > Date.now()) {
+  const currentMs = currentTimeMs();
+  if (!options.forceRefresh && xcodeStatusCache && xcodeStatusCache.expiresAt > currentMs) {
     return xcodeStatusCache.value;
   }
   const value = probeIosXcodeStatus();
-  // Only cache successful host probes and structured unsupported-platform results.
-  // Leave failed/partial host states short-lived so recoveries are noticed quickly.
-  const cacheable = !('ready' in value) || value.ready === true || ('error' in value && (value as { error?: { code?: string } }).error?.code === 'IOS_DEPENDENCY_UNAVAILABLE');
-  if (cacheable) {
-    xcodeStatusCache = { expiresAt: Date.now() + XCODE_STATUS_TTL_MS, value };
-  } else {
-    xcodeStatusCache = undefined;
-  }
+  const cacheTtlMs = !('ready' in value) || value.ready === true || ('error' in value && (value as { error?: { code?: string } }).error?.code === 'IOS_DEPENDENCY_UNAVAILABLE')
+    ? XCODE_STATUS_TTL_MS
+    : XCODE_STATUS_DEGRADED_TTL_MS;
+  xcodeStatusCache = { expiresAt: currentMs + cacheTtlMs, value };
   return value;
 }
 
@@ -240,10 +246,10 @@ export function iosProjectDiscover(repository: RepositoryRecord, options: { forc
   const root = resolve(repository.canonicalRoot);
   if (!options.forceRefresh) {
     const cached = projectDiscoverCache.get(root);
-    if (cached && cached.expiresAt > Date.now()) return cached.value;
+    if (cached && cached.expiresAt > currentTimeMs()) return cached.value;
   }
   const value = probeIosProjectDiscover({ ...repository, canonicalRoot: root });
-  projectDiscoverCache.set(root, { expiresAt: Date.now() + PROJECT_DISCOVER_TTL_MS, value });
+  projectDiscoverCache.set(root, { expiresAt: currentTimeMs() + PROJECT_DISCOVER_TTL_MS, value });
   return value;
 }
 

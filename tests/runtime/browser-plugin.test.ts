@@ -11,12 +11,17 @@ import {
   resetBrowserPluginRuntimeHooksForTest,
   setBrowserPluginRuntimeHooksForTest,
 } from '../../src/runtime/plugins/browser-adapter';
-import { submitAssistantPluginAction } from '../../src/runtime/plugins/store';
+import {
+  clearAssistantPluginManifestCacheForTest,
+  getAssistantPluginManifest,
+  submitAssistantPluginAction,
+} from '../../src/runtime/plugins/store';
 
 const roots: string[] = [];
 
 afterEach(() => {
   resetBrowserPluginRuntimeHooksForTest();
+  clearAssistantPluginManifestCacheForTest();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
   delete process.env.REPO_HARNESS_CONTROLLER_HOME;
 });
@@ -243,6 +248,31 @@ describe('browser plugin', () => {
       args: { url: 'https://example.com/' },
       origin: { surface: 'local-ui', actor: 'test' },
     })).rejects.toThrow('PLUGIN_DEPENDENCY_MISSING');
+  });
+
+  test('reuses a hot cached manifest instead of probing browser readiness on every read', () => {
+    const { repoRoot, controllerHome, repository } = repoFixture();
+    writeBrowserConfig(repoRoot, {
+      schemaVersion: 1,
+      enabled: true,
+      provider: 'playwright',
+      allowedDomains: ['example.com'],
+    });
+
+    let moduleChecks = 0;
+    setBrowserPluginRuntimeHooksForTest({
+      moduleAvailable: () => {
+        moduleChecks += 1;
+        return true;
+      },
+    });
+
+    const first = getAssistantPluginManifest(controllerHome, repository, 'browser');
+    const second = getAssistantPluginManifest(controllerHome, repository, 'browser');
+
+    expect(first.health.state).toBe('ready');
+    expect(second.health.state).toBe('ready');
+    expect(moduleChecks).toBe(1);
   });
 
   test('click returns url, title, summary, and a saved screenshot without bypassing allowed domains', async () => {

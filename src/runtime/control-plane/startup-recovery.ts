@@ -1,9 +1,13 @@
+import { existsSync } from 'fs';
+import { join } from 'path';
 import { listRepositories, reconcileRepositoryCheckouts } from '../../cli/repositories/registry';
+import { repositoryControllerRoot } from '../../cli/repositories/controller-home';
 import { listLocalBridgeJobs, reconcileLocalBridgeJobs } from '../../cli/local-bridge/job-store';
 import { listExecutionJobs, rebuildExecutionJobIndexes } from '../execution/jobs/store';
 import { reconcileExecutionJobs } from './global-scheduler/reconciliation';
 import { listActiveLeases } from '../resources/leases/store';
 import { rebuildRepositoryProjection } from '../projections/materialized-view';
+import { readRepositoryProjectionDirty } from '../projections/invalidation';
 import { CONTROLLER_SCOPE_REPO_ID } from '../../cli/repositories/controller-home';
 import { reconcileStaleWorkContracts } from './facade/work-contract-store';
 
@@ -37,6 +41,15 @@ function errorCode(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   const separator = message.indexOf(':');
   return separator > 0 ? message.slice(0, separator) : 'RECOVERY_FAILED';
+}
+
+function persistedProjectionExists(controllerHome: string, repoId: string): boolean {
+  return existsSync(join(repositoryControllerRoot(controllerHome, repoId), 'projections', 'runtime.json'));
+}
+
+function projectionNeedsRebuild(controllerHome: string, repoId: string): boolean {
+  return !persistedProjectionExists(controllerHome, repoId)
+    || readRepositoryProjectionDirty(controllerHome, repoId) !== undefined;
 }
 
 /**
@@ -85,6 +98,7 @@ export function reconcileControllerStartup(controllerHome: string): ControllerSt
       );
     });
     result.projectionRebuilt = run('projection', () => {
+      if (!projectionNeedsRebuild(controllerHome, repository.repoId)) return false;
       rebuildRepositoryProjection(controllerHome, repository.repoId);
       return true;
     });

@@ -9,6 +9,7 @@ import type { RepositoryRecord } from "../repositories/types";
 
 const CONFIG_PATH = ".repo-harness/plugins/github.json";
 const STATUS_CACHE_TTL_MS = 30_000;
+const CONFIG_STATUS_CACHE_TTL_MS = 5_000;
 const statusCache = new Map<string, { at: number; fingerprint: string; status: GitHubPluginStatus }>();
 
 export interface GitHubPluginConfig {
@@ -45,6 +46,22 @@ export function defaultGitHubPluginConfig(): GitHubPluginConfig {
     enabled: false,
     syncMode: "manual",
     includeTasks: true,
+  };
+}
+
+function configuredGitHubPluginStatus(config: GitHubPluginConfig): GitHubPluginStatus {
+  return {
+    config,
+    probed: false,
+    available: false,
+    authenticated: false,
+    ready: false,
+    repository: config.repository,
+    errors: [],
+    warnings: !config.enabled
+      ? ['GitHub plugin is disabled. Enable it to probe GitHub CLI and repository readiness.']
+      : ['Live GitHub CLI readiness will refresh on the next explicit status read.'],
+    capabilities: { issues: false, projects: false, copilotAgentSessions: false },
   };
 }
 
@@ -211,7 +228,11 @@ export function saveGitHubPluginConfig(
   const path = join(repoRoot, CONFIG_PATH);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, "utf-8");
-  statusCache.delete(repoRoot);
+  statusCache.set(repoRoot, {
+    at: Date.now() - STATUS_CACHE_TTL_MS + CONFIG_STATUS_CACHE_TTL_MS,
+    fingerprint: JSON.stringify(config),
+    status: configuredGitHubPluginStatus(config),
+  });
   tryAppendControllerWorklogEvent(repoRoot, {
     category: "github",
     action: "github_plugin_configured",

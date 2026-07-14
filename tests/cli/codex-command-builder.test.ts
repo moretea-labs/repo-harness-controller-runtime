@@ -16,11 +16,14 @@ afterEach(() => {
   for (const root of roots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
   }
+  delete process.env.REPO_HARNESS_CONTROLLER_HOME;
 });
 
 function repo(): string {
   const root = mkdtempSync(join(tmpdir(), "repo-harness-codex-args-"));
-  roots.push(root);
+  const controllerHome = mkdtempSync(join(tmpdir(), "repo-harness-codex-args-home-"));
+  roots.push(root, controllerHome);
+  process.env.REPO_HARNESS_CONTROLLER_HOME = controllerHome;
   mkdirSync(join(root, "src"), { recursive: true });
   mkdirSync(join(root, "tasks"), { recursive: true });
   mkdirSync(join(root, ".ai/harness"), { recursive: true });

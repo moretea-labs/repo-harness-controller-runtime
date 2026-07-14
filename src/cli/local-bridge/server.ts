@@ -311,7 +311,7 @@ function controllerStateSignature(repoRoot: string): string {
   });
 }
 
-const SNAPSHOT_CACHE_TTL_MS = 750;
+const SNAPSHOT_CACHE_TTL_MS = 2_000;
 const localSnapshotCache = new Map<string, { createdAt: number; value: ReturnType<typeof buildLocalControllerSnapshot> }>();
 
 function cachedLocalControllerSnapshot(repoRoot: string): ReturnType<typeof buildLocalControllerSnapshot> {

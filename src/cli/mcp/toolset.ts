@@ -48,6 +48,21 @@ export const CORE_CONTROLLER_TOOL_NAMES = STABLE_CONTROLLER_TOOL_NAMES;
 
 const DEFAULT_CONTROLLER_TOOL_SET = new Set<string>(STABLE_CONTROLLER_TOOL_NAMES);
 
+interface StaticControllerExposureSnapshot {
+  definitions: McpToolDefinition[];
+  toolNames: string[];
+  expectedToolNames: string[];
+  actualToolNames: string[];
+  missingToolNames: string[];
+  unexpectedToolNames: string[];
+  duplicateToolNames: string[];
+  fingerprint: string;
+  schemaStableAcrossAccessModes: true;
+  ready: boolean;
+}
+
+const staticControllerExposureCache = new Map<string, StaticControllerExposureSnapshot>();
+
 export function normalizeMcpToolset(value: unknown): McpToolset {
   if (value === 'full' || value === 'advanced' || value === 'core') return value;
   return 'advanced';
@@ -105,13 +120,24 @@ function uniqueDefinitions(definitions: McpToolDefinition[]): {
   return { definitions: orderedDefinitions, duplicates: [...duplicates].sort() };
 }
 
-export function allControllerToolDefinitions(ctx: MultiRepositoryMcpToolContext): McpToolDefinition[] {
-  return uniqueDefinitions(
-    runtimeToolDefinitions.concat(executionToolDefinitions, accessToolDefinitions, repositoryToolDefinitions, buildMultiRepositoryToolDefinitions(ctx)),
-  ).definitions;
+function staticExposureCacheKey(ctx: MultiRepositoryMcpToolContext): string {
+  return JSON.stringify({
+    controllerHome: ctx.controllerHome,
+    repoRoot: ctx.repoRoot,
+    explicitRepositoryId: ctx.explicitRepository?.repoId,
+    toolset: ctx.toolset,
+    profile: ctx.policy.profile,
+    enableChatgptBrowser: ctx.enableChatgptBrowser === true,
+    devAgentRunner: ctx.policy.execution.agentRunner,
+    allowedAgents: [...ctx.policy.execution.allowedAgents].sort(),
+    runnerTimeoutMs: ctx.policy.execution.runnerTimeoutMs,
+    runnerMaxTimeoutMs: ctx.policy.execution.runnerMaxTimeoutMs,
+  });
 }
 
-export function controllerExposureSnapshot(ctx: MultiRepositoryMcpToolContext): ControllerExposureSnapshot {
+function buildStaticControllerExposureSnapshot(
+  ctx: MultiRepositoryMcpToolContext,
+): StaticControllerExposureSnapshot {
   const rawDefinitions = runtimeToolDefinitions.concat(
     executionToolDefinitions,
     accessToolDefinitions,
@@ -134,8 +160,6 @@ export function controllerExposureSnapshot(ctx: MultiRepositoryMcpToolContext): 
   const unexpectedToolNames = actualToolNames.filter((name) => !expectedSet.has(name));
   const fingerprint = createHash('sha256').update(actualToolNames.join('\n')).digest('hex');
   return {
-    access: resolveControllerAccessStateForContext(ctx),
-    toolset: ctx.toolset,
     definitions,
     toolNames: actualToolNames,
     expectedToolNames,
@@ -146,6 +170,36 @@ export function controllerExposureSnapshot(ctx: MultiRepositoryMcpToolContext): 
     fingerprint,
     schemaStableAcrossAccessModes: true,
     ready: missingToolNames.length === 0 && unexpectedToolNames.length === 0 && unique.duplicates.length === 0,
+  };
+}
+
+function staticControllerExposureSnapshot(
+  ctx: MultiRepositoryMcpToolContext,
+): StaticControllerExposureSnapshot {
+  const key = staticExposureCacheKey(ctx);
+  const cached = staticControllerExposureCache.get(key);
+  if (cached) return cached;
+  const built = buildStaticControllerExposureSnapshot(ctx);
+  staticControllerExposureCache.set(key, built);
+  return built;
+}
+
+export function clearControllerExposureCacheForTest(): void {
+  staticControllerExposureCache.clear();
+}
+
+export function allControllerToolDefinitions(ctx: MultiRepositoryMcpToolContext): McpToolDefinition[] {
+  return uniqueDefinitions(
+    runtimeToolDefinitions.concat(executionToolDefinitions, accessToolDefinitions, repositoryToolDefinitions, buildMultiRepositoryToolDefinitions(ctx)),
+  ).definitions;
+}
+
+export function controllerExposureSnapshot(ctx: MultiRepositoryMcpToolContext): ControllerExposureSnapshot {
+  const staticSnapshot = staticControllerExposureSnapshot(ctx);
+  return {
+    access: resolveControllerAccessStateForContext(ctx),
+    toolset: ctx.toolset,
+    ...staticSnapshot,
   };
 }
 

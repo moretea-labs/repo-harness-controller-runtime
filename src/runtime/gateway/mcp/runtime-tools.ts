@@ -50,7 +50,11 @@ import {
   stageSelectedPaths,
 } from '../../../cli/repositories/selected-path-actions';
 import type { TaskRisk } from '../../../cli/controller/types';
-import { controllerContextProjectionAgeMs, readControllerContextProjection } from '../../projections/controller-context';
+import {
+  controllerContextProjectionAgeMs,
+  readControllerContextProjection,
+  writeControllerContextProjection,
+} from '../../projections/controller-context';
 import { loadMcpRuntimeState } from '../../../cli/mcp/auth';
 import { redactMcpText } from '../../../cli/mcp/redaction';
 import { controllerPluginRepository, executeAssistantPluginReadDirect, getAssistantPluginManifest, isDirectPluginReadAction, listAssistantPluginManifests, submitAssistantPluginAction } from '../../plugins/store';
@@ -1021,6 +1025,7 @@ function expectedRevision(args: Record<string, unknown>, key = 'expected_revisio
 
 const SCHEDULER_HEARTBEAT_STALE_MS = 5_000;
 const QUEUE_PROGRESS_STALE_MS = 10_000;
+const CONTROLLER_CONTEXT_PROJECTION_REFRESH_MS = 5_000;
 
 function ageMs(value: string | undefined): number | undefined {
   if (!value) return undefined;
@@ -2142,7 +2147,6 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         const runtimeProjection = runtimeSnapshot.projection;
         const cached = readControllerContextProjection(ctx.controllerHome, repository.repoId);
         const projectionAgeMs = controllerContextProjectionAgeMs(cached);
-        const stale = projectionAgeMs > 10_000;
         const readiness = controllerReadiness(ctx, repository);
         const activeCheckout = repository.checkouts.find((checkout) => checkout.checkoutId === repository.activeCheckoutId);
         const liveGit = gitSnapshot(repository.canonicalRoot);
@@ -2218,9 +2222,8 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             confirmation: action.confirmation,
           })),
         }));
-        const cachedPayload = cached?.payload ?? {};
-        return result({
-          ...cachedPayload,
+        const payload = {
+          ...(cached?.payload ?? {}),
           git: liveGit.branch || liveGit.status || liveGit.diffStat ? liveGit : {
             branch: activeCheckout?.branch ?? null,
             status: 'No live repository scan is available; showing bounded runtime state only.',
@@ -2245,20 +2248,43 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           runtimeStorage,
           recommendedExecution: controllerContextAssessment(args),
           runtimeProjection,
-          contextProjection: {
-            generatedAt: cached?.generatedAt,
-            ageMs: Number.isFinite(projectionAgeMs) ? projectionAgeMs : undefined,
-            stale,
-            strategy: 'event-driven',
-            refreshJobId: undefined,
-            readOnly: true,
-            nonBlocking: true,
-          },
           runtimeProjectionState: {
             stale: runtimeSnapshot.stale,
             persisted: runtimeSnapshot.persisted,
           },
           controllerReady: readiness,
+        };
+        const cachedPayload = cached?.payload;
+        const cachedProjectionIncomplete = !cachedPayload
+          || typeof cachedPayload !== 'object'
+          || !('repoId' in cachedPayload)
+          || !('runtimeProjectionState' in cachedPayload)
+          || !('controllerReady' in cachedPayload);
+        let projectionRecord = cached;
+        if (
+          !cached
+          || cachedProjectionIncomplete
+          || !Number.isFinite(projectionAgeMs)
+          || projectionAgeMs >= CONTROLLER_CONTEXT_PROJECTION_REFRESH_MS
+        ) {
+          try {
+            projectionRecord = writeControllerContextProjection(ctx.controllerHome, repository.repoId, payload);
+          } catch {
+            projectionRecord = cached;
+          }
+        }
+        const refreshedProjectionAgeMs = controllerContextProjectionAgeMs(projectionRecord);
+        return result({
+          ...payload,
+          contextProjection: {
+            generatedAt: projectionRecord?.generatedAt,
+            ageMs: Number.isFinite(refreshedProjectionAgeMs) ? refreshedProjectionAgeMs : undefined,
+            stale: refreshedProjectionAgeMs > 10_000,
+            strategy: 'event-driven',
+            refreshJobId: undefined,
+            readOnly: true,
+            nonBlocking: true,
+          },
         });
       }
       case 'get_job': {
