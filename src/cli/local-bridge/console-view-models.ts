@@ -302,8 +302,8 @@ export interface CommandCenterViewModel {
   /** Autonomous goal loop surface (daemon-owned, above Issue/Task). */
   goalLoop?: GoalLoopStatusViewModel;
   /** Assistant/plugin capabilities available to the controller (not the primary workflow). */
-  pluginSummary?: PluginSummaryViewModel;
-  plugins?: PluginCardViewModel[];
+  pluginSummary: PluginSummaryViewModel;
+  plugins: PluginCardViewModel[];
   modePreviewDefault: ModePreviewViewModel;
   warnings: string[];
   /** Setup guidance when no usable repository is selected. */

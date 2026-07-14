@@ -24,7 +24,7 @@ const DIRECT_HOT_READ_TOOLS = new Set([
   'work_get', 'work_list', 'work_status_digest', 'work_result_summary',
   'controller_ready', 'repository_runtime_snapshot',
   'rh_status', 'rh_context', 'rh_inbox',
-  'controller_context', 'controller_context_pack',
+  'controller_context_pack',
   'repository_git_status', 'repository_git_diff', 'git_diff_paths',
 ]);
 
