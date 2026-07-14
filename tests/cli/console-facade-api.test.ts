@@ -3,8 +3,9 @@ import { spawnSync } from 'child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { ensureControllerHome } from '../../src/cli/repositories/controller-home';
+import { ensureControllerHome, repositoryControllerRoot } from '../../src/cli/repositories/controller-home';
 import { registerRepository } from '../../src/cli/repositories/registry';
+import { writeJsonAtomic } from '../../src/runtime/shared/json-files';
 import {
   applyConsoleSafePatch,
   approveConsoleHandoff,
@@ -46,6 +47,45 @@ function fixture() {
   };
 }
 
+function writeStoredPluginManifest(
+  controllerHome: string,
+  repoId: string,
+  pluginId: string,
+  overrides: Partial<Record<string, unknown>> = {},
+): void {
+  writeJsonAtomic(join(repositoryControllerRoot(controllerHome, repoId), 'plugins', 'manifests', `${pluginId}.json`), {
+    schemaVersion: 1,
+    manifestVersion: 1,
+    revision: 33,
+    pluginId,
+    provider: 'stored-provider',
+    displayName: `Stored ${pluginId}`,
+    pluginVersion: '1.0.0-test',
+    authority: {
+      strategy: 'derived',
+      duplicateStateAllowed: false,
+      sourceOfTruth: ['test'],
+    },
+    enabled: true,
+    lifecycle: {
+      state: 'enabled',
+    },
+    health: {
+      state: 'ready',
+      checkedAt: new Date().toISOString(),
+      ready: true,
+      probed: true,
+      errors: [],
+      warnings: [],
+    },
+    permissions: [],
+    capabilities: [],
+    actions: [],
+    updatedAt: new Date().toISOString(),
+    ...overrides,
+  });
+}
+
 describe('console facade api', () => {
   test('command center uses plain language readiness and no default internal ids in primary fields', async () => {
     const { ctx, repository } = fixture();
@@ -80,6 +120,21 @@ describe('console facade api', () => {
     expect(work!.phaseLabel).toBeTruthy();
     expect(work!.latestAction || work!.nextAction).toBeTruthy();
     expect(work!.objective).toContain('console polish');
+  });
+
+  test('command center plugin cards reuse stored plugin manifests on hot reads', async () => {
+    const { ctx, repository } = fixture();
+    writeStoredPluginManifest(ctx.controllerHome, repository.repoId, 'github', {
+      revision: 88,
+      displayName: 'Stored GitHub',
+    });
+
+    const center = await buildCommandCenter(ctx, [mapRepositoryCard(repository, true)]);
+    const plugin = center.plugins.find((entry) => entry.id === 'github');
+
+    expect(plugin).toBeTruthy();
+    expect(plugin?.name).toBe('Stored GitHub');
+    expect(plugin?.advanced?.revision).toBe(88);
   });
 
   test('mode preview distinguishes direct control and goal workloop', () => {

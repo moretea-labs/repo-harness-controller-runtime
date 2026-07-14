@@ -1122,7 +1122,9 @@ function capabilityRecoveryInput(ctx: MultiRepositoryMcpToolContext, repository:
     runtimeStorageReady = false;
     runtimeStorageWarnings = [error instanceof Error ? error.message : String(error)];
   }
-  const plugins = listAssistantPluginManifests(ctx.controllerHome, repository);
+  const plugins = listAssistantPluginManifests(ctx.controllerHome, repository, {
+    preferStored: true,
+  });
   const localJobs = listLocalBridgeJobSnapshots(repository.canonicalRoot, 30);
   const executionJobs = listExecutionJobs(ctx.controllerHome, repository.repoId, 30);
   return {
@@ -2200,7 +2202,9 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           timeoutMs: check.timeoutMs,
           source: check.source,
         }));
-        const plugins = listAssistantPluginManifests(ctx.controllerHome, repository).map((plugin) => ({
+        const plugins = listAssistantPluginManifests(ctx.controllerHome, repository, {
+          preferStored: true,
+        }).map((plugin) => ({
           pluginId: plugin.pluginId,
           provider: plugin.provider,
           enabled: plugin.enabled,
@@ -2840,13 +2844,17 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
       }
       case 'list_plugins': {
         const controllerRepository = controllerPluginRepository(ctx.controllerHome);
-        const controllerPlugins = listAssistantPluginManifests(ctx.controllerHome, controllerRepository).map(summarizePlugin);
+        const controllerPlugins = listAssistantPluginManifests(ctx.controllerHome, controllerRepository, {
+          preferStored: true,
+        }).map(summarizePlugin);
         let repositoryPlugins: ReturnType<typeof summarizePlugin>[] = [];
         let repositoryId: string | undefined;
         try {
           const repository = selected(ctx, args);
           repositoryId = repository.repoId;
-          repositoryPlugins = listAssistantPluginManifests(ctx.controllerHome, repository).map(summarizePlugin);
+          repositoryPlugins = listAssistantPluginManifests(ctx.controllerHome, repository, {
+            preferStored: true,
+          }).map(summarizePlugin);
         } catch (error) {
           if (typeof args.repo_id === 'string' && args.repo_id.trim()) throw error;
         }

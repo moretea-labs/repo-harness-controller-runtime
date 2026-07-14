@@ -36,8 +36,20 @@ export interface RepositoryRuntimeProjection {
   };
 }
 
+interface DirtyProjectionReadCacheEntry {
+  dirtyNonce: string;
+  persistedRevision: number | null;
+  value: RepositoryRuntimeProjectionSnapshot;
+}
+
+const dirtyProjectionReadCache = new Map<string, DirtyProjectionReadCacheEntry>();
+
 function projectionPath(controllerHome: string, repoId: string): string {
   return join(repositoryControllerRoot(controllerHome, repoId), 'projections', 'runtime.json');
+}
+
+function dirtyProjectionReadCacheKey(controllerHome: string, repoId: string): string {
+  return `${controllerHome}::${repoId}`;
 }
 
 function buildRepositoryProjection(
@@ -58,7 +70,9 @@ function buildRepositoryProjection(
   const currentAttentionJobs = attentionJobs.filter((job) => !job.finishedAt || activeJobIds.has(job.jobId));
   const campaigns = listCampaigns(controllerHome, repoId, 1_000);
   const repository = listRepositories(controllerHome).find((entry) => entry.repoId === repoId);
-  const plugins = repository ? listAssistantPluginManifests(controllerHome, repository) : [];
+  const plugins = repository ? listAssistantPluginManifests(controllerHome, repository, {
+    preferStored: true,
+  }) : [];
   return {
     schemaVersion: 1,
     repoId,
@@ -97,6 +111,7 @@ function buildRepositoryProjection(
 }
 
 export function rebuildRepositoryProjection(controllerHome: string, repoId: string): RepositoryRuntimeProjection {
+  dirtyProjectionReadCache.delete(dirtyProjectionReadCacheKey(controllerHome, repoId));
   const dirtyMarker = readRepositoryProjectionDirty(controllerHome, repoId);
   const previous = readJsonFile<RepositoryRuntimeProjection | undefined>(projectionPath(controllerHome, repoId), undefined);
   const projection = buildRepositoryProjection(controllerHome, repoId, previous);
@@ -124,7 +139,8 @@ export function readRepositoryProjectionSnapshot(
   controllerHome: string,
   repoId: string,
 ): RepositoryRuntimeProjectionSnapshot {
-  const stale = repositoryProjectionIsDirty(controllerHome, repoId);
+  const dirtyMarker = readRepositoryProjectionDirty(controllerHome, repoId);
+  const stale = Boolean(dirtyMarker);
   let persisted: RepositoryRuntimeProjection | undefined;
   try {
     persisted = readJsonFile<RepositoryRuntimeProjection>(projectionPath(controllerHome, repoId));
@@ -133,17 +149,37 @@ export function readRepositoryProjectionSnapshot(
   }
 
   if (!stale && persisted) {
+    dirtyProjectionReadCache.delete(dirtyProjectionReadCacheKey(controllerHome, repoId));
     return { projection: persisted, stale: false, persisted: true };
   }
 
   // A hot read must remain read-only. When persisted state is dirty (or absent),
   // build a bounded current snapshot in memory without clearing the dirty marker
   // or rewriting the projection file.
-  return {
+  const cacheKey = dirtyProjectionReadCacheKey(controllerHome, repoId);
+  const persistedRevision = persisted?.revision ?? null;
+  const cached = dirtyMarker ? dirtyProjectionReadCache.get(cacheKey) : undefined;
+  if (
+    cached
+    && dirtyMarker
+    && cached.dirtyNonce === dirtyMarker.nonce
+    && cached.persistedRevision === persistedRevision
+  ) {
+    return cached.value;
+  }
+  const value: RepositoryRuntimeProjectionSnapshot = {
     projection: buildRepositoryProjection(controllerHome, repoId, persisted),
     stale,
     persisted: Boolean(persisted),
   };
+  if (dirtyMarker) {
+    dirtyProjectionReadCache.set(cacheKey, {
+      dirtyNonce: dirtyMarker.nonce,
+      persistedRevision,
+      value,
+    });
+  }
+  return value;
 }
 
 export function readRepositoryProjection(controllerHome: string, repoId: string): RepositoryRuntimeProjection {

@@ -5,6 +5,18 @@ import { runProcess } from '../../effects/process-runner';
 import { globMatches, resolveMcpPath } from '../mcp/paths';
 import type { McpPolicy } from '../mcp/types';
 
+const GIT_SNAPSHOT_CACHE_TTL_MS = 1_000;
+
+interface GitSnapshotResult {
+  branch: string | null;
+  head: string | null;
+  status: string;
+  diffStat: string;
+  dirty: boolean;
+}
+
+const gitSnapshotCache = new Map<string, { createdAt: number; value: GitSnapshotResult }>();
+
 const DEFAULT_EXCLUDES = [
   '.git/**',
   'node_modules/**',
@@ -158,19 +170,36 @@ export function readRepositoryRange(repoRoot: string, policy: McpPolicy, path: s
   };
 }
 
-export function gitSnapshot(repoRoot: string): { branch: string | null; head: string | null; status: string; diffStat: string; dirty: boolean } {
-  const branchResult = runProcess('git', ['branch', '--show-current'], { cwd: repoRoot, timeoutMs: 10_000, maxOutputBytes: 32 * 1024 });
-  const headResult = runProcess('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, timeoutMs: 10_000, maxOutputBytes: 32 * 1024 });
+export function clearGitSnapshotCacheForTest(): void {
+  gitSnapshotCache.clear();
+}
+
+export function gitSnapshot(repoRoot: string): GitSnapshotResult {
+  const cached = gitSnapshotCache.get(repoRoot);
+  const now = Date.now();
+  if (cached && now - cached.createdAt <= GIT_SNAPSHOT_CACHE_TTL_MS) return cached.value;
+  const branchResult = runProcess('git', ['branch', '--show-current'], {
+    cwd: repoRoot,
+    timeoutMs: 10_000,
+    maxOutputBytes: 32 * 1024,
+  });
+  const headResult = runProcess('git', ['rev-parse', 'HEAD'], {
+    cwd: repoRoot,
+    timeoutMs: 10_000,
+    maxOutputBytes: 32 * 1024,
+  });
   const statusResult = runProcess('git', ['status', '--short', '--branch'], { cwd: repoRoot, timeoutMs: 10_000, maxOutputBytes: 64 * 1024 });
   const diffResult = runProcess('git', ['diff', '--stat'], { cwd: repoRoot, timeoutMs: 10_000, maxOutputBytes: 64 * 1024 });
   const status = statusResult.ok ? statusResult.stdout.trim() : statusResult.error || statusResult.stderr.trim();
-  return {
+  const value: GitSnapshotResult = {
     branch: branchResult.ok ? branchResult.stdout.trim() || null : null,
     head: headResult.ok ? headResult.stdout.trim() || null : null,
     status,
     diffStat: diffResult.ok ? diffResult.stdout.trim() : diffResult.error || diffResult.stderr.trim(),
     dirty: status.split(/\r?\n/).some((line) => line.trim() && !line.startsWith("##")),
   };
+  gitSnapshotCache.set(repoRoot, { createdAt: now, value });
+  return value;
 }
 
 export function gitDiff(repoRoot: string, path?: string, maxBytes = 128 * 1024): { path?: string; diff: string; truncated: boolean } {

@@ -24,10 +24,8 @@ import { isExpectedLocalControllerHealth } from '../keepalive';
 import { resolveMcpRepoRoot } from '../repo';
 import { buildMcpToolDefinitions } from '../tools';
 import { resolveControllerHome } from '../../repositories/controller-home';
-import { injectDurableCommandFields } from '../../../runtime/gateway/mcp/router';
 import {
   controllerExposureSnapshot,
-  exposedControllerToolDefinitions,
 } from '../toolset';
 import { ensureControllerDaemon, readControllerDaemonStatus } from '../../../runtime/control-plane/daemon-client';
 import { projectionBlocksReadiness, readRepositoryProjectionSnapshot, rebuildRepositoryProjection } from '../../../runtime/projections/materialized-view';
@@ -764,7 +762,6 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   const controllerHealth = () => {
     if (!('controllerHome' in toolContext)) return null;
     const exposure = controllerExposureSnapshot(toolContext);
-    const toolDefinitions = exposedControllerToolDefinitions(toolContext).map(injectDurableCommandFields);
     const fingerprint = controllerToolSurfaceFingerprint(exposure.toolNames);
     return {
       configuredAccessMode: exposure.access.configuredAccessMode,
@@ -774,10 +771,9 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
       accessModeSource: exposure.access.source,
       accessModeLastAppliedAt: exposure.access.lastAppliedAt,
       toolset: exposure.access.effectiveToolset,
-      toolDefinitions,
       toolSurfaceFingerprint: fingerprint,
       runtimeToolSurfaceFingerprint: fingerprint,
-      toolCount: toolDefinitions.length,
+      toolCount: exposure.toolNames.length,
       generation: runtimeGeneration?.generation,
       source: runtimeGeneration?.source,
     };

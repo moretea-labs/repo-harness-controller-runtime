@@ -932,7 +932,9 @@ export function mapPluginCard(manifest: AssistantPluginManifest): PluginCardView
 }
 
 export function listConsolePlugins(ctx: ConsoleFacadeContext): PluginCardViewModel[] {
-  return listAssistantPluginManifests(ctx.controllerHome, ctx.repository).map(mapPluginCard);
+  return listAssistantPluginManifests(ctx.controllerHome, ctx.repository, {
+    preferStored: true,
+  }).map(mapPluginCard);
 }
 
 export function getConsolePlugin(ctx: ConsoleFacadeContext, pluginId: string): PluginCardViewModel | null {

@@ -284,14 +284,10 @@ function queryString(value: unknown): string | undefined {
 }
 
 function controllerStateSignature(repoRoot: string): string {
-  const board = projectBoard(repoRoot);
-  const runs = listAgentJobs(repoRoot, 30);
-  const jobs = listLocalBridgeJobs(repoRoot, 30);
+  const snapshot = cachedLocalControllerSnapshot(repoRoot);
   const latestWorklog = listControllerWorklogEvents(repoRoot, { limit: 1 })[0];
-  const projectState = loadControllerProjectState(repoRoot);
-  const edits = listEditSessions(repoRoot, 30);
   return JSON.stringify({
-    issues: board.issues.map((issue) => ({
+    issues: snapshot.board.issues.map((issue) => ({
       id: issue.id,
       status: issue.status,
       updatedAt: issue.updatedAt,
@@ -300,7 +296,7 @@ function controllerStateSignature(repoRoot: string): string {
         return [value.id, value.status, value.updatedAt, Array.isArray(value.runIds) ? value.runIds.at(-1) : undefined];
       }),
     })),
-    runs: runs.map((run) => [
+    runs: snapshot.runs.map((run) => [
       run.runId,
       run.status,
       run.lastHeartbeatAt,
@@ -308,10 +304,10 @@ function controllerStateSignature(repoRoot: string): string {
       run.integratedAt,
       run.autoIntegrationError,
     ]),
-    jobs: jobs.map((job) => [job.jobId, job.status, job.updatedAt, job.runId]),
+    jobs: snapshot.localJobs.map((job) => [job.jobId, job.status, job.updatedAt, job.runId]),
     worklog: latestWorklog?.id,
-    projectState,
-    edits: edits.map((edit) => [edit.sessionId, edit.status, edit.updatedAt, edit.changedFiles, edit.checksPassed, edit.checksTotal]),
+    projectState: snapshot.projectState,
+    edits: snapshot.editSessions.map((edit) => [edit.sessionId, edit.status, edit.updatedAt, edit.changedFiles, edit.checksPassed, edit.checksTotal]),
   });
 }
 
@@ -359,7 +355,9 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
   const assistantRepository = loadRepositoryRegistry(controllerHome).repositories.find(
     (entry) => entry.canonicalRoot.replace(/\\/g, '/') === normalizedAssistantRoot,
   );
-  const assistantPlugins = (assistantRepository ? listAssistantPluginManifests(controllerHome, assistantRepository) : []).map((plugin) => ({
+  const assistantPlugins = (assistantRepository ? listAssistantPluginManifests(controllerHome, assistantRepository, {
+    preferStored: true,
+  }) : []).map((plugin) => ({
     pluginId: plugin.pluginId,
     provider: plugin.provider,
     displayName: plugin.displayName,

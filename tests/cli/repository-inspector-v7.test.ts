@@ -4,10 +4,11 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { globMatches } from "../../src/cli/mcp/paths";
 import { getMcpPolicy } from "../../src/cli/mcp/policy";
-import { gitSnapshot, readRepositoryRange, searchRepository } from "../../src/cli/repository/inspector";
+import { clearGitSnapshotCacheForTest, gitSnapshot, readRepositoryRange, searchRepository } from "../../src/cli/repository/inspector";
 
 const roots: string[] = [];
 afterEach(() => {
+  clearGitSnapshotCacheForTest();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 

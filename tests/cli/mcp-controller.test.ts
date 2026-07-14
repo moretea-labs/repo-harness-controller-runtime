@@ -21,6 +21,7 @@ import { executeExecutionJob } from "../../src/runtime/execution/workers/executo
 import { getMcpPolicy } from "../../src/cli/mcp/policy";
 import { createMcpToolContext as createMultiRepositoryContext } from "../../src/cli/mcp/multi-repository";
 import { callRepositoryTool } from "../../src/cli/mcp/repository-tools";
+import { repositoryControllerRoot } from "../../src/cli/repositories/controller-home";
 import { registerRepository } from "../../src/cli/repositories/registry";
 import {
   buildMcpToolDefinitions,
@@ -96,6 +97,45 @@ async function withController<T>(
     rmSync(repoRoot, { recursive: true, force: true });
     rmSync(controllerHome, { recursive: true, force: true });
   }
+}
+
+function writeStoredPluginManifest(
+  controllerHome: string,
+  repoId: string,
+  pluginId: string,
+  overrides: Partial<Record<string, unknown>> = {},
+): void {
+  writeJsonAtomic(join(repositoryControllerRoot(controllerHome, repoId), "plugins", "manifests", `${pluginId}.json`), {
+    schemaVersion: 1,
+    manifestVersion: 1,
+    revision: 42,
+    pluginId,
+    provider: `stored-${pluginId}`,
+    displayName: `Stored ${pluginId}`,
+    pluginVersion: "1.0.0-test",
+    authority: {
+      strategy: "derived",
+      duplicateStateAllowed: false,
+      sourceOfTruth: ["test"],
+    },
+    enabled: true,
+    lifecycle: {
+      state: "enabled",
+    },
+    health: {
+      state: "ready",
+      checkedAt: new Date().toISOString(),
+      ready: true,
+      probed: true,
+      errors: [],
+      warnings: [],
+    },
+    permissions: [],
+    capabilities: [],
+    actions: [],
+    updatedAt: new Date().toISOString(),
+    ...overrides,
+  });
 }
 
 test("returns compact default dispatch and verification payloads", async () => {
@@ -929,6 +969,26 @@ describe("MCP controller profile", () => {
       expect(packValue.contextPack.git.branch).toBe("main");
       expect(typeof packValue.contextPack.git.dirty).toBe("boolean");
       expect(packValue.contextPack.files[0].snippets[0].content).toContain("contextPackValue");
+    });
+  });
+
+  test("controller_context hot reads reuse stored plugin manifests", async () => {
+    await withController(async (repoRoot, _ctx) => {
+      const controllerHome = join(repoRoot, ".controller-home");
+      const multi = createMultiRepositoryContext({ repo: repoRoot, profile: "controller", controllerHome });
+      const repository = registerRepository({ path: repoRoot, controllerHome });
+      writeStoredPluginManifest(controllerHome, repository.repoId, "github", {
+        revision: 77,
+        provider: "stored-provider",
+      });
+
+      const context = await callRuntimeTool(multi, "controller_context", { repo_id: repository.repoId });
+      const value = JSON.parse(context!.content[0].text);
+      const plugin = value.plugins.find((entry: { pluginId: string }) => entry.pluginId === "github");
+
+      expect(plugin).toBeTruthy();
+      expect(plugin.provider).toBe("stored-provider");
+      expect(plugin.revision).toBe(77);
     });
   });
 

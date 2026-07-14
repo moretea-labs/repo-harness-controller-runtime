@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { spawnSync } from 'child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { repositoryControllerRoot } from '../../src/cli/repositories/controller-home';
+import { registerRepository } from '../../src/cli/repositories/registry';
 import { RepoActor } from '../../src/runtime/control-plane/repo-actor/actor';
 import { GlobalScheduler } from '../../src/runtime/control-plane/global-scheduler/scheduler';
 import { touchSchedulerWakeSignal, waitForSchedulerWakeSignal } from '../../src/runtime/control-plane/global-scheduler/wake-signal';
@@ -40,6 +43,65 @@ function home(): string {
   homes.push(value);
   return value;
 }
+
+const REPOSITORY_PLUGIN_IDS = [
+  'app_store_connect',
+  'browser',
+  'github',
+  'gmail',
+  'google_calendar',
+  'google_tasks',
+  'ios',
+] as const;
+
+function initGitRepo(repoRoot: string): void {
+  writeFileSync(join(repoRoot, 'package.json'), JSON.stringify({ name: 'projection-fixture' }, null, 2));
+  spawnSync('git', ['init', '-b', 'main'], { cwd: repoRoot, stdio: 'ignore' });
+  spawnSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repoRoot, stdio: 'ignore' });
+  spawnSync('git', ['config', 'user.name', 'Repo Harness Test'], { cwd: repoRoot, stdio: 'ignore' });
+  spawnSync('git', ['add', 'package.json'], { cwd: repoRoot, stdio: 'ignore' });
+  spawnSync('git', ['commit', '-m', 'init'], { cwd: repoRoot, stdio: 'ignore' });
+}
+
+function writeStoredPluginManifest(
+  controllerHome: string,
+  repoId: string,
+  pluginId: string,
+  healthState: 'ready' | 'degraded' | 'error',
+  revision: number,
+): void {
+  writeJsonAtomic(join(repositoryControllerRoot(controllerHome, repoId), 'plugins', 'manifests', `${pluginId}.json`), {
+    schemaVersion: 1,
+    manifestVersion: 1,
+    revision,
+    pluginId,
+    provider: `stored-${pluginId}`,
+    displayName: `Stored ${pluginId}`,
+    pluginVersion: '1.0.0-test',
+    authority: {
+      strategy: 'derived',
+      duplicateStateAllowed: false,
+      sourceOfTruth: ['test'],
+    },
+    enabled: true,
+    lifecycle: {
+      state: healthState === 'error' ? 'error' : 'enabled',
+    },
+    health: {
+      state: healthState,
+      checkedAt: new Date().toISOString(),
+      ready: healthState === 'ready',
+      probed: true,
+      errors: healthState === 'error' ? [`stored-${pluginId}-error`] : [],
+      warnings: healthState === 'degraded' ? [`stored-${pluginId}-warning`] : [],
+    },
+    permissions: [],
+    capabilities: [],
+    actions: [],
+    updatedAt: new Date().toISOString(),
+  });
+}
+
 afterEach(() => {
   while (homes.length) rmSync(homes.pop()!, { recursive: true, force: true });
 });
@@ -123,6 +185,35 @@ describe('target architecture runtime', () => {
     expect(snapshot.projection.activeJobs).toHaveLength(2);
     expect(readFileSync(projectionPath, 'utf-8')).toBe(beforeProjection);
     expect(readFileSync(dirtyPath, 'utf-8')).toBe(beforeDirty);
+  });
+
+  test('rebuilds runtime projections from stored plugin manifests instead of live adapter probes', () => {
+    const controllerHome = home();
+    const repoRoot = home();
+    initGitRepo(repoRoot);
+    const repository = registerRepository({ path: repoRoot, controllerHome });
+    const states: Array<'ready' | 'degraded' | 'error'> = [
+      'ready',
+      'ready',
+      'degraded',
+      'error',
+      'ready',
+      'error',
+      'degraded',
+    ];
+    REPOSITORY_PLUGIN_IDS.forEach((pluginId, index) => {
+      writeStoredPluginManifest(controllerHome, repository.repoId, pluginId, states[index]!, index + 1);
+    });
+
+    const projection = rebuildRepositoryProjection(controllerHome, repository.repoId);
+
+    expect(projection.plugins).toEqual({
+      total: REPOSITORY_PLUGIN_IDS.length,
+      enabled: REPOSITORY_PLUGIN_IDS.length,
+      ready: 3,
+      degraded: 2,
+      error: 2,
+    });
   });
 
   test('keeps terminal attention in history without treating it as current attention', () => {
