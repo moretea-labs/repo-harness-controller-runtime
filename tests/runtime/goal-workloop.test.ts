@@ -10,7 +10,7 @@ import {
   stopGoalWorkloop,
   verifyGoalWorkloop,
 } from '../../src/runtime/control-plane/facade/goal-workloop';
-import { getWorkContract, listWorkContracts, reconcileStaleWorkContracts } from '../../src/runtime/control-plane/facade/work-contract-store';
+import { appendWorkEvidence, getWorkContract, listWorkContracts, reconcileStaleWorkContracts } from '../../src/runtime/control-plane/facade/work-contract-store';
 import { listHandoffItems } from '../../src/runtime/control-plane/facade/handoff-inbox-store';
 
 const roots: string[] = [];
@@ -213,6 +213,28 @@ describe('goal workloop engine', () => {
     expect(finalized.status).toBe('blocked');
     expect((finalized.data as { finalStatus: string }).finalStatus).toBe('waiting_for_review');
     expect(getWorkContract(ctx.workStore, workId)?.status).toBe('waiting_for_review');
+  });
+
+  test('generic delegate evidence without a patch, worker, worktree, or check cannot unlock success', () => {
+    const { ctx } = fixture();
+    const started = startGoalWorkloop(ctx, {
+      objective: 'Delegate investigation without implementation output',
+      modeInput: { scopeClear: true, expectedFiles: 5, expectedChangedLines: 250 },
+    });
+    const workId = (started.data as { work: { workId: string } }).work.workId;
+    appendWorkEvidence(ctx.workStore, workId, {
+      title: 'codex worker evidence',
+      summary: 'Codex produced bounded output but no patch proposal.',
+      detailLevel: 'summary',
+    });
+
+    const continued = continueGoalWorkloop(ctx, { workId });
+    expect(continued.status).toBe('blocked');
+    expect((continued.data as { executionEvidencePresent: boolean }).executionEvidencePresent).toBe(false);
+
+    const finalized = finalizeGoalWorkloop(ctx, { workId });
+    expect(finalized.status).toBe('blocked');
+    expect((finalized.data as { finalStatus: string }).finalStatus).toBe('waiting_for_review');
   });
 
   test('reconciles stale running work only when no execution owner remains', () => {

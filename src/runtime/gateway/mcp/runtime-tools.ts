@@ -1191,6 +1191,7 @@ function summarizeWorkListItem(job: ExecutionJob): Record<string, unknown> {
   return {
     workId: job.jobId,
     requestId: job.requestId,
+    kind: 'execution_job',
     operation: typeof job.payload?.operation === 'string' ? job.payload.operation : job.type,
     status: job.status,
     phase: digest.phase,
@@ -1205,6 +1206,29 @@ function summarizeWorkListItem(job: ExecutionJob): Record<string, unknown> {
     updatedAt: job.updatedAt,
     suggestedNextAction: digest.suggestedNextActions[0],
     detailPointer: { tool: 'work_get', work_id: job.jobId },
+  };
+}
+
+function summarizeWorkContractListItem(contract: NonNullable<ReturnType<typeof getWorkContract>>): Record<string, unknown> {
+  const terminal = ['succeeded', 'failed', 'cancelled'].includes(contract.status);
+  return {
+    workId: contract.workId,
+    kind: 'work_contract',
+    mode: contract.mode,
+    objective: contract.objective,
+    status: contract.status,
+    phase: terminal ? 'completed' : contract.status === 'running' ? 'running' : 'attention',
+    statusLabel: terminal ? '已完成' : contract.status === 'running' ? '运行中' : '待审查',
+    summary: `WorkContract ${contract.status}: ${contract.objective.slice(0, 240)}`,
+    terminal,
+    resumable: !terminal,
+    changedFileCount: 0,
+    evidenceCount: contract.evidenceRefs.length,
+    checkCount: contract.checkRefs.length,
+    createdAt: contract.createdAt,
+    updatedAt: contract.updatedAt,
+    suggestedNextAction: contract.suggestedNextActions[0],
+    detailPointer: { tool: 'work_get', work_id: contract.workId },
   };
 }
 
@@ -1849,7 +1873,29 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
       case 'work_get': {
         const repository = selected(ctx, args);
         let job = resolveWorkJob(ctx, repository.repoId, args);
-        if (!job) return result({ error: { code: 'WORK_NOT_FOUND', message: 'No Work matched this repository and identifier.', errorClass: 'not_found', summary: '未找到对应任务。' } }, true);
+        if (!job) {
+          const workId = typeof args.work_id === 'string' ? args.work_id.trim() : '';
+          const contract = workId
+            ? getWorkContract({ controllerHome: ctx.controllerHome, repoId: repository.repoId }, workId)
+            : undefined;
+          if (contract) {
+            const work = summarizeWorkContractListItem(contract);
+            return result({
+              work,
+              workContract: contract,
+              summary: work.summary,
+              phase: work.phase,
+              statusLabel: work.statusLabel,
+              waited: false,
+              timedOut: false,
+              waitedMs: 0,
+              next: contract.status === 'running'
+                ? 'Continue or verify this WorkContract through rh_work.'
+                : 'Inspect retained evidence and decide whether to continue, finalize, or stop through rh_work.',
+            });
+          }
+          return result({ error: { code: 'WORK_NOT_FOUND', message: 'No Work matched this repository and identifier.', errorClass: 'not_found', summary: '未找到对应任务。' } }, true);
+        }
         let timedOut = false;
         let waitedMs = 0;
         if (args.wait === true) {
@@ -1906,8 +1952,18 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
       }
       case 'work_list': {
         const repository = selected(ctx, args);
-        const jobs = listExecutionJobs(ctx.controllerHome, repository.repoId, typeof args.limit === 'number' ? args.limit : 50);
-        return result({ detailLevel: 'summary', works: jobs.map(summarizeWorkListItem), next: 'Call work_get for bounded details.' });
+        const limit = typeof args.limit === 'number' ? Math.max(1, Math.min(Math.trunc(args.limit), 100)) : 50;
+        const jobs = listExecutionJobs(ctx.controllerHome, repository.repoId, limit).map(summarizeWorkListItem);
+        const contracts = listWorkContracts({
+          controllerHome: ctx.controllerHome,
+          repoId: repository.repoId,
+          status: 'all',
+          limit,
+        }).map(summarizeWorkContractListItem);
+        const works = [...jobs, ...contracts]
+          .sort((left, right) => String(right.updatedAt ?? '').localeCompare(String(left.updatedAt ?? '')))
+          .slice(0, limit);
+        return result({ detailLevel: 'summary', works, next: 'Call work_get for bounded details.' });
       }
       case 'work_cancel': {
         const repository = selected(ctx, args);

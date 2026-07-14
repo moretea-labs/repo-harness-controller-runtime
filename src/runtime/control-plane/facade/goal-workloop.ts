@@ -149,8 +149,7 @@ function hasExecutionEvidence(work: WorkContract): boolean {
   return Boolean(
     work.workerRef
     || work.worktreeRef
-    || work.checkRefs.length > 0
-    || work.evidenceRefs.some((evidence) => evidence.title !== 'work contract created'),
+    || work.checkRefs.length > 0,
   );
 }
 

@@ -464,15 +464,20 @@ export function delegateToCodexCerebellum(
   if (work && ctx.workStore) {
     appendWorkEvidence(ctx.workStore, work.workId, evidence);
     updateWorkContract(ctx.workStore, work.workId, {
-      status: 'running',
+      status: patchProposal.present ? 'running' : 'waiting_for_review',
       suggestedNextActions: suggested,
-      workerRef: `${target}:${randomUUID().slice(0, 8)}`,
+      ...(patchProposal.present ? { workerRef: `${target}:${randomUUID().slice(0, 8)}` } : {}),
+      ...(!patchProposal.present
+        ? { continuationPrompt: `${target} returned bounded evidence but no patch proposal. Request implementation output or continue with direct edits before verification/finalize.` }
+        : {}),
     });
   }
 
   return buildFacadeResult({
-    status: 'ok',
-    summary: `${target} cerebellum returned bounded outputs. ChatGPT/rh_work must review before finalize.`,
+    status: patchProposal.present ? 'ok' : 'blocked',
+    summary: patchProposal.present
+      ? `${target} cerebellum returned bounded outputs. ChatGPT/rh_work must review before finalize.`
+      : `${target} returned no patch proposal; evidence was retained but execution completion was not recorded.`, 
     data: {
       target,
       available: true,

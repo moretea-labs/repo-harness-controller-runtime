@@ -120,6 +120,26 @@ describe('codex cerebellum delegation', () => {
     expect(listHandoffItems(ctx.handoffStore).length).toBe(1);
   });
 
+  test('codex output without a patch remains waiting_for_review and does not create worker ownership', () => {
+    const { ctx, work } = fixture();
+    const result = delegateToCodexCerebellum(ctx, {
+      workId: work.workId,
+      objective: work.objective,
+      codexAvailable: true,
+      workerOutput: {
+        summary: 'Investigation only',
+        evidenceSummary: 'No implementation output was produced',
+      },
+    });
+
+    expect(result.status).toBe('blocked');
+    expect((result.data as { outputs: { patchProposal: { present: boolean } } }).outputs.patchProposal.present).toBe(false);
+    expect(getWorkContract(ctx.workStore, work.workId)).toMatchObject({
+      status: 'waiting_for_review',
+      workerRef: undefined,
+    });
+  });
+
   test('successful codex output lands as evidence and suggested actions without finalize', () => {
     const { ctx, work } = fixture();
     const result = delegateToCodexCerebellum(ctx, {

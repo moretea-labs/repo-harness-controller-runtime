@@ -7,6 +7,7 @@ import { getMcpPolicy } from '../../src/cli/mcp/policy';
 import type { MultiRepositoryMcpToolContext } from '../../src/cli/mcp/multi-repository';
 import { ensureControllerHome } from '../../src/cli/repositories/controller-home';
 import { registerRepository } from '../../src/cli/repositories/registry';
+import { createWorkContract } from '../../src/runtime/control-plane/facade/work-contract-store';
 import { getExecutionJob, listExecutionJobs } from '../../src/runtime/execution/jobs/store';
 import { callRuntimeTool } from '../../src/runtime/gateway/mcp/runtime-tools';
 import { terminateProcessesByCommand, waitForNoProcessesByCommand } from '../runtime/process-hygiene';
@@ -66,6 +67,38 @@ describe('work_submit hardening', () => {
     expect(result?.isError).toBe(true);
     expect(JSON.stringify(result?.structuredContent ?? {})).toContain('INVALID_ARGUMENT');
     expect(listExecutionJobs(controllerHome, repository.repoId, 20)).toHaveLength(0);
+  });
+
+  test('work_get and work_list include resumable WorkContracts as well as Execution Jobs', async () => {
+    const { ctx, repository, controllerHome } = createFixture();
+    const contract = createWorkContract({ controllerHome, repoId: repository.repoId }, {
+      workId: 'work-retained-contract',
+      repoId: repository.repoId,
+      mode: 'goal_workloop',
+      objective: 'Review a retained controller work contract',
+      acceptanceCriteria: [],
+      constraints: { requireHandoffOnAmbiguity: true },
+      allowedPaths: [],
+      forbiddenPaths: [],
+      checks: [],
+      requestedBy: 'chatgpt',
+      status: 'waiting_for_review',
+    });
+
+    const fetched = structured(await callRuntimeTool(ctx, 'work_get', {
+      repo_id: repository.repoId,
+      work_id: contract.workId,
+    }));
+    expect((fetched.work as { kind?: string; workId?: string })).toMatchObject({
+      kind: 'work_contract',
+      workId: contract.workId,
+    });
+
+    const listed = structured(await callRuntimeTool(ctx, 'work_list', {
+      repo_id: repository.repoId,
+      limit: 20,
+    }));
+    expect((listed.works as Array<{ kind?: string; workId?: string }>).some((work) => work.kind === 'work_contract' && work.workId === contract.workId)).toBe(true);
   });
 
   test('submits readonly work without write claims and remains resumable after wait timeout', async () => {
