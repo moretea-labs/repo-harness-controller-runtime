@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { getMcpPolicy } from '../../src/cli/mcp/policy';
@@ -14,9 +14,10 @@ import {
   exposedControllerToolDefinitions,
 } from '../../src/cli/mcp/toolset';
 import type { MultiRepositoryMcpToolContext } from '../../src/cli/mcp/multi-repository';
-import { callRuntimeTool, runtimeToolDefinitions } from '../../src/runtime/gateway/mcp/runtime-tools';
+import { callRuntimeTool, runtimeSourceSnapshotStatus, runtimeToolDefinitions } from '../../src/runtime/gateway/mcp/runtime-tools';
 import { ensureControllerHome } from '../../src/cli/repositories/controller-home';
 import { registerRepository } from '../../src/cli/repositories/registry';
+import { collectRuntimeSourceIdentity } from '../../src/runtime/control-plane/runtime-generation';
 
 const roots: string[] = [];
 
@@ -97,6 +98,24 @@ describe('facade MCP surface wiring', () => {
       expect(def?.inputSchema).toBeTruthy();
       expect((def?.inputSchema as { properties?: Record<string, unknown> }).properties?.operation).toBeTruthy();
     }
+  });
+
+  test('runtime source snapshot ignores workflow artifacts but detects runtime code edits', () => {
+    const { repoRoot } = controllerFixture();
+    const active = collectRuntimeSourceIdentity(repoRoot);
+
+    mkdirSync(join(repoRoot, 'tasks', 'issues'), { recursive: true });
+    writeFileSync(join(repoRoot, 'tasks', 'issues', 'ISS-pending.issue.md'), '# pending\n');
+    const workflowOnly = runtimeSourceSnapshotStatus(active, repoRoot);
+    expect(workflowOnly.restartRequired).toBe(false);
+    expect(workflowOnly.current.dirty).toBe(false);
+
+    mkdirSync(join(repoRoot, 'src'), { recursive: true });
+    writeFileSync(join(repoRoot, 'src', 'runtime-change.ts'), 'export const changed = true;\n');
+    const runtimeChanged = runtimeSourceSnapshotStatus(active, repoRoot);
+    expect(runtimeChanged.restartRequired).toBe(true);
+    expect(runtimeChanged.current.dirty).toBe(true);
+    expect(runtimeChanged.reasons).toContain('runtime source files changed after startup');
   });
 
   test('rh_status returns FacadeResult', async () => {

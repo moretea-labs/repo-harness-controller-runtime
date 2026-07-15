@@ -70,8 +70,8 @@ requireText('src/runtime/gateway/mcp/runtime-tools.ts', "case 'controller_contex
 requireText('src/runtime/gateway/mcp/runtime-tools.ts', "case 'local_bridge_status'");
 requireText('src/cli/local-bridge/job-store.ts', 'listLocalBridgeJobSnapshots');
 requireText('src/runtime/execution/workers/executor.ts', 'writeControllerContextProjection');
-forbid('src/runtime/gateway/mcp/router.ts', /const DIRECT_HOT_READ_TOOLS = new Set\([\s\S]*?["']controller_context["'][\s\S]*?\);/, 'controller_context must use a materialized projection or Durable Job, never the legacy Gateway path');
-forbid('src/runtime/gateway/mcp/router.ts', /const DIRECT_HOT_READ_TOOLS = new Set\([\s\S]*?(?:local_bridge_status|get_local_job|get_local_job_output)[\s\S]*?\);/, 'Local Bridge observations must use bounded snapshots, never reconciliation in the Gateway');
+forbid('src/runtime/gateway/mcp/router.ts', /const DIRECT_HOT_READ_TOOLS = new Set\([\s\S]*?['"]controller_context['"][\s\S]*?\);/, 'controller_context must use a materialized projection or Durable Job, never the legacy Gateway path');
+forbid('src/runtime/gateway/mcp/router.ts', /const DIRECT_HOT_READ_TOOLS = new Set\([\s\S]*?['"](?:local_bridge_status|get_local_job|get_local_job_output)['"][\s\S]*?\);/, 'Local Bridge observations must use bounded snapshots, never reconciliation in the Gateway');
 requireText('src/runtime/execution/jobs/types.ts', 'requestId: string');
 requireText('src/runtime/execution/jobs/types.ts', 'semanticKey: string');
 requireText('src/runtime/execution/jobs/store.ts', "'active.json'");

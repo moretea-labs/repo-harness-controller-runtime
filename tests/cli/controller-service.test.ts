@@ -190,7 +190,7 @@ describe("controller service lifecycle", () => {
     expect(logs.stdout).toContain("[repo-harness mcp keepalive] Repo:");
 
     const restart = runCli(controllerHome, ["restart", "--repo", repoRoot, "--json"], { useScript: true });
-    expect(restart.status).toBe(0);
+    expect(restart.status, restart.stderr || restart.stdout).toBe(0);
     const restarted = parseJsonPrefix<{ action: string; status: { running: boolean } }>(restart.stdout);
     expect(restarted.action).toBe("restarted");
     expect(restarted.status.running).toBe(true);

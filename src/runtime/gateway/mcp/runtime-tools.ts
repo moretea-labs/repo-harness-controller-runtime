@@ -14,6 +14,7 @@ import { readExecutionArtifact } from '../../evidence/artifact-store';
 import { readExecutionEvidence } from '../../evidence/evidence-store';
 import { ensureControllerDaemon, readControllerDaemonStatus } from '../../control-plane/daemon-client';
 import { readSchedulerHealthSnapshot } from '../../control-plane/global-scheduler/scheduler';
+import { collectRuntimeSourceIdentity, evaluateRuntimeSourceDrift, type RuntimeSourceIdentity } from '../../control-plane/runtime-generation';
 import { rebuildRepositoryProjection, readRepositoryProjectionSnapshot } from '../../projections/materialized-view';
 import { applyScheduleDedupe, buildScheduleDedupeReport, createSchedule, getSchedule, getScheduleDecision, listOccurrences, listSchedules, saveSchedule } from '../../workflow/schedules/store';
 import { evaluateSchedule } from '../../workflow/schedules/engine';
@@ -34,6 +35,7 @@ import {
 } from '../../workflow/campaigns/normalize';
 import { ensureRepositoryRuntimeStorage } from '../../../cli/repositories/runtime-storage';
 import { assessWorkMode } from '../../../cli/controller/work-mode';
+import { scheduleControllerServiceRestart } from '../../../cli/controller/restart-coordinator';
 import { projectBoard } from '../../../cli/controller/issue-store';
 import {
   buildControllerTaskLedgerProjection,
@@ -1365,6 +1367,27 @@ function runFacadeRepair(
       },
     },
   );
+  if (
+    args.repair_operation === 'repair'
+    && args.dry_run === false
+    && args.approval_confirmed === true
+    && args.process_kill_or_restart === true
+  ) {
+    const restart = scheduleControllerServiceRestart({
+      repo: repository.canonicalRoot,
+      controllerHome: ctx.controllerHome,
+      requestId: typeof args.request_id === 'string' ? args.request_id : undefined,
+      requestedBy: 'rh_status.repair',
+      reason: 'Authorized self-healing repair requested a full Controller stack restart',
+      mode: 'detached',
+    });
+    return result({
+      ...(facade as unknown as Record<string, unknown>),
+      status: 'applied',
+      summary: 'Authorized repair scheduled a durable out-of-band Controller stack restart.',
+      restart,
+    });
+  }
   return result(facade as unknown as Record<string, unknown>, facade.status === 'blocked' || facade.status === 'approval_required' || facade.status === 'failed');
 }
 
@@ -1539,6 +1562,12 @@ function runFacadeVerify(
   }
 }
 
+export function runtimeSourceSnapshotStatus(active: RuntimeSourceIdentity | undefined, repoRoot: string) {
+  const current = collectRuntimeSourceIdentity(repoRoot);
+  const drift = evaluateRuntimeSourceDrift(active, current);
+  return { current, ...drift };
+}
+
 export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: string, args: Record<string, unknown>): Promise<CallToolResult | undefined> {
   try {
     switch (name) {
@@ -1554,10 +1583,8 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         }
         const readiness = controllerReadiness(ctx, repository);
         const liveGit = gitSnapshot(repository.canonicalRoot);
-        const sourceSnapshotStale = !readiness.daemon.source
-          || readiness.daemon.source.branch !== liveGit.branch
-          || readiness.daemon.source.commit !== liveGit.head
-          || readiness.daemon.source.dirty !== liveGit.dirty;
+        const runtimeSource = runtimeSourceSnapshotStatus(readiness.daemon.source, repository.canonicalRoot);
+        const sourceSnapshotStale = runtimeSource.restartRequired;
         // Dynamic import avoids a static cycle: toolset.ts composes runtimeToolDefinitions.
         const exposure = (await import('../../../cli/mcp/toolset')).controllerExposureSnapshot(ctx);
         const toolSurfaceReady = exposure.ready && exposure.missingToolNames.length === 0;
@@ -1572,7 +1599,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         if (sourceSnapshotStale) {
           readinessReasons.push({
             code: 'RUNTIME_SOURCE_SNAPSHOT_STALE',
-            message: `Controller runtime source does not match live checkout HEAD ${liveGit.head}; restart is required before mutating work.`,
+            message: `Controller runtime source changed: ${runtimeSource.reasons.join('; ')}. Restart is required before mutating work.`,
           });
         }
         const readinessWithToolSurface = {
@@ -1615,6 +1642,8 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
                 ? Math.max(0, Date.now() - Date.parse(readiness.daemon.source.observedAt))
                 : undefined,
               sourceSnapshotStale,
+              sourceSnapshotReasons: runtimeSource.reasons,
+              runtimeSourceDirty: runtimeSource.current.dirty,
             },
             capabilityCount: capabilities.length,
             capabilityGroups: summarizeCapabilityGroups(manifests),
@@ -2837,15 +2866,23 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             affectedPaths = ['.ai/harness/local-jobs', '.ai/harness/controller'];
             break;
           }
-          case 'recovery.restart_controller': {
-            const daemon = ensureControllerDaemon(ctx.controllerHome);
-            payload = { daemon, note: 'ensureControllerDaemon starts or verifies the bounded repo-harness daemon; it does not kill unrelated processes.' };
-            affectedPaths = ['_ops/controller-home/daemon'];
+          case 'recovery.restart_controller':
+          case 'recovery.restart_local_bridge': {
+            const restart = scheduleControllerServiceRestart({
+              repo: repository.canonicalRoot,
+              controllerHome: ctx.controllerHome,
+              requestId: typeof args.request_id === 'string' ? args.request_id : undefined,
+              requestedBy: 'capability_recovery_apply',
+              reason,
+              mode: 'detached',
+            });
+            payload = {
+              restart,
+              note: 'The detached coordinator owns the full Controller stack restart. The current request returns before Gateway or Local Bridge shutdown.',
+            };
+            affectedPaths = ['_ops/controller-home/restart'];
             break;
           }
-          case 'recovery.restart_local_bridge':
-            payload = { skipped: true, reason: 'Local bridge restart must be performed by the owning supervisor process or CLI to avoid killing the current HTTP request mid-response.' };
-            break;
           case 'recovery.create_patch_handoff':
             payload = prepareFallbackHandoffArtifacts(repository, { reason }) as unknown as Record<string, unknown>;
             affectedPaths = ['.ai/handoff'];

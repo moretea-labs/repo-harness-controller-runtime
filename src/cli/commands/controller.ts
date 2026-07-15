@@ -19,10 +19,10 @@ import {
   controllerServiceLogs,
   controllerServiceStatus,
   formatControllerServiceStatus,
-  restartControllerService,
   startControllerService,
   stopControllerService,
 } from '../controller/lifecycle';
+import { formatControllerRestartScheduled, requestControllerServiceRestart } from '../controller/restart-coordinator';
 import { dispatchLocalBridgeJob,
   executeLocalBridgeJob, loadLocalBridgeConfig, submitLocalBridgeJob } from '../local-bridge/job-store';
 import { startLocalBridgeServer } from '../local-bridge/server';
@@ -693,10 +693,28 @@ export function buildControllerCommand(): Command {
     .option('--repo <path>', 'Repository root')
     .option('--controller-home <path>', 'Controller state root; defaults to repo _ops/controller-home when present')
     .option('--log-file <path>', 'Combined supervisor log file')
+    .option('--request-id <id>', 'Idempotent restart request id')
+    .option('--reason <text>', 'Bounded restart reason')
+    .option('--detached', 'Always hand the restart to the out-of-band coordinator')
     .option('--json', 'Output JSON')
-    .action(async (opts: { repo?: string; controllerHome?: string; logFile?: string; json?: boolean }) => {
-      const result = await restartControllerService({ repo: opts.repo, controllerHome: opts.controllerHome, logFile: opts.logFile });
-      output(opts.json ? result : formatControllerServiceStatus(result.status), opts.json === true);
+    .action(async (opts: { repo?: string; controllerHome?: string; logFile?: string; requestId?: string; reason?: string; detached?: boolean; json?: boolean }) => {
+      const result = await requestControllerServiceRestart({
+        repo: opts.repo,
+        controllerHome: opts.controllerHome,
+        logFile: opts.logFile,
+        requestId: opts.requestId,
+        reason: opts.reason,
+        requestedBy: 'controller-service-cli',
+        mode: opts.detached ? 'detached' : 'auto',
+      });
+      output(
+        opts.json
+          ? result
+          : result.action === 'restart_scheduled'
+            ? formatControllerRestartScheduled(result)
+            : formatControllerServiceStatus(result.status),
+        opts.json === true,
+      );
     });
 
   service.command('logs')

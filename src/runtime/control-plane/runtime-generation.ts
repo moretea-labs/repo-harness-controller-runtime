@@ -166,6 +166,8 @@ export function evaluateRuntimeSourceDrift(
   }
   if (active.dirty) {
     reasons.push('runtime was started from a dirty source checkout');
+  } else if (current.dirty) {
+    reasons.push('runtime source files changed after startup');
   }
   return {
     restartRequired: reasons.length > 0,

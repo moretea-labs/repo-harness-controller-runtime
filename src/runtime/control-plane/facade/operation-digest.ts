@@ -1,5 +1,11 @@
 import type { ExecutionJob, ExecutionJobStatus } from '../../execution/jobs/types';
 import { TERMINAL_JOB_STATUSES } from '../../execution/jobs/types';
+import {
+  childReferenceFromJob,
+  hasDurableChildReference,
+  isAgentDelegationOperation,
+  type ExecutionChildReference,
+} from '../../execution/jobs/child-reference';
 import type { SuggestedNextAction } from './types';
 
 export type UserFacingErrorClass =
@@ -46,6 +52,11 @@ export interface OperationDigest {
   errorMessage?: string;
   suggestedNextActions: SuggestedNextAction[];
   rawAvailable: false;
+  /** Present when the parent Job only accepted an Agent Run and is not the authority for run progress. */
+  childReference?: ExecutionChildReference;
+  childRunStatus?: string;
+  childLocalJobStatus?: string;
+  delegationAccepted?: boolean;
 }
 
 function bound(text: string, max = 400): string {
@@ -260,6 +271,45 @@ function readableErrorMessage(job: ExecutionJob): string | undefined {
   return undefined;
 }
 
+function childStatusFromResult(job: ExecutionJob): {
+  childReference?: ExecutionChildReference;
+  childRunStatus?: string;
+  childLocalJobStatus?: string;
+  delegationAccepted?: boolean;
+} {
+  const childReference = childReferenceFromJob(job);
+  const result = job.result && typeof job.result === 'object' ? job.result as Record<string, unknown> : {};
+  const localJob = result.localJob && typeof result.localJob === 'object'
+    ? result.localJob as Record<string, unknown>
+    : result.job && typeof result.job === 'object'
+      ? result.job as Record<string, unknown>
+      : undefined;
+  const childRunStatus = typeof result.childRunStatus === 'string'
+    ? result.childRunStatus
+    : typeof result.runStatus === 'string'
+      ? result.runStatus
+      : undefined;
+  const childLocalJobStatus = typeof result.childLocalJobStatus === 'string'
+    ? result.childLocalJobStatus
+    : typeof localJob?.status === 'string'
+      ? localJob.status
+      : typeof result.status === 'string' && result.delegated === true
+        ? result.status
+        : undefined;
+  const delegationAccepted = result.delegationAccepted === true
+    || result.delegated === true
+    || (TERMINAL_JOB_STATUSES.has(job.status)
+      && job.status === 'succeeded'
+      && hasDurableChildReference(childReference)
+      && isAgentDelegationOperation(job.payload.operation));
+  return {
+    ...(childReference ? { childReference } : {}),
+    ...(childRunStatus ? { childRunStatus } : {}),
+    ...(childLocalJobStatus ? { childLocalJobStatus } : {}),
+    ...(delegationAccepted ? { delegationAccepted: true } : {}),
+  };
+}
+
 export function buildJobOperationDigest(job: ExecutionJob, options: {
   waited?: boolean;
   stillRunning?: boolean;
@@ -281,9 +331,16 @@ export function buildJobOperationDigest(job: ExecutionJob, options: {
         || Boolean(job.outcome?.acceptanceFailure),
     })
     : undefined;
+  const child = childStatusFromResult(job);
 
   let summary: string;
-  if (phase === 'succeeded') {
+  if (child.delegationAccepted && phase === 'succeeded') {
+    const runLabel = child.childRunStatus ? `，子 Run 状态 ${child.childRunStatus}` : '';
+    const localLabel = !child.childRunStatus && child.childLocalJobStatus
+      ? `，Local Job 状态 ${child.childLocalJobStatus}`
+      : '';
+    summary = `已接受 ${operation} 委派${runLabel}${localLabel}。父 Job 完成不代表 Task 验收通过。`;
+  } else if (phase === 'succeeded') {
     const files = extractChangedFiles(job);
     summary = files.length
       ? `已完成 ${operation}，涉及 ${files.length} 个文件。`
@@ -308,7 +365,10 @@ export function buildJobOperationDigest(job: ExecutionJob, options: {
     // to decide whether execution/verification succeeded.
     accepted: true,
     requestAccepted: true,
-    resultAccepted: terminal ? phase === 'succeeded' : null,
+    // Delegation-accepted parent success is not Task/Run result success.
+    resultAccepted: terminal
+      ? (child.delegationAccepted ? false : phase === 'succeeded')
+      : null,
     operation,
     workId: job.jobId,
     jobId: job.jobId,
@@ -319,6 +379,7 @@ export function buildJobOperationDigest(job: ExecutionJob, options: {
     errorMessage,
     suggestedNextActions: defaultNextActions(phase, job.jobId, errorClass),
     rawAvailable: false,
+    ...child,
   };
 }
 

@@ -1,6 +1,6 @@
 import { randomBytes } from 'crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
-import { join } from 'path';
+import { join, sep } from 'path';
 import type {
   ControllerAgent,
   ControllerIssue,
@@ -68,11 +68,19 @@ function issueFiles(repoRoot: string, includeEphemeral = false): Array<{ root: s
 }
 
 function issuePath(repoRoot: string, issue: Pick<ControllerIssue, 'id' | 'slug' | 'ephemeral'>): string {
-  return join(repoRoot, issueRoot(issue), `${issue.id}-${issue.slug}.issue.json`);
+  const absolute = join(repoRoot, issueRoot(issue), `${issue.id}-${issue.slug}.issue.json`);
+  if (issue.ephemeral && absolute.includes(`${sep}tasks${sep}issues${sep}`)) {
+    throw new Error(`EPHEMERAL_ISSUE_PATH_INVALID: refused durable path for ephemeral Issue ${issue.id}`);
+  }
+  return absolute;
 }
 
 function markdownPath(repoRoot: string, issue: Pick<ControllerIssue, 'id' | 'slug' | 'ephemeral'>): string {
-  return join(repoRoot, issueRoot(issue), `${issue.id}-${issue.slug}.issue.md`);
+  const absolute = join(repoRoot, issueRoot(issue), `${issue.id}-${issue.slug}.issue.md`);
+  if (issue.ephemeral && absolute.includes(`${sep}tasks${sep}issues${sep}`)) {
+    throw new Error(`EPHEMERAL_ISSUE_PATH_INVALID: refused durable path for ephemeral Issue ${issue.id}`);
+  }
+  return absolute;
 }
 
 function renderGitHubLink(link?: GitHubIssueLink): string[] {

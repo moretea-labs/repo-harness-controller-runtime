@@ -443,6 +443,22 @@ function findExistingLaunchJob(
   );
 }
 
+function findExistingQuickSessionJob(
+  repoRoot: string,
+  payload: QuickAgentSessionPayload,
+): LocalBridgeJob | undefined {
+  const jobs = readStoredJobs(repoRoot, 500);
+  const requestId = payload.requestId?.trim();
+  if (requestId) {
+    return jobs.find((entry) =>
+      entry.action === "quick-agent-session" &&
+      typeof (entry.payload as QuickAgentSessionPayload).requestId === "string" &&
+      (entry.payload as QuickAgentSessionPayload).requestId === requestId,
+    );
+  }
+  return undefined;
+}
+
 function findExistingRunCheckJob(
   repoRoot: string,
   payload: RunCheckPayload,
@@ -574,6 +590,10 @@ export function submitLocalBridgeJob(
   }
   if (request.action === "launch-task") {
     const existing = findExistingLaunchJob(repoRoot, request.payload as LaunchTaskPayload);
+    if (existing) return refreshLocalBridgeJob(repoRoot, existing);
+  }
+  if (request.action === "quick-agent-session") {
+    const existing = findExistingQuickSessionJob(repoRoot, request.payload as QuickAgentSessionPayload);
     if (existing) return refreshLocalBridgeJob(repoRoot, existing);
   }
   if (request.action === "verify-edit-session") {
@@ -1307,6 +1327,15 @@ function executeLaunchTask(
     runId: accepted.runId,
     provider: run.provider,
     status: accepted.status,
+    delegated: true,
+    childReference: {
+      localJobId: job.jobId,
+      runId: accepted.runId,
+      issueId: payload.issueId,
+      taskId: payload.taskId,
+      requestId: payload.requestId,
+      delegatedAt: now(),
+    },
   };
   appendEvent(repoRoot, job.jobId, {
     type: "job_dispatched",
@@ -1324,12 +1353,15 @@ function executeQuickSession(
   const objective = payload.objective?.trim();
   if (!title || !objective)
     throw new Error("quick-agent-session requires title and objective");
+  // Default ephemeral. Explicit durable (ephemeral=false) keeps tasks/issues files.
+  const ephemeral = payload.ephemeral !== false;
+  job.ephemeral = ephemeral;
   const acceptance = normalizeStringList(payload.acceptanceCriteria);
   const issue = createIssue(repoRoot, {
     title,
     kind: "investigation",
     allowWhileFocused: true,
-    ephemeral: payload.ephemeral !== false,
+    ephemeral,
     ephemeralOwnerJobId: job.jobId,
     summary: payload.summary?.trim() || objective,
     goals: [objective],
@@ -1354,8 +1386,14 @@ function executeQuickSession(
       },
     ],
   });
+  if (ephemeral && !issue.ephemeral) {
+    throw new Error("EPHEMERAL_ISSUE_PATH_INVALID: quick-agent-session ephemeral metadata must not use durable tasks/issues");
+  }
   const task = issue.tasks[0];
   if (!task) throw new Error("quick session issue was created without a Task");
+  // Prefer the parent Execution Job requestId so Agent Run idempotency aligns
+  // with the durable control plane; fall back to the Local Job payload key.
+  const requestId = payload.requestId?.trim() || job.jobId;
   const accepted = acceptTaskJob({
     repoRoot,
     issueId: issue.id,
@@ -1364,7 +1402,7 @@ function executeQuickSession(
     executorPolicy: localExecutorPolicy(repoRoot),
     timeoutMs: resolvedJobTimeout(repoRoot, payload.timeoutMs),
     isolate: resolvedIsolation(payload),
-    requestId: payload.requestId,
+    requestId,
     approveDestructive: payload.approveDestructive === true,
   });
   dispatchAcceptedTaskJob(repoRoot, accepted.runId);
@@ -1380,6 +1418,15 @@ function executeQuickSession(
     runId: accepted.runId,
     provider: run.provider,
     status: accepted.status,
+    delegated: true,
+    childReference: {
+      localJobId: job.jobId,
+      runId: accepted.runId,
+      issueId: issue.id,
+      taskId: task.id,
+      requestId,
+      delegatedAt: now(),
+    },
   };
   appendEvent(repoRoot, job.jobId, {
     type: "job_dispatched",

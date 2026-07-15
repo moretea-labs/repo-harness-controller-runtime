@@ -9,8 +9,13 @@ import { commandValue, normalizeRepositoryCommand } from '../../../cli/repositor
 
 const LEGACY_SETTLEMENT_GRACE_MS = 30_000;
 const MAX_DURABLE_EXECUTION_TIMEOUT_MS = 24 * 60 * 60_000;
+/** Parent Agent-delegation Jobs only accept the child Run; keep the parent deadline short. */
+const AGENT_DELEGATION_PARENT_TIMEOUT_MS = 120_000;
 
 export function legacySettlementTimeoutMs(job: LocalBridgeJob): number {
+  if (job.action === 'launch-task' || job.action === 'quick-agent-session') {
+    return AGENT_DELEGATION_PARENT_TIMEOUT_MS;
+  }
   const payload = job.payload as { timeoutMs?: unknown };
   const requested = typeof payload.timeoutMs === 'number' && Number.isFinite(payload.timeoutMs)
     ? Math.max(1_000, Math.min(payload.timeoutMs, MAX_AGENT_TIMEOUT_MS))
@@ -29,6 +34,10 @@ function claims(job: LocalBridgeJob, repoId: string, checkoutId: string): Resour
     { resourceKey: `workspace:${checkoutId}`, mode: 'write' },
     { resourceKey: `git-refs:${repoId}`, mode: 'exclusive' },
   ];
+  // Parent only creates/accepts the Agent Run; workspace write ownership belongs to the child Run.
+  if (job.action === 'launch-task' || job.action === 'quick-agent-session') {
+    return [{ resourceKey: `agent-dispatch:${repoId}:${job.jobId}`, mode: 'write' }];
+  }
   return [{ resourceKey: `workspace:${checkoutId}`, mode: 'write' }];
 }
 
@@ -40,6 +49,7 @@ export function dispatchLegacyLocalJob(repoRoot: string, legacyJob: LocalBridgeJ
       : undefined,
   );
   const repository = registerRepository({ path: repoRoot, controllerHome });
+  const agentDelegation = legacyJob.action === 'launch-task' || legacyJob.action === 'quick-agent-session';
   const created = createExecutionJob(controllerHome, {
     repoId: repository.repoId,
     checkoutId: repository.activeCheckoutId,
@@ -49,7 +59,9 @@ export function dispatchLegacyLocalJob(repoRoot: string, legacyJob: LocalBridgeJ
         ? 'verify-edit'
         : legacyJob.action === 'repository-command'
           ? 'repository-command'
-          : 'dispatch-task',
+          : legacyJob.action === 'quick-agent-session'
+            ? 'agent-run'
+            : 'dispatch-task',
     requestId: requestId(legacyJob),
     semanticKey: `legacy-local-job:${repository.repoId}:${legacyJob.jobId}`,
     priority: legacyJob.action === 'run-check' || legacyJob.action === 'verify-edit-session' ? 'P0' : 'P1',
@@ -62,12 +74,13 @@ export function dispatchLegacyLocalJob(repoRoot: string, legacyJob: LocalBridgeJ
         ...(legacyJob.action === 'repository-command'
           ? { command: commandValue(normalizeRepositoryCommand((legacyJob.payload as { command: string | string[] }).command)) }
           : {}),
+        ...(agentDelegation ? { agentDelegation: true, localAction: legacyJob.action } : {}),
       },
       timeoutMs: settlementTimeoutMs,
     },
     resourceClaims: claims(legacyJob, repository.repoId, repository.activeCheckoutId),
     timeoutMs: settlementTimeoutMs,
-    maxAttempts: 2,
+    maxAttempts: agentDelegation ? 3 : 2,
   });
   const daemon = ensureControllerDaemon(controllerHome);
   return { controllerHome, repository, executionJob: created.job, deduplicated: created.deduplicated, daemon };

@@ -122,8 +122,11 @@ export function claimsForMcpOperation(name: string, args: Record<string, unknown
   if (REMOTE_TOOLS.has(name)) return [{ resourceKey: `remote:${repoId}`, mode: 'exclusive' }];
   if (AGENT_TOOLS.has(name)) {
     if (args.agent === 'github-copilot') return [{ resourceKey: `remote:${repoId}`, mode: 'exclusive' }];
-    if (args.isolate === true) return [{ resourceKey: `worktree:${isolatedWorktreeKey(args)}`, mode: 'write' }];
-    return [{ resourceKey: `workspace:${checkoutId ?? 'active'}`, mode: 'write' }];
+    // Parent Execution Job only accepts the child Agent Run. Workspace/worktree
+    // write ownership belongs to the child Run, not the short-lived parent Job.
+    const requestId = typeof args.request_id === 'string' ? args.request_id.trim() : '';
+    const dispatchKey = isolatedWorktreeKey(args) || requestId || name;
+    return [{ resourceKey: `agent-dispatch:${repoId}:${dispatchKey}`, mode: 'write' }];
   }
   if (WORKSPACE_WRITE_TOOLS.has(name)) {
     const paths = operationPaths(args);
