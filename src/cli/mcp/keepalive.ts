@@ -306,18 +306,17 @@ async function stopChild(child: ChildProcess | undefined, label: string): Promis
 
 export function resolveSelfCliInvocation(): { command: string; args: string[] } {
   const scriptPath = process.argv[1];
-  // When lifecycle APIs are invoked under `bun test`, argv[1] is the test file.
-  // Keepalive must still spawn the real CLI entrypoint, not the test harness.
-  const looksLikeTestEntrypoint = !scriptPath
-    || /(?:^|\/)tests?\//.test(scriptPath.replace(/\\/g, '/'))
-    || /\.test\.[cm]?[jt]sx?$/.test(scriptPath)
-    || scriptPath.includes('bun:test');
-  if (looksLikeTestEntrypoint) {
+  const normalized = scriptPath?.replace(/\\/g, '/') ?? '';
+  // Lifecycle APIs may be invoked from bun test, smoke scripts, or other hosts.
+  // Keepalive must spawn the real CLI entrypoint, not the caller's script path.
+  const looksLikeCliEntrypoint = /(?:^|\/)src\/cli\/index\.[cm]?[jt]sx?$/.test(normalized)
+    || /(?:^|\/)(?:bin\/)?repo-harness(?:-local)?(?:\.ts|\.js)?$/.test(normalized)
+    || normalized.endsWith('/cli/index.ts');
+  if (!scriptPath || !looksLikeCliEntrypoint) {
     const packageCli = resolve(packageRuntimeSourceRootFromKeepalive(), 'src', 'cli', 'index.ts');
     accessSync(packageCli, constants.R_OK);
     return { command: process.execPath, args: [packageCli] };
   }
-  if (!scriptPath) throw new Error('cannot resolve repo-harness CLI entrypoint for keepalive');
   const resolvedPath = resolve(scriptPath);
   accessSync(resolvedPath, constants.R_OK);
   return { command: process.execPath, args: [resolvedPath] };

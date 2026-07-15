@@ -108,15 +108,24 @@ export async function verifySlotHealth(
   }
   const toolFingerprint = status.mcpRuntime?.server.toolSurfaceFingerprint
     ?? status.mcpRuntime?.server.runtimeToolSurfaceFingerprint;
-  // Only fail on true worker/daemon orphans. "unknown" listeners that share a repo
-  // root but not this slot home are warnings during multi-slot operation.
+  // Only fail on true worker/daemon orphans for THIS slot. Sibling-slot supervisors,
+  // tunnels, and generic "unknown" processes that merely share a repo path are noise
+  // during blue/green operation and must not block cutover.
   const workerOrphans = status.orphanedProcesses.filter((entry) => {
     if (entry.pid === status.supervisor.pid) return false;
     if (entry.kind === 'controller-daemon' && entry.pid === status.daemon.pid) return false;
-    if (entry.kind === 'mcp-keepalive' || entry.kind === 'mcp-serve' || entry.kind === 'local-controller') {
-      return entry.pid !== status.supervisor.pid;
+    if (entry.kind === 'tunnel-supervisor' || entry.kind === 'tunnel-worker' || entry.kind === 'tunnel-client') {
+      return false;
     }
-    return /worker|agent-job|execution-job|daemon-entry/i.test(entry.command);
+    if (entry.kind === 'unknown') {
+      return /(?:^|[\s/])(?:worker|agent-job|execution-job|daemon-entry)(?:[\s.]|$)/i.test(entry.command);
+    }
+    // Managed kinds outside the tracked supervisor for this slot home.
+    return entry.kind === 'mcp-keepalive'
+      || entry.kind === 'mcp-serve'
+      || entry.kind === 'local-controller'
+      || entry.kind === 'supervisor'
+      || entry.kind === 'controller-daemon';
   });
   if (workerOrphans.length > 0) {
     failures.push(`orphan workers: ${workerOrphans.map((p) => `${p.kind}:${p.pid}`).join(',')}`);
