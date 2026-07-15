@@ -3136,15 +3136,11 @@ export async function callMcpTool(
             suggestedActions: connectorFreshness.suggestedActions,
           },
           docs: [
-            "docs/repo-harness-chatgpt-controller.md",
+            "docs/architecture/current/README.md",
+            "docs/architecture/history.md",
+            "docs/operations/controller-reliability-runbook.md",
             "docs/repo-harness-github-issue-launcher.md",
             "docs/repo-harness-chatgpt-mcp-setup.md",
-            "docs/repo-harness-local-execution-bridge.md",
-            "docs/repo-harness-execution-closure-v5.md",
-            "docs/repo-harness-direct-change-v6.md",
-            "docs/repo-harness-execution-first-v7.md",
-            "docs/repo-harness-chatgpt-bridge-v8.md",
-            "docs/repo-harness-v8-verification.md",
           ],
           staleConnectorHint: staleConnector
             ? `Stale ChatGPT connector tool snapshot is missing facade tools: ${missingFacadeTools.join(", ")}. Refresh/reconnect MCP so tools/list reloads rh_status, rh_inbox, rh_context, and rh_work.`

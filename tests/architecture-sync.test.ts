@@ -25,15 +25,7 @@ const REQUIRED_CURRENT_DOCS = [
   "operations-runbook.md",
 ];
 
-const HISTORICAL_RUNTIME_DOCS = [
-  "repo-harness-chatgpt-controller.md",
-  "repo-harness-local-execution-bridge.md",
-  "architecture/history/repo-harness-execution-closure-v5.md",
-  "architecture/history/repo-harness-direct-change-v6.md",
-  "architecture/history/repo-harness-execution-first-v7.md",
-  "architecture/history/repo-harness-chatgpt-bridge-v8.md",
-  "architecture/history/repo-harness-v8-verification.md",
-];
+const HISTORICAL_RUNTIME_DOCS = ["architecture/history.md"];
 
 function installRuntimeArchitectureBaseline(cwd: string): void {
   const currentRoot = join(cwd, "docs/architecture/current");
@@ -308,7 +300,7 @@ describe("architecture sync gate", () => {
   test("historical runtime document without authority marker fails", () => {
     tmpRepo((cwd) => {
       installRuntimeArchitectureBaseline(cwd);
-      const path = join(cwd, "docs/architecture/history/repo-harness-chatgpt-bridge-v8.md");
+      const path = join(cwd, "docs/architecture/history.md");
       writeFileSync(path, readFileSync(path, "utf-8").replace("Historical Design", "Version Notes"));
       const res = run("bash", ["scripts/check-architecture-sync.sh", "--mode", "off"], cwd);
       expect(res.status).toBe(1);

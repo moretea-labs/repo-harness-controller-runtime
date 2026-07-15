@@ -28,6 +28,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 issues=0
+bootstrap_issues=0
 WORKFLOW_CONTRACT_PATH=".ai/harness/workflow-contract.json"
 policy_file=".ai/harness/policy.json"
 json_runtime=""
@@ -36,6 +37,13 @@ report_issue() {
   local message="$1"
   echo "[workflow] $message"
   issues=$((issues + 1))
+}
+
+report_bootstrap() {
+  local message="$1"
+  bootstrap_issues=$((bootstrap_issues + 1))
+  echo "[workflow] Bootstrap/remediation required (ignored runtime; check is read-only): $message"
+  echo "[workflow] Supported remediation: bash scripts/migrate-project-template.sh --repo . --dry-run (inspect), then run the repository bootstrap/migration command in the owning checkout."
 }
 
 resolve_json_runtime() {
@@ -416,23 +424,23 @@ check_handoff_resume_pair() {
   [[ -f "$handoff_file" || -f "$resume_file" ]] || return 0
 
   if [[ -f "$handoff_file" && ! -f "$resume_file" ]]; then
-    report_issue "Handoff current exists but resume packet is missing: $resume_file"
+    report_bootstrap "Handoff current exists but resume packet is missing: $resume_file"
     return 0
   fi
 
   if [[ ! -f "$handoff_file" && -f "$resume_file" ]]; then
-    report_issue "Resume packet exists but handoff current is missing: $handoff_file"
+    report_bootstrap "Resume packet exists but handoff current is missing: $handoff_file"
     return 0
   fi
 
   handoff_mtime="$(file_mtime "$handoff_file")"
   resume_mtime="$(file_mtime "$resume_file")"
   if [[ "$resume_mtime" =~ ^[0-9]+$ && "$handoff_mtime" =~ ^[0-9]+$ && "$resume_mtime" -lt "$handoff_mtime" ]]; then
-    report_issue "Resume packet is older than handoff current: $resume_file < $handoff_file"
+    report_bootstrap "Resume packet is older than handoff current: $resume_file < $handoff_file. Refresh it with scripts/prepare-handoff.sh or scripts/codex-handoff-resume.sh."
   fi
 
   if handoff_declares_no_active_plan "$handoff_file" && resume_references_plan "$resume_file"; then
-    report_issue "Handoff current declares no active plan but resume packet references a historical plan: $resume_file"
+    report_bootstrap "Handoff current declares no active plan but resume packet references a historical plan: $resume_file. Archive or regenerate the resume packet before continuing."
   fi
 }
 
@@ -445,7 +453,7 @@ check_current_resume_freshness() {
   current_mtime="$(file_mtime "$current_file")"
   resume_mtime="$(file_mtime "$resume_file")"
   if [[ "$current_mtime" =~ ^[0-9]+$ && "$resume_mtime" =~ ^[0-9]+$ && "$resume_mtime" -lt "$current_mtime" ]]; then
-    report_issue "Resume packet is older than current status snapshot: $resume_file < $current_file. Run scripts/prepare-handoff.sh --reason <reason> or scripts/codex-handoff-resume.sh."
+    report_bootstrap "Resume packet is older than current status snapshot: $resume_file < $current_file. Run scripts/prepare-handoff.sh --reason <reason> or scripts/codex-handoff-resume.sh."
   fi
 }
 
@@ -465,7 +473,14 @@ check_required_file() {
     fi
   fi
 
-  report_issue "Missing required file: $path"
+  case "$path" in
+    .ai/context/*|.ai/harness/*)
+      report_bootstrap "Missing generated runtime file: $path"
+      ;;
+    *)
+      report_issue "Missing required file: $path"
+      ;;
+  esac
 }
 
 check_reference_config_stub() {
@@ -628,7 +643,14 @@ check_required_dir() {
     return 0
   fi
 
-  report_issue "Missing required directory: $path"
+  case "$path" in
+    .ai/context|.ai/context/*|.ai/harness|.ai/harness/*)
+      report_bootstrap "Missing generated runtime directory: $path"
+      ;;
+    *)
+      report_issue "Missing required directory: $path"
+      ;;
+  esac
 }
 
 check_helper_runtime_files() {
@@ -701,6 +723,7 @@ helper_runtime_dir="$(policy_get '.harness.helper_runtime_dir' '.ai/harness/scri
 helper_compat_dir="$(policy_get '.harness.helper_compat_dir' 'scripts')"
 helper_source="$(policy_get '.harness.helper_source' 'package')"
 context_map_file="$(policy_get '.context.map_file' '.ai/context/context-map.json')"
+brain_manifest_file="$(policy_get '.information_lifecycle.external_knowledge.manifest_file' '.ai/harness/brain-manifest.json')"
 handoff_file="$(policy_get '.harness.handoff_file' '.ai/harness/handoff/current.md')"
 resume_file="$(policy_get '.handoff_resume.resume_packet_file' '.ai/harness/handoff/resume.md')"
 sprints_dir="$(policy_get '.sprints.dir' 'plans/sprints')"
@@ -748,7 +771,7 @@ check_required_file "$lessons_file"
 check_required_dir "$research_dir"
 check_required_file "$context_map_file"
 check_required_file "$policy_file"
-check_required_file "$(policy_get '.information_lifecycle.external_knowledge.manifest_file' '.ai/harness/brain-manifest.json')"
+check_required_file "$brain_manifest_file"
 
 if [[ -f ".claude/templates/plan.template.md" ]]; then
   check_plan_template_evidence_contract ".claude/templates/plan.template.md"
@@ -759,7 +782,7 @@ if [[ -f "$policy_file" && -z "$upgrade_strategy_version" ]] && command -v jq >/
 fi
 
 if [[ ! -f "$WORKFLOW_CONTRACT_PATH" ]]; then
-  report_issue "Missing workflow contract manifest: $WORKFLOW_CONTRACT_PATH"
+  report_bootstrap "Missing generated workflow contract manifest: $WORKFLOW_CONTRACT_PATH"
 else
   json_runtime="$(resolve_json_runtime || true)"
   if [[ -z "$json_runtime" ]]; then
@@ -801,13 +824,13 @@ if [[ -f "scripts/check-deploy-sql-order.sh" ]]; then
   fi
 fi
 
-if [[ -f "scripts/check-brain-manifest.sh" ]]; then
+if [[ -f "scripts/check-brain-manifest.sh" && -f "$brain_manifest_file" ]]; then
   if ! bash "scripts/check-brain-manifest.sh"; then
     report_issue "Brain manifest check failed."
   fi
 fi
 
-if [[ -f "scripts/sync-brain-docs.sh" ]]; then
+if [[ -f "scripts/sync-brain-docs.sh" && -f "$brain_manifest_file" ]]; then
   if ! bash "scripts/sync-brain-docs.sh" --check; then
     report_issue "Brain doc sync check failed."
   fi
@@ -965,6 +988,9 @@ else
 fi
 
 if [[ "$issues" -eq 0 ]]; then
+  if [[ "$bootstrap_issues" -gt 0 ]]; then
+    echo "[workflow] OK: source/document contracts pass; $bootstrap_issues generated runtime item(s) need local bootstrap/remediation."
+  fi
   echo "[workflow] OK"
   exit 0
 fi

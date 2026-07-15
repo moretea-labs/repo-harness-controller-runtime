@@ -45,6 +45,7 @@ The default `advanced` surface is a stable repair-capable schema capped at 128 t
 - Tutorials: [`tutorials/`](tutorials/)
 - User/operator guides: [`operations/`](operations/)
 - Runtime authority: [`architecture/current/README.md`](architecture/current/README.md)
-- Historical records: [`architecture/history/`](architecture/history/), [`architecture/snapshots/`](architecture/snapshots/), [`researches/`](researches/)
+- Consolidated architecture history: [`architecture/history.md`](architecture/history.md)
+- Other historical evidence: [`architecture/snapshots/`](architecture/snapshots/), [`researches/`](researches/)
 
-Historical documents remain published for audit and migration context. They should not be treated as the current runtime contract.
+Detailed superseded architecture documents remain recoverable from Git history; only the consolidated summary is published in the current documentation tree.

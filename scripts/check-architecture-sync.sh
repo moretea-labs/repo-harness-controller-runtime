@@ -39,13 +39,7 @@ required_current_docs=(
 )
 
 historical_runtime_docs=(
-  "docs/repo-harness-chatgpt-controller.md"
-  "docs/repo-harness-local-execution-bridge.md"
-  "docs/architecture/history/repo-harness-execution-closure-v5.md"
-  "docs/architecture/history/repo-harness-direct-change-v6.md"
-  "docs/architecture/history/repo-harness-execution-first-v7.md"
-  "docs/architecture/history/repo-harness-chatgpt-bridge-v8.md"
-  "docs/architecture/history/repo-harness-v8-verification.md"
+  "docs/architecture/history.md"
 )
 
 runtime_architecture_gate_enabled() {
@@ -91,7 +85,7 @@ check_runtime_architecture_baseline() {
   for file in "${historical_runtime_docs[@]}"; do
     require_architecture_text "$file" "Historical Design" || failed=1
     require_architecture_text "$file" "Not Runtime Authority" || failed=1
-    require_architecture_text "$file" "architecture/current/README.md" || failed=1
+    require_architecture_text "$file" "docs/architecture/current/README.md" || failed=1
   done
 
   require_architecture_text "docs/architecture/current/architecture-invariants.md" "Invariant 2 — Persist Before Execute" || failed=1

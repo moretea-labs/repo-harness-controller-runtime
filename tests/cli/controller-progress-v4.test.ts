@@ -158,6 +158,8 @@ describe("Controller V4 progress and worklog", () => {
 
   test("prefers repository-registry GitHub plugin config and absorbs legacy repo-local config", () => {
     const root = repo();
+    const controllerHome = mkdtempSync(join(tmpdir(), "repo-harness-v4-progress-controller-"));
+    roots.push(controllerHome);
     mkdirSync(join(root, ".repo-harness", "plugins"), { recursive: true });
     writeFileSync(join(root, ".repo-harness", "plugins", "github.json"), `${JSON.stringify({
       schemaVersion: 1,
@@ -171,6 +173,7 @@ describe("Controller V4 progress and worklog", () => {
 
     registerRepository({
       path: root,
+      controllerHome,
     });
 
     const loaded = loadGitHubPluginConfig(root);

@@ -134,10 +134,9 @@ describe('codex cerebellum delegation', () => {
 
     expect(result.status).toBe('blocked');
     expect((result.data as { outputs: { patchProposal: { present: boolean } } }).outputs.patchProposal.present).toBe(false);
-    expect(getWorkContract(ctx.workStore, work.workId)).toMatchObject({
-      status: 'waiting_for_review',
-      workerRef: undefined,
-    });
+    const contract = getWorkContract(ctx.workStore, work.workId);
+    expect(contract?.status).toBe('waiting_for_review');
+    expect(contract?.workerRef).toBeUndefined();
   });
 
   test('successful codex output lands as evidence and suggested actions without finalize', () => {

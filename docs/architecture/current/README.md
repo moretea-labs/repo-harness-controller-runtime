@@ -101,16 +101,9 @@ The approved top-level layers are:
 
 ## Historical Documents
 
-Versioned design documents are preserved because they explain migrations and compatibility decisions. They must be treated as:
+Superseded V5–V8 decisions are consolidated in [`docs/architecture/history.md`](../history.md), which is explicitly **Historical Design — Not Runtime Authority**. Detailed legacy documents are retained by Git history rather than published as parallel architecture surfaces.
 
-```text
-Historical Design
-Not Runtime Authority
-```
-
-They may describe behavior that still exists, behavior that was removed, or behavior not yet migrated. Their content does not override this directory.
-
-Historical documents should link here rather than being rewritten to look current. This preserves evidence and prevents architecture history from becoming indistinguishable from architecture truth.
+The history may describe behavior that still exists, behavior that was removed, or behavior not yet migrated. It never overrides this directory.
 
 ## Change Discipline
 

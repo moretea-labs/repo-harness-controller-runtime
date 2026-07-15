@@ -15,6 +15,10 @@ docs/operations/controller-browser-plugin.md
 src/cli/mcp/setup.ts
 tests/readme-dx.test.ts
 
+# Runtime proxy bypass intentionally includes Tailscale's standardized CGNAT CIDR.
+scripts/controller-runtime.sh
+src/cli/mcp/proxy-env.ts
+
 # Scanner / redaction implementations intentionally embed pattern samples.
 scripts/public-release.ts
 scripts/check-open-source-tracked-surface.sh

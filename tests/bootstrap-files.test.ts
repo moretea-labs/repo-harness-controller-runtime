@@ -73,7 +73,7 @@ describe("Bootstrap Script Contracts", () => {
     expect(pkg.scripts["check:task-sync"]).toBe("repo-harness run check-task-sync");
     expect(pkg.scripts["check:deploy-sql"]).toBe("repo-harness run check-deploy-sql-order");
     expect(pkg.scripts["check:architecture-sync"]).toBe("repo-harness run check-architecture-sync");
-    expect(pkg.scripts["check:task-workflow"]).toBe("repo-harness run check-task-workflow --strict");
+    expect(pkg.scripts["check:task-workflow"]).toBe("bash scripts/check-task-workflow.sh --strict");
     expect(pkg.scripts["check:context-files"]).toBe("repo-harness run check-context-files");
     expect(pkg.scripts["sync:brain-docs"]).toBe("repo-harness run sync-brain-docs --all");
   });

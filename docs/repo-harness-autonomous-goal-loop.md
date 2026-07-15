@@ -170,5 +170,5 @@ Approval states: `approval_not_required` | `normal_authorization_required` | `st
 ## Related docs
 
 - `docs/repo-harness-runtime-self-healing-loop.md` — observe / maintenance / model repair layers  
-- `docs/repo-harness-chatgpt-controller.md` — ChatGPT control plane facade  
+- `docs/architecture/current/README.md` — current Controller Runtime architecture and ChatGPT facade boundary
 - Stage-2 workloop: WorkContract + `rh_work` (task-scoped); GoalContract sits above that layer  

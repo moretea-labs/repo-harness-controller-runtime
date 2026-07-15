@@ -93,11 +93,13 @@ describe('v8.1 repository identity and selection', () => {
 
   test('registers GitHub repositories with the GitHub plugin enabled by default', () => {
     const root = mkdtempSync(join(tmpdir(), 'repo-harness-v81-register-'));
+    const controllerHome = mkdtempSync(join(tmpdir(), 'repo-harness-v81-register-controller-'));
     try {
       execSync('git init -q', { cwd: root });
       execSync('git remote add origin https://github.com/example/repo-a.git', { cwd: root });
       const registered = registerRepository({
         path: root,
+        controllerHome,
       });
       expect(registered.github?.pluginEnabled).toBe(true);
       expect(registered.github?.repository).toBe('example/repo-a');
@@ -105,6 +107,7 @@ describe('v8.1 repository identity and selection', () => {
       expect(registered.github?.includeTasks).toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });
+      rmSync(controllerHome, { recursive: true, force: true });
     }
   });
 

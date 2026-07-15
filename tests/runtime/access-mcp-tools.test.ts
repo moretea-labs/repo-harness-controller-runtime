@@ -60,41 +60,33 @@ describe('repository access MCP tools', () => {
     expect(names).toContain('repository_access_set');
   });
 
-  test('get returns Full Access by default without mutating storage', () => {
+  test('get returns host-managed execution by default without mutating storage', () => {
     const { ctx, repository } = fixture();
     const value = payload(callAccessTool(ctx, 'repository_access_get', { repo_id: repository.repoId }));
     expect(value).toMatchObject({
       policy: { mode: 'full_access', updatedBy: 'system' },
-      descriptor: { shortLabel: 'Full Access' },
+      descriptor: { shortLabel: 'Host managed' },
       scope: 'repository',
       storage: 'controllerHome',
     });
   });
 
-  test('Full Access requires explicit authorization but never a reconnect phrase', () => {
+  test('host-managed mode does not add a second Repo Harness authorization or reconnect step', () => {
     const { ctx, repository } = fixture();
-    const denied = callAccessTool(ctx, 'repository_access_set', {
-      repo_id: repository.repoId,
-      mode: 'full_access',
-    });
-    expect(denied?.isError).toBe(true);
-    expect(payload(denied)).toMatchObject({ error: { code: 'ACCESS_MODE_AUTHORIZATION_REQUIRED' } });
-
     const enabled = callAccessTool(ctx, 'repository_access_set', {
       repo_id: repository.repoId,
       mode: 'full_access',
-      confirm_authorization: true,
     });
     expect(enabled?.isError).not.toBe(true);
     expect(payload(enabled)).toMatchObject({
       policy: { mode: 'full_access', updatedBy: 'user' },
-      descriptor: { shortLabel: 'Full Access' },
+      descriptor: { shortLabel: 'Host managed' },
       reconnectRequired: false,
       toolSchemaStable: true,
     });
   });
 
-  test('bulk Full Access requires all-repository confirmation and updates every enabled repository', () => {
+  test('bulk host-managed mode updates every enabled repository without a second authorization layer', () => {
     const { ctx, repository } = fixture();
     const secondRoot = mkdtempSync(join(tmpdir(), 'repo-harness-access-mcp-repo-'));
     roots.push(secondRoot);
@@ -115,7 +107,6 @@ describe('repository access MCP tools', () => {
     const enabled = callAccessTool(ctx, 'repository_access_set', {
       all_repositories: true,
       mode: 'full_access',
-      confirm_authorization: true,
     });
     expect(enabled?.isError).not.toBe(true);
     expect(payload(enabled)).toMatchObject({
@@ -129,15 +120,16 @@ describe('repository access MCP tools', () => {
     expect(readRepositoryAccessPolicy(ctx.controllerHome, second.repoId).mode).toBe('full_access');
   });
 
-  test('downgrading to Request remains an explicit write action', () => {
+  test('compatibility mode can be stored without a second Repo Harness authorization', () => {
     const { ctx, repository } = fixture();
-    const denied = callAccessTool(ctx, 'repository_access_set', {
+    const updated = callAccessTool(ctx, 'repository_access_set', {
       repo_id: repository.repoId,
       mode: 'request',
     });
-    expect(denied?.isError).toBe(true);
-    expect(payload(denied)).toMatchObject({
-      error: { code: 'ACCESS_MODE_AUTHORIZATION_REQUIRED' },
+    expect(updated?.isError).not.toBe(true);
+    expect(payload(updated)).toMatchObject({
+      policy: { mode: 'request', updatedBy: 'user' },
+      descriptor: { shortLabel: 'Compatibility' },
     });
   });
 });

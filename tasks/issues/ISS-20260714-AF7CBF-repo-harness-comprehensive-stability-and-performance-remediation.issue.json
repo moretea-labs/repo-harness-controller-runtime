@@ -1,0 +1,199 @@
+{
+  "schemaVersion": 5,
+  "id": "ISS-20260714-AF7CBF",
+  "title": "Repo Harness comprehensive stability and performance remediation",
+  "slug": "repo-harness-comprehensive-stability-and-performance-remediation",
+  "kind": "investigation",
+  "status": "planned",
+  "summary": "Single-pass remediation for current type, architecture, workflow, check evidence/classification, summary payload, connector diagnostics, and state-read performance defects.",
+  "goals": [
+    "Work from the exact current repository state and complete one cohesive remediation, not a partial diagnosis. First verify the current HEAD and current failures. Fix all confirmed issues in scope: (1) TypeScript failure in tests/cli/console-facade-api.test.ts where center.plugins may be undefined; fix production typing or test narrowing appropriately, not with unsafe casts. (2) Fix the runtime architecture invariant violation in src/runtime/gateway/mcp/router.ts: controller_context must use the materialized projection or a Durable Execution Job and must never fall through to the legacy Gateway execution path. Preserve bounded hot reads and compatibility. (3) Make controller check caching transparent and trustworthy: add backward-compatible optional metadata to results/evidence/jobs so callers can distinguish a cache hit from a new process execution and see validated/current revision and original executedAt; keep the existing content-bound cache semantics. Add tests. (4) Correct check failure classification end to end: a named check returning a normal nonzero status is an acceptance/validation failure, not an infrastructure failure; timeouts, spawn failures, missing runtime, and corrupt state remain infrastructure failures. Preserve exact error details through Local Job -> ExecutionJob -> rh_work result summaries. Add regression tests. (5) Make rh_context detail_level=summary genuinely bounded: do not return the full 124-tool list, all checks, and large historical Work/Job arrays by default. Return counts, readiness, selected/requested checks, active attention and bounded recent summaries. Keep detail/raw compatibility and add a strict response-size/shape test. (6) Make tool-surface diagnostics honest: local expected/actual registry parity must not claim connector callability. Add explicit scope/state such as local registry verified and connector callability unverified unless an external callability probe exists; an exposed-but-UNKNOWN_TOOL call must be representable as connector mismatch. Update readiness/doctor tests and docs only where needed. (7) Fix package:check:task-workflow for this repository without committing runtime-generated state: separate missing bootstrap/runtime files from tracked document contract defects, ensure the check is read-only with respect to tracked files, add the required Status lines to the identified PRD and Sprint where appropriate, and produce an actionable bootstrap/remediation message for missing .ai runtime files and stale resume packets. Do not weaken strict checking globally merely to make this repository pass. (8) Review the surrounding implementations for activeWork/recentExecutionJobs/history limits and stale campaign/review counts; fix hot-read scanning or default payload expansion where directly responsible, but do not delete user history. Validate no regression in projection recovery and managed worktree cleanup. Run focused tests while editing, then package:check:type, package:check:runtime-architecture, package:check:task-workflow, package:check:controller-v8, and finally package:test once. Do not stop after the first failure: continue fixing until all in-scope checks pass or provide exact irreducible blockers with evidence. Do not modify or commit _ops/**, .ai/harness/checks/**, .ai/harness/local-jobs/**, .ai/harness/jobs/**, node_modules/**, or dist/**. Do not push remote. Leave a clean, reviewable isolated worktree and a complete handoff with changed files, test results, remaining risks, and rollback notes."
+  ],
+  "nonGoals": [
+    "Do not make unrelated changes outside the declared Task scope."
+  ],
+  "acceptanceCriteria": [
+    "All confirmed current defects are addressed in one cohesive patch rather than a one-error fix.",
+    "package:check:type passes.",
+    "package:check:runtime-architecture passes and controller_context cannot execute through the legacy Gateway path.",
+    "package:check:task-workflow is read-only for tracked files, distinguishes missing generated bootstrap state from source defects, and passes after the supported local bootstrap/remediation path without committing runtime state.",
+    "Check results expose cache-hit provenance and classify normal assertion failures separately from infrastructure failures.",
+    "rh_context summary is materially smaller and bounded while detail/raw remain compatible.",
+    "Tool diagnostics distinguish local registry parity from actual connector callability.",
+    "package:check:controller-v8 passes.",
+    "package:test passes once at the end, or any irreducible external blocker is proven with exact evidence.",
+    "No forbidden runtime/generated paths are committed and the worktree is clean for review."
+  ],
+  "relatedArtifacts": [],
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Repo Harness comprehensive stability and performance remediation",
+      "objective": "Work from the exact current repository state and complete one cohesive remediation, not a partial diagnosis. First verify the current HEAD and current failures. Fix all confirmed issues in scope: (1) TypeScript failure in tests/cli/console-facade-api.test.ts where center.plugins may be undefined; fix production typing or test narrowing appropriately, not with unsafe casts. (2) Fix the runtime architecture invariant violation in src/runtime/gateway/mcp/router.ts: controller_context must use the materialized projection or a Durable Execution Job and must never fall through to the legacy Gateway execution path. Preserve bounded hot reads and compatibility. (3) Make controller check caching transparent and trustworthy: add backward-compatible optional metadata to results/evidence/jobs so callers can distinguish a cache hit from a new process execution and see validated/current revision and original executedAt; keep the existing content-bound cache semantics. Add tests. (4) Correct check failure classification end to end: a named check returning a normal nonzero status is an acceptance/validation failure, not an infrastructure failure; timeouts, spawn failures, missing runtime, and corrupt state remain infrastructure failures. Preserve exact error details through Local Job -> ExecutionJob -> rh_work result summaries. Add regression tests. (5) Make rh_context detail_level=summary genuinely bounded: do not return the full 124-tool list, all checks, and large historical Work/Job arrays by default. Return counts, readiness, selected/requested checks, active attention and bounded recent summaries. Keep detail/raw compatibility and add a strict response-size/shape test. (6) Make tool-surface diagnostics honest: local expected/actual registry parity must not claim connector callability. Add explicit scope/state such as local registry verified and connector callability unverified unless an external callability probe exists; an exposed-but-UNKNOWN_TOOL call must be representable as connector mismatch. Update readiness/doctor tests and docs only where needed. (7) Fix package:check:task-workflow for this repository without committing runtime-generated state: separate missing bootstrap/runtime files from tracked document contract defects, ensure the check is read-only with respect to tracked files, add the required Status lines to the identified PRD and Sprint where appropriate, and produce an actionable bootstrap/remediation message for missing .ai runtime files and stale resume packets. Do not weaken strict checking globally merely to make this repository pass. (8) Review the surrounding implementations for activeWork/recentExecutionJobs/history limits and stale campaign/review counts; fix hot-read scanning or default payload expansion where directly responsible, but do not delete user history. Validate no regression in projection recovery and managed worktree cleanup. Run focused tests while editing, then package:check:type, package:check:runtime-architecture, package:check:task-workflow, package:check:controller-v8, and finally package:test once. Do not stop after the first failure: continue fixing until all in-scope checks pass or provide exact irreducible blockers with evidence. Do not modify or commit _ops/**, .ai/harness/checks/**, .ai/harness/local-jobs/**, .ai/harness/jobs/**, node_modules/**, or dist/**. Do not push remote. Leave a clean, reviewable isolated worktree and a complete handoff with changed files, test results, remaining risks, and rollback notes.",
+      "status": "analysis",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src/**",
+        "scripts/**",
+        "tests/**",
+        "docs/**",
+        "plans/**",
+        "tasks/**",
+        "package.json",
+        ".repo-harness/**"
+      ],
+      "forbiddenPaths": [
+        "_ops/**",
+        ".ai/harness/checks/**",
+        ".ai/harness/local-jobs/**",
+        ".ai/harness/jobs/**",
+        "node_modules/**",
+        "dist/**"
+      ],
+      "checks": [
+        "package:check:type",
+        "package:check:runtime-architecture",
+        "package:check:task-workflow",
+        "package:check:controller-v8",
+        "package:test"
+      ],
+      "acceptanceCriteria": [
+        "All confirmed current defects are addressed in one cohesive patch rather than a one-error fix.",
+        "package:check:type passes.",
+        "package:check:runtime-architecture passes and controller_context cannot execute through the legacy Gateway path.",
+        "package:check:task-workflow is read-only for tracked files, distinguishes missing generated bootstrap state from source defects, and passes after the supported local bootstrap/remediation path without committing runtime state.",
+        "Check results expose cache-hit provenance and classify normal assertion failures separately from infrastructure failures.",
+        "rh_context summary is materially smaller and bounded while detail/raw remain compatible.",
+        "Tool diagnostics distinguish local registry parity from actual connector callability.",
+        "package:check:controller-v8 passes.",
+        "package:test passes once at the end, or any irreducible external blocker is proven with exact evidence.",
+        "No forbidden runtime/generated paths are committed and the worktree is clean for review."
+      ],
+      "risk": "medium",
+      "recommendedAgent": "codex",
+      "notes": [
+        "Accepted RUN-iss-20260714-af7cbf-t1-1784027939835-3968b3d9 for asynchronous launch.",
+        "Dispatched RUN-iss-20260714-af7cbf-t1-1784027939835-3968b3d9 to codex.",
+        "RUN-iss-20260714-af7cbf-t1-1784027939835-3968b3d9 ended as unknown; explicit retry is required. Controller process 88288 is no longer running",
+        "Re-baselining directly after restart hardening because the previous Codex Run ended unknown when its Controller disappeared. Running all five required checks in one durable job without stopping after the first failure. Will fix only defects still reproducible on current main 43b33f4; no agent retry while Codex executable health remains broken.",
+        "继续本轮治理：修复重复 502 的 Gateway 健康恢复窗口；保留并验证现有 bounded response/check provenance 修复；隐藏 GUI Request/Full Access 与普通审批入口；普通本地开发默认执行，仅保留 secrets、仓库外系统路径、不可逆 Git/远程删除等灾难级硬拦截；实现终态 Issue/历史文档/运行垃圾的安全收敛与清理。不得丢弃两个脏 worktree 的唯一修改。"
+      ],
+      "runIds": [
+        "RUN-iss-20260714-af7cbf-t1-1784027939835-3968b3d9"
+      ],
+      "createdAt": "2026-07-14T11:18:59.829Z",
+      "updatedAt": "2026-07-15T05:20:33.788Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    },
+    {
+      "id": "T2",
+      "title": "Harden restart coordination and post-restart recovery",
+      "objective": "Implement one authoritative restart protocol for all repo-harness restart entry points. A restart requested from MCP, Local Bridge, Local Job, Controller Daemon child, CLI, or scripts must never depend on a process that the restart will terminate. Use a detached out-of-band coordinator with durable controllerHome state, idempotency/locking, bounded delayed execution, phase/error recording, and post-start verification. Unify scripts/controller-runtime.sh, controller lifecycle, mcp restart, capability recovery, and Local Bridge behavior so they do not report fake restart success. Return a compact scheduled/accepted result before stopping the old Gateway when invoked inside the managed process tree; external CLI may still wait synchronously. Preserve durable Jobs/WorkContracts across restart. Verify local MCP, daemon, Local Bridge, public domain health, OAuth discovery, runtime generation/source, and connectorNeedsReconnect=false after restart. Add failure-injection and process-ownership tests. Document the exact guarantee: the in-flight MCP connection may close during a full Gateway restart, but the stable domain and durable request/work IDs must allow the same ChatGPT conversation to call again without manual Connector recreation when tool schema/auth are unchanged.",
+      "status": "cancelled",
+      "dependsOn": [],
+      "allowedPaths": [
+        "scripts/controller-runtime.sh",
+        "src/cli/controller/**",
+        "src/cli/mcp/**",
+        "src/cli/local-bridge/**",
+        "src/runtime/recovery/**",
+        "src/runtime/gateway/**",
+        "src/runtime/control-plane/**",
+        "tests/cli/**",
+        "tests/runtime/**",
+        "docs/operations/**",
+        "docs/architecture/current/**",
+        "docs/repo-harness-runtime-self-healing-loop.md",
+        "package.json"
+      ],
+      "forbiddenPaths": [
+        "_ops/**",
+        ".ai/harness/**",
+        "node_modules/**",
+        "dist/**"
+      ],
+      "checks": [
+        "package:check:type",
+        "package:check:mcp-compatibility",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "All restart entry points use one coordinator contract or explicitly delegate to it; no path directly kills its current request/worker parent and then waits for completion.",
+        "Coordinator is detached from the managed process group, persists scheduled/stopping/starting/verifying/succeeded/failed state under controllerHome, rejects or deduplicates overlapping restarts, and records bounded failure details.",
+        "MCP/GUI recovery no longer maps restart to ensureControllerDaemon or a fake applied summary; it schedules the real stack restart only after explicit authorization.",
+        "Post-restart verification checks local Gateway, Controller Daemon, Local Bridge, configured public endpoint, OAuth protected-resource discovery, runtime generation/source, and connectorNeedsReconnect=false.",
+        "Durable work/job state remains readable by request/work/job ID after restart; no accepted mutation is blindly replayed.",
+        "Focused tests cover invocation from inside managed ancestry, detached coordinator survival, idempotent overlapping request, verification failure, and stable-domain reconnect contract.",
+        "Targeted checks pass and the task leaves an isolated clean worktree with a reviewable diff."
+      ],
+      "risk": "high",
+      "recommendedAgent": "codex",
+      "notes": [
+        "Accepted RUN-iss-20260714-af7cbf-t2-1784081497511-1f077d46 for asynchronous launch.",
+        "Dispatched RUN-iss-20260714-af7cbf-t2-1784081497511-1f077d46 to codex.",
+        "RUN-iss-20260714-af7cbf-t2-1784081497511-1f077d46 ended as failed; explicit retry is required. Error: spawn /opt/homebrew/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/codex/codex ENOENT\n    at ChildProcess._handle.onexit (node:internal/child_process:285:19)\n    at onErrorNT (node:internal/child_process:483:16)\n    at process.processTicksAndRejections (node:internal/process/task_queues:90:21) {\n  errno: -2,\n  code: 'ENOENT',\n  syscall: 'spawn /opt/homebrew/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/codex/codex',\n  path: '/opt/homebrew/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/codex/codex',\n  spawnargs: [\n    'exec',\n    '--json',\n    '--cd',\n    '/Users/greyson/DevProjects/repo-harness-controller-runtime/.ai/harness/worktrees/iss-20260714-af7cbf-t2-1f077d46',\n    '# repo-harness Controller Task\\n' +\n      'Issue: Repo Harness comprehensive stability and performance remediation\\n' +\n      'Issue summary: Single-pass remediation for current type, architecture, workflow, check evidence/classification, summary payload, connector diagnostics, and state-read performance defects.\\n' +\n      'Task: T2 — Harden restart coordination and post-restart recovery\\n' +\n      'Objective: Implement one authoritative restart protocol for all repo-harness restart entry points. A restart requested from MCP, Local Bridge, Local Job, Controller Daemon child, CLI, or scripts must never depend on a process that the restart will terminate. Use a detached out-of-band coordinator with durable controllerHome state, idempotency/locking, bounded delayed execution, phase/error recording, and post-start verification. Unify scripts/controller-runtime.sh, controller lifecycle, mcp restart, capability recovery, and Local Bridge behavior so they do not report fake restart success. Return a compact scheduled/accepted result before stopping the old Gateway when invoked inside the managed process tree; external CLI may still wait synchronously. Preserve durable Jobs/WorkContracts across restart. Verify local MCP, daemon, Local Bridge, public domain health, OAuth discovery, runtime generation/source, and connectorNeedsReconnect=false after restart. Add failure-injection and process-ownership tests. Document the exact guarantee: the in-flight MCP connection may close during a full Gateway restart, but the stable domain and durable request/work IDs must allow the same ChatGPT conversation to call again without manual Connector recreation when tool schema/auth are unchanged.\\n' +\n      '## Scope contract\\n' +\n      '- Repository: /Users/greyson/DevProjects/repo-harness-controller-runtime\\n' +\n      '- Execution mode: isolated worktree (/Users/greyson/DevProjects/repo-harness-controller-runtime/.ai/harness/worktrees/iss-20260714-af7cbf-t2-1f077d46)\\n' +\n      '- Allowed paths: scripts/controller-runtime.sh, src/cli/controller/**, src/cli/mcp/**, src/cli/local-bridge/**, src/runtime/recovery/**, src/runtime/gateway/**, src/runtime/control-plane/**, tests/cli/**, tests/runtime/**, docs/operations/**, docs/architecture/current/**, docs/repo-harness-runtime-self-healing-loop.md, package.json\\n' +\n      '- Forbidden paths: _ops/**, .ai/harness/**, node_modules/**, dist/**\\n' +\n      '- Risk: high\\n' +\n      '## Acceptance criteria\\n' +\n      '- All restart entry points use one coordinator contract or explicitly delegate to it; no path directly kills its current request/worker parent and then waits for completion.\\n' +\n      '- Coordinator is detached from the managed process group, persists scheduled/stopping/starting/verifying/succeeded/failed state under controllerHome, rejects or deduplicates overlapping restarts, and records bounded failure details.\\n' +\n      '- MCP/GUI recovery no longer maps restart to ensureControllerDaemon or a fake applied summary; it schedules the real stack restart only after explicit authorization.\\n' +\n      '- Post-restart verification checks local Gateway, Controller Daemon, Local Bridge, configured public endpoint, OAuth protected-resource discovery, runtime generation/source, and connectorNeedsReconnect=false.\\n' +\n      '- Durable work/job state remains readable by request/work/job ID after restart; no accepted mutation is blindly replayed.\\n' +\n      '- Focused tests cover invocation from inside managed ancestry, detached coordinator survival, idempotent overlapping request, verification failure, and stable-domain reconnect contract.\\n' +\n      '- Targeted checks pass and the task leaves an isolated clean worktree with a reviewable diff.\\n' +\n      '## Required checks\\n' +\n      '- package:check:type\\n' +\n      '- package:check:mcp-compatibility\\n' +\n      '- package:check:controller-v8\\n' +\n      '## Execution rules\\n' +\n      '- Inspect repository instructions and the affected implementation before editing.\\n' +\n      '- Keep the change limited to this task. Do not broaden the requirement.\\n' +\n      '- Work only inside the isolated worktree. repo-harness will integrate and clean it automatically after a successful Run.\\n' +\n      '- Finish with a concise report: changed files, checks, residual risks, and any blocker.'\n  ]\n}",
+        "Codex run failed before execution because its configured native binary path returned ENOENT. No files changed. Retry with the available Claude executor in a fresh isolated worktree; this is an infrastructure retry, not a source-code failure.",
+        "Executor failed before source execution due missing Codex native binary (ENOENT); no changes exist. Clean the abandoned isolated worktree and preserve the infrastructure failure evidence."
+      ],
+      "runIds": [
+        "RUN-iss-20260714-af7cbf-t2-1784081497511-1f077d46"
+      ],
+      "createdAt": "2026-07-15T02:11:09.832Z",
+      "updatedAt": "2026-07-15T02:13:01.242Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    },
+    {
+      "id": "T3",
+      "title": "Implement restart coordinator directly",
+      "objective": "Replace cancelled T2 after both external executors proved unavailable. Implement and verify the same authoritative out-of-band restart protocol through ChatGPT-supervised direct edits in a controller-managed isolated worktree. Reuse T2 findings and acceptance contract; do not retry the unavailable agents.",
+      "status": "done",
+      "dependsOn": [],
+      "allowedPaths": [
+        "scripts/controller-runtime.sh",
+        "src/cli/controller/**",
+        "src/cli/mcp/**",
+        "src/cli/local-bridge/**",
+        "src/runtime/recovery/**",
+        "src/runtime/gateway/**",
+        "src/runtime/control-plane/**",
+        "tests/cli/**",
+        "tests/runtime/**",
+        "docs/operations/**",
+        "docs/architecture/current/**",
+        "docs/repo-harness-runtime-self-healing-loop.md",
+        "package.json"
+      ],
+      "forbiddenPaths": [
+        "_ops/**",
+        ".ai/harness/**",
+        "node_modules/**",
+        "dist/**"
+      ],
+      "checks": [
+        "package:check:type",
+        "package:check:mcp-compatibility",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "All restart entry points use one coordinator contract or explicitly delegate to it; no path directly kills its current request/worker parent and then waits for completion.",
+        "Coordinator is detached from the managed process group, persists scheduled/stopping/starting/verifying/succeeded/failed state under controllerHome, rejects or deduplicates overlapping restarts, and records bounded failure details.",
+        "MCP/GUI recovery no longer maps restart to ensureControllerDaemon or a fake applied summary; it schedules the real stack restart only after explicit authorization.",
+        "Post-restart verification checks local Gateway, Controller Daemon, Local Bridge, configured public endpoint, OAuth protected-resource discovery, runtime generation/source, and connectorNeedsReconnect=false.",
+        "Durable work/job state remains readable by request/work/job ID after restart; no accepted mutation is blindly replayed.",
+        "Focused tests cover managed ancestry, detached coordinator survival, overlapping request idempotency, verification failure, and stable-domain reconnect contract.",
+        "Targeted checks pass; changes are committed, merged to main, and the isolated branch/worktree is deleted."
+      ],
+      "risk": "high",
+      "notes": [
+        "Completed directly and merged to main in commits a718911 and 43b33f4. Real restart drills succeeded twice from inside the old Daemon worker tree. Durable request state reached succeeded; runtime generation changed; local MCP, Daemon, Local Bridge, projection, connector, public health and OAuth discovery all verified. The same ChatGPT conversation reconnected automatically without Connector recreation. Added 7 restart coordinator tests plus runtime-source/worktree-safety regression coverage; package:check:type, package:check:mcp-compatibility and package:check:controller-v8 pass. Managed branches/worktrees created for this work were cleaned. Unrelated untracked Issue files were not committed."
+      ],
+      "runIds": [],
+      "createdAt": "2026-07-15T02:13:30.755Z",
+      "updatedAt": "2026-07-15T03:34:15.971Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    }
+  ],
+  "createdAt": "2026-07-14T11:18:59.829Z",
+  "updatedAt": "2026-07-15T05:20:33.788Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+}

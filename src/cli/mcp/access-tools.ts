@@ -41,7 +41,7 @@ const repoId = { type: 'string', description: 'Stable repository id. Omit when e
 export const accessToolDefinitions: McpToolDefinition[] = [
   definition(
     'rh_access',
-    'Always-exposed controller execution policy. Request vs Full Access changes approval behavior only; the MCP tool schema remains stable.',
+    'Always-exposed compatibility policy. Normal operations follow the host AI permission model; the MCP tool schema remains stable.',
     {
       operation: {
         type: 'string',
@@ -60,7 +60,7 @@ export const accessToolDefinitions: McpToolDefinition[] = [
       },
       confirm_authorization: {
         type: 'boolean',
-        description: 'Must be true to change access mode.',
+        description: 'Deprecated compatibility field. Normal mode changes use the host AI permission decision and do not require a second Repo Harness confirmation.',
       },
       confirmation_text: {
         type: 'string',
@@ -93,7 +93,7 @@ export const accessToolDefinitions: McpToolDefinition[] = [
   ),
   definition(
     'repository_access_set',
-    'Set one or all enabled repository permission levels. Full Access covers local repository work only; remote, destructive, outside-repository, and secret access remain gated.',
+    'Set one or all enabled repository compatibility modes. Normal operations follow the host AI permission model; secrets, outside-repository paths, and destructive operations retain hard gates.',
     {
       repo_id: repoId,
       all_repositories: {
@@ -107,14 +107,14 @@ export const accessToolDefinitions: McpToolDefinition[] = [
       },
       confirm_authorization: {
         type: 'boolean',
-        description: 'Must be true to change repository permission levels.',
+        description: 'Deprecated compatibility field. It is accepted but no longer required as a second authorization layer.',
       },
       confirmation_text: {
         type: 'string',
         description: 'Optional compatibility confirmation text; explicit confirm_authorization is sufficient.',
       },
     },
-    ['mode', 'confirm_authorization'],
+    ['mode'],
     false,
   ),
 ];
@@ -268,14 +268,6 @@ export function callAccessTool(
       const applyAll = args.all_repositories === true;
       if (operation === 'preview') return result(previewPayload(ctx, repository, mode, applyAll));
 
-      if (args.confirm_authorization !== true) {
-        return result({
-          error: {
-            code: 'ACCESS_MODE_AUTHORIZATION_REQUIRED',
-            message: 'confirm_authorization must be true before changing access mode.',
-          },
-        }, true);
-      }
       const persisted = persistControllerAccessMode(ctx.controllerHome, mode, ctx.explicitRepository?.canonicalRoot);
       if (applyAll) {
         const repositories = loadRepositoryRegistry(ctx.controllerHome).repositories
@@ -329,15 +321,6 @@ export function callAccessTool(
         },
       }, true);
     }
-    if (args.confirm_authorization !== true) {
-      return result({
-        error: {
-          code: 'ACCESS_MODE_AUTHORIZATION_REQUIRED',
-          message: 'confirm_authorization must be true before changing repository access.',
-        },
-      }, true);
-    }
-
     const applyAll = args.all_repositories === true;
     if (applyAll && typeof args.repo_id === 'string' && args.repo_id.trim()) {
       return result({
@@ -369,8 +352,8 @@ export function callAccessTool(
         schemaRefreshRequired: false,
         toolSchemaStable: true,
         warning: mode === 'full_access'
-          ? 'Full Access applies only to local work in each enabled repository. Remote writes, destructive actions, outside-repository paths, and raw secrets remain gated.'
-          : 'Request mode is active for every enabled repository; elevated local effects will ask for approval.',
+          ? 'Host-managed mode is active for every enabled repository. Normal work, including ordinary remote writes, follows the host AI permission model; destructive actions, outside-repository paths, and raw secrets retain hard gates.'
+          : 'Compatibility mode is stored for every enabled repository. Normal work still follows the host AI permission model; hard safety gates are unchanged.',
       });
     }
 
@@ -389,8 +372,8 @@ export function callAccessTool(
       schemaRefreshRequired: false,
       toolSchemaStable: true,
       warning: mode === 'full_access'
-        ? 'Full Access applies only to local work in this repository. Remote writes, destructive actions, outside-repository paths, and raw secrets remain gated.'
-        : 'Request mode is active; elevated local effects will ask for approval.',
+        ? 'Host-managed mode is active. Normal work, including ordinary remote writes, follows the host AI permission model; destructive actions, outside-repository paths, and raw secrets retain hard gates.'
+        : 'Compatibility mode is stored. Normal work still follows the host AI permission model; hard safety gates are unchanged.',
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

@@ -107,7 +107,7 @@ describe('mcp restart process ownership', () => {
       profile: 'controller',
       authMode: 'oauth',
       toolset: 'full',
-      publicEndpoint: 'https://greysons-macbook-air.tail95bb5c.ts.net/mcp',
+      publicEndpoint: 'https://controller-node.acme.dev/mcp',
       defaultServerName: 'repo-harness',
       expectedToolSurface: 'controller-chatgpt-bridge-v8',
       devRunner: true,
@@ -161,7 +161,7 @@ describe('proxy bypass and public endpoint normalization', () => {
 
   test('drops placeholder ChatGPT public endpoints', () => {
     expect(normalizeKeepalivePublicEndpoint('https://repo-harness-mcp.example.com/mcp')).toBeUndefined();
-    expect(normalizeKeepalivePublicEndpoint('https://greysons-macbook-air.tail95bb5c.ts.net/mcp'))
-      .toBe('https://greysons-macbook-air.tail95bb5c.ts.net/mcp');
+    expect(normalizeKeepalivePublicEndpoint('https://controller-node.acme.dev/mcp'))
+      .toBe('https://controller-node.acme.dev/mcp');
   });
 });

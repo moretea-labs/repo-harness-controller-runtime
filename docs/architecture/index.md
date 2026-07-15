@@ -11,12 +11,12 @@ Start here:
 - [Current architecture map and reading order](current/README.md)
 - [Architecture governance contract](current/governance.md)
 
-When current implementation, a historical V5–V8 design document, a research note, and a document under `current/` disagree, the following precedence applies:
+When current implementation, the consolidated architecture history, a research note, and a document under `current/` disagree, the following precedence applies:
 
 1. executable code and persisted schemas describe **Current Implementation** facts;
 2. `docs/architecture/current/` defines the approved **Target Architecture** and mandatory **Migration Rules**;
 3. accepted ADRs may amend the target architecture until their conclusions are merged into `current/`;
-4. versioned design documents, snapshots, plans, research reports, and diagrams are historical or exploratory evidence only.
+4. the consolidated history, snapshots, plans, research reports, and diagrams are historical or exploratory evidence only.
 
 A target rule is not evidence that the implementation already satisfies it. Every current architecture document must distinguish:
 
@@ -45,14 +45,14 @@ It is not the product runtime of the repositories it manages. It must not replac
 | Architecture decisions | `docs/architecture/decisions/` | Binding until merged or superseded |
 | Pending drift requests | `docs/architecture/requests/` | Proposed change only |
 | Architecture snapshots | `docs/architecture/snapshots/` | Historical evidence |
-| Versioned V5–V8 documents | `docs/repo-harness-*.md` | Historical Design / Not Runtime Authority |
+| Consolidated architecture history | `docs/architecture/history.md` | Historical Design / Not Runtime Authority |
 | Research reports | `docs/researches/` | Hypothesis and supporting evidence |
 | Plans and task records | `plans/`, `tasks/` | Execution intent and progress, not architecture authority |
 | Diagrams | `docs/architecture/diagrams/` | Explanatory projection; semantic Markdown source wins |
 
 ## Current Architecture Set
 
-The current set is introduced incrementally under governance Issue `ISS-20260625-BBFD4B`. The completed baseline will contain:
+The maintained current architecture set contains:
 
 - `README.md` — map, status labels, and reading order;
 - `governance.md` — authority, ownership, ADR, and drift rules;
@@ -70,7 +70,7 @@ The current set is introduced incrementally under governance Issue `ISS-20260625
 - `implementation-status.md` — verified implementation coverage and explicit migration gaps;
 - `migration-roadmap.md` — evidence-driven implementation convergence order.
 
-Until a listed document is created, the rule must be recorded in an accepted Issue/ADR and must not be inferred from a historical version document.
+A missing or proposed rule must be recorded in an accepted architecture request or ADR and must not be inferred from historical material.
 
 ## Architecture Change Flow
 
@@ -78,7 +78,7 @@ Until a listed document is created, the rule must be recorded in an accepted Iss
 2. Record the change as an architecture request or ADR before implementation when the answer is yes.
 3. Update the affected `current/` documents in the same change or explicitly record the temporary drift and its owner.
 4. Update tests and architecture checks that enforce the changed rule.
-5. Mark superseded version documents as historical; never silently rewrite them into current truth.
+5. Consolidate useful superseded decisions in `history.md`, then remove duplicate detailed documents from the current tree while preserving them in Git history.
 6. Close the request only after the current architecture and executable behavior no longer contradict each other, or the difference is explicitly labeled as a migration gap.
 
 See [Architecture governance contract](current/governance.md) for the full rule.

@@ -232,7 +232,7 @@ describe('handoff and facade contracts', () => {
       directEditBoundary: { scopeClear: true, pathsExplicit: true, maxChangedFiles: 2, maxChangedLines: 80 },
     })).toMatchObject({ decision: 'allowed' });
     expect(evaluatePolicyGate({ risk: 'raw_secret_config' })).toMatchObject({ decision: 'denied' });
-    expect(evaluatePolicyGate({ risk: 'remote_write' })).toMatchObject({ decision: 'approval_required' });
+    expect(evaluatePolicyGate({ risk: 'remote_write' })).toMatchObject({ decision: 'allowed' });
   });
 
   test('normalizes check aliases without treating invalid ids as check failures', () => {
