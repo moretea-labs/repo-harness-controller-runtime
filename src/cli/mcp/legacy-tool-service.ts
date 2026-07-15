@@ -167,6 +167,9 @@ export interface McpToolContext {
   /** Authenticated or controller-issued principal used to scope session state. */
   principalId?: string;
   controllerInstanceId?: string;
+  /** Bound repository identity for session cache keys. */
+  repoId?: string;
+  checkoutId?: string;
 }
 
 export interface McpToolDefinition {
@@ -3473,6 +3476,13 @@ export async function callMcpTool(
             "TOOL_DISABLED",
             "search_repository requires the controller profile",
           );
+        const session = ctx.sessionId && ctx.repoId
+          ? {
+            sessionId: ctx.sessionId,
+            repoId: ctx.repoId,
+            checkoutId: ctx.checkoutId ?? ctx.repoId,
+          }
+          : undefined;
         const result = searchRepository(ctx.repoRoot, ctx.policy, {
           query: String(args.query ?? ""),
           includeGlobs: stringList(args.include_globs),
@@ -3482,6 +3492,7 @@ export async function callMcpTool(
           maxFiles:
             typeof args.max_files === "number" ? args.max_files : undefined,
           caseSensitive: args.case_sensitive === true,
+          session,
         });
         audit(ctx, name, "ok", args);
         return textResult(result);
@@ -3493,12 +3504,20 @@ export async function callMcpTool(
             "read_repository_file requires the controller profile",
           );
         const path = String(args.path ?? "");
+        const session = ctx.sessionId && ctx.repoId
+          ? {
+            sessionId: ctx.sessionId,
+            repoId: ctx.repoId,
+            checkoutId: ctx.checkoutId ?? ctx.repoId,
+          }
+          : undefined;
         const result = readRepositoryRange(
           ctx.repoRoot,
           ctx.policy,
           path,
           typeof args.start_line === "number" ? args.start_line : 1,
           typeof args.end_line === "number" ? args.end_line : 200,
+          session,
         );
         const redacted = redactMcpText(result.content);
         audit(ctx, name, "ok", args, result.path);

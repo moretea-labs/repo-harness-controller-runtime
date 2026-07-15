@@ -280,7 +280,7 @@ export function restartRequestNeedsDetachedCoordinator(
 
   const repoRoot = resolveMcpRepoRoot(repoRootInput);
   const controllerHome = resolveRepoPreferredControllerHome(repoRoot, controllerHomeInput);
-  const service = loadControllerServiceState(repoRoot);
+  const service = loadControllerServiceState(repoRoot, controllerHome);
   const runtime = loadMcpServiceRuntimeState(controllerHome, repoRoot);
   const daemon = readControllerDaemonStatus(controllerHome);
   const managedPids = new Set<number>();

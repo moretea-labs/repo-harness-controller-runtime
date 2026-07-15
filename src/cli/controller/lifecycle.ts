@@ -183,29 +183,51 @@ function currentPackageVersion(): string {
   }
 }
 
-export function controllerServiceStatePath(repoRoot: string): string {
+export function controllerServiceStatePath(repoRoot: string, controllerHome?: string): string {
+  // Prefer controllerHome so blue/green slots never overwrite each other's
+  // supervisor PID/state. Legacy repo-local path remains the fallback.
+  if (controllerHome?.trim()) {
+    return join(resolve(controllerHome.trim()), "lifecycle", "controller-service.json");
+  }
   return join(repoRoot, ".ai", "local", "state", "controller-service.json");
 }
 
-export function defaultControllerServiceLogPath(repoRoot: string): string {
+export function defaultControllerServiceLogPath(repoRoot: string, controllerHome?: string): string {
+  if (controllerHome?.trim()) {
+    return join(resolve(controllerHome.trim()), "logs", "repo-harness-controller.log");
+  }
   return join(repoRoot, ".ai", "local", "logs", "repo-harness-controller.log");
 }
 
-function writeControllerServiceState(repoRoot: string, state: ControllerServiceState): ControllerServiceState {
-  const path = controllerServiceStatePath(repoRoot);
+function writeControllerServiceState(
+  repoRoot: string,
+  state: ControllerServiceState,
+  controllerHome?: string,
+): ControllerServiceState {
+  const path = controllerServiceStatePath(repoRoot, controllerHome ?? state.controllerHome);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`, "utf-8");
   return state;
 }
 
-export function loadControllerServiceState(repoRoot: string): ControllerServiceState | null {
-  const path = controllerServiceStatePath(repoRoot);
-  if (!existsSync(path)) return null;
-  try {
-    return JSON.parse(readFileSync(path, "utf-8")) as ControllerServiceState;
-  } catch (_error) {
-    return null;
+export function loadControllerServiceState(repoRoot: string, controllerHome?: string): ControllerServiceState | null {
+  const candidates = [
+    controllerHome ? controllerServiceStatePath(repoRoot, controllerHome) : null,
+    controllerServiceStatePath(repoRoot),
+  ].filter((value): value is string => Boolean(value));
+  for (const path of candidates) {
+    if (!existsSync(path)) continue;
+    try {
+      const parsed = JSON.parse(readFileSync(path, "utf-8")) as ControllerServiceState;
+      if (controllerHome && parsed.controllerHome && resolve(parsed.controllerHome) !== resolve(controllerHome)) {
+        continue;
+      }
+      return parsed;
+    } catch (_error) {
+      // try next candidate
+    }
   }
+  return null;
 }
 
 function isPidAlive(pid: number | undefined): boolean {
@@ -281,11 +303,29 @@ async function portReachable(host: string, port: number): Promise<boolean> {
   });
 }
 
-function processMatchesRepoHarness(commandLine: string, repoRoot: string): boolean {
-  if (!commandLine.includes(repoRoot)) return false;
-  return commandLine.includes("repo-harness")
+function processMatchesRepoHarness(
+  commandLine: string,
+  repoRoot: string,
+  controllerHome?: string,
+): boolean {
+  const isHarness = commandLine.includes("repo-harness")
     || commandLine.includes("/src/cli/index.ts")
-    || commandLine.includes("/scripts/controller-runtime.sh");
+    || commandLine.includes("/scripts/controller-runtime.sh")
+    || commandLine.includes("daemon-entry.ts");
+  if (!isHarness) return false;
+  // Prefer controllerHome so blue/green slots that share a repo root do not
+  // claim each other's managed processes during stop/restart.
+  if (controllerHome) {
+    if (commandLine.includes(controllerHome)) return true;
+    // Never claim a process that is explicitly bound to a different controller home.
+    if (commandLine.includes("--controller-home") && !commandLine.includes(controllerHome)) {
+      return false;
+    }
+    // When a dedicated controllerHome is provided (slot or explicit), do not fall
+    // back to repo-root matching. Shared-repo blue/green would otherwise cross-kill.
+    return false;
+  }
+  return commandLine.includes(repoRoot);
 }
 
 function detectProcessKind(commandLine: string): ControllerServiceProcess["kind"] {
@@ -407,12 +447,26 @@ function collectControllerServiceProcesses(
     if (!seen.has(pid)) seen.set(pid, { pid, command, kind });
   };
 
-  add(state?.supervisor.pid, "controller service supervisor", "supervisor");
-  add(state?.localController?.pid, "local controller", "local-controller");
-  const runtime = loadMcpRuntimeState(repoRoot);
-  add(runtime?.server.pid, "mcp serve", "mcp-serve");
-  add(runtime?.localController?.pid, "local controller", "local-controller");
-  add(runtime?.tunnel?.pid, "cloudflared tunnel", "unknown");
+  // Only trust state PIDs when the recorded controllerHome matches this slot.
+  const stateOwnsHome = !state?.controllerHome
+    || resolve(state.controllerHome) === resolve(controllerHome);
+  if (stateOwnsHome) {
+    add(state?.supervisor.pid, "controller service supervisor", "supervisor");
+    add(state?.localController?.pid, "local controller", "local-controller");
+  }
+  const serviceRuntime = loadMcpServiceRuntimeState(controllerHome, repoRoot);
+  // Slot homes must only adopt controller-home runtime PIDs. Falling back to
+  // repo-local runtime would let one slot stop another slot's gateway.
+  if (serviceRuntime) {
+    add(serviceRuntime.server.pid, "mcp serve", "mcp-serve");
+    add(serviceRuntime.localController?.pid, "local controller", "local-controller");
+    add(serviceRuntime.tunnel?.pid, "cloudflared tunnel", "unknown");
+  } else if (stateOwnsHome) {
+    const legacyRuntime = loadMcpRuntimeState(repoRoot);
+    add(legacyRuntime?.server.pid, "mcp serve", "mcp-serve");
+    add(legacyRuntime?.localController?.pid, "local controller", "local-controller");
+    add(legacyRuntime?.tunnel?.pid, "cloudflared tunnel", "unknown");
+  }
   const daemon = readControllerDaemonStatus(controllerHome);
   add(daemon.pid, "controller daemon", "controller-daemon");
 
@@ -427,7 +481,7 @@ function collectControllerServiceProcesses(
     const pid = Number(match[1]);
     const commandLine = match[2];
     if (!Number.isInteger(pid) || protectedPids.has(pid)) continue;
-    if (!processMatchesRepoHarness(commandLine, repoRoot)) continue;
+    if (!processMatchesRepoHarness(commandLine, repoRoot, controllerHome)) continue;
     add(pid, commandLine, detectProcessKind(commandLine));
   }
   return Array.from(seen.values()).sort((a, b) => a.pid - b.pid);
@@ -484,7 +538,7 @@ function resolveServiceConfig(repoRoot: string, explicitLogFile?: string, explic
     devRunnerAgents: localConfig?.devMode?.allowedAgents ?? ["codex"],
     devRunnerTimeoutMs: localConfig?.devMode?.timeoutMs,
     devRunnerMaxTimeoutMs: localConfig?.devMode?.maxTimeoutMs,
-    logPath: resolve(explicitLogFile ?? defaultControllerServiceLogPath(repoRoot)),
+    logPath: resolve(explicitLogFile ?? defaultControllerServiceLogPath(repoRoot, controllerHome)),
   };
 }
 
@@ -584,9 +638,12 @@ function controllerHomeConfigAuthoritative(controllerHome: string): boolean {
 export async function controllerServiceStatus(opts: ControllerServiceOptions = {}): Promise<ControllerServiceStatus> {
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? ".");
   const config = resolveServiceConfig(repoRoot, opts.logFile, opts.controllerHome);
-  const state = loadControllerServiceState(repoRoot);
+  const state = loadControllerServiceState(repoRoot, config.controllerHome);
+  // Never fall back to shared repo-local MCP runtime when a dedicated controllerHome
+  // is in use — blue/green slots would otherwise claim each other's PIDs/health.
   const serviceRuntime = loadMcpServiceRuntimeState(config.controllerHome, repoRoot);
-  const runtime = serviceRuntime ?? loadMcpRuntimeState(repoRoot);
+  const runtime = serviceRuntime
+    ?? (opts.controllerHome ? null : loadMcpRuntimeState(repoRoot));
   const authority = {
     localConfig: resolveMcpRuntimeAuthority(config.controllerHome, repoRoot, "local-config"),
     runtimeState: resolveMcpRuntimeAuthority(config.controllerHome, repoRoot, "runtime-state"),
@@ -691,7 +748,7 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
     bunVersion: process.versions.bun ?? null,
     controllerHome: config.controllerHome,
     adopted: adoptedRepo(repoRoot),
-    serviceStatePath: controllerServiceStatePath(repoRoot),
+    serviceStatePath: controllerServiceStatePath(repoRoot, config.controllerHome),
     runtimeStatePath,
     logPath: config.logPath,
     running: supervisorAlive && ports.health.mcp && ports.health.localController,
@@ -807,7 +864,20 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
   }
 
   let cleaned: number[] = [];
-  if (status.supervisor.alive || status.health.mcp || status.health.localController || status.orphanedProcesses.length > 0) {
+  // Only stop processes owned by THIS controllerHome. Healthy foreign listeners on
+  // the configured ports must refuse start (ensureStartableStatus) instead of being
+  // torn down — blue/green slots must never kill each other on port collision.
+  const state = loadControllerServiceState(repoRoot, config.controllerHome);
+  const ownsTrackedSupervisor = Boolean(
+    state?.controllerHome
+    && resolve(state.controllerHome) === resolve(config.controllerHome)
+    && state.supervisor.pid
+    && isPidAlive(state.supervisor.pid),
+  );
+  const shouldStopOwnStack = ownsTrackedSupervisor
+    || status.supervisor.alive
+    || status.orphanedProcesses.length > 0;
+  if (shouldStopOwnStack) {
     cleaned = (await stopControllerService({
       repo: repoRoot,
       controllerHome: config.controllerHome,
@@ -908,7 +978,7 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
       tunnelMode: config.tunnelMode,
       publicEndpoint: config.publicEndpoint,
     },
-  });
+  }, config.controllerHome);
 
   const configuredStartTimeout = Number(process.env.REPO_HARNESS_CONTROLLER_START_TIMEOUT_MS);
   const startTimeoutMs = opts.startTimeoutMs
@@ -920,7 +990,7 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
 export async function stopControllerService(opts: ControllerServiceOptions = {}): Promise<ControllerServiceActionResult> {
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? ".");
   const config = resolveServiceConfig(repoRoot, opts.logFile, opts.controllerHome);
-  const state = loadControllerServiceState(repoRoot);
+  const state = loadControllerServiceState(repoRoot, config.controllerHome);
   const status = await controllerServiceStatus({ repo: repoRoot, logFile: config.logPath, controllerHome: config.controllerHome });
   const launchAgents = findRepoLaunchAgents(repoRoot);
   if (launchAgents.length > 0) bootoutRepoLaunchAgents(launchAgents);
@@ -944,7 +1014,7 @@ export async function stopControllerService(opts: ControllerServiceOptions = {})
           pid: undefined,
           stoppedAt: nowIso(),
         },
-      });
+      }, config.controllerHome);
     }
     return { action: "already_stopped", cleanedPids: [], status };
   }
@@ -980,7 +1050,7 @@ export async function stopControllerService(opts: ControllerServiceOptions = {})
         pid: undefined,
         stoppedAt: nowIso(),
       },
-    });
+    }, config.controllerHome);
   }
   return {
     action: "stopped",

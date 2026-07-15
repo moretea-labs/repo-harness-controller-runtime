@@ -35,7 +35,7 @@ describe('single Controller lifecycle authority', () => {
     ]) {
       const result = run(args);
       expect(result.status).not.toBe(0);
-      expect(`${result.stdout}\n${result.stderr}`).toContain('repo-harness controller start|stop|restart|status|logs');
+      expect(`${result.stdout}\n${result.stderr}`).toContain('repo-harness controller start|stop|restart|status|logs|rollout|rollback');
     }
   });
 

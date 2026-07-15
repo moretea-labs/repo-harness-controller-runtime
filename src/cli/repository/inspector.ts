@@ -4,6 +4,12 @@ import { join } from 'path';
 import { runProcess } from '../../effects/process-runner';
 import { globMatches, resolveMcpPath } from '../mcp/paths';
 import type { McpPolicy } from '../mcp/types';
+import {
+  collectSessionIdentity,
+  getOrCreateSessionCache,
+  type RepositorySessionCache,
+  type SessionIdentity,
+} from './session-cache';
 
 // Status/readiness storms call gitSnapshot repeatedly; 1s still re-ran 4 git
 // processes per second per repo. 3s is short enough for interactive UX.
@@ -18,6 +24,31 @@ interface GitSnapshotResult {
 }
 
 const gitSnapshotCache = new Map<string, { createdAt: number; value: GitSnapshotResult }>();
+
+/** Optional per-call session cache binding for MCP sessions. */
+export interface RepositoryReadSession {
+  sessionId: string;
+  repoId: string;
+  checkoutId: string;
+}
+
+function bindSessionCache(repoRoot: string, session?: RepositoryReadSession): RepositorySessionCache | null {
+  if (!session?.sessionId || !session.repoId || !session.checkoutId) return null;
+  const identity = collectSessionIdentity({
+    repoRoot,
+    repoId: session.repoId,
+    checkoutId: session.checkoutId,
+  });
+  return getOrCreateSessionCache(session.sessionId, repoRoot, identity);
+}
+
+export function resolveSessionIdentity(
+  repoRoot: string,
+  repoId: string,
+  checkoutId: string,
+): SessionIdentity {
+  return collectSessionIdentity({ repoRoot, repoId, checkoutId });
+}
 
 const DEFAULT_EXCLUDES = [
   '.git/**',
@@ -75,7 +106,9 @@ export interface SearchRepositoryOptions {
   caseSensitive?: boolean;
 }
 
-export function searchRepository(repoRoot: string, policy: McpPolicy, opts: SearchRepositoryOptions): {
+export function searchRepository(repoRoot: string, policy: McpPolicy, opts: SearchRepositoryOptions & {
+  session?: RepositoryReadSession;
+}): {
   query: string;
   results: Array<{ path: string; line: number; text: string }>;
   scannedFiles: number;
@@ -84,6 +117,7 @@ export function searchRepository(repoRoot: string, policy: McpPolicy, opts: Sear
   skippedBinaryFiles: number;
   truncated: boolean;
   truncationReason?: "max_results" | "max_files";
+  cacheHit?: boolean;
 } {
   const query = opts.query;
   if (!query.trim()) throw new Error('search query is required');
@@ -92,6 +126,20 @@ export function searchRepository(repoRoot: string, policy: McpPolicy, opts: Sear
   const includes = opts.includeGlobs ?? [];
   // Explicit include globs opt into a targeted scan; MCP read policy remains the single authority.
   const excludes = [...(includes.length === 0 ? DEFAULT_EXCLUDES : []), ...(opts.excludeGlobs ?? [])];
+  const includeKey = JSON.stringify({
+    includes,
+    excludes,
+    maxResults,
+    maxFiles,
+    caseSensitive: opts.caseSensitive === true,
+  });
+  const sessionCache = bindSessionCache(repoRoot, opts.session);
+  if (sessionCache) {
+    const cached = sessionCache.getSearch(query, includeKey);
+    if (cached && cached.result && typeof cached.result === 'object') {
+      return { ...(cached.result as ReturnType<typeof searchRepository>), cacheHit: true };
+    }
+  }
   const files: string[] = [];
   walk(repoRoot, '', maxFiles, excludes, files);
   const needle = opts.caseSensitive ? query : query.toLowerCase();
@@ -131,7 +179,7 @@ export function searchRepository(repoRoot: string, policy: McpPolicy, opts: Sear
     : files.length >= maxFiles
       ? 'max_files' as const
       : undefined;
-  return {
+  const payload = {
     query,
     results,
     scannedFiles,
@@ -140,35 +188,86 @@ export function searchRepository(repoRoot: string, policy: McpPolicy, opts: Sear
     skippedBinaryFiles,
     truncated: Boolean(truncationReason),
     truncationReason,
+    cacheHit: false as boolean | undefined,
   };
+  if (sessionCache) {
+    sessionCache.putSearch({
+      query,
+      includeKey,
+      result: payload,
+      scannedFiles,
+    });
+  }
+  return payload;
 }
 
-export function readRepositoryRange(repoRoot: string, policy: McpPolicy, path: string, startLine = 1, endLine = startLine + 199): {
+export function readRepositoryRange(
+  repoRoot: string,
+  policy: McpPolicy,
+  path: string,
+  startLine = 1,
+  endLine = startLine + 199,
+  session?: RepositoryReadSession,
+): {
   path: string;
   startLine: number;
   endLine: number;
   totalLines: number;
   content: string;
   sha256: string;
+  cacheHit?: boolean;
 } {
   const decision = resolveMcpPath(repoRoot, path, policy, 'read');
   if (!decision.ok || !decision.absolutePath || !decision.relativePath) throw new Error(decision.reason ?? 'path denied');
   const info = statSync(decision.absolutePath);
   if (!info.isFile()) throw new Error(`path is not a file: ${decision.relativePath}`);
   if (info.size > policy.maxFileBytes) throw new Error(`file exceeds ${policy.maxFileBytes} bytes`);
+  const requestedStart = Math.max(Math.trunc(startLine), 1);
+  const requestedEnd = Math.max(Math.trunc(endLine), requestedStart);
+
+  const sessionCache = bindSessionCache(repoRoot, session);
+  if (sessionCache) {
+    const cached = sessionCache.getRange(decision.relativePath, requestedStart, requestedEnd);
+    if (cached) {
+      return {
+        path: cached.path,
+        startLine: cached.startLine,
+        endLine: cached.endLine,
+        totalLines: cached.totalLines,
+        content: cached.content,
+        sha256: cached.fileSha,
+        cacheHit: true,
+      };
+    }
+  }
+
   const bytes = readFileSync(decision.absolutePath);
   if (binary(bytes)) throw new Error('binary files are not supported');
   const raw = bytes.toString('utf-8');
   const lines = raw.split(/\r?\n/);
-  const start = Math.min(Math.max(Math.trunc(startLine), 1), Math.max(lines.length, 1));
-  const end = Math.min(Math.max(Math.trunc(endLine), start), lines.length);
+  const resolvedStart = Math.min(Math.max(Math.trunc(startLine), 1), Math.max(lines.length, 1));
+  const resolvedEnd = Math.min(Math.max(Math.trunc(endLine), resolvedStart), lines.length);
+  const sha256 = createHash('sha256').update(raw).digest('hex');
+  const content = lines.slice(resolvedStart - 1, resolvedEnd).map((line, index) => `${resolvedStart + index}: ${line}`).join('\n');
+  if (sessionCache) {
+    sessionCache.putRange({
+      path: decision.relativePath,
+      fileSha: sha256,
+      startLine: resolvedStart,
+      endLine: resolvedEnd,
+      content,
+      totalLines: lines.length,
+      bytes: Buffer.byteLength(content, 'utf8'),
+    });
+  }
   return {
     path: decision.relativePath,
-    startLine: start,
-    endLine: end,
+    startLine: resolvedStart,
+    endLine: resolvedEnd,
     totalLines: lines.length,
-    sha256: createHash('sha256').update(raw).digest('hex'),
-    content: lines.slice(start - 1, end).map((line, index) => `${start + index}: ${line}`).join('\n'),
+    sha256,
+    content,
+    cacheHit: false,
   };
 }
 
@@ -176,10 +275,18 @@ export function clearGitSnapshotCacheForTest(): void {
   gitSnapshotCache.clear();
 }
 
-export function gitSnapshot(repoRoot: string): GitSnapshotResult {
+export function gitSnapshot(repoRoot: string, session?: RepositoryReadSession): GitSnapshotResult {
+  const sessionCache = bindSessionCache(repoRoot, session);
+  if (sessionCache) {
+    const hit = sessionCache.getGitSnapshot();
+    if (hit && typeof hit === 'object') return hit as GitSnapshotResult;
+  }
   const cached = gitSnapshotCache.get(repoRoot);
   const now = Date.now();
-  if (cached && now - cached.createdAt <= GIT_SNAPSHOT_CACHE_TTL_MS) return cached.value;
+  if (cached && now - cached.createdAt <= GIT_SNAPSHOT_CACHE_TTL_MS) {
+    if (sessionCache) sessionCache.putGitSnapshot(cached.value);
+    return cached.value;
+  }
   const branchResult = runProcess('git', ['branch', '--show-current'], {
     cwd: repoRoot,
     timeoutMs: 10_000,
@@ -201,6 +308,7 @@ export function gitSnapshot(repoRoot: string): GitSnapshotResult {
     dirty: status.split(/\r?\n/).some((line) => line.trim() && !line.startsWith("##")),
   };
   gitSnapshotCache.set(repoRoot, { createdAt: now, value });
+  if (sessionCache) sessionCache.putGitSnapshot(value);
   return value;
 }
 

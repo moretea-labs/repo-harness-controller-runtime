@@ -48,6 +48,12 @@ import {
 import { buildControllerContextPack } from '../../../cli/controller/context-pack';
 import { buildControllerOperationalPlan } from '../../../cli/controller/operational-plan';
 import { listControllerChecks, runControllerCheck } from '../../../cli/controller/check-runner';
+import {
+  controllerFeatureVerify,
+  controllerRestartVerify,
+  repositoryChangeVerify,
+} from '../../../cli/controller/composite-operations';
+import { controllerRollback, controllerRollout } from '../../../cli/controller/bluegreen-rollout';
 import { listActiveAgentJobSnapshots } from '../../../cli/agent-jobs/job-manager';
 import {
   commitSelectedPaths,
@@ -315,6 +321,38 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
     wait_ms: { type: 'number' },
   }, ['job_id']),
   definition('get_artifact', 'Read one bounded Evidence Plane artifact by id. Large content remains bounded.', { artifact_id: { type: 'string' }, repo_id: repoId, max_bytes: { type: 'number' } }, ['artifact_id', 'repo_id']),
+  definition('repository_change_verify', 'Composite: verify checkout/SHA, apply bounded patch, run checks, return first failure inline without get_job/get_artifact follow-ups.', {
+    repo_id: repoId,
+    expected_branch: { type: 'string' },
+    expected_head: { type: 'string' },
+    expected_file_shas: { type: 'object', additionalProperties: { type: 'string' } },
+    patch: { type: 'string', description: 'Unified diff applied with git apply.' },
+    allowed_paths: { type: 'array', items: { type: 'string' } },
+    checks: { type: 'array', items: { type: 'string' } },
+    check_timeout_ms: { type: 'number' },
+  }, [], false),
+  definition('controller_restart_verify', 'Composite: durable controller restart with full health verification; resume the same requestId instead of resubmitting.', {
+    repo_id: repoId,
+    request_id: { type: 'string' },
+    reason: { type: 'string' },
+    poll_only: { type: 'boolean' },
+    mode: { type: 'string', enum: ['auto', 'sync', 'detached'] },
+    expected_source_commit: { type: 'string' },
+    expected_tool_fingerprint: { type: 'string' },
+  }, [], false),
+  definition('controller_feature_verify', 'Composite: feature-branch unit + isolated lifecycle gate for green rollout readiness. Does not push.', {
+    repo_id: repoId,
+    skip_lifecycle: { type: 'boolean' },
+  }, [], false),
+  definition('controller_rollout', 'Blue/green rollout through the single lifecycle surface: start inactive slot, verify, atomic cutover.', {
+    repo_id: repoId,
+    skip_durable_job: { type: 'boolean' },
+    reason: { type: 'string' },
+  }, [], false),
+  definition('controller_rollback', 'Rollback to the previous healthy runtime slot within the bounded window.', {
+    repo_id: repoId,
+    skip_durable_job: { type: 'boolean' },
+  }, [], false),
   definition('list_jobs', 'List durable Execution Jobs for one repository. Summary is the default.', {
     repo_id: repoId,
     limit: { type: 'number' },
@@ -2417,6 +2455,67 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
               ? digest.summary
               : 'Job is still active. Poll get_job without waiting, or use work_wait only when blocking is explicitly required.',
         }, digest.phase === 'failed' || digest.phase === 'timed_out');
+      }
+      case 'repository_change_verify': {
+        const repository = selected(ctx, args);
+        const expectedFileShas = args.expected_file_shas && typeof args.expected_file_shas === 'object' && !Array.isArray(args.expected_file_shas)
+          ? Object.fromEntries(
+            Object.entries(args.expected_file_shas as Record<string, unknown>)
+              .filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+          )
+          : undefined;
+        const payload = repositoryChangeVerify({
+          repo: repository.canonicalRoot,
+          expectedBranch: typeof args.expected_branch === 'string' ? args.expected_branch : undefined,
+          expectedHead: typeof args.expected_head === 'string' ? args.expected_head : undefined,
+          expectedFileShas,
+          patch: typeof args.patch === 'string' ? args.patch : undefined,
+          allowedPaths: Array.isArray(args.allowed_paths)
+            ? args.allowed_paths.filter((value): value is string => typeof value === 'string')
+            : undefined,
+          checks: Array.isArray(args.checks)
+            ? args.checks.filter((value): value is string => typeof value === 'string')
+            : undefined,
+          checkTimeoutMs: typeof args.check_timeout_ms === 'number' ? args.check_timeout_ms : undefined,
+        });
+        return result(payload as unknown as Record<string, unknown>, payload.status === 'failed');
+      }
+      case 'controller_restart_verify': {
+        const payload = await controllerRestartVerify({
+          repo: selected(ctx, args).canonicalRoot,
+          controllerHome: ctx.controllerHome,
+          requestId: typeof args.request_id === 'string' ? args.request_id : undefined,
+          reason: typeof args.reason === 'string' ? args.reason : undefined,
+          pollOnly: args.poll_only === true,
+          mode: args.mode === 'sync' || args.mode === 'detached' || args.mode === 'auto' ? args.mode : 'auto',
+          expectedSourceCommit: typeof args.expected_source_commit === 'string' ? args.expected_source_commit : undefined,
+          expectedToolFingerprint: typeof args.expected_tool_fingerprint === 'string' ? args.expected_tool_fingerprint : undefined,
+        });
+        return result(payload as unknown as Record<string, unknown>, payload.status === 'failed');
+      }
+      case 'controller_feature_verify': {
+        const payload = controllerFeatureVerify({
+          repo: selected(ctx, args).canonicalRoot,
+          skipLifecycle: args.skip_lifecycle === true,
+        });
+        return result(payload as unknown as Record<string, unknown>, payload.status === 'failed');
+      }
+      case 'controller_rollout': {
+        const payload = await controllerRollout({
+          repo: selected(ctx, args).canonicalRoot,
+          controllerHome: ctx.controllerHome,
+          skipDurableJob: args.skip_durable_job === true,
+          reason: typeof args.reason === 'string' ? args.reason : undefined,
+        });
+        return result(payload as unknown as Record<string, unknown>, payload.status === 'failed');
+      }
+      case 'controller_rollback': {
+        const payload = await controllerRollback({
+          repo: selected(ctx, args).canonicalRoot,
+          controllerHome: ctx.controllerHome,
+          skipDurableJob: args.skip_durable_job === true,
+        });
+        return result(payload as unknown as Record<string, unknown>, payload.status === 'failed');
       }
       case 'get_artifact': {
         const artifactId = String(args.artifact_id ?? '').trim();

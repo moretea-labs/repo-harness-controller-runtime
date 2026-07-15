@@ -1,4 +1,5 @@
 import { Command } from 'commander';
+import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import { getAgentJob, getAgentJobEvents, getAgentJobLog, listAgentJobs } from '../agent-jobs/job-manager';
 import { archiveIssue, getIssue, inspectIssueReadiness, projectBoard, restoreIssue } from '../controller/issue-store';
@@ -23,6 +24,12 @@ import {
   stopControllerService,
 } from '../controller/lifecycle';
 import { formatControllerRestartScheduled, requestControllerServiceRestart } from '../controller/restart-coordinator';
+import { controllerRollback, controllerRollout } from '../controller/bluegreen-rollout';
+import {
+  controllerFeatureVerify,
+  controllerRestartVerify,
+  repositoryChangeVerify,
+} from '../controller/composite-operations';
 import { dispatchLocalBridgeJob,
   executeLocalBridgeJob, submitLocalBridgeJob } from '../local-bridge/job-store';
 
@@ -702,6 +709,93 @@ export function buildControllerCommand(): Command {
         tail: Math.max(1, Number(opts.tail ?? 200)),
       });
       output(opts.json ? result : result.text || `(no log output yet)\nlog: ${result.logPath}`, opts.json === true);
+    });
+
+  command.command('rollout')
+    .description('Blue/green rollout: start inactive slot, verify, atomically cut over active-slot authority')
+    .option('--repo <path>', 'Repository root')
+    .option('--controller-home <path>', 'Controller state root')
+    .option('--skip-durable-job', 'Skip minimal durable job smoke during verification')
+    .option('--json', 'Output JSON')
+    .action(async (opts: { repo?: string; controllerHome?: string; skipDurableJob?: boolean; json?: boolean }) => {
+      const result = await controllerRollout({
+        repo: opts.repo,
+        controllerHome: opts.controllerHome,
+        skipDurableJob: opts.skipDurableJob === true,
+      });
+      output(result, opts.json === true);
+      if (result.status === 'failed') process.exitCode = 1;
+    });
+
+  command.command('rollback')
+    .description('Rollback to the previous healthy runtime slot within the bounded window')
+    .option('--repo <path>', 'Repository root')
+    .option('--controller-home <path>', 'Controller state root')
+    .option('--skip-durable-job', 'Skip durable job smoke during verification')
+    .option('--json', 'Output JSON')
+    .action(async (opts: { repo?: string; controllerHome?: string; skipDurableJob?: boolean; json?: boolean }) => {
+      const result = await controllerRollback({
+        repo: opts.repo,
+        controllerHome: opts.controllerHome,
+        skipDurableJob: opts.skipDurableJob === true,
+      });
+      output(result, opts.json === true);
+      if (result.status === 'failed') process.exitCode = 1;
+    });
+
+  command.command('change-verify')
+    .description('Composite: verify checkout, apply bounded patch, run checks, return first failure inline')
+    .option('--repo <path>', 'Repository root')
+    .option('--branch <name>', 'Expected branch')
+    .option('--head <sha>', 'Expected HEAD')
+    .option('--patch-file <path>', 'Unified diff to apply')
+    .option('--check <id>', 'Check id to run (repeatable)', (value, previous: string[]) => [...previous, value], [])
+    .option('--json', 'Output JSON')
+    .action((opts: { repo?: string; branch?: string; head?: string; patchFile?: string; check?: string[]; json?: boolean }) => {
+      const patch = opts.patchFile ? readFileSync(opts.patchFile, 'utf8') : undefined;
+      const result = repositoryChangeVerify({
+        repo: opts.repo,
+        expectedBranch: opts.branch,
+        expectedHead: opts.head,
+        patch,
+        checks: opts.check,
+      });
+      output(result, opts.json === true);
+      if (result.status === 'failed') process.exitCode = 1;
+    });
+
+  command.command('restart-verify')
+    .description('Composite: durable restart/rollout request with full health verification and resume by request id')
+    .option('--repo <path>', 'Repository root')
+    .option('--controller-home <path>', 'Controller state root')
+    .option('--request-id <id>', 'Idempotent request id')
+    .option('--poll-only', 'Only read an existing durable request; never submit a new restart')
+    .option('--reason <text>', 'Bounded restart reason')
+    .option('--json', 'Output JSON')
+    .action(async (opts: { repo?: string; controllerHome?: string; requestId?: string; pollOnly?: boolean; reason?: string; json?: boolean }) => {
+      const result = await controllerRestartVerify({
+        repo: opts.repo,
+        controllerHome: opts.controllerHome,
+        requestId: opts.requestId,
+        pollOnly: opts.pollOnly === true,
+        reason: opts.reason,
+      });
+      output(result, opts.json === true);
+      if (result.status === 'failed') process.exitCode = 1;
+    });
+
+  command.command('feature-verify')
+    .description('Composite: feature-branch unit + isolated lifecycle gate for green rollout readiness')
+    .option('--repo <path>', 'Repository root')
+    .option('--skip-lifecycle', 'Skip Level 2 isolated lifecycle suite')
+    .option('--json', 'Output JSON')
+    .action((opts: { repo?: string; skipLifecycle?: boolean; json?: boolean }) => {
+      const result = controllerFeatureVerify({
+        repo: opts.repo,
+        skipLifecycle: opts.skipLifecycle === true,
+      });
+      output(result, opts.json === true);
+      if (result.status === 'failed') process.exitCode = 1;
     });
 
   return command;

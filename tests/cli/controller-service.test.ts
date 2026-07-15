@@ -167,8 +167,9 @@ describe("controller service lifecycle", () => {
     }>(start.stdout);
     expect(firstStart.action).toBe("started");
     expect(firstStart.status.running).toBe(true);
+    // Lifecycle state is owned by controllerHome so blue/green slots never share PIDs.
     expect(realpathSync(firstStart.status.serviceStatePath)).toBe(
-      realpathSync(join(repoRoot, ".ai", "local", "state", "controller-service.json")),
+      realpathSync(join(controllerHome, "lifecycle", "controller-service.json")),
     );
     expect(firstStart.status.supervisor.pid).toBeTruthy();
     expect(firstStart.status.mcpRuntime?.localController?.pid).toBe(firstStart.status.supervisor.pid);
@@ -219,7 +220,7 @@ describe("controller service lifecycle", () => {
     expect(finalStatus.running).toBe(false);
     expect((finalStatus.supervisor as { alive?: boolean }).alive).toBe(false);
 
-    const logPath = join(repoRoot, ".ai", "local", "logs", "repo-harness-controller.log");
+    const logPath = join(controllerHome, "logs", "repo-harness-controller.log");
     expect(readFileSync(logPath, "utf-8")).toContain("[repo-harness mcp keepalive] Repo:");
   }, 150_000);
 

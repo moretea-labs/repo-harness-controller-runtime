@@ -55,7 +55,7 @@ command -v bun >/dev/null 2>&1 || {
 }
 
 if [ "$#" -eq 0 ]; then
-  echo "Usage: scripts/controller-runtime.sh <start|stop|status|restart|logs> [args...]" >&2
+  echo "Usage: scripts/controller-runtime.sh <start|stop|status|restart|logs|rollout|rollback> [args...]" >&2
   echo "Controller home: $REPO_HARNESS_CONTROLLER_HOME" >&2
   echo "External tunnel manager: $EXTERNAL_TUNNEL_MANAGER (set REPO_HARNESS_CONTROLLER_EXTERNAL_TUNNEL=ngrok to enable legacy ngrok rotation)" >&2
   exit 2
@@ -142,6 +142,13 @@ case "$COMMAND" in
     # The coordinator decides whether an external caller can wait synchronously
     # or a managed MCP/GUI/Worker caller must return before shutdown begins.
     run_restart_request "$@"
+    ;;
+  rollout)
+    # Blue/green cutover through the single public lifecycle surface.
+    run_controller_service rollout "$@"
+    ;;
+  rollback)
+    run_controller_service rollback "$@"
     ;;
   status)
     run_controller_service status "$@"

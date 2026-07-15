@@ -283,6 +283,11 @@ export async function callMultiRepositoryTool(
         devRunnerMaxTimeoutMs: ctx.policy.execution.runnerMaxTimeoutMs,
       }),
       enableChatgptBrowser: ctx.enableChatgptBrowser,
+      sessionId: ctx.sessionId,
+      principalId: ctx.principalId,
+      controllerInstanceId: ctx.controllerInstanceId,
+      repoId: repository.repoId,
+      checkoutId: repository.activeCheckoutId,
     };
     const invoke = async () => await callMcpTool(scopedContext, name, scopedArgs) as ToolResult;
     const result = REPOSITORY_LOCKED_TOOLS.has(name)
