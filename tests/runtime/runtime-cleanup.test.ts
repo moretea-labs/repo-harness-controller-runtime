@@ -82,6 +82,8 @@ describe('runtime cleanup', () => {
       startedAt: new Date(Date.now() - 60_000).toISOString(),
     }, null, 2)}\n`, 'utf8');
 
+    // Dead PID forces ensureControllerDaemon off the live fast-path so startup
+    // cleanup still runs before spawning a replacement daemon.
     const status = ensureControllerDaemon(home);
     if (status.pid) daemonPids.add(status.pid);
 

@@ -196,6 +196,18 @@ export function runtimeGenerationPath(controllerHome: string): string {
   return join(ensureControllerHome(controllerHome), 'system', 'runtime-generation.json');
 }
 
+/**
+ * Status/readiness storms re-resolve the Controller Runtime Source repeatedly.
+ * Cache only the authority path (not every explicit collectRuntimeSourceIdentity
+ * call) so tests and rotate/start can still observe immediate dirty/commit changes.
+ */
+const RUNTIME_SOURCE_IDENTITY_CACHE_TTL_MS = 2_500;
+const runtimeSourceIdentityCache = new Map<string, { at: number; value: RuntimeSourceIdentity }>();
+
+export function clearRuntimeSourceIdentityCacheForTest(): void {
+  runtimeSourceIdentityCache.clear();
+}
+
 export function collectRuntimeSourceIdentity(repoRoot: string): RuntimeSourceIdentity {
   const canonicalRoot = realpathSync(repoRoot);
   const repoId = `repo_${repositoryIdentity(canonicalRoot)}`;
@@ -212,6 +224,22 @@ export function collectRuntimeSourceIdentity(repoRoot: string): RuntimeSourceIde
     dirty: runtimeSourceDirty(canonicalRoot),
     observedAt: nowIso(),
   };
+}
+
+function collectRuntimeSourceIdentityCached(repoRoot: string): RuntimeSourceIdentity {
+  const now = Date.now();
+  const cacheKey = resolve(repoRoot);
+  const cached = runtimeSourceIdentityCache.get(cacheKey);
+  if (cached && now - cached.at <= RUNTIME_SOURCE_IDENTITY_CACHE_TTL_MS) {
+    return cached.value;
+  }
+  const value = collectRuntimeSourceIdentity(repoRoot);
+  runtimeSourceIdentityCache.set(cacheKey, { at: now, value });
+  if (runtimeSourceIdentityCache.size > 32) {
+    const oldest = runtimeSourceIdentityCache.keys().next().value;
+    if (oldest !== undefined) runtimeSourceIdentityCache.delete(oldest);
+  }
+  return value;
 }
 
 /**
@@ -237,7 +265,13 @@ export function collectCurrentControllerRuntimeSourceIdentity(options: {
   cwd?: string;
 } = {}): RuntimeSourceIdentity | undefined {
   const resolved = resolveControllerRuntimeSourceRoot(options);
-  return tryCollectRuntimeSourceIdentity(resolved.root);
+  if (!resolved.root?.trim()) return undefined;
+  try {
+    if (!existsSync(resolved.root)) return undefined;
+    return collectRuntimeSourceIdentityCached(resolved.root);
+  } catch {
+    return undefined;
+  }
 }
 
 export function readRuntimeGeneration(controllerHome: string): RuntimeGenerationRecord | undefined {
@@ -341,7 +375,14 @@ export function evaluateActiveRuntimeSourceDrift(
   } = {},
 ): RuntimeSourceDrift & { current?: RuntimeSourceIdentity } {
   const current = options.currentRuntimeRoot
-    ? tryCollectRuntimeSourceIdentity(options.currentRuntimeRoot)
+    ? (() => {
+      try {
+        if (!options.currentRuntimeRoot || !existsSync(options.currentRuntimeRoot)) return undefined;
+        return collectRuntimeSourceIdentityCached(options.currentRuntimeRoot);
+      } catch {
+        return undefined;
+      }
+    })()
     : collectCurrentControllerRuntimeSourceIdentity(options);
   return {
     current,

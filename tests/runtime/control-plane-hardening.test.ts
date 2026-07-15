@@ -63,6 +63,38 @@ describe('control-plane hardening', () => {
     expect(ensured.startedAt).toBe(startedAt);
   });
 
+  test('ensureControllerDaemon skips startup cleanup when the daemon PID is live', () => {
+    const controllerHome = temp('repo-harness-daemon-hotpath-');
+    mkdirSync(join(controllerHome, 'daemon'), { recursive: true });
+    const startedAt = new Date().toISOString();
+    writeFileSync(join(controllerHome, 'daemon', 'controller.pid'), `${process.pid}\n`);
+    writeFileSync(join(controllerHome, 'daemon', 'state.json'), `${JSON.stringify({
+      schemaVersion: 1,
+      status: 'ready',
+      pid: process.pid,
+      startedAt,
+    }, null, 2)}\n`);
+    // A live scheduler heartbeat keeps status ready without degraded noise.
+    mkdirSync(join(controllerHome, 'scheduler'), { recursive: true });
+    writeFileSync(join(controllerHome, 'scheduler', 'state.json'), `${JSON.stringify({
+      schemaVersion: 1,
+      updatedAt: new Date().toISOString(),
+      loopStartedAt: new Date().toISOString(),
+      lastTickAt: new Date().toISOString(),
+      lastDispatchAt: new Date().toISOString(),
+      lastReconcileAt: new Date().toISOString(),
+      lastRepoDispatch: {},
+    }, null, 2)}\n`);
+
+    const first = ensureControllerDaemon(controllerHome);
+    const second = ensureControllerDaemon(controllerHome);
+    expect(first.pid).toBe(process.pid);
+    expect(second.pid).toBe(process.pid);
+    expect(second.startedAt).toBe(startedAt);
+    // Fast path must not spawn a replacement daemon or rewrite state.
+    expect(readControllerDaemonStatus(controllerHome).pid).toBe(process.pid);
+  });
+
   test('returns immediately for waiting approval and resumes the same durable Job', async () => {
     const controllerHome = temp('repo-harness-approval-wait-');
     const created = createJob(controllerHome);

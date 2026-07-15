@@ -40,8 +40,14 @@ Selecting a business execution repository (different root/branch from the contro
 - Objective: Introduce unique runtime source resolver; stop comparing execution repository roots; pin daemon/keepalive startup source; add targeted tests and architecture invariant.
 - Checks: `bun test tests/runtime/runtime-source-isolation.test.ts tests/cli/controller-runtime-status.test.ts tests/runtime/facade-mcp-surface.test.ts`, `bun run check:type`
 
+## Follow-up completed
+
+- Hot-path controller performance: live `ensureControllerDaemon` skips cleanup; process-list / gitSnapshot / runtime-source identity short TTL caches.
+
 ## Related Artifacts
 
 - `src/runtime/control-plane/runtime-generation.ts`
+- `src/runtime/control-plane/daemon-client.ts`
 - `docs/architecture/current/architecture-invariants.md` Invariant 26
 - `tests/runtime/runtime-source-isolation.test.ts`
+- `tests/runtime/controller-hotpath-cache.test.ts`

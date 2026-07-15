@@ -84,8 +84,13 @@ export function readControllerDaemonStatus(controllerHome: string): ControllerDa
 
 export function ensureControllerDaemon(controllerHome: string): ControllerDaemonStatus {
   const home = ensureControllerHome(controllerHome);
-  // Cleanup is bounded but still performs filesystem I/O. Run it before taking
-  // the global daemon-start lock so unrelated Controller operations are not blocked.
+  // Hot path: a live Controller daemon needs neither cleanup I/O nor the global
+  // lock. Durable MCP jobs call this on every mutating request; scanning a large
+  // controllerHome on each call was a multi-ms tax even when the daemon was up.
+  const live = readControllerDaemonStatus(home);
+  if (pidAlive(live.pid)) return live;
+
+  // Cleanup only when we may actually start a daemon. Bounded, but still FS-heavy.
   try {
     cleanupControllerRuntimeState(home, { reason: 'startup' });
   } catch (error) {
