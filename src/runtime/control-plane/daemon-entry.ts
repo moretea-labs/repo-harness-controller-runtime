@@ -6,12 +6,22 @@ import { writeJsonAtomic } from '../shared/json-files';
 import { bootstrapManagedRuntimeEnv } from '../shared/managed-env';
 import { controllerDaemonOwnsPidFile } from './daemon-ownership';
 import { GlobalScheduler } from './global-scheduler/scheduler';
-import { collectRuntimeSourceIdentity, rotateRuntimeGeneration, type RuntimeGenerationRecord } from './runtime-generation';
+import {
+  collectRuntimeSourceIdentity,
+  CONTROLLER_RUNTIME_SOURCE_ROOT_ENV,
+  resolveControllerRuntimeSourceRoot,
+  rotateRuntimeGeneration,
+  type RuntimeGenerationRecord,
+} from './runtime-generation';
 import { reconcileControllerStartup, type ControllerStartupRecoveryResult } from './startup-recovery';
 
 function option(name: string): string | undefined {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : undefined;
+}
+
+function optionOrEnv(name: string, envName: string): string | undefined {
+  return option(name) ?? process.env[envName];
 }
 
 export function startControllerDaemon(controllerHome: string): void {
@@ -69,7 +79,21 @@ export function publishReadyAfterStartupRecovery(
 } {
   const statePath = join(controllerHome, 'daemon', 'state.json');
   const pidPath = join(controllerHome, 'daemon', 'controller.pid');
-  const generation = rotateRuntimeGeneration(controllerHome, collectRuntimeSourceIdentity(process.cwd()));
+  // Runtime Source is controller-scoped and package-derived. Never capture ambient
+  // execution-repository cwd as the runtime identity (multi-repo false drift).
+  const resolvedSource = resolveControllerRuntimeSourceRoot({
+    explicitRoot: optionOrEnv('--runtime-source-root', CONTROLLER_RUNTIME_SOURCE_ROOT_ENV),
+  });
+  if (!resolvedSource.root) {
+    throw new Error(
+      `Controller daemon cannot resolve runtime source root: ${resolvedSource.detail ?? resolvedSource.reason}. `
+      + `Set ${CONTROLLER_RUNTIME_SOURCE_ROOT_ENV} to the controller package/source checkout.`,
+    );
+  }
+  const generation = rotateRuntimeGeneration(
+    controllerHome,
+    collectRuntimeSourceIdentity(resolvedSource.root),
+  );
   // The controller is observably starting while recovery is synchronous. A
   // gateway must never see ready before durable truth has been reconciled.
   writeJsonAtomic(statePath, {

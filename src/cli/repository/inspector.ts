@@ -5,7 +5,9 @@ import { runProcess } from '../../effects/process-runner';
 import { globMatches, resolveMcpPath } from '../mcp/paths';
 import type { McpPolicy } from '../mcp/types';
 
-const GIT_SNAPSHOT_CACHE_TTL_MS = 1_000;
+// Status/readiness storms call gitSnapshot repeatedly; 1s still re-ran 4 git
+// processes per second per repo. 3s is short enough for interactive UX.
+const GIT_SNAPSHOT_CACHE_TTL_MS = 3_000;
 
 interface GitSnapshotResult {
   branch: string | null;

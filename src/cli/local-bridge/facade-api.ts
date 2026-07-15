@@ -14,7 +14,7 @@ import { listControllerChecks, runControllerCheck } from '../controller/check-ru
 import { createMcpToolContext, type MultiRepositoryMcpToolContext } from '../mcp/multi-repository';
 import { readControllerDaemonStatus } from '../../runtime/control-plane/daemon-client';
 import { readSchedulerHealthSnapshot } from '../../runtime/control-plane/global-scheduler/scheduler';
-import { collectRuntimeSourceIdentity, evaluateRuntimeSourceDrift, readRuntimeGeneration } from '../../runtime/control-plane/runtime-generation';
+import { evaluateActiveRuntimeSourceDrift, readRuntimeGeneration } from '../../runtime/control-plane/runtime-generation';
 import {
   getAssistantPluginManifest,
   listAssistantPluginManifests,
@@ -674,7 +674,8 @@ function controllerAccessStateView(ctx: ConsoleFacadeContext): AccessStateViewMo
   });
   const repositoryPolicy = readRepositoryAccessPolicy(ctx.controllerHome, ctx.repository.repoId);
   const runtimeGeneration = readRuntimeGeneration(ctx.controllerHome);
-  const drift = evaluateRuntimeSourceDrift(runtimeGeneration?.source, collectRuntimeSourceIdentity(ctx.repository.canonicalRoot));
+  // Runtime Source is controller-scoped; execution repository is not the current source.
+  const drift = evaluateActiveRuntimeSourceDrift(runtimeGeneration?.source);
   return {
     configuredAccessMode: configured.configuredAccessMode,
     configuredAccessModeLabel: accessModeDescriptor(configured.configuredAccessMode).shortLabel,

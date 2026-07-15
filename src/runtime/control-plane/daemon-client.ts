@@ -6,7 +6,12 @@ import { ensureControllerHome } from '../../cli/repositories/controller-home';
 import { withControllerLock } from '../../cli/repositories/locks';
 import { readJsonFile, writeJsonAtomic } from '../shared/json-files';
 import { readSchedulerHealthSnapshot } from './global-scheduler/scheduler';
-import { readRuntimeGeneration, type RuntimeSourceIdentity } from './runtime-generation';
+import {
+  CONTROLLER_RUNTIME_SOURCE_ROOT_ENV,
+  readRuntimeGeneration,
+  resolveControllerRuntimeSourceRoot,
+  type RuntimeSourceIdentity,
+} from './runtime-generation';
 import { cleanupControllerRuntimeState } from './runtime-cleanup';
 import type { ControllerStartupRecoveryResult } from './startup-recovery';
 
@@ -79,8 +84,13 @@ export function readControllerDaemonStatus(controllerHome: string): ControllerDa
 
 export function ensureControllerDaemon(controllerHome: string): ControllerDaemonStatus {
   const home = ensureControllerHome(controllerHome);
-  // Cleanup is bounded but still performs filesystem I/O. Run it before taking
-  // the global daemon-start lock so unrelated Controller operations are not blocked.
+  // Hot path: a live Controller daemon needs neither cleanup I/O nor the global
+  // lock. Durable MCP jobs call this on every mutating request; scanning a large
+  // controllerHome on each call was a multi-ms tax even when the daemon was up.
+  const live = readControllerDaemonStatus(home);
+  if (pidAlive(live.pid)) return live;
+
+  // Cleanup only when we may actually start a daemon. Bounded, but still FS-heavy.
   try {
     cleanupControllerRuntimeState(home, { reason: 'startup' });
   } catch (error) {
@@ -94,13 +104,25 @@ export function ensureControllerDaemon(controllerHome: string): ControllerDaemon
     const entry = fileURLToPath(new URL('./daemon-entry.ts', import.meta.url));
     const bun = Boolean(process.versions.bun);
     const loader = fileURLToPath(new URL('../shared/node-ts-loader.mjs', import.meta.url));
+    // Pin daemon runtime source to the package/source authority, not ambient cwd
+    // (e.g. business repository) of the process that called ensureControllerDaemon.
+    const runtimeSource = resolveControllerRuntimeSourceRoot();
     const args = bun
       ? [entry, '--controller-home', home]
       : ['--loader', loader, entry, '--controller-home', home];
+    if (runtimeSource.root) {
+      args.push('--runtime-source-root', runtimeSource.root);
+    }
     const child = spawn(process.execPath, args, {
       detached: true,
       stdio: 'ignore',
-      env: process.env,
+      env: {
+        ...process.env,
+        ...(runtimeSource.root
+          ? { [CONTROLLER_RUNTIME_SOURCE_ROOT_ENV]: runtimeSource.root }
+          : {}),
+      },
+      ...(runtimeSource.root ? { cwd: runtimeSource.root } : {}),
     });
     const starting: ControllerDaemonStatus = {
       schemaVersion: 1,

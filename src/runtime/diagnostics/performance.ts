@@ -157,25 +157,43 @@ function classify(command: string): RuntimeProcessSample['kind'] {
   return 'other';
 }
 
-export function collectRuntimeProcesses(activeJobIds: string[] = []): RuntimeProcessSample[] {
-  const active = new Set(activeJobIds);
+/** Full-table `ps` is ~50–100ms. Cache the base list for readiness/status storms. */
+const PROCESS_LIST_CACHE_TTL_MS = 2_500;
+
+type RuntimeProcessBase = Omit<RuntimeProcessSample, 'orphan'>;
+
+interface CachedProcessList {
+  at: number;
+  samples: RuntimeProcessBase[];
+}
+
+let processListCache: CachedProcessList | undefined;
+
+export function clearRuntimeProcessListCacheForTest(): void {
+  processListCache = undefined;
+}
+
+function scanRuntimeProcessList(): RuntimeProcessBase[] {
   let output = '';
   try {
     output = execFileSync('ps', ['-axo', 'pid=,ppid=,pgid=,etime=,%cpu=,%mem=,command='], { encoding: 'utf8', maxBuffer: 1024 * 1024 });
   } catch (_error) {
     return [];
   }
-  return output.split('\n').map((line) => line.trim()).filter(Boolean).map((line): RuntimeProcessSample | undefined => {
+  const samples: RuntimeProcessBase[] = [];
+  for (const raw of output.split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
     const match = line.match(/^(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+([\d.]+)\s+([\d.]+)\s+(.+)$/);
-    if (!match) return undefined;
+    if (!match) continue;
     const command = match[7];
     const kind = classify(command);
     const relevant = kind !== 'other' || /\b(bun|node|tsx)\b/.test(command);
-    if (!relevant) return undefined;
+    if (!relevant) continue;
     const jobId = extractFlag(command, '--job-id');
     const ppid = Number(match[2]);
     const cpu = parseNumber(match[5]);
-    return {
+    samples.push({
       pid: Number(match[1]),
       ppid,
       pgid: Number(match[3]),
@@ -186,10 +204,31 @@ export function collectRuntimeProcesses(activeJobIds: string[] = []): RuntimePro
       kind,
       repoRoot: extractRepoRoot(command),
       jobId,
-      orphan: kind === 'worker' && (ppid === 1 || (jobId ? !active.has(jobId) : false)),
       highCpu: cpu >= 20,
-    };
-  }).filter((sample): sample is RuntimeProcessSample => sample !== undefined).sort((a, b) => b.cpu - a.cpu);
+    });
+  }
+  return samples.sort((a, b) => b.cpu - a.cpu);
+}
+
+export function collectRuntimeProcesses(
+  activeJobIds: string[] = [],
+  options: { forceRefresh?: boolean } = {},
+): RuntimeProcessSample[] {
+  const now = Date.now();
+  if (
+    options.forceRefresh
+    || !processListCache
+    || now - processListCache.at > PROCESS_LIST_CACHE_TTL_MS
+  ) {
+    processListCache = { at: now, samples: scanRuntimeProcessList() };
+  }
+  const active = new Set(activeJobIds);
+  return processListCache.samples.map((sample) => ({
+    ...sample,
+    orphan: sample.kind === 'worker' && (
+      sample.ppid === 1 || (sample.jobId ? !active.has(sample.jobId) : false)
+    ),
+  }));
 }
 
 export function inferLocalControllerProcess(repoRoot: string): { running: boolean; pid?: number; endpoint?: string; source: 'process-scan' } | undefined {

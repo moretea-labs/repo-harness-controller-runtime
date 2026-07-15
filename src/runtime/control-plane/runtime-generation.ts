@@ -1,11 +1,17 @@
 import { randomUUID } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync } from 'fs';
-import { join } from 'path';
+import { dirname, join, resolve } from 'path';
+import { fileURLToPath } from 'url';
 import { spawnSync } from 'child_process';
 import { ensureControllerHome } from '../../cli/repositories/controller-home';
 import { repositoryIdentity } from '../../cli/controller/runtime-config';
 import { stableCheckoutId } from '../../cli/repositories/identity';
 import { readJsonFile, writeJsonAtomic } from '../shared/json-files';
+
+/** Explicit override for the Controller Runtime Source root (not an execution repository). */
+export const CONTROLLER_RUNTIME_SOURCE_ROOT_ENV = 'REPO_HARNESS_CONTROLLER_RUNTIME_SOURCE_ROOT';
+/** Compatibility alias used by some launchers and docs. */
+export const CONTROLLER_RUNTIME_SOURCE_ROOT_ENV_ALIAS = 'REPO_HARNESS_SOURCE_ROOT';
 
 export interface RuntimeSourceIdentity {
   repoId: string;
@@ -30,9 +36,29 @@ export interface RuntimeGenerationRecord {
   updatedAt: string;
 }
 
+export type RuntimeSourceDriftCode =
+  | 'RUNTIME_SOURCE_OK'
+  | 'RUNTIME_SOURCE_SNAPSHOT_MISSING'
+  | 'RUNTIME_SOURCE_CURRENT_UNAVAILABLE'
+  | 'RUNTIME_SOURCE_SNAPSHOT_STALE';
+
 export interface RuntimeSourceDrift {
   restartRequired: boolean;
   reasons: string[];
+  code: RuntimeSourceDriftCode;
+}
+
+export type RuntimeSourceResolveReason =
+  | 'explicit'
+  | 'env'
+  | 'package-root'
+  | 'process-cwd'
+  | 'unavailable';
+
+export interface ResolvedControllerRuntimeSourceRoot {
+  root?: string;
+  reason: RuntimeSourceResolveReason;
+  detail?: string;
 }
 
 function nowIso(): string {
@@ -88,8 +114,98 @@ function runtimeSourceDirty(root: string): boolean {
   return Boolean(gitText(root, ['status', '--porcelain=v1', '--untracked-files=all', '--', ...runtimeSourceStatusPaths(root)]));
 }
 
+/**
+ * Package/install root that owns Controller runtime code.
+ * Derived from this module's location so ambient process.cwd() cannot redefine it.
+ */
+export function packageRuntimeSourceRoot(): string {
+  return resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+}
+
+function readPackageName(root: string): string | undefined {
+  try {
+    const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { name?: string };
+    return typeof pkg.name === 'string' ? pkg.name : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * True when `root` is a Controller runtime package checkout or install tree.
+ * Does not hardcode absolute paths or require a specific clone name.
+ */
+export function looksLikeControllerRuntimePackage(root: string): boolean {
+  if (!root || !existsSync(root)) return false;
+  const name = readPackageName(root);
+  if (name === '@moretea-labs/repo-harness-controller') return true;
+  // Source checkout / worktree without install: entry + package markers.
+  return existsSync(join(root, 'src', 'runtime', 'control-plane', 'daemon-entry.ts'))
+    && existsSync(join(root, 'package.json'));
+}
+
+/**
+ * Unique Controller Runtime Source root resolver.
+ *
+ * Authority order:
+ * 1. explicit root (daemon/lifecycle handoff)
+ * 2. REPO_HARNESS_CONTROLLER_RUNTIME_SOURCE_ROOT / REPO_HARNESS_SOURCE_ROOT
+ * 3. package root derived from this module (source checkout, global install, worktree)
+ * 4. process.cwd() only when it itself looks like the controller package
+ *
+ * Execution repository roots must never be passed here for drift evaluation.
+ */
+export function resolveControllerRuntimeSourceRoot(options: {
+  explicitRoot?: string;
+  env?: NodeJS.ProcessEnv;
+  cwd?: string;
+} = {}): ResolvedControllerRuntimeSourceRoot {
+  const env = options.env ?? process.env;
+  const explicit = options.explicitRoot?.trim();
+  if (explicit) {
+    return { root: resolve(explicit), reason: 'explicit' };
+  }
+
+  const fromEnv = env[CONTROLLER_RUNTIME_SOURCE_ROOT_ENV]?.trim()
+    || env[CONTROLLER_RUNTIME_SOURCE_ROOT_ENV_ALIAS]?.trim();
+  if (fromEnv) {
+    return { root: resolve(fromEnv), reason: 'env' };
+  }
+
+  const packageRoot = packageRuntimeSourceRoot();
+  if (looksLikeControllerRuntimePackage(packageRoot)) {
+    return { root: packageRoot, reason: 'package-root' };
+  }
+
+  const cwd = resolve(options.cwd ?? process.cwd());
+  if (looksLikeControllerRuntimePackage(cwd)) {
+    return {
+      root: cwd,
+      reason: 'process-cwd',
+      detail: 'ambient cwd matches controller runtime package markers',
+    };
+  }
+
+  return {
+    reason: 'unavailable',
+    detail: `Unable to resolve controller runtime source root (packageRoot=${packageRoot}, cwd=${cwd})`,
+  };
+}
+
 export function runtimeGenerationPath(controllerHome: string): string {
   return join(ensureControllerHome(controllerHome), 'system', 'runtime-generation.json');
+}
+
+/**
+ * Status/readiness storms re-resolve the Controller Runtime Source repeatedly.
+ * Cache only the authority path (not every explicit collectRuntimeSourceIdentity
+ * call) so tests and rotate/start can still observe immediate dirty/commit changes.
+ */
+const RUNTIME_SOURCE_IDENTITY_CACHE_TTL_MS = 2_500;
+const runtimeSourceIdentityCache = new Map<string, { at: number; value: RuntimeSourceIdentity }>();
+
+export function clearRuntimeSourceIdentityCacheForTest(): void {
+  runtimeSourceIdentityCache.clear();
 }
 
 export function collectRuntimeSourceIdentity(repoRoot: string): RuntimeSourceIdentity {
@@ -108,6 +224,54 @@ export function collectRuntimeSourceIdentity(repoRoot: string): RuntimeSourceIde
     dirty: runtimeSourceDirty(canonicalRoot),
     observedAt: nowIso(),
   };
+}
+
+function collectRuntimeSourceIdentityCached(repoRoot: string): RuntimeSourceIdentity {
+  const now = Date.now();
+  const cacheKey = resolve(repoRoot);
+  const cached = runtimeSourceIdentityCache.get(cacheKey);
+  if (cached && now - cached.at <= RUNTIME_SOURCE_IDENTITY_CACHE_TTL_MS) {
+    return cached.value;
+  }
+  const value = collectRuntimeSourceIdentity(repoRoot);
+  runtimeSourceIdentityCache.set(cacheKey, { at: now, value });
+  if (runtimeSourceIdentityCache.size > 32) {
+    const oldest = runtimeSourceIdentityCache.keys().next().value;
+    if (oldest !== undefined) runtimeSourceIdentityCache.delete(oldest);
+  }
+  return value;
+}
+
+/**
+ * Safe identity collection: missing/unreadable roots return undefined instead of throwing.
+ */
+export function tryCollectRuntimeSourceIdentity(repoRoot: string | undefined): RuntimeSourceIdentity | undefined {
+  if (!repoRoot?.trim()) return undefined;
+  try {
+    if (!existsSync(repoRoot)) return undefined;
+    return collectRuntimeSourceIdentity(repoRoot);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Current Controller Runtime Source identity from the unique authority resolver.
+ * Never accepts an execution repository root.
+ */
+export function collectCurrentControllerRuntimeSourceIdentity(options: {
+  explicitRoot?: string;
+  env?: NodeJS.ProcessEnv;
+  cwd?: string;
+} = {}): RuntimeSourceIdentity | undefined {
+  const resolved = resolveControllerRuntimeSourceRoot(options);
+  if (!resolved.root?.trim()) return undefined;
+  try {
+    if (!existsSync(resolved.root)) return undefined;
+    return collectRuntimeSourceIdentityCached(resolved.root);
+  } catch {
+    return undefined;
+  }
 }
 
 export function readRuntimeGeneration(controllerHome: string): RuntimeGenerationRecord | undefined {
@@ -144,11 +308,29 @@ export function ensureRuntimeGeneration(
   return readRuntimeGeneration(controllerHome) ?? rotateRuntimeGeneration(controllerHome, source);
 }
 
+/**
+ * Compare startup Runtime Source snapshot against the current Controller Runtime Source.
+ * Missing active snapshot is fail-closed (restart required), never silent pass.
+ */
 export function evaluateRuntimeSourceDrift(
   active: RuntimeSourceIdentity | undefined,
-  current: RuntimeSourceIdentity,
+  current: RuntimeSourceIdentity | undefined,
 ): RuntimeSourceDrift {
-  if (!active) return { restartRequired: false, reasons: [] };
+  if (!active) {
+    return {
+      restartRequired: true,
+      reasons: ['Controller runtime source snapshot is missing'],
+      code: 'RUNTIME_SOURCE_SNAPSHOT_MISSING',
+    };
+  }
+  if (!current) {
+    return {
+      restartRequired: true,
+      reasons: ['Controller runtime source is unavailable for drift evaluation'],
+      code: 'RUNTIME_SOURCE_CURRENT_UNAVAILABLE',
+    };
+  }
+
   const reasons: string[] = [];
   if (active.canonicalRoot !== current.canonicalRoot) {
     reasons.push(`runtime source root moved from ${active.canonicalRoot} to ${current.canonicalRoot}`);
@@ -169,8 +351,59 @@ export function evaluateRuntimeSourceDrift(
   } else if (current.dirty) {
     reasons.push('runtime source files changed after startup');
   }
+
   return {
     restartRequired: reasons.length > 0,
     reasons,
+    code: reasons.length > 0 ? 'RUNTIME_SOURCE_SNAPSHOT_STALE' : 'RUNTIME_SOURCE_OK',
   };
+}
+
+/**
+ * Shared drift evaluation used by MCP, CLI, Local Bridge, and restart verification.
+ * Always resolves "current" from the Controller Runtime Source authority — never from
+ * the selected execution repository.
+ */
+export function evaluateActiveRuntimeSourceDrift(
+  active: RuntimeSourceIdentity | undefined,
+  options: {
+    explicitRoot?: string;
+    env?: NodeJS.ProcessEnv;
+    cwd?: string;
+    /** Test-only override of the current runtime source root (not an execution repo). */
+    currentRuntimeRoot?: string;
+  } = {},
+): RuntimeSourceDrift & { current?: RuntimeSourceIdentity } {
+  const current = options.currentRuntimeRoot
+    ? (() => {
+      try {
+        if (!options.currentRuntimeRoot || !existsSync(options.currentRuntimeRoot)) return undefined;
+        return collectRuntimeSourceIdentityCached(options.currentRuntimeRoot);
+      } catch {
+        return undefined;
+      }
+    })()
+    : collectCurrentControllerRuntimeSourceIdentity(options);
+  return {
+    current,
+    ...evaluateRuntimeSourceDrift(active, current),
+  };
+}
+
+export function formatRuntimeSourceDriftMessage(drift: RuntimeSourceDrift): string {
+  if (drift.code === 'RUNTIME_SOURCE_SNAPSHOT_MISSING' || (
+    drift.restartRequired
+    && drift.reasons.length === 1
+    && drift.reasons[0] === 'Controller runtime source snapshot is missing'
+  )) {
+    return 'Controller runtime source snapshot is missing. Restart the controller from an authoritative runtime source before mutating work.';
+  }
+  if (drift.code === 'RUNTIME_SOURCE_CURRENT_UNAVAILABLE') {
+    return 'Controller runtime source is unavailable for drift evaluation. Restore the authoritative runtime source and restart the controller before mutating work.';
+  }
+  if (drift.restartRequired) {
+    const reasons = drift.reasons.length > 0 ? drift.reasons.join('; ') : 'unknown runtime source drift';
+    return `Controller runtime source changed after startup: ${reasons}. Restore the authoritative runtime source and restart the controller before mutating work.`;
+  }
+  return '';
 }

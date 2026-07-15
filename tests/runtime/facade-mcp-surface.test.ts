@@ -106,15 +106,17 @@ describe('facade MCP surface wiring', () => {
 
     mkdirSync(join(repoRoot, 'tasks', 'issues'), { recursive: true });
     writeFileSync(join(repoRoot, 'tasks', 'issues', 'ISS-pending.issue.md'), '# pending\n');
+    // Second arg pins Controller Runtime Source fixture for the test; it is not
+    // an execution repository selection.
     const workflowOnly = runtimeSourceSnapshotStatus(active, repoRoot);
     expect(workflowOnly.restartRequired).toBe(false);
-    expect(workflowOnly.current.dirty).toBe(false);
+    expect(workflowOnly.current?.dirty).toBe(false);
 
     mkdirSync(join(repoRoot, 'src'), { recursive: true });
     writeFileSync(join(repoRoot, 'src', 'runtime-change.ts'), 'export const changed = true;\n');
     const runtimeChanged = runtimeSourceSnapshotStatus(active, repoRoot);
     expect(runtimeChanged.restartRequired).toBe(true);
-    expect(runtimeChanged.current.dirty).toBe(true);
+    expect(runtimeChanged.current?.dirty).toBe(true);
     expect(runtimeChanged.reasons).toContain('runtime source files changed after startup');
   });
 

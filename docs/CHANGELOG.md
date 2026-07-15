@@ -12,6 +12,15 @@ All notable changes to this skill are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Isolated Controller Runtime Source Identity from execution repositories. MCP `rh_status`, CLI controller status, and Local Bridge access state now compare startup runtime source against the package/source authority instead of the selected business repository, eliminating false `RUNTIME_SOURCE_SNAPSHOT_STALE` when switching multi-repo sessions. Missing runtime snapshots remain fail-closed with structured reasons.
+
+### Performance
+
+- `ensureControllerDaemon` now returns immediately when the Controller daemon PID is live, skipping startup runtime cleanup and the global start lock on every durable MCP mutation.
+- Cached full-table process scans (~2.5s), git snapshots (~3s), and runtime source identity collection (~2.5s) so status/readiness storms do not re-run the same host/git work every request.
+
 ## [1.3.0] - 2026-06-22
 
 ### Added
