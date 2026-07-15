@@ -170,6 +170,33 @@ function moveDirectory(source: string, target: string): void {
   }
 }
 
+function gitWorktreeEntries(path: string): string[] {
+  if (!existsSync(path)) return [];
+  return readdirSync(path, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && existsSync(join(path, entry.name, '.git')))
+    .map((entry) => entry.name)
+    .sort();
+}
+
+function preservedWorktreeStorageBlocker(
+  sourcePath: string,
+  controllerPath: string,
+  spec: RuntimeStorageSpec,
+): string | undefined {
+  if (!spec.preserveNonEmpty) return undefined;
+  const sourceWorktrees = gitWorktreeEntries(sourcePath);
+  if (sourceWorktrees.length > 0) {
+    return `live Git worktrees must not be relocated automatically: ${sourceWorktrees.join(', ')}`;
+  }
+  if (directoryEntries(sourcePath).length > 0) {
+    const controllerWorktrees = gitWorktreeEntries(controllerPath);
+    if (controllerWorktrees.length > 0) {
+      return `runtime worktree storage cannot be merged while Controller Home contains live Git worktrees: ${controllerWorktrees.join(', ')}`;
+    }
+  }
+  return undefined;
+}
+
 function legacyRuntimeBlocker(repositoryPath: string, spec: RuntimeStorageSpec): string | undefined {
   const sourceEntries = directoryEntries(repositoryPath);
   if (sourceEntries.length === 0) return undefined;
@@ -220,7 +247,8 @@ function bindRuntimeDirectory(
       };
     }
 
-    const blocker = legacyRuntimeBlocker(repositoryPath, spec);
+    const blocker = preservedWorktreeStorageBlocker(legacyTarget, controllerPath, spec)
+      ?? legacyRuntimeBlocker(repositoryPath, spec);
     if (blocker) {
       return {
         name: spec.name,
@@ -274,7 +302,8 @@ function bindRuntimeDirectory(
     return { name: spec.name, repositoryPath, controllerPath, status: 'linked' };
   }
 
-  const blocker = legacyRuntimeBlocker(repositoryPath, spec);
+  const blocker = preservedWorktreeStorageBlocker(repositoryPath, controllerPath, spec)
+    ?? legacyRuntimeBlocker(repositoryPath, spec);
   if (blocker) {
     return {
       name: spec.name,

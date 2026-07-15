@@ -14,6 +14,7 @@ import { readExecutionArtifact } from '../../evidence/artifact-store';
 import { readExecutionEvidence } from '../../evidence/evidence-store';
 import { ensureControllerDaemon, readControllerDaemonStatus } from '../../control-plane/daemon-client';
 import { readSchedulerHealthSnapshot } from '../../control-plane/global-scheduler/scheduler';
+import { collectRuntimeSourceIdentity, evaluateRuntimeSourceDrift, type RuntimeSourceIdentity } from '../../control-plane/runtime-generation';
 import { rebuildRepositoryProjection, readRepositoryProjectionSnapshot } from '../../projections/materialized-view';
 import { applyScheduleDedupe, buildScheduleDedupeReport, createSchedule, getSchedule, getScheduleDecision, listOccurrences, listSchedules, saveSchedule } from '../../workflow/schedules/store';
 import { evaluateSchedule } from '../../workflow/schedules/engine';
@@ -1552,6 +1553,12 @@ function runFacadeVerify(
   }
 }
 
+export function runtimeSourceSnapshotStatus(active: RuntimeSourceIdentity | undefined, repoRoot: string) {
+  const current = collectRuntimeSourceIdentity(repoRoot);
+  const drift = evaluateRuntimeSourceDrift(active, current);
+  return { current, ...drift };
+}
+
 export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: string, args: Record<string, unknown>): Promise<CallToolResult | undefined> {
   try {
     switch (name) {
@@ -1567,10 +1574,8 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         }
         const readiness = controllerReadiness(ctx, repository);
         const liveGit = gitSnapshot(repository.canonicalRoot);
-        const sourceSnapshotStale = !readiness.daemon.source
-          || readiness.daemon.source.branch !== liveGit.branch
-          || readiness.daemon.source.commit !== liveGit.head
-          || readiness.daemon.source.dirty !== liveGit.dirty;
+        const runtimeSource = runtimeSourceSnapshotStatus(readiness.daemon.source, repository.canonicalRoot);
+        const sourceSnapshotStale = runtimeSource.restartRequired;
         // Dynamic import avoids a static cycle: toolset.ts composes runtimeToolDefinitions.
         const exposure = (await import('../../../cli/mcp/toolset')).controllerExposureSnapshot(ctx);
         const toolSurfaceReady = exposure.ready && exposure.missingToolNames.length === 0;
@@ -1585,7 +1590,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         if (sourceSnapshotStale) {
           readinessReasons.push({
             code: 'RUNTIME_SOURCE_SNAPSHOT_STALE',
-            message: `Controller runtime source does not match live checkout HEAD ${liveGit.head}; restart is required before mutating work.`,
+            message: `Controller runtime source changed: ${runtimeSource.reasons.join('; ')}. Restart is required before mutating work.`,
           });
         }
         const readinessWithToolSurface = {
@@ -1628,6 +1633,8 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
                 ? Math.max(0, Date.now() - Date.parse(readiness.daemon.source.observedAt))
                 : undefined,
               sourceSnapshotStale,
+              sourceSnapshotReasons: runtimeSource.reasons,
+              runtimeSourceDirty: runtimeSource.current.dirty,
             },
             capabilityCount: capabilities.length,
             capabilityGroups: summarizeCapabilityGroups(manifests),

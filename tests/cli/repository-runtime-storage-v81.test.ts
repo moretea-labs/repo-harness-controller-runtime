@@ -197,7 +197,77 @@ describe('v8.1 repository runtime storage isolation', () => {
     }
   });
 
-  test('migrates non-empty legacy worktree storage without blocking execution', () => {
+  test('blocks relocation of repository-local live Git worktrees and preserves every file', () => {
+    const fixture = repositoryFixture();
+    try {
+      const storageRoot = join(fixture.repoA.canonicalRoot, '.ai', 'harness', 'worktrees');
+      const worktree = join(storageRoot, 'active-worktree');
+      mkdirSync(worktree, { recursive: true });
+      writeFileSync(join(worktree, '.git'), 'gitdir: git-admin-active-worktree\n', 'utf-8');
+      writeFileSync(join(worktree, 'baseline.txt'), 'must survive\n', 'utf-8');
+
+      const storage = ensureRepositoryRuntimeStorage(fixture.repoA, fixture.controllerHome);
+      const binding = storage.bindings.find((entry) => entry.name === 'worktrees');
+      expect(storage.readyForExecution).toBe(false);
+      expect(binding?.status).toBe('legacy-active');
+      expect(binding?.message).toContain('live Git worktrees must not be relocated automatically');
+      expect(lstatSync(storageRoot).isSymbolicLink()).toBe(false);
+      expect(readFileSync(join(worktree, '.git'), 'utf-8')).toContain('gitdir:');
+      expect(readFileSync(join(worktree, 'baseline.txt'), 'utf-8')).toBe('must survive\n');
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test('blocks relocation of live Git worktrees behind a legacy Controller Home symlink', () => {
+    const fixture = repositoryFixture();
+    try {
+      const oldControllerHome = join(fixture.root, 'old-controller-home');
+      const oldTarget = join(repositoryControllerRoot(oldControllerHome, fixture.repoA.repoId), 'worktrees');
+      const worktree = join(oldTarget, 'active-worktree');
+      const source = join(fixture.repoA.canonicalRoot, '.ai', 'harness', 'worktrees');
+      rmSync(source, { recursive: true, force: true });
+      mkdirSync(worktree, { recursive: true });
+      writeFileSync(join(worktree, '.git'), 'gitdir: git-admin-active-worktree\n', 'utf-8');
+      writeFileSync(join(worktree, 'baseline.txt'), 'must remain in old home\n', 'utf-8');
+      symlinkSync(oldTarget, source, 'dir');
+
+      const storage = ensureRepositoryRuntimeStorage(fixture.repoA, fixture.controllerHome);
+      const binding = storage.bindings.find((entry) => entry.name === 'worktrees');
+      expect(storage.readyForExecution).toBe(false);
+      expect(binding?.status).toBe('legacy-active');
+      expect(realpathSync(source)).toBe(realpathSync(oldTarget));
+      expect(readFileSync(join(worktree, 'baseline.txt'), 'utf-8')).toBe('must remain in old home\n');
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test('blocks merge when Controller Home already contains live Git worktrees', () => {
+    const fixture = repositoryFixture();
+    try {
+      const source = join(fixture.repoA.canonicalRoot, '.ai', 'harness', 'worktrees');
+      const controllerTarget = join(repositoryControllerRoot(fixture.controllerHome, fixture.repoA.repoId), 'worktrees');
+      const activeTarget = join(controllerTarget, 'controller-active-worktree');
+      mkdirSync(join(source, 'legacy-metadata'), { recursive: true });
+      writeFileSync(join(source, 'legacy-metadata', 'marker.txt'), 'must remain repository-local\n', 'utf-8');
+      mkdirSync(activeTarget, { recursive: true });
+      writeFileSync(join(activeTarget, '.git'), 'gitdir: git-admin-controller-active\n', 'utf-8');
+      writeFileSync(join(activeTarget, 'baseline.txt'), 'must remain in Controller Home\n', 'utf-8');
+
+      const storage = ensureRepositoryRuntimeStorage(fixture.repoA, fixture.controllerHome);
+      const binding = storage.bindings.find((entry) => entry.name === 'worktrees');
+      expect(storage.readyForExecution).toBe(false);
+      expect(binding?.status).toBe('legacy-active');
+      expect(binding?.message).toContain('cannot be merged while Controller Home contains live Git worktrees');
+      expect(readFileSync(join(source, 'legacy-metadata', 'marker.txt'), 'utf-8')).toBe('must remain repository-local\n');
+      expect(readFileSync(join(activeTarget, 'baseline.txt'), 'utf-8')).toBe('must remain in Controller Home\n');
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test('migrates non-Git legacy worktree metadata without blocking execution', () => {
     const fixture = repositoryFixture();
     try {
       const worktree = join(fixture.repoA.canonicalRoot, '.ai', 'harness', 'worktrees', 'active-worktree');
