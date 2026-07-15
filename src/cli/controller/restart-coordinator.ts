@@ -551,6 +551,10 @@ export async function runControllerRestartCoordinator(
       controllerHome,
       logFile: opts.logFile,
       stopTimeoutMs: opts.stopTimeoutMs,
+      // The coordinator is detached specifically so it can replace the old
+      // Gateway/keepalive ancestry. Protect only the coordinator process itself.
+      protectCallerAncestry: false,
+      requireFullStop: true,
     });
 
     state = updateState(state, { phase: "starting" }, deps);

@@ -221,6 +221,7 @@ describe("controller restart coordinator", () => {
       isPidAlive: () => true,
     });
     const failedStatus = statusFixture({ repoRoot, controllerHome, localMcp: false });
+    let stopOptions: { protectCallerAncestry?: boolean; requireFullStop?: boolean } | undefined;
 
     await expect(runControllerRestartCoordinator({
       repo: repoRoot,
@@ -228,12 +229,19 @@ describe("controller restart coordinator", () => {
       requestId: "restart-fails",
     }, {
       sleep: async () => undefined,
-      stop: async () => action("stopped", failedStatus),
+      stop: async (options) => {
+        stopOptions = options;
+        return action("stopped", failedStatus);
+      },
       start: async () => action("started", failedStatus),
       status: async () => failedStatus,
       verificationAttempts: 1,
     })).rejects.toThrow("RESTART_VERIFICATION_FAILED");
 
+    expect(stopOptions).toMatchObject({
+      protectCallerAncestry: false,
+      requireFullStop: true,
+    });
     const persisted = readControllerRestartState(controllerHome, "restart-fails");
     expect(persisted?.phase).toBe("failed");
     expect(persisted?.completedAt).toBeTruthy();

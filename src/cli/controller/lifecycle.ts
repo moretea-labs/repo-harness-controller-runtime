@@ -161,6 +161,10 @@ export interface ControllerServiceOptions {
   logFile?: string;
   startTimeoutMs?: number;
   stopTimeoutMs?: number;
+  /** Internal lifecycle control: detached coordinators protect only themselves, not the old managed ancestry. */
+  protectCallerAncestry?: boolean;
+  /** Internal lifecycle control: require every managed stack process to be gone before startup continues. */
+  requireFullStop?: boolean;
 }
 
 function nowIso(): string {
@@ -374,9 +378,28 @@ export function classifyDetachedControllerServiceProcesses(
       && !trackedChildPids.has(entry.pid));
 }
 
-function collectControllerServiceProcesses(repoRoot: string, state: ControllerServiceState | null, controllerHome: string): ControllerServiceProcess[] {
+const MANAGED_CONTROLLER_PROCESS_KINDS = new Set<ControllerServiceProcess["kind"]>([
+  "supervisor",
+  "mcp-keepalive",
+  "mcp-serve",
+  "local-controller",
+  "controller-daemon",
+  "tunnel-supervisor",
+  "tunnel-worker",
+  "tunnel-client",
+]);
+
+function collectControllerServiceProcesses(
+  repoRoot: string,
+  state: ControllerServiceState | null,
+  controllerHome: string,
+  options: Pick<ControllerServiceOptions, "protectCallerAncestry"> = {},
+): ControllerServiceProcess[] {
   const seen = new Map<number, ControllerServiceProcess>();
-  const protectedPids = currentProcessAncestry();
+  const protectedPids = options.protectCallerAncestry === false
+    ? new Set<number>([process.pid])
+    : currentProcessAncestry();
+  for (const pid of trackedActiveChildProcessPids(repoRoot, controllerHome)) protectedPids.add(pid);
   const add = (pid: number | undefined, command: string, kind: ControllerServiceProcess["kind"]) => {
     if (!pid || pid <= 0 || protectedPids.has(pid)) return;
     if (!seen.has(pid)) seen.set(pid, { pid, command, kind });
@@ -490,7 +513,8 @@ async function healthSummary(
   ]);
   return {
     health: {
-      mcp: mcpHealth?.status === "ok",
+      mcp: mcpHealth?.status === "ok"
+        && (!generation || mcpHealth.generation === generation),
       localController: isExpectedLocalControllerHealth(localControllerHealth, { repoRoot, generation }),
     },
     mcpReachable,
@@ -775,6 +799,8 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
       controllerHome: config.controllerHome,
       logFile: config.logPath,
       stopTimeoutMs: opts.stopTimeoutMs,
+      protectCallerAncestry: opts.protectCallerAncestry,
+      requireFullStop: opts.requireFullStop,
     })).cleanedPids;
     status = await controllerServiceStatus({ repo: repoRoot, logFile: config.logPath, controllerHome: config.controllerHome });
   }
@@ -914,8 +940,10 @@ export async function stopControllerService(opts: ControllerServiceOptions = {})
   const status = await controllerServiceStatus({ repo: repoRoot, logFile: config.logPath, controllerHome: config.controllerHome });
   const launchAgents = findRepoLaunchAgents(repoRoot);
   if (launchAgents.length > 0) bootoutRepoLaunchAgents(launchAgents);
-  const processes = collectControllerServiceProcesses(repoRoot, state, config.controllerHome);
-  const stoppable = processes.filter((entry) => entry.kind !== "unknown" || entry.command.includes(repoRoot));
+  const processes = collectControllerServiceProcesses(repoRoot, state, config.controllerHome, opts);
+  const stoppable = opts.requireFullStop
+    ? processes.filter((entry) => MANAGED_CONTROLLER_PROCESS_KINDS.has(entry.kind))
+    : processes.filter((entry) => entry.kind !== "unknown" || entry.command.includes(repoRoot));
   if (stoppable.length === 0) {
     if (state) {
       writeControllerServiceState(repoRoot, {
@@ -937,7 +965,22 @@ export async function stopControllerService(opts: ControllerServiceOptions = {})
     return { action: "already_stopped", cleanedPids: [], status };
   }
 
-  const cleaned = await stopProcesses(stoppable, opts.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS);
+  const stopTimeoutMs = opts.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS;
+  const cleaned = await stopProcesses(stoppable, stopTimeoutMs);
+  if (opts.requireFullStop) {
+    await sleep(PROCESS_STOP_POLL_MS);
+    const remaining = collectControllerServiceProcesses(repoRoot, state, config.controllerHome, opts)
+      .filter((entry) => MANAGED_CONTROLLER_PROCESS_KINDS.has(entry.kind));
+    if (remaining.length > 0) {
+      cleaned.push(...await stopProcesses(remaining, stopTimeoutMs));
+      await sleep(PROCESS_STOP_POLL_MS);
+    }
+    const survivors = collectControllerServiceProcesses(repoRoot, state, config.controllerHome, opts)
+      .filter((entry) => MANAGED_CONTROLLER_PROCESS_KINDS.has(entry.kind));
+    if (survivors.length > 0) {
+      throw new Error(`CONTROLLER_FULL_STOP_INCOMPLETE: ${survivors.map((entry) => `${entry.kind}:${entry.pid}`).join(", ")}`);
+    }
+  }
   if (state) {
     writeControllerServiceState(repoRoot, {
       ...state,
