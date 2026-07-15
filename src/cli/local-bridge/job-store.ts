@@ -825,7 +825,9 @@ function syncProjectedExecutionJob(repoRoot: string, job: LocalBridgeJob): Local
             : "failed";
   job.finishedAt = execution.finishedAt ?? now();
   job.workerPid = undefined;
-  job.error = execution.error?.message ?? execution.outcome?.infrastructureError?.message;
+  job.error = execution.error?.message
+    ?? execution.outcome?.acceptanceFailure?.message
+    ?? execution.outcome?.infrastructureError?.message;
   if (previous !== job.status) {
     appendEvent(repoRoot, job.jobId, {
       type: job.status === "succeeded"
@@ -1418,15 +1420,23 @@ async function executeRunCheck(
     job.status = result.ok ? "succeeded" : "failed";
     job.finishedAt = now();
     job.result = result as unknown as Record<string, unknown>;
+    const failureClass = result.failureClass ?? (result.ok ? undefined : "infrastructure_failure");
+    const failureMessage = result.stderr || `check failed: ${payload.checkId}`;
     job.outcome = {
       process: { exitCode: result.status, timedOut: result.timedOut },
-      infrastructureError: result.ok ? undefined : {
-        code: result.timedOut ? "CHECK_TIMED_OUT" : "CHECK_FAILED",
-        message: result.stderr || `check failed: ${payload.checkId}`,
-      },
+      failureClass,
+      acceptanceFailure: failureClass === "acceptance_failure"
+        ? { code: "CHECK_FAILED", message: failureMessage }
+        : undefined,
+      infrastructureError: failureClass === "infrastructure_failure"
+        ? {
+          code: result.timedOut ? "CHECK_TIMED_OUT" : "CHECK_EXECUTION_FAILED",
+          message: failureMessage,
+        }
+        : undefined,
     };
     job.workerPid = undefined;
-    if (!result.ok) job.error = job.outcome.infrastructureError?.message;
+    if (!result.ok) job.error = failureMessage;
     appendEvent(repoRoot, job.jobId, {
       type: result.ok ? "job_succeeded" : "job_failed",
       message: result.ok
@@ -1441,7 +1451,12 @@ async function executeRunCheck(
     job.status = "failed";
     job.finishedAt = now();
     job.workerPid = undefined;
-    job.error = error instanceof Error ? error.message : String(error);
+    const message = error instanceof Error ? error.message : String(error);
+    job.error = message;
+    job.outcome = {
+      failureClass: "infrastructure_failure",
+      infrastructureError: { code: "CHECK_EXECUTION_FAILED", message },
+    };
     appendEvent(repoRoot, job.jobId, {
       type: "job_failed",
       message: job.error,

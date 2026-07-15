@@ -85,6 +85,9 @@ export interface ExecutionOperationMetadata {
 }
 
 export interface ExecutionJobOutcome {
+  /** Optional semantic classification; normal check failures are acceptance failures. */
+  failureClass?: 'acceptance_failure' | 'infrastructure_failure';
+  acceptanceFailure?: { code: string; message: string };
   process?: { exitCode?: number | null; timedOut?: boolean; stdoutPath?: string; stderrPath?: string };
   policy?: { decision: 'allowed' | 'approval_required' | 'rejected'; repositoryChanged?: boolean; changedPaths?: string[] };
   infrastructureError?: { code: string; message: string };

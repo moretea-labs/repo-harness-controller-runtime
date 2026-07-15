@@ -64,6 +64,7 @@ export function classifyUserFacingError(input: {
   const message = (input.message ?? '').toLowerCase();
   const blob = `${code} ${message} ${input.status ?? ''}`;
 
+  if (input.infrastructure && !input.acceptance) return 'infrastructure_failure';
   if (input.acceptance || blob.includes('acceptance') || blob.includes('valid_fail') || blob.includes('check failed') || blob.includes('] failed') || blob.includes('expected ') && blob.includes(' got ')) {
     return 'acceptance_failure';
   }
@@ -96,8 +97,7 @@ export function classifyUserFacingError(input: {
     return 'policy_denied';
   }
   if (
-    input.infrastructure
-    || blob.includes('infrastructure')
+    blob.includes('infrastructure')
     || blob.includes('runtime_storage')
     || blob.includes('worker')
     || blob.includes('spawn')
@@ -273,7 +273,12 @@ export function buildJobOperationDigest(job: ExecutionJob, options: {
       code: job.error?.code,
       message: errorMessage,
       status: job.status,
-      infrastructure: Boolean(job.outcome?.infrastructureError) || job.status === 'orphaned' || job.status === 'stale',
+      infrastructure: job.outcome?.failureClass === 'infrastructure_failure'
+        || Boolean(job.outcome?.infrastructureError)
+        || job.status === 'orphaned'
+        || job.status === 'stale',
+      acceptance: job.outcome?.failureClass === 'acceptance_failure'
+        || Boolean(job.outcome?.acceptanceFailure),
     })
     : undefined;
 

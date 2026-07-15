@@ -630,6 +630,10 @@ function mapConnectorFreshnessView(report: ConnectorFreshnessReport): ConnectorF
     reconnectRecommended: report.reconnectRecommended,
     howToFix: report.howToFix,
     suggestedActions: report.suggestedActions,
+    diagnosticScope: report.diagnosticScope,
+    localRegistryVerified: report.localRegistryVerified,
+    connectorCallability: report.connectorCallability,
+    connectorMismatch: report.connectorMismatch,
   };
 }
 

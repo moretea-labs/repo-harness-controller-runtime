@@ -52,6 +52,7 @@ export type ConnectorFreshnessStatus =
   | 'chatgpt_snapshot_missing_facade'
   | 'unable_to_verify_chatgpt_snapshot'
   | 'stale_fingerprint'
+  | 'connector_mismatch'
   | 'unknown';
 
 export type ConnectorFreshnessSeverity = 'ok' | 'info' | 'warning' | 'error';
@@ -81,6 +82,13 @@ export interface EvaluateConnectorFreshnessInput {
   toolSurfaceFingerprint?: string;
   /** Observed running MCP process surface, if available. */
   runtime?: ConnectorRuntimeObservation | null;
+  /** Optional real connector callability probe; a tools/list snapshot is not a callability probe. */
+  callabilityProbe?: {
+    toolName: string;
+    callable: boolean;
+    errorCode?: string;
+    source?: 'external_probe';
+  };
 }
 
 export interface ConnectorFreshnessReport {
@@ -116,6 +124,12 @@ export interface ConnectorFreshnessReport {
   sectionDetail: string;
   /** User-facing banner warning (amber/error only; empty for ok/info). */
   bannerWarning?: string;
+  /** Scope of the evidence: local registry parity is not connector callability. */
+  diagnosticScope: 'local_registry';
+  localRegistryVerified: boolean;
+  connectorCallability: 'unverified' | 'verified' | 'mismatch';
+  connectorCallabilitySource?: 'external_probe';
+  connectorMismatch?: { toolName: string; errorCode?: string; message: string };
 }
 
 const DEFAULT_HOW_TO_FIX = [
@@ -317,6 +331,10 @@ export function evaluateConnectorFreshness(input: EvaluateConnectorFreshnessInpu
     : [];
   const optionalPresent = optionalExpected.filter((name) => observedLocalTools.includes(name));
   const optionalMissing = optionalExpected.filter((name) => !observedLocalTools.includes(name));
+  const localRegistryVerified = missingLocalTools.length === 0;
+  const connectorCallability = input.callabilityProbe
+    ? input.callabilityProbe.callable ? 'verified' as const : 'mismatch' as const
+    : 'unverified' as const;
 
   const base = {
     expectedFacadeTools,
@@ -336,6 +354,10 @@ export function evaluateConnectorFreshness(input: EvaluateConnectorFreshnessInpu
     runtimeFingerprint: runtime?.toolSurfaceFingerprint,
     runtimeHealthy: runtime?.healthy,
     fingerprintMatches,
+    diagnosticScope: 'local_registry' as const,
+    localRegistryVerified,
+    connectorCallability,
+    ...(input.callabilityProbe ? { connectorCallabilitySource: input.callabilityProbe.source ?? 'external_probe' as const } : {}),
   };
 
   if (observedLocalTools.length === 0) {
@@ -389,6 +411,32 @@ export function evaluateConnectorFreshness(input: EvaluateConnectorFreshnessInpu
     });
   }
 
+  if (input.callabilityProbe && !input.callabilityProbe.callable) {
+    const toolName = input.callabilityProbe.toolName.trim() || 'unknown';
+    const errorCode = input.callabilityProbe.errorCode?.trim() || undefined;
+    return finalize({
+      ...base,
+      status: 'connector_mismatch',
+      severity: 'error',
+      summary: `Connector callability mismatch: ${toolName} was exposed locally but the external probe could not call it.`,
+      restartRecommended: false,
+      reconnectRecommended: true,
+      suggestedActions: ['重新连接 MCP Connector', '确认外部 Connector 使用当前 tools/list', '再次运行 connector callability probe'],
+      howToFix: [...DEFAULT_HOW_TO_FIX],
+      warnings: [errorCode ? `${errorCode}: ${toolName}` : `Connector probe failed for ${toolName}.`],
+      connectorLabel: 'Connector 不匹配',
+      connectorTone: 'red',
+      sectionStatusLabel: '调用不匹配',
+      sectionDetail: `本地 registry 已验证包含 ${toolName}，但外部 Connector 返回${errorCode ?? '不可调用'}。`,
+      bannerWarning: '本地工具注册表与 Connector 实际可调用性不一致，请重连 Connector。',
+      connectorMismatch: {
+        toolName,
+        errorCode,
+        message: errorCode === 'UNKNOWN_TOOL' ? 'Connector reported UNKNOWN_TOOL for an exposed tool.' : 'External connector callability probe failed.',
+      },
+    });
+  }
+
   if (observedConnectorTools) {
     if (missingConnectorTools.length > 0) {
       return finalize({
@@ -423,7 +471,9 @@ export function evaluateConnectorFreshness(input: EvaluateConnectorFreshnessInpu
       ...base,
       status: 'local_mcp_updated',
       severity: 'ok',
-      summary: 'Facade 工具已可用。',
+      summary: input.callabilityProbe?.callable
+        ? '本地 registry 与外部 Connector 调用探针均已验证。'
+        : '本地 registry 已验证；Facade 工具可用，但 Connector 实际可调用性尚未验证。',
       restartRecommended: false,
       reconnectRecommended: false,
       suggestedActions: [],
@@ -431,10 +481,12 @@ export function evaluateConnectorFreshness(input: EvaluateConnectorFreshnessInpu
       warnings: optionalMissing.length
         ? [`可选交互开发工具未全部暴露：${optionalMissing.join(', ')}`]
         : [],
-      connectorLabel: 'Facade 可用',
+      connectorLabel: input.callabilityProbe?.callable ? 'Facade 可调用' : '本地 registry 已验证 · Connector 未确认',
       connectorTone: 'green',
       sectionStatusLabel: '正常',
-      sectionDetail: 'ChatGPT facade tools are available（rh_status / rh_inbox / rh_context / rh_work）。',
+      sectionDetail: input.callabilityProbe?.callable
+        ? 'Local registry and external Connector callability are verified for the facade surface.'
+        : 'Local registry parity is verified（rh_status / rh_inbox / rh_context / rh_work）；Connector callability remains unverified.',
     });
   }
 
@@ -514,6 +566,7 @@ export function buildLocalConnectorStatus(input: {
   expectedTools: readonly string[];
   connectorToolNames?: readonly string[] | null;
   runtime?: ConnectorRuntimeObservation | null;
+  callabilityProbe?: EvaluateConnectorFreshnessInput['callabilityProbe'];
 }): ConnectorFreshnessReport {
   const expectedTools = uniqueSorted(input.expectedTools);
   const fingerprint = controllerToolSurfaceFingerprint(expectedTools);
@@ -527,6 +580,7 @@ export function buildLocalConnectorStatus(input: {
     toolSurfaceVersion: CONTROLLER_TOOL_SURFACE_VERSION,
     toolSurfaceFingerprint: fingerprint,
     runtime: input.runtime,
+    callabilityProbe: input.callabilityProbe,
   });
 }
 
@@ -538,6 +592,7 @@ export async function buildLocalConnectorStatusForRepo(input: {
   expectedTools: readonly string[];
   connectorToolNames?: readonly string[] | null;
   refreshRuntimeFile?: boolean;
+  callabilityProbe?: EvaluateConnectorFreshnessInput['callabilityProbe'];
 }): Promise<ConnectorFreshnessReport> {
   const runtime = await observeLocalMcpRuntime(input.repoRoot, {
     refreshRuntimeFile: input.refreshRuntimeFile,
@@ -546,5 +601,6 @@ export async function buildLocalConnectorStatusForRepo(input: {
     expectedTools: input.expectedTools,
     connectorToolNames: input.connectorToolNames,
     runtime,
+    callabilityProbe: input.callabilityProbe,
   });
 }

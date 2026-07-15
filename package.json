@@ -69,7 +69,7 @@
     "benchmark:skills": "bun scripts/run-skill-evals.ts",
     "test": "bash scripts/run-tests-portable.sh",
     "test:coverage": "bun test --coverage",
-    "check:type": "node node_modules/typescript/bin/tsc --noEmit",
+    "check:type": "bun x tsc --noEmit",
     "check:runtime-architecture": "node scripts/check-runtime-architecture.mjs",
     "check:mcp-compatibility": "node --loader ./src/runtime/shared/node-ts-loader.mjs scripts/check-mcp-compatibility.ts",
     "smoke:runtime-control-plane": "node --loader ./src/runtime/shared/node-ts-loader.mjs scripts/smoke-runtime-control-plane.ts",

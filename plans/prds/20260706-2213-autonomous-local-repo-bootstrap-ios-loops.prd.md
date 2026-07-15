@@ -6,6 +6,8 @@ source: "repo-harness-mcp"
 ---
 # PRD: Autonomous Local Repository Bootstrap and iOS Review Loops
 
+> **Status**: Draft
+
 ## Problem
 
 repo-harness can register existing Git repositories and discover iOS projects, but it cannot currently complete trusted personal local workflows when a valid project directory is not yet a Git repository. It also cannot reliably run active goal loops through ChatGPT-triggered tool calls because active scheduling, local agent execution, and iOS smoke testing are not isolated enough from platform-level gating.

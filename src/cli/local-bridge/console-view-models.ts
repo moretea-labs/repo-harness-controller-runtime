@@ -138,6 +138,7 @@ export interface ConnectorFreshnessViewModel {
     | 'chatgpt_snapshot_missing_facade'
     | 'unable_to_verify_chatgpt_snapshot'
     | 'stale_fingerprint'
+    | 'connector_mismatch'
     | 'unknown';
   severity: 'ok' | 'info' | 'warning' | 'error';
   summary: string;
@@ -148,6 +149,10 @@ export interface ConnectorFreshnessViewModel {
   reconnectRecommended: boolean;
   howToFix: string[];
   suggestedActions: string[];
+  diagnosticScope?: 'local_registry';
+  localRegistryVerified?: boolean;
+  connectorCallability?: 'unverified' | 'verified' | 'mismatch';
+  connectorMismatch?: { toolName: string; errorCode?: string; message: string };
 }
 
 export interface SystemReadinessViewModel {

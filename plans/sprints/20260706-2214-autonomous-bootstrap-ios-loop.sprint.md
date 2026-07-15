@@ -6,6 +6,8 @@ source: "repo-harness-mcp"
 ---
 # Sprint: Autonomous Repository Bootstrap and iOS Loop
 
+> **Status**: Draft
+
 ## Objective
 
 Make repo-harness capable of bootstrapping trusted local non-Git project directories, selecting the latest sibling source tree, registering it, and running autonomous local goal/iOS review loops with clear fallback behavior.

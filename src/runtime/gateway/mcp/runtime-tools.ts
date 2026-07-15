@@ -1440,7 +1440,8 @@ function runFacadeVerify(
   // Real registered check execution path.
   try {
     const executed = runControllerCheck(repository.canonicalRoot, classified.normalizedCheckId!);
-    const infrastructureFailed = executed.timedOut === true;
+    const infrastructureFailed = executed.failureClass === 'infrastructure_failure'
+      || executed.timedOut === true;
     const checkFailed = !executed.ok && !infrastructureFailed;
     if (workId) {
       const facade = verifyGoalWorkloop(workloopCtx, {
@@ -1460,6 +1461,10 @@ function runFacadeVerify(
             registeredCheckId: classified.normalizedCheckId,
             ok: executed.ok,
             timedOut: executed.timedOut,
+            failureClass: executed.failureClass,
+            cacheHit: executed.cacheHit,
+            validatedRevision: executed.validatedRevision,
+            originalExecutedAt: executed.originalExecutedAt,
             // Never return raw stdout/stderr to ChatGPT by default.
             evidenceArtifactPath: executed.artifactPath,
             boundedStatus: executed.ok ? 'pass' : infrastructureFailed ? 'infrastructure_failure' : 'fail',
@@ -1482,6 +1487,10 @@ function runFacadeVerify(
           isInfrastructureIssue: infrastructureFailed,
           executed: true,
           evidenceArtifactPath: executed.artifactPath,
+          cacheHit: executed.cacheHit,
+          validatedRevision: executed.validatedRevision,
+          originalExecutedAt: executed.originalExecutedAt,
+          failureClass: executed.failureClass,
         },
       },
       warnings: infrastructureFailed ? ['infrastructure_failure is distinct from acceptance failure'] : [],
@@ -1740,13 +1749,26 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           });
           return result(facade as unknown as Record<string, unknown>, true);
         }
-        const activeContracts = operation === 'list' || !workId ? listWorkContracts({ ...store, status: 'active', limit: 20 }) : [];
-        const recentJobs = operation === 'list' || !workId ? listExecutionJobs(ctx.controllerHome, repository.repoId, 20) : [];
         const detailLevel = args.detail_level === 'detail' || args.detail_level === 'raw' ? args.detail_level : 'summary';
+        const boundedSummaryLimit = 5;
+        const activeContracts = operation === 'list' || !workId
+          ? listWorkContracts({ ...store, status: 'active', limit: detailLevel === 'summary' ? boundedSummaryLimit : 20 })
+          : [];
+        const recentJobs = operation === 'list' || !workId
+          ? listExecutionJobs(ctx.controllerHome, repository.repoId, detailLevel === 'summary' ? boundedSummaryLimit : 20)
+          : [];
         const manifests = listAssistantPluginManifests(ctx.controllerHome, repository, {
           preferStored: true,
         });
         const capabilities = listCapabilityDescriptors(manifests);
+        const selectedChecks = normalizedChecks.validCheckIds
+          .map((id) => checks.find((check) => check.id === id))
+          .filter((check): check is (typeof checks)[number] => Boolean(check))
+          .map((check) => ({ id: check.id, description: check.description, source: check.source }));
+        const attention = listHandoffItems({ ...store, status: 'pending', limit: boundedSummaryLimit }).map(summarizeHandoffItem);
+        const checkSummaries = detailLevel === 'summary'
+          ? selectedChecks
+          : checks.map((check) => ({ id: check.id, description: check.description, source: check.source }));
         const facade = buildFacadeResult({
           status: 'ok',
           summary: work
@@ -1758,18 +1780,13 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             operation,
             repoId: repository.repoId,
             repository: repositorySummary(repository),
-            checks: checks.map((check) => ({ id: check.id, description: check.description, source: check.source })),
+            checks: checkSummaries,
+            selectedChecks,
+            requestedCheckIds: requested,
             normalizedChecks,
             invalidCheckIdsAreNotFailures: true,
-            capabilities: detailLevel === 'summary'
-              ? capabilities.map((entry) => ({
-                capabilityId: entry.capabilityId,
-                domain: entry.domain,
-                group: entry.group,
-                exposedVia: entry.exposedVia,
-                schemaExposure: entry.schemaExposure,
-              }))
-              : capabilities,
+            capabilityCount: capabilities.length,
+            ...(detailLevel === 'summary' ? {} : { capabilities }),
             capabilityGroups: summarizeCapabilityGroups(manifests),
             toolArchitecture: {
               facadeTools: ['rh_access', 'rh_status', 'rh_inbox', 'rh_context', 'rh_work'],
@@ -1786,6 +1803,16 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
               workId: entry.workId, status: entry.status, mode: entry.mode, objective: entry.objective.slice(0, 240),
             })),
             recentExecutionJobs: recentJobs.map(summarizeWorkListItem),
+            activeAttention: attention,
+            counts: {
+              availableChecks: checks.length,
+              selectedChecks: selectedChecks.length,
+              capabilities: capabilities.length,
+              activeWork: activeContracts.length,
+              recentExecutionJobs: recentJobs.length,
+              activeAttention: attention.length,
+            },
+            bounded: detailLevel === 'summary',
           },
           warnings: normalizedChecks.warnings,
           evidenceRefs: work?.evidenceRefs?.slice(0, 5) ?? [],

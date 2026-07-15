@@ -75,6 +75,25 @@ describe('operation digest usability', () => {
     expect(digest.resultAccepted).toBe(false);
   });
 
+  test('keeps named check assertion failures separate from infrastructure failures', () => {
+    const exact = 'expected value mismatch at assertion 3';
+    const acceptance = buildJobOperationDigest(job({
+      status: 'failed',
+      error: { code: 'LEGACY_JOB_FAILED', message: exact, retryable: false },
+      outcome: { failureClass: 'acceptance_failure', acceptanceFailure: { code: 'CHECK_FAILED', message: exact } },
+    }));
+    expect(acceptance.errorClass).toBe('acceptance_failure');
+    expect(acceptance.errorMessage).toBe(exact);
+
+    const infrastructure = buildJobOperationDigest(job({
+      status: 'failed',
+      error: { code: 'LEGACY_JOB_FAILED', message: exact, retryable: false },
+      outcome: { failureClass: 'infrastructure_failure', infrastructureError: { code: 'CHECK_EXECUTION_FAILED', message: exact } },
+    }));
+    expect(infrastructure.errorClass).toBe('infrastructure_failure');
+    expect(infrastructure.errorMessage).toBe(exact);
+  });
+
   test('succeeded job exposes changed files from result', () => {
     const digest = buildJobOperationDigest(job({
       status: 'succeeded',

@@ -150,6 +150,29 @@ describe('connector freshness diagnostics', () => {
     expect(report.bannerWarning).toContain('连接器快照缺少');
   });
 
+  test('reports local registry parity separately from external connector callability', () => {
+    const localOnly = evaluateConnectorFreshness({
+      localToolNames: [...EXPECTED_FACADE_TOOLS],
+      connectorToolNames: [...EXPECTED_FACADE_TOOLS],
+    });
+    expect(localOnly.localRegistryVerified).toBe(true);
+    expect(localOnly.diagnosticScope).toBe('local_registry');
+    expect(localOnly.connectorCallability).toBe('unverified');
+
+    const mismatch = evaluateConnectorFreshness({
+      localToolNames: [...EXPECTED_FACADE_TOOLS],
+      callabilityProbe: {
+        toolName: 'rh_context',
+        callable: false,
+        errorCode: 'UNKNOWN_TOOL',
+        source: 'external_probe',
+      },
+    });
+    expect(mismatch.status).toBe('connector_mismatch');
+    expect(mismatch.connectorCallability).toBe('mismatch');
+    expect(mismatch.connectorMismatch).toMatchObject({ toolName: 'rh_context', errorCode: 'UNKNOWN_TOOL' });
+  });
+
   test('local_mcp_updated when connector_tool_names contains rh_*', () => {
     const report = evaluateConnectorFreshness({
       localToolNames: [...EXPECTED_FACADE_TOOLS, 'work_wait', 'repository_safe_patch_apply'],

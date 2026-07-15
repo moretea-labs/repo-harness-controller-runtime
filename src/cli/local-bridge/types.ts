@@ -117,6 +117,9 @@ export interface LocalBridgeJobEvent {
 }
 
 export interface LocalBridgeJobOutcome {
+  /** Optional semantic classification; acceptance failures are not infrastructure failures. */
+  failureClass?: "acceptance_failure" | "infrastructure_failure";
+  acceptanceFailure?: { code: string; message: string };
   process?: {
     exitCode?: number | null;
     timedOut?: boolean;

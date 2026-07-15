@@ -200,6 +200,27 @@ describe('facade MCP surface wiring', () => {
     });
   });
 
+  test('rh_context summary keeps the payload bounded and selects only requested checks', async () => {
+    const { ctx, repository } = controllerFixture();
+    const summary = structured(await callRuntimeTool(ctx, 'rh_context', {
+      repo_id: repository.repoId,
+      operation: 'list',
+      requested_check_ids: ['typecheck'],
+    }));
+    const data = summary.data as Record<string, unknown>;
+    expect(summary.detailLevel).toBe('summary');
+    expect(data.capabilities).toBeUndefined();
+    expect(data.requestedCheckIds).toEqual(['typecheck']);
+    expect((data.selectedChecks as Array<{ id: string }>).map((entry) => entry.id)).toEqual(['package:check:type']);
+    expect((data.checks as unknown[]).length).toBeLessThanOrEqual(5);
+    expect((data.activeWork as unknown[]).length).toBeLessThanOrEqual(5);
+    expect((data.recentExecutionJobs as unknown[]).length).toBeLessThanOrEqual(5);
+    expect((data.activeAttention as unknown[]).length).toBeLessThanOrEqual(5);
+    expect((data.counts as Record<string, number>).availableChecks).toBeGreaterThanOrEqual(2);
+    const encoded = JSON.stringify(summary);
+    expect(Buffer.byteLength(encoded, 'utf8')).toBeLessThan(12_000);
+  });
+
   test('rh_work start routes small/complex/high-risk modes', async () => {
     const { ctx, repository } = controllerFixture();
     const small = structured(await callRuntimeTool(ctx, 'rh_work', {

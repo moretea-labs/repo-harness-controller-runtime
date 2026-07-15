@@ -106,6 +106,14 @@ export interface ControllerCheckResult {
   command: readonly string[];
   executedAt: string;
   artifactPath: string;
+  /** True when this result came from content-bound evidence rather than a new process. */
+  cacheHit?: boolean;
+  /** Revision whose content and check definition were validated for this result. */
+  validatedRevision?: string;
+  /** Original process execution timestamp; retained when a result is served from cache. */
+  originalExecutedAt?: string;
+  /** A non-zero check result is acceptance failure; runtime/process defects are infrastructure. */
+  failureClass?: 'acceptance_failure' | 'infrastructure_failure';
 }
 
 export interface ControllerCheckEvidence {
@@ -125,6 +133,10 @@ export interface ControllerCheckEvidence {
   cacheKey?: string;
   completedRevision?: string;
   stale?: boolean;
+  cacheHit?: boolean;
+  validatedRevision?: string;
+  originalExecutedAt?: string;
+  failureClass?: 'acceptance_failure' | 'infrastructure_failure';
 }
 
 function artifactSlug(id: string): string {
@@ -263,7 +275,14 @@ function buildCheckCacheKey(check: ControllerCheck, timeoutMs: number, revision:
 function persistCheckEvidence(
   repoRoot: string,
   result: Omit<ControllerCheckResult, 'artifactPath'>,
-  meta: { revision?: string; cacheKey?: string; completedRevision?: string; stale?: boolean } = {},
+  meta: {
+    revision?: string;
+    cacheKey?: string;
+    completedRevision?: string;
+    stale?: boolean;
+    cacheHit?: boolean;
+    validatedRevision?: string;
+  } = {},
 ): string {
   const path = evidencePath(repoRoot, result.check.id);
   mkdirSync(dirname(path), { recursive: true });
@@ -284,6 +303,10 @@ function persistCheckEvidence(
     cacheKey: meta.cacheKey,
     completedRevision: meta.completedRevision,
     stale: meta.stale,
+    cacheHit: meta.cacheHit,
+    validatedRevision: meta.validatedRevision,
+    originalExecutedAt: result.originalExecutedAt ?? result.executedAt,
+    failureClass: result.failureClass,
   };
   atomicWriteFileSync(path, `${JSON.stringify(evidence, null, 2)}\n`);
   return relative(repoRoot, path).replace(/\\/g, '/');
@@ -318,6 +341,10 @@ export function runControllerCheck(repoRoot: string, id: string, requestedTimeou
       command: cached.command,
       executedAt: cached.executedAt,
       artifactPath: relative(repoRoot, evidencePath(repoRoot, id)).replace(/\\/g, '/'),
+      cacheHit: true,
+      validatedRevision: cached.validatedRevision ?? cached.completedRevision ?? cached.revision ?? revision,
+      originalExecutedAt: cached.originalExecutedAt ?? cached.executedAt,
+      failureClass: cached.failureClass,
     };
   }
   const heavy = controllerCheckConcurrencyClass(id) === 'heavy';
@@ -335,6 +362,7 @@ export function runControllerCheck(repoRoot: string, id: string, requestedTimeou
   }
   const completedRevision = currentControllerCheckRevision(repoRoot);
   const stale = completedRevision !== revision;
+  const executedAt = new Date().toISOString();
   const withoutPath = {
     check,
     ok: result.ok && !stale,
@@ -346,7 +374,13 @@ export function runControllerCheck(repoRoot: string, id: string, requestedTimeou
       stale ? 'repository revision changed while the check was running; evidence is stale and the check must be rerun' : '',
     ].filter(Boolean).join('\n'),
     command: result.command,
-    executedAt: new Date().toISOString(),
+    executedAt,
+    cacheHit: false,
+    validatedRevision: stale ? completedRevision : revision,
+    originalExecutedAt: executedAt,
+    failureClass: stale || result.timedOut || Boolean(result.error) || Boolean(result.signal)
+      ? 'infrastructure_failure' as const
+      : result.ok ? undefined : 'acceptance_failure' as const,
   };
   return {
     ...withoutPath,
@@ -355,6 +389,8 @@ export function runControllerCheck(repoRoot: string, id: string, requestedTimeou
       completedRevision,
       stale,
       cacheKey: stale ? undefined : cacheKey,
+      cacheHit: false,
+      validatedRevision: stale ? completedRevision : revision,
     }),
   };
 }
@@ -543,6 +579,7 @@ async function executeControllerCheckAsync(
     timedOut: boolean;
     stdout: string;
     stderr: string;
+    failureClass?: 'acceptance_failure' | 'infrastructure_failure';
   }>((resolvePromise) => {
     const child = spawn(check.command[0], check.command.slice(1), {
       cwd: resolve(repoRoot, check.cwd),
@@ -590,6 +627,9 @@ async function executeControllerCheckAsync(
         timedOut,
         stdout: capProcessOutput(redactProcessOutput(stdout), maxOutputBytes),
         stderr: capProcessOutput(redactProcessOutput(stderrText), maxOutputBytes),
+        failureClass: timedOut || Boolean(error) || Boolean(processTreeError)
+          ? 'infrastructure_failure'
+          : status === 0 ? undefined : 'acceptance_failure',
       });
     };
 
@@ -597,6 +637,7 @@ async function executeControllerCheckAsync(
     child.once('close', (code) => { void finish(code ?? 1); });
   });
 
+  const executedAt = new Date().toISOString();
   const withoutPath = {
     check,
     ok: result.ok,
@@ -605,7 +646,11 @@ async function executeControllerCheckAsync(
     stdout: result.stdout,
     stderr: result.stderr,
     command: command.map((part) => redactProcessOutput(part)),
-    executedAt: new Date().toISOString(),
+    executedAt,
+    cacheHit: false,
+    validatedRevision: undefined,
+    originalExecutedAt: executedAt,
+    failureClass: result.failureClass,
   };
   return { ...withoutPath, artifactPath: relative(repoRoot, evidencePath(repoRoot, check.id)).replace(/\\/g, '/') };
 }
@@ -639,6 +684,10 @@ export function runControllerCheckAsync(
       command: cached.command,
       executedAt: cached.executedAt,
       artifactPath: relative(repoRoot, evidencePath(repoRoot, id)).replace(/\\/g, '/'),
+      cacheHit: true,
+      validatedRevision: cached.validatedRevision ?? cached.completedRevision ?? cached.revision ?? revision,
+      originalExecutedAt: cached.originalExecutedAt ?? cached.executedAt,
+      failureClass: cached.failureClass,
     });
   }
   const key = `${resolve(repoRoot)}\u0000${id}\u0000${cacheKey}`;
@@ -691,23 +740,28 @@ export function runControllerCheckAsync(
     });
     const completedRevision = currentControllerCheckRevision(repoRoot);
     const stale = completedRevision !== revision;
-    const finalized = stale
-      ? {
-          ...result,
-          ok: false,
-          status: 1,
-          stderr: [
-            result.stderr,
-            'repository revision changed while the check was running; evidence is stale and the check must be rerun',
-          ].filter(Boolean).join('\n'),
-        }
-      : result;
+    const finalized = {
+      ...result,
+      ...(stale ? {
+        ok: false,
+        status: 1,
+        stderr: [
+          result.stderr,
+          'repository revision changed while the check was running; evidence is stale and the check must be rerun',
+        ].filter(Boolean).join('\n'),
+        failureClass: 'infrastructure_failure' as const,
+      } : {}),
+      cacheHit: false,
+      validatedRevision: stale ? completedRevision : revision,
+    };
     const { artifactPath: _artifactPath, ...withoutPath } = finalized;
     const artifactPath = persistCheckEvidence(repoRoot, withoutPath, {
       revision,
       completedRevision,
       stale,
       cacheKey: stale ? undefined : cacheKey,
+      cacheHit: false,
+      validatedRevision: stale ? completedRevision : revision,
     });
     return { ...finalized, artifactPath };
   };
@@ -732,6 +786,10 @@ export function runControllerCheckAsync(
           command: refreshed.command,
           executedAt: refreshed.executedAt,
           artifactPath: relative(repoRoot, evidencePath(repoRoot, id)).replace(/\\/g, '/'),
+          cacheHit: true,
+          validatedRevision: refreshed.validatedRevision ?? refreshed.completedRevision ?? refreshed.revision ?? revision,
+          originalExecutedAt: refreshed.originalExecutedAt ?? refreshed.executedAt,
+          failureClass: refreshed.failureClass,
         };
       }
       return execute(lease);

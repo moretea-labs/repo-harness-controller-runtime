@@ -130,7 +130,10 @@ describe('console facade api', () => {
     });
 
     const center = await buildCommandCenter(ctx, [mapRepositoryCard(repository, true)]);
-    const plugin = center.plugins.find((entry) => entry.id === 'github');
+    const plugins = center.plugins;
+    expect(plugins).toBeDefined();
+    if (!plugins) throw new Error('command center did not return plugin cards');
+    const plugin = plugins.find((entry) => entry.id === 'github');
 
     expect(plugin).toBeTruthy();
     expect(plugin?.name).toBe('Stored GitHub');
