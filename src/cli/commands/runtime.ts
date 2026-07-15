@@ -3,10 +3,10 @@ import { ensureControllerHome } from '../repositories/controller-home';
 import {
   controllerServiceStatus,
   formatControllerServiceStatus,
-  restartControllerService,
   startControllerService,
   stopControllerService,
 } from '../controller/lifecycle';
+import { requestControllerServiceRestart } from '../controller/restart-coordinator';
 import { ensureControllerDaemon, readControllerDaemonStatus } from '../../runtime/control-plane/daemon-client';
 import { findExecutionJob, listActiveExecutionJobs, listExecutionJobs } from '../../runtime/execution/jobs/store';
 import { readJobEvents } from '../../runtime/evidence/event-ledger';
@@ -62,7 +62,14 @@ export function buildRuntimeCommand(): Command {
     .option('--controller-home <path>', 'Controller state root')
     .option('--repo <path>', 'Repository root')
     .option('--log-file <path>', 'Combined runtime log file')
-    .action(async (opts: { controllerHome?: string; repo?: string; logFile?: string }) => output(await restartControllerService(opts)));
+    .option('--request-id <id>', 'Idempotent restart request id')
+    .option('--reason <text>', 'Bounded restart reason')
+    .option('--detached', 'Always hand the restart to the out-of-band coordinator')
+    .action(async (opts: { controllerHome?: string; repo?: string; logFile?: string; requestId?: string; reason?: string; detached?: boolean }) => output(await requestControllerServiceRestart({
+      ...opts,
+      requestedBy: 'runtime-cli',
+      mode: opts.detached ? 'detached' : 'auto',
+    })));
 
   command.command('doctor')
     .description('Run a bounded runtime diagnosis view')

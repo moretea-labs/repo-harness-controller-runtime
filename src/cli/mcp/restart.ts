@@ -19,7 +19,7 @@ import { applyDirectNetworkProxyBypass, withDirectNetworkProxyBypass } from './p
 import { resolveMcpRepoRoot } from './repo';
 import { runMcpDoctor, runMcpSetupChatgpt, runMcpSetupCodex, type McpSetupResult } from './setup';
 import { CONTROLLER_TOOL_SURFACE } from '../controller/runtime-config';
-import { restartControllerService } from '../controller/lifecycle';
+import { requestControllerServiceRestart } from '../controller/restart-coordinator';
 import { ensureRepoPreferredControllerHome } from '../repositories/controller-home';
 import { getGitHubPluginStatus, loadGitHubPluginConfig, saveGitHubPluginConfig } from '../github/plugin';
 
@@ -835,13 +835,34 @@ export async function runMcpRestart(opts: McpRestartOptions): Promise<McpSetupRe
     lines.push(`[repo-harness restart] GitHub plugin: enabled=${String(github.enabled)} sync_mode=${github.syncMode} include_tasks=${String(github.includeTasks)}`);
   }
 
-  const restarted = await restartControllerService({
+  const restarted = await requestControllerServiceRestart({
     repo: repoRoot,
     controllerHome,
     logFile: config.stderrLogPath,
+    requestedBy: 'mcp-restart-cli',
+    reason: 'MCP runtime restart requested after setup/config reconciliation',
+    mode: 'auto',
   });
-  let keepalivePid: number | undefined = restarted.status.mcpRuntime?.server.pid;
   lines.push(`[repo-harness restart] launchd_managed=${launchAgents.length > 0 ? "true" : "false"}`);
+  if (restarted.action === 'restart_scheduled') {
+    lines.push('[repo-harness restart] accepted');
+    lines.push(`  request_id: ${restarted.requestId}`);
+    lines.push(`  phase: ${restarted.state.phase}`);
+    lines.push(`  state_file: ${restarted.statePath}`);
+    lines.push(`  coordinator_log: ${restarted.logPath}`);
+    lines.push('  reconnect_contract: stable_domain_retry');
+    lines.push('');
+    lines.push('Next ChatGPT step:');
+    lines.push('  Retry controller_capabilities through the stable domain after the coordinator completes. Connector recreation is only needed when auth or the tool schema changed, or the Connector reports UNKNOWN_TOOL.');
+    return {
+      status: 'ok',
+      repoRoot,
+      changed: Array.from(new Set(changed)),
+      lines,
+    };
+  }
+
+  let keepalivePid: number | undefined = restarted.status.mcpRuntime?.server.pid;
   lines.push(
     restarted.cleanedPids.length > 0
       ? `[repo-harness restart] cleaned runtime pids: ${restarted.cleanedPids.join(' ')}`
@@ -878,7 +899,7 @@ export async function runMcpRestart(opts: McpRestartOptions): Promise<McpSetupRe
   lines.push(`  log_file: ${config.stderrLogPath}`);
   lines.push('');
   lines.push('Next ChatGPT step:');
-  lines.push(`  Recreate or rescan the Connector as "${doctor.chatgpt?.serverName ?? config.defaultServerName}", then call controller_capabilities.`);
+  lines.push(`  Call controller_capabilities through the stable domain as "${doctor.chatgpt?.serverName ?? config.defaultServerName}". Recreate or rescan only if auth or the tool schema changed, or the Connector reports UNKNOWN_TOOL.`);
 
   return {
     status: 'ok',

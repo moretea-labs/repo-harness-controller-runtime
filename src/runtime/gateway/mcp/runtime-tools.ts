@@ -34,6 +34,7 @@ import {
 } from '../../workflow/campaigns/normalize';
 import { ensureRepositoryRuntimeStorage } from '../../../cli/repositories/runtime-storage';
 import { assessWorkMode } from '../../../cli/controller/work-mode';
+import { scheduleControllerServiceRestart } from '../../../cli/controller/restart-coordinator';
 import { projectBoard } from '../../../cli/controller/issue-store';
 import {
   buildControllerTaskLedgerProjection,
@@ -1365,6 +1366,27 @@ function runFacadeRepair(
       },
     },
   );
+  if (
+    args.repair_operation === 'repair'
+    && args.dry_run === false
+    && args.approval_confirmed === true
+    && args.process_kill_or_restart === true
+  ) {
+    const restart = scheduleControllerServiceRestart({
+      repo: repository.canonicalRoot,
+      controllerHome: ctx.controllerHome,
+      requestId: typeof args.request_id === 'string' ? args.request_id : undefined,
+      requestedBy: 'rh_status.repair',
+      reason: 'Authorized self-healing repair requested a full Controller stack restart',
+      mode: 'detached',
+    });
+    return result({
+      ...(facade as unknown as Record<string, unknown>),
+      status: 'applied',
+      summary: 'Authorized repair scheduled a durable out-of-band Controller stack restart.',
+      restart,
+    });
+  }
   return result(facade as unknown as Record<string, unknown>, facade.status === 'blocked' || facade.status === 'approval_required' || facade.status === 'failed');
 }
 
@@ -2810,15 +2832,23 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             affectedPaths = ['.ai/harness/local-jobs', '.ai/harness/controller'];
             break;
           }
-          case 'recovery.restart_controller': {
-            const daemon = ensureControllerDaemon(ctx.controllerHome);
-            payload = { daemon, note: 'ensureControllerDaemon starts or verifies the bounded repo-harness daemon; it does not kill unrelated processes.' };
-            affectedPaths = ['_ops/controller-home/daemon'];
+          case 'recovery.restart_controller':
+          case 'recovery.restart_local_bridge': {
+            const restart = scheduleControllerServiceRestart({
+              repo: repository.canonicalRoot,
+              controllerHome: ctx.controllerHome,
+              requestId: typeof args.request_id === 'string' ? args.request_id : undefined,
+              requestedBy: 'capability_recovery_apply',
+              reason,
+              mode: 'detached',
+            });
+            payload = {
+              restart,
+              note: 'The detached coordinator owns the full Controller stack restart. The current request returns before Gateway or Local Bridge shutdown.',
+            };
+            affectedPaths = ['_ops/controller-home/restart'];
             break;
           }
-          case 'recovery.restart_local_bridge':
-            payload = { skipped: true, reason: 'Local bridge restart must be performed by the owning supervisor process or CLI to avoid killing the current HTTP request mid-response.' };
-            break;
           case 'recovery.create_patch_handoff':
             payload = prepareFallbackHandoffArtifacts(repository, { reason }) as unknown as Record<string, unknown>;
             affectedPaths = ['.ai/handoff'];

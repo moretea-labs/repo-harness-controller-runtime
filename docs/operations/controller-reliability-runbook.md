@@ -59,6 +59,30 @@ Recommended policy:
 - no cross-repository process termination from a repository-scoped repair action;
 - explicit operator authorization before terminating a peer repository process.
 
+## Restart coordination and reconnect contract
+
+Use `scripts/controller-runtime.sh restart` or an authorized recovery action. All MCP, Local Bridge, GUI, and Worker-owned restart requests must be accepted before the old process tree is stopped.
+
+The restart coordinator provides these guarantees:
+
+- a request from inside the managed Supervisor, Gateway, Local Bridge, Daemon, or Worker ancestry is handed to a detached process group;
+- the accepted request is persisted under `<controllerHome>/restart/requests/<requestId>.json`, with the latest request also written to `<controllerHome>/restart/current.json`;
+- overlapping requests are deduplicated by request ID and by a controller-wide schedule/execution lock;
+- only the process that acquired a lock removes it;
+- phases are durable: `scheduled`, `coordinator_started`, `waiting_for_handoff`, `stopping`, `starting`, `verifying`, then `succeeded` or `failed`;
+- errors are bounded and retained instead of being reported as a successful daemon probe;
+- verification checks local MCP, Controller Daemon, Local Bridge, repository projection, current source/generation, connector readiness, the configured public health endpoint, and OAuth protected-resource discovery.
+
+A full Gateway restart can close the single in-flight MCP HTTP request. It cannot preserve that socket. The supported continuity contract is the stable domain plus durable request, Work, and Job identifiers: retry the same conversation after the endpoint is healthy and continue reading the existing durable state. Do not recreate the ChatGPT Connector when the endpoint, OAuth configuration, and tool schema are unchanged. Recreate or rescan only after an auth/schema change or an explicit `UNKNOWN_TOOL`/connector-staleness result.
+
+After a restart, confirm:
+
+1. `controller_ready` reports Gateway, Daemon, Worker loop, Local Bridge, and projection ready.
+2. `controller_capabilities` reports no missing tools and the expected fingerprint.
+3. The public `/health` and `/.well-known/oauth-protected-resource/mcp` endpoints return valid JSON.
+4. `connectorNeedsReconnect` is not true.
+5. Previously accepted Work/Job identifiers remain readable and no mutation was blindly replayed.
+
 ## Cleanup
 
 Run cleanup as preview-first work:

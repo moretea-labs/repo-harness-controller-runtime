@@ -67,47 +67,14 @@ run_controller_service() {
   "$LOCAL_CLI" controller service "$action" --repo "$ROOT" --controller-home "$REPO_HARNESS_CONTROLLER_HOME" "$@"
 }
 
-controller_daemon_pid() {
-  local pid_file="$REPO_HARNESS_CONTROLLER_HOME/daemon/controller.pid"
-  [ -f "$pid_file" ] || return 1
-  tr -d '[:space:]' < "$pid_file"
+RESTART_ENTRY="$ROOT/src/cli/controller/restart-coordinator-entry.ts"
+
+run_restart_request() {
+  bun "$RESTART_ENTRY" request --repo "$ROOT" --controller-home "$REPO_HARNESS_CONTROLLER_HOME" "$@"
 }
 
-pid_is_ancestor() {
-  local target_pid="$1"
-  local current_pid="$$"
-  local parent_pid
-  while [ "$current_pid" -gt 1 ] 2>/dev/null; do
-    [ "$current_pid" = "$target_pid" ] && return 0
-    parent_pid="$(ps -o ppid= -p "$current_pid" 2>/dev/null | tr -d '[:space:]')"
-    case "$parent_pid" in
-      ''|*[!0-9]*) return 1 ;;
-    esac
-    current_pid="$parent_pid"
-  done
-  return 1
-}
-
-restart_requires_detached_coordinator() {
-  [ "${REPO_HARNESS_FORCE_DETACHED_RESTART:-0}" = "1" ] && return 0
-  local daemon_pid
-  daemon_pid="$(controller_daemon_pid 2>/dev/null || true)"
-  case "$daemon_pid" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
-  kill -0 "$daemon_pid" 2>/dev/null || return 1
-  pid_is_ancestor "$daemon_pid"
-}
-
-schedule_detached_restart() {
-  local log_dir="$ROOT/.ai/local/logs"
-  local log_file="$log_dir/controller-restart-coordinator.log"
-  mkdir -p "$log_dir"
-  REPO_HARNESS_RESTART_COORDINATOR=1 \
-    nohup bash "$0" __restart_coordinator "$@" >>"$log_file" 2>&1 </dev/null &
-  local coordinator_pid=$!
-  echo "Controller restart scheduled via detached coordinator pid=$coordinator_pid"
-  echo "Restart log: $log_file"
+run_restart_coordinator() {
+  bun "$RESTART_ENTRY" run --repo "$ROOT" --controller-home "$REPO_HARNESS_CONTROLLER_HOME" "$@"
 }
 
 maybe_manage_external_tunnel() {
@@ -160,14 +127,8 @@ COMMAND="$1"
 shift || true
 
 case "$COMMAND" in
-  __restart_coordinator)
-    # The caller may be a Worker owned by the daemon being replaced. Wait for
-    # that caller to exit so this process is re-parented outside the old daemon
-    # tree before stopping the complete stack.
-    sleep "${REPO_HARNESS_RESTART_COORDINATOR_DELAY_SECONDS:-2}"
-    maybe_manage_external_tunnel stop
-    run_controller_service restart "$@"
-    maybe_manage_external_tunnel start
+  __restart_coordinator_run)
+    run_restart_coordinator "$@"
     ;;
   start)
     run_controller_service start "$@"
@@ -178,13 +139,9 @@ case "$COMMAND" in
     run_controller_service stop "$@"
     ;;
   restart)
-    if [ "${REPO_HARNESS_RESTART_COORDINATOR:-0}" != "1" ] && restart_requires_detached_coordinator; then
-      schedule_detached_restart "$@"
-      exit 0
-    fi
-    maybe_manage_external_tunnel stop
-    run_controller_service restart "$@"
-    maybe_manage_external_tunnel start
+    # The coordinator decides whether an external caller can wait synchronously
+    # or a managed MCP/GUI/Worker caller must return before shutdown begins.
+    run_restart_request "$@"
     ;;
   status)
     run_controller_service status "$@"
