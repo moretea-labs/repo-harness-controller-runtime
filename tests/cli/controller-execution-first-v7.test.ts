@@ -533,6 +533,8 @@ describe("Controller v7 compatibility on the V8 execution bridge", () => {
     const run = getAgentJob(root, runId);
     expect(run.status).toBe("waiting_for_user");
     expect(run.autoIntegrationError).toContain("automatic worktree integration did not finish");
+    expect(run.closureState).toBe("preserved");
+    expect(run.preservationReason).toBe("integration_failed");
     expect(run.integratedSessionId).toBeUndefined();
     expect(run.finishedAt).toBeUndefined();
 

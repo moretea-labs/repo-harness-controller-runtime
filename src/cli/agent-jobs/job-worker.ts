@@ -757,10 +757,13 @@ if (ok && config.autoIntegrate && finalMeta.executionMode === "worktree") {
       finalMeta.repoRoot,
       diffArtifactPath,
     ).replace(/\\/g, "/");
+    beforeIntegrationMeta.closureState = "integrating";
+    beforeIntegrationMeta.closureUpdatedAt = new Date().toISOString();
     persistMeta(beforeIntegrationMeta);
     const noChanges = !archivedDiff.status && !archivedDiff.diff && archivedDiff.untracked.length === 0;
     if (noChanges) {
       const cleanup = cleanupNoChangeWorktree(finalMeta.repoRoot, finalMeta.runId);
+      if (cleanup.preserved) throw new Error(cleanup.message ?? "No-change worktree cleanup was preserved.");
       const noChangeMeta = JSON.parse(readFileSync(config.metaPath, "utf-8")) as AgentJobMeta;
       const completedAt = new Date().toISOString();
       noChangeMeta.status = "succeeded";
@@ -769,6 +772,11 @@ if (ok && config.autoIntegrate && finalMeta.executionMode === "worktree") {
       noChangeMeta.finishedAt = completedAt;
       noChangeMeta.lastHeartbeatAt = completedAt;
       noChangeMeta.worktreeCleanedAt = completedAt;
+      if (cleanup.branchDeleted) noChangeMeta.cleanupBranchDeletedAt = completedAt;
+      noChangeMeta.closureState = "completed";
+      noChangeMeta.closureUpdatedAt = completedAt;
+      delete noChangeMeta.preservationReason;
+      delete noChangeMeta.preservationDetails;
       noChangeMeta.progress = {
         phase: "completed",
         percent: 100,
@@ -777,7 +785,7 @@ if (ok && config.autoIntegrate && finalMeta.executionMode === "worktree") {
         activityCount: (noChangeMeta.progress?.activityCount ?? 0) + 1,
       };
       persistMeta(noChangeMeta);
-      event("run_worktree_cleaned", "No-change worktree and temporary branch were removed.", cleanup);
+      event("run_worktree_cleaned", "No-change worktree and temporary branch were removed.", { ...cleanup });
       event("run_succeeded", "Agent completed with no repository changes.", { changeOutcome: "no_change" });
     } else {
       const integrated = integrateAgentJob(
@@ -801,6 +809,7 @@ if (ok && config.autoIntegrate && finalMeta.executionMode === "worktree") {
         finalMeta.repoRoot,
         finalMeta.runId,
       );
+      if (cleanup.preserved) throw new Error(cleanup.message ?? "Integrated worktree cleanup was preserved.");
       const integratedMeta = JSON.parse(
         readFileSync(config.metaPath, "utf-8"),
       ) as AgentJobMeta;
@@ -811,6 +820,11 @@ if (ok && config.autoIntegrate && finalMeta.executionMode === "worktree") {
       integratedMeta.finishedAt = completedAt;
       integratedMeta.lastHeartbeatAt = completedAt;
       integratedMeta.worktreeCleanedAt = completedAt;
+      if (cleanup.branchDeleted) integratedMeta.cleanupBranchDeletedAt = completedAt;
+      integratedMeta.closureState = "completed";
+      integratedMeta.closureUpdatedAt = completedAt;
+      delete integratedMeta.preservationReason;
+      delete integratedMeta.preservationDetails;
       integratedMeta.progress = {
         phase: "completed",
         percent: 100,
@@ -824,7 +838,7 @@ if (ok && config.autoIntegrate && finalMeta.executionMode === "worktree") {
       event(
         "run_worktree_cleaned",
         "Integrated worktree and temporary branch were removed.",
-        cleanup,
+        { ...cleanup },
       );
       event("run_succeeded", "Agent process, automatic integration, and worktree cleanup completed.");
     }
@@ -841,6 +855,16 @@ if (ok && config.autoIntegrate && finalMeta.executionMode === "worktree") {
       integrationError instanceof Error
         ? integrationError.message
         : String(integrationError);
+    failedMeta.closureState = "preserved";
+    failedMeta.closureUpdatedAt = completedAt;
+    failedMeta.preservationReason = failedMeta.preservationReason ?? (
+      failedMeta.integratedSessionId
+        ? "cleanup_failed"
+        : failedMeta.integrationReviewPath
+          ? "integration_review_required"
+          : "integration_failed"
+    );
+    failedMeta.preservationDetails = failedMeta.autoIntegrationError;
     failedMeta.progress = {
       phase: "waiting",
       percent: 96,

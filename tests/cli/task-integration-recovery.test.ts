@@ -3,7 +3,8 @@ import { execFileSync } from 'child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { getAgentJob } from '../../src/cli/agent-jobs/job-manager';
+import { getAgentJob, markAgentJobIntegrated } from '../../src/cli/agent-jobs/job-manager';
+import { cleanupIntegratedWorktree } from '../../src/cli/agent-jobs/integration';
 import type { AgentJobMeta } from '../../src/cli/agent-jobs/types';
 import { finishTaskRun } from '../../src/cli/controller/completion-orchestrator';
 import { createIssue, updateTask } from '../../src/cli/controller/issue-store';
@@ -120,9 +121,6 @@ describe('task integration recovery', () => {
     const runId = 'RUN-already-integrated';
     const prepared = prepareWorktreeRun(repoRoot, runId, registerCleanupPath);
     writeFileSync(join(prepared.worktree, 'src/example.ts'), 'export const value = 2;\n');
-    git(prepared.worktree, ['add', 'src/example.ts']);
-    git(prepared.worktree, ['commit', '-m', 'Worktree change']);
-
     writeFileSync(join(repoRoot, 'src/example.ts'), 'export const value = 2;\n');
 
     const result = finishTaskRun(repoRoot, { runId, commit: true });
@@ -143,6 +141,33 @@ describe('task integration recovery', () => {
     expect(meta.changeOutcome).toBe('already_integrated');
     expect(meta.integratedSessionId).toBeTruthy();
     expect(meta.worktreeCleanedAt).toBeTruthy();
+    expect(meta.cleanupBranchDeletedAt).toBeTruthy();
+    expect(meta.closureState).toBe('completed');
+
+    const repeated = finishTaskRun(repoRoot, { runId, commit: true });
+    expect(repeated.action).toBe('already_done');
+    expect(getAgentJob(repoRoot, runId).closureState).toBe('completed');
+  }));
+
+  test('preserves an integrated worktree when it contains changes outside durable integration evidence', () => withRepo((repoRoot, registerCleanupPath) => {
+    const runId = 'RUN-unexpected-dirty-path';
+    const prepared = prepareWorktreeRun(repoRoot, runId, registerCleanupPath);
+    markAgentJobIntegrated(repoRoot, runId, 'EDIT-test-integration', {
+      changedFiles: ['src/example.ts'],
+      changeOutcome: 'changed',
+    });
+    writeFileSync(join(prepared.worktree, 'src/unexpected.ts'), 'export const unexpected = true;\n');
+
+    const cleanup = cleanupIntegratedWorktree(repoRoot, runId);
+
+    expect(cleanup.preserved).toBe(true);
+    expect(cleanup.preservationReason).toBe('dirty_worktree');
+    expect(existsSync(prepared.worktree)).toBe(true);
+    expect(branchExists(repoRoot, prepared.branch)).toBe(true);
+    const meta = getAgentJob(repoRoot, runId);
+    expect(meta.status).toBe('waiting_for_user');
+    expect(meta.closureState).toBe('preserved');
+    expect(meta.preservationReason).toBe('dirty_worktree');
   }));
 
   test('preserves both sides and writes a bounded review packet when main changed concurrently', () => withRepo((repoRoot, registerCleanupPath) => {
@@ -163,6 +188,8 @@ describe('task integration recovery', () => {
 
     const meta = getAgentJob(repoRoot, runId);
     expect(meta.integrationReviewPath).toBe(result.integrationReviewPath);
+    expect(meta.closureState).toBe('preserved');
+    expect(meta.preservationReason).toBe('integration_review_required');
 
     const packet = JSON.parse(
       readFileSync(join(repoRoot, result.integrationReviewPath!), 'utf-8'),

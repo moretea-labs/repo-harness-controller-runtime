@@ -2,7 +2,7 @@ import { spawnSync } from 'child_process';
 import { createHash } from 'crypto';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
-import { getAgentJob, markAgentJobReviewedCompletion } from '../agent-jobs/job-manager';
+import { getAgentJob, markAgentJobClosure, markAgentJobReviewedCompletion } from '../agent-jobs/job-manager';
 import type { AgentJobMeta } from '../agent-jobs/types';
 import { cleanupIntegratedWorktree, cleanupNoChangeWorktree, integrateAgentJob, IntegrationReviewRequiredError, taskRunDiff } from '../agent-jobs/integration';
 import { getMcpPolicy } from '../mcp/policy';
@@ -279,10 +279,27 @@ export function finishTaskRun(repoRoot: string, options: FinishTaskRunOptions): 
     const hasChanges = Boolean(diff.status || diff.diff || diff.untracked.length > 0);
     if (!hasChanges) {
       const cleanupResult = cleanup ? cleanupNoChangeWorktree(repoRoot, run.runId) : { removed: false, branchDeleted: false };
+      if (cleanupResult.preserved) {
+        return result(repoRoot, {
+          action: 'blocked',
+          runId: run.runId,
+          issueId: issue.id,
+          taskId: task.id,
+          decision,
+          taskStatus: 'review',
+          integrated: false,
+          cleaned: false,
+          branchDeleted: false,
+          changedPaths: [],
+          changeOutcome: 'no_change',
+          reason: cleanupResult.message,
+        });
+      }
       currentRun = markAgentJobReviewedCompletion(repoRoot, run.runId, {
         changeOutcome: 'no_change',
         changedFiles: [],
         worktreeCleaned: cleanupResult.removed,
+        branchDeleted: cleanupResult.branchDeleted,
       });
       changeOutcome = 'no_change';
       cleaned = cleanupResult.removed;
@@ -348,6 +365,28 @@ export function finishTaskRun(repoRoot: string, options: FinishTaskRunOptions): 
       });
       commitSha = committed.commitSha;
       commitError = committed.error;
+      if (commitError) {
+        markAgentJobClosure(repoRoot, run.runId, {
+          state: 'preserved',
+          preservationReason: commitError.includes('index already has staged changes') ? 'main_workspace_occupied' : 'cleanup_failed',
+          details: commitError,
+        });
+        return result(repoRoot, {
+          action: 'blocked',
+          runId: run.runId,
+          issueId: issue.id,
+          taskId: task.id,
+          decision,
+          taskStatus: final.taskStatus,
+          integrated,
+          cleaned: false,
+          branchDeleted: false,
+          changedPaths,
+          changeOutcome,
+          commitError,
+          reason: commitError,
+        });
+      }
     }
     if (
       cleanup &&
@@ -357,6 +396,22 @@ export function finishTaskRun(repoRoot: string, options: FinishTaskRunOptions): 
       !(shouldCommit && final.taskStatus === 'done' && commitError)
     ) {
       const cleanupResult = cleanupIntegratedWorktree(repoRoot, run.runId);
+      if (cleanupResult.preserved) {
+        return result(repoRoot, {
+          action: 'blocked',
+          runId: run.runId,
+          issueId: issue.id,
+          taskId: task.id,
+          decision,
+          taskStatus: final.taskStatus,
+          integrated,
+          cleaned: false,
+          branchDeleted: false,
+          changedPaths,
+          changeOutcome,
+          reason: cleanupResult.message,
+        });
+      }
       cleaned = cleanupResult.removed;
       branchDeleted = cleanupResult.branchDeleted;
     }
@@ -364,6 +419,7 @@ export function finishTaskRun(repoRoot: string, options: FinishTaskRunOptions): 
       changeOutcome,
       changedFiles: changedPaths,
       worktreeCleaned: cleaned,
+      branchDeleted,
     });
     return result(repoRoot, {
       action: final.taskStatus === 'done' ? 'finished' : 'needs_decision',

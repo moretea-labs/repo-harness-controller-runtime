@@ -2390,7 +2390,21 @@ process.exit(2);
           })
         ).value;
       }
-      expect(run.status).toBe("succeeded");
+      expect({
+        status: run.status,
+        autoIntegrationError: run.autoIntegrationError,
+        closureState: run.closureState,
+        preservationReason: run.preservationReason,
+        preservationDetails: run.preservationDetails,
+        changedFiles: run.changedFiles,
+      }).toEqual({
+        status: "succeeded",
+        autoIntegrationError: undefined,
+        closureState: "completed",
+        preservationReason: undefined,
+        preservationDetails: undefined,
+        changedFiles: ["src/example.ts"],
+      });
       for (
         let attempt = 0;
         attempt < 120 && !run.worktreeCleanedAt && !run.autoIntegrationError;

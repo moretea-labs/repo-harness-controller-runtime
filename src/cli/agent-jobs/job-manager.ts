@@ -45,7 +45,9 @@ import { terminateProcessTreeSync } from "../../runtime/shared/process-tree";
 import type {
   AgentExecutionMode,
   AgentJobEvent,
+  AgentJobClosureState,
   AgentJobMeta,
+  AgentJobPreservationReason,
   AgentJobStatus,
   AgentJobWorkerConfig,
 } from "./types";
@@ -101,8 +103,16 @@ function normalizeAgentMeta(
         : "worktree");
   meta.autoIntegrate = meta.autoIntegrate ?? meta.executionMode === "worktree";
   meta.closureState = meta.closureState ?? (
-    meta.executionMode === "worktree" && meta.provider === "local" && !meta.integratedSessionId
-      ? "integration_pending"
+    meta.provider === "local" && meta.executionMode === "worktree"
+      ? meta.worktreeCleanedAt
+        ? "completed"
+        : meta.status === "waiting_for_user"
+          ? "preserved"
+          : meta.integratedSessionId
+            ? "cleanup_pending"
+            : ["queued", "starting", "running", "succeeded"].includes(meta.status)
+              ? "integration_pending"
+              : "none"
       : meta.status === "succeeded"
         ? "completed"
         : "none"
@@ -711,12 +721,19 @@ function reconcileIncompleteAutoIntegration(
   path: string,
   meta: AgentJobMeta,
 ): void {
-  const message = meta.autoIntegrationError?.trim() || "automatic worktree integration did not finish after the worker exited; the isolated worktree was preserved for manual integration";
+  const cleanupWasPending = Boolean(meta.integratedSessionId);
+  const message = meta.autoIntegrationError?.trim() || (cleanupWasPending
+    ? "automatic worktree cleanup did not finish after integration; the isolated worktree was preserved for a safe retry"
+    : "automatic worktree integration did not finish after the worker exited; the isolated worktree was preserved for manual integration");
   const progressedAt = new Date().toISOString();
   meta.status = "waiting_for_user";
   meta.closureState = "preserved";
   meta.closureUpdatedAt = progressedAt;
-  meta.preservationReason = meta.integrationReviewPath ? "integration_review_required" : "integration_failed";
+  meta.preservationReason = cleanupWasPending
+    ? "cleanup_failed"
+    : meta.integrationReviewPath
+      ? "integration_review_required"
+      : "integration_failed";
   meta.preservationDetails = message;
   meta.autoIntegrationError = message;
   meta.lastHeartbeatAt = progressedAt;
@@ -1922,6 +1939,53 @@ export function retryAgentJob(
 }
 
 
+export function markAgentJobClosure(
+  repoRoot: string,
+  runId: string,
+  input: {
+    state: AgentJobClosureState;
+    preservationReason?: AgentJobPreservationReason;
+    details?: string;
+    worktreeCleaned?: boolean;
+    branchDeleted?: boolean;
+  },
+): AgentJobMeta {
+  const current = getAgentJob(repoRoot, runId);
+  const { stdoutTail: _stdout, stderrTail: _stderr, ...meta } = current;
+  const changedAt = new Date().toISOString();
+  meta.closureState = input.state;
+  meta.closureUpdatedAt = changedAt;
+  if (input.worktreeCleaned) meta.worktreeCleanedAt = meta.worktreeCleanedAt ?? changedAt;
+  if (input.branchDeleted) meta.cleanupBranchDeletedAt = meta.cleanupBranchDeletedAt ?? changedAt;
+  if (input.state === "preserved") {
+    meta.status = "waiting_for_user";
+    delete meta.finishedAt;
+    meta.preservationReason = input.preservationReason ?? "unknown_worktree_state";
+    meta.preservationDetails = input.details ?? "Run closure was preserved because cleanup safety could not be proven.";
+    meta.autoIntegrationError = meta.preservationDetails;
+  } else if (input.state === "completed") {
+    delete meta.preservationReason;
+    delete meta.preservationDetails;
+    delete meta.autoIntegrationError;
+    delete meta.integrationReviewPath;
+  } else {
+    delete meta.preservationReason;
+    delete meta.preservationDetails;
+  }
+  writeAgentMeta(repoRoot, metaPath(repoRoot, runId), meta);
+  appendAgentJobEvent(repoRoot, runId, {
+    type: input.state === "preserved" ? "run_waiting" : "run_activity",
+    message: input.details ?? `Run closure moved to ${input.state}.`,
+    data: {
+      closureState: input.state,
+      preservationReason: meta.preservationReason,
+      worktreeCleanedAt: meta.worktreeCleanedAt,
+      cleanupBranchDeletedAt: meta.cleanupBranchDeletedAt,
+    },
+  });
+  return meta;
+}
+
 export function markAgentJobReviewedCompletion(
   repoRoot: string,
   runId: string,
@@ -1929,6 +1993,7 @@ export function markAgentJobReviewedCompletion(
     changeOutcome?: AgentJobMeta["changeOutcome"];
     changedFiles?: string[];
     worktreeCleaned?: boolean;
+    branchDeleted?: boolean;
   } = {},
 ): AgentJobMeta {
   const current = getAgentJob(repoRoot, runId);
@@ -1941,6 +2006,11 @@ export function markAgentJobReviewedCompletion(
   if (options.changeOutcome) meta.changeOutcome = options.changeOutcome;
   if (options.changedFiles) meta.changedFiles = options.changedFiles;
   if (options.worktreeCleaned) meta.worktreeCleanedAt = meta.worktreeCleanedAt ?? completedAt;
+  if (options.branchDeleted) meta.cleanupBranchDeletedAt = meta.cleanupBranchDeletedAt ?? completedAt;
+  meta.closureState = "completed";
+  meta.closureUpdatedAt = completedAt;
+  delete meta.preservationReason;
+  delete meta.preservationDetails;
   meta.progress = {
     phase: "completed",
     percent: 100,
@@ -1963,6 +2033,10 @@ export function markAgentJobIntegrated(
   repoRoot: string,
   runId: string,
   sessionId: string,
+  options: {
+    changedFiles?: string[];
+    changeOutcome?: AgentJobMeta["changeOutcome"];
+  } = {},
 ): AgentJobMeta {
   const current = getAgentJob(repoRoot, runId);
   if (current.provider !== "local")
@@ -1972,6 +2046,12 @@ export function markAgentJobIntegrated(
   const { stdoutTail: _stdout, stderrTail: _stderr, ...meta } = current;
   meta.integratedSessionId = sessionId;
   meta.integratedAt = new Date().toISOString();
+  if (options.changedFiles) meta.changedFiles = [...options.changedFiles];
+  if (options.changeOutcome) meta.changeOutcome = options.changeOutcome;
+  meta.closureState = "cleanup_pending";
+  meta.closureUpdatedAt = meta.integratedAt;
+  delete meta.preservationReason;
+  delete meta.preservationDetails;
   delete meta.integrationReviewPath;
   writeAgentMeta(repoRoot, metaPath(repoRoot, runId), meta);
   appendAgentJobEvent(repoRoot, runId, {
@@ -1989,7 +2069,15 @@ export function markAgentJobIntegrationReview(
   const current = getAgentJob(repoRoot, runId);
   if (current.provider !== "local") return current;
   const { stdoutTail: _stdout, stderrTail: _stderr, ...meta } = current;
+  const changedAt = new Date().toISOString();
+  meta.status = "waiting_for_user";
+  delete meta.finishedAt;
   meta.integrationReviewPath = reviewPath;
+  meta.closureState = "preserved";
+  meta.closureUpdatedAt = changedAt;
+  meta.preservationReason = "integration_review_required";
+  meta.preservationDetails = `Integration review is required: ${reviewPath}`;
+  meta.autoIntegrationError = meta.preservationDetails;
   writeAgentMeta(repoRoot, metaPath(repoRoot, runId), meta);
   appendAgentJobEvent(repoRoot, runId, {
     type: "run_activity",

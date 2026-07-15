@@ -365,8 +365,19 @@ function summarizeAgentRun(
     executionClass: run.executionClass,
     allowedPaths: run.allowedPaths,
     status: run.status,
+    closureState: run.closureState,
+    closureUpdatedAt: run.closureUpdatedAt,
+    preservationReason: run.preservationReason,
+    preservationDetails: typeof run.preservationDetails === "string"
+      ? redactRunText(run.preservationDetails, repoRoot, {
+        executionRoot: typeof run.executionRoot === "string" ? run.executionRoot : undefined,
+        worktree: typeof run.worktree === "string" ? run.worktree : undefined,
+        worktreePath: typeof run.worktreePath === "string" ? run.worktreePath : undefined,
+      }, 1000).text
+      : run.preservationDetails,
     branch: run.branch,
     baseRevision: run.baseRevision,
+    changedFiles: Array.isArray(run.changedFiles) ? run.changedFiles.slice(0, 100) : run.changedFiles,
     exitCode: run.exitCode,
     error: typeof run.error === "string"
       ? redactRunText(run.error, repoRoot, {
@@ -390,6 +401,7 @@ function summarizeAgentRun(
       }, 1000).text
       : run.autoIntegrationError,
     worktreeCleanedAt: run.worktreeCleanedAt,
+    cleanupBranchDeletedAt: run.cleanupBranchDeletedAt,
     diffArtifactPath: run.diffArtifactPath,
     terminationReason: run.terminationReason,
     createdAt: run.createdAt,

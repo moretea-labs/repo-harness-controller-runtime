@@ -118,7 +118,7 @@ describe('ChatGPT-supervised campaigns', () => {
     expect(campaign.checkpoints.some((checkpoint) => checkpoint.kind === 'task_review' && checkpoint.taskId === 'T2')).toBe(true);
   });
 
-  test('forces agent tasks into an isolated worktree claim', () => {
+  test('honors the current Campaign workspace without creating a nested worktree', () => {
     const controllerHome = home();
     const created = createCampaign(controllerHome, campaignInput({
       tasks: [{
@@ -131,8 +131,26 @@ describe('ChatGPT-supervised campaigns', () => {
     reconcileCampaign(controllerHome, 'repo-a', created.campaignId);
     const campaign = getCampaign(controllerHome, 'repo-a', created.campaignId);
     const job = getExecutionJob(controllerHome, 'repo-a', campaign.tasks[0].jobId!);
+    expect(job.payload.arguments?.isolate).toBe(false);
+    expect(job.resourceClaims).toEqual([{ resourceKey: 'agent-dispatch:repo-a:ISS-1-T1', mode: 'write' }]);
+  });
+
+  test('passes isolate=true while retaining the parent agent-dispatch fence for an isolated Campaign', () => {
+    const controllerHome = home();
+    const created = createCampaign(controllerHome, campaignInput({
+      workspace: { mode: 'isolated', checkoutId: 'checkout-isolated', managed: true },
+      tasks: [{
+        taskId: 'T1',
+        title: 'Implement feature',
+        operation: 'dispatch_task',
+        arguments: { issue_id: 'ISS-1', task_id: 'T1', agent: 'codex' },
+      }],
+    })).campaign;
+    reconcileCampaign(controllerHome, 'repo-a', created.campaignId);
+    const campaign = getCampaign(controllerHome, 'repo-a', created.campaignId);
+    const job = getExecutionJob(controllerHome, 'repo-a', campaign.tasks[0].jobId!);
     expect(job.payload.arguments?.isolate).toBe(true);
-    expect(job.resourceClaims).toEqual([{ resourceKey: 'worktree:ISS-1-T1', mode: 'write' }]);
+    expect(job.resourceClaims).toEqual([{ resourceKey: 'agent-dispatch:repo-a:ISS-1-T1', mode: 'write' }]);
   });
 
   test('normalizes campaign dependency references and legacy operation aliases', () => {

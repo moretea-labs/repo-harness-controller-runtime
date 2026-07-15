@@ -1,8 +1,8 @@
 import { createHash } from "crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "fs";
 import { spawnSync } from "child_process";
 import { tmpdir } from "os";
-import { join, relative } from "path";
+import { join, relative, resolve } from "path";
 import {
   applyEditOperations,
   beginEditSession,
@@ -18,10 +18,18 @@ import { readTaskRunEvidence } from "../controller/run-evidence";
 import { resolveEffectiveTaskState } from "../controller/task-status-resolver";
 import { resolveMcpPath } from "../mcp/paths";
 import type { McpPolicy } from "../mcp/types";
-import { getAgentJob, markAgentJobIntegrated, markAgentJobIntegrationReview } from "./job-manager";
-import type { AgentJobMeta } from "./types";
+import { getAgentJob, markAgentJobClosure, markAgentJobIntegrated, markAgentJobIntegrationReview } from "./job-manager";
+import type { AgentJobMeta, AgentJobPreservationReason } from "./types";
 
 type IntegrationChangeOutcome = "changed" | "already_integrated";
+
+export interface WorktreeCleanupResult {
+  removed: boolean;
+  branchDeleted: boolean;
+  preserved?: boolean;
+  preservationReason?: AgentJobPreservationReason;
+  message?: string;
+}
 
 interface IntegrationPlan {
   changedPaths: string[];
@@ -491,7 +499,7 @@ export function integrateAgentJob(
   changedPaths: string[];
   changeOutcome: IntegrationChangeOutcome;
 } {
-  const run = getAgentJob(repoRoot, runId);
+  let run: AgentJobMeta = getAgentJob(repoRoot, runId);
   const autoFinalizing = run.status === "running" &&
     run.autoIntegrate === true &&
     run.executionMode === "worktree" &&
@@ -524,6 +532,11 @@ export function integrateAgentJob(
   }
   if (!existsSync(run.worktree))
     throw new Error(`task worktree no longer exists: ${run.worktree}`);
+
+  run = markAgentJobClosure(repoRoot, runId, {
+    state: "integrating",
+    details: "Applying isolated Run changes to the canonical workspace.",
+  });
 
   const issue = getIssue(repoRoot, run.issueId);
   const task = issue.tasks.find((entry) => entry.id === run.taskId);
@@ -562,7 +575,10 @@ export function integrateAgentJob(
       run,
       allowedPaths,
     );
-    markAgentJobIntegrated(repoRoot, runId, applied.sessionId);
+    markAgentJobIntegrated(repoRoot, runId, applied.sessionId, {
+      changedFiles: initialPlan.changedPaths,
+      changeOutcome: "already_integrated",
+    });
     updateTask(repoRoot, run.issueId, run.taskId, {
       status: "integrated",
       note: `${runId} already matched the main workspace and was recorded through edit session ${applied.sessionId}; run focused checks and record verification before acceptance.`,
@@ -611,7 +627,10 @@ export function integrateAgentJob(
           run,
           allowedPaths,
         );
-        markAgentJobIntegrated(repoRoot, runId, alreadyIntegrated.sessionId);
+        markAgentJobIntegrated(repoRoot, runId, alreadyIntegrated.sessionId, {
+          changedFiles: refreshedPlan.changedPaths,
+          changeOutcome: "already_integrated",
+        });
         updateTask(repoRoot, run.issueId, run.taskId, {
           status: "integrated",
           note: `${runId} became already integrated while finish was running and was recorded through edit session ${alreadyIntegrated.sessionId}; run focused checks and record verification before acceptance.`,
@@ -647,7 +666,10 @@ export function integrateAgentJob(
     }
     throw error;
   }
-  markAgentJobIntegrated(repoRoot, runId, applied.sessionId);
+  markAgentJobIntegrated(repoRoot, runId, applied.sessionId, {
+    changedFiles: initialPlan.operations.map((operation) => operation.path),
+    changeOutcome: "changed",
+  });
   updateTask(repoRoot, run.issueId, run.taskId, {
     status: "integrated",
     note: `${runId} integrated through edit session ${applied.sessionId}; run focused checks and record verification before acceptance.`,
@@ -659,73 +681,146 @@ export function integrateAgentJob(
   };
 }
 
-export function cleanupIntegratedWorktree(
+function preserveCleanup(
   repoRoot: string,
   runId: string,
-): { removed: boolean; branchDeleted: boolean } {
-  const run = getAgentJob(repoRoot, runId);
-  if (run.provider !== "local" || run.executionMode !== "worktree")
-    return { removed: false, branchDeleted: false };
-  if (!run.integratedSessionId)
-    throw new Error("cannot clean an isolated worktree before integration");
-  let removed = !existsSync(run.worktree);
-  if (!removed) {
-    const remove = gitBuffer(repoRoot, [
-      "worktree",
-      "remove",
-      "--force",
-      run.worktree,
-    ]);
-    if (!remove.ok)
-      throw new Error(`failed to remove integrated worktree: ${remove.stderr}`);
-    removed = !existsSync(run.worktree);
-    if (!removed) {
-      rmSync(run.worktree, { recursive: true, force: true });
-      removed = !existsSync(run.worktree);
-    }
-    if (!removed)
-      throw new Error(
-        `integrated worktree still exists after cleanup: ${run.worktree}`,
-      );
-  }
-  let branchDeleted = !run.branch;
-  if (run.branch) {
-    const deleted = gitBuffer(repoRoot, ["branch", "-D", run.branch]);
-    if (!deleted.ok && !deleted.stderr.includes("not found"))
-      throw new Error(
-        `failed to delete integrated worktree branch: ${deleted.stderr}`,
-      );
-    branchDeleted = true;
-  }
-  return { removed, branchDeleted };
+  reason: AgentJobPreservationReason,
+  message: string,
+): WorktreeCleanupResult {
+  markAgentJobClosure(repoRoot, runId, {
+    state: "preserved",
+    preservationReason: reason,
+    details: message,
+  });
+  return { removed: false, branchDeleted: false, preserved: true, preservationReason: reason, message };
 }
 
-export function cleanupNoChangeWorktree(
-  repoRoot: string,
-  runId: string,
-): { removed: boolean; branchDeleted: boolean } {
-  const run = getAgentJob(repoRoot, runId);
-  if (run.provider !== "local" || run.executionMode !== "worktree")
-    return { removed: false, branchDeleted: false };
-  const diff = taskRunDiff(repoRoot, runId);
-  if (diff.status || diff.diff || diff.untracked.length > 0) {
-    throw new Error("cannot discard a worktree that contains changes");
+function canonicalExistingPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
   }
+}
+
+function worktreeCleanupBlocker(
+  repoRoot: string,
+  run: AgentJobMeta,
+): { reason: AgentJobPreservationReason; message: string } | undefined {
+  const runWorktreePath = canonicalExistingPath(run.worktree);
+  if (runWorktreePath === canonicalExistingPath(repoRoot)) {
+    return { reason: "active_worktree", message: "Refusing to clean the canonical repository workspace." };
+  }
+  const worktrees = gitBuffer(repoRoot, ["worktree", "list", "--porcelain"]);
+  if (!worktrees.ok) {
+    return { reason: "unknown_worktree_state", message: `Unable to inspect Git worktree ownership: ${worktrees.stderr}` };
+  }
+  const records = worktrees.stdout.toString("utf-8").split(/\n\n+/).map((record) => record.trim()).filter(Boolean);
+  const selected = records.find((record) => {
+    const listedPath = record.split(/\r?\n/).find((line) => line.startsWith("worktree "))?.slice("worktree ".length);
+    return listedPath ? canonicalExistingPath(listedPath) === runWorktreePath : false;
+  });
+  if (existsSync(run.worktree) && !selected) {
+    return { reason: "unknown_worktree_state", message: `Worktree is not registered with Git; preserving ${run.worktree}.` };
+  }
+  if (existsSync(run.worktree)) {
+    const status = gitBuffer(run.worktree, ["status", "--porcelain", "--untracked-files=all"]);
+    if (!status.ok) {
+      return { reason: "unknown_worktree_state", message: `Unable to verify worktree cleanliness: ${status.stderr}` };
+    }
+    if (status.stdout.toString("utf-8").trim()) {
+      if (!run.integratedSessionId || !run.baseRevision || !run.changedFiles || run.changedFiles.length === 0) {
+        return { reason: "dirty_worktree", message: `Worktree contains changes that are not covered by durable integration evidence; preserving ${run.worktree}.` };
+      }
+      let actualPaths: string[];
+      try {
+        actualPaths = plannedChangePaths(run.worktree, run.baseRevision);
+      } catch (error) {
+        return { reason: "unknown_worktree_state", message: `Unable to verify integrated worktree paths: ${error instanceof Error ? error.message : String(error)}` };
+      }
+      const expectedPaths = new Set(run.changedFiles);
+      const unexpectedPaths = actualPaths.filter((path) => !expectedPaths.has(path));
+      if (unexpectedPaths.length > 0) {
+        return { reason: "dirty_worktree", message: `Worktree contains changes outside durable integration evidence (${unexpectedPaths.join(", ")}); preserving ${run.worktree}.` };
+      }
+    }
+  }
+  if (run.branch) {
+    const rootBranch = gitBuffer(repoRoot, ["branch", "--show-current"]);
+    if (!rootBranch.ok) {
+      return { reason: "unknown_worktree_state", message: `Unable to inspect the canonical branch: ${rootBranch.stderr}` };
+    }
+    if (rootBranch.stdout.toString("utf-8").trim() === run.branch) {
+      return { reason: "protected_branch", message: `Temporary branch ${run.branch} is active in the canonical workspace; preserving it.` };
+    }
+    const branchMarker = `branch refs/heads/${run.branch}`;
+    const activeElsewhere = records.some((record) => {
+      const lines = record.split(/\r?\n/);
+      const path = lines.find((line) => line.startsWith("worktree "))?.slice("worktree ".length);
+      return path && canonicalExistingPath(path) !== runWorktreePath && lines.includes(branchMarker);
+    });
+    if (activeElsewhere) {
+      return { reason: "active_worktree", message: `Branch ${run.branch} is checked out by another worktree; preserving it.` };
+    }
+  }
+  return undefined;
+}
+
+function cleanupVerifiedWorktree(repoRoot: string, runId: string): WorktreeCleanupResult {
+  const run = getAgentJob(repoRoot, runId);
+  const blocker = worktreeCleanupBlocker(repoRoot, run);
+  if (blocker) return preserveCleanup(repoRoot, runId, blocker.reason, blocker.message);
+  markAgentJobClosure(repoRoot, runId, { state: "cleaning", details: "Removing the verified isolated worktree and temporary branch." });
+  const cleanupPath = canonicalExistingPath(run.worktree);
   let removed = !existsSync(run.worktree);
   if (!removed) {
-    const remove = gitBuffer(repoRoot, ["worktree", "remove", "--force", run.worktree]);
-    if (!remove.ok) throw new Error(`failed to remove no-change worktree: ${remove.stderr}`);
-    removed = !existsSync(run.worktree);
+    const removal = gitBuffer(repoRoot, ["worktree", "remove", "--force", cleanupPath]);
+    if (!removal.ok || existsSync(run.worktree)) {
+      return preserveCleanup(repoRoot, runId, "cleanup_failed", `Git could not remove the verified worktree: ${removal.stderr || run.worktree}`);
+    }
+    removed = true;
   }
   let branchDeleted = !run.branch;
   if (run.branch) {
     const deleted = gitBuffer(repoRoot, ["branch", "-D", run.branch]);
     if (!deleted.ok && !deleted.stderr.includes("not found")) {
-      throw new Error(`failed to delete no-change worktree branch: ${deleted.stderr}`);
+      return preserveCleanup(repoRoot, runId, "cleanup_failed", `Worktree was removed but branch ${run.branch} could not be deleted: ${deleted.stderr}`);
     }
     branchDeleted = true;
   }
+  markAgentJobClosure(repoRoot, runId, {
+    state: "cleanup_pending",
+    details: "Verified worktree cleanup completed; Run completion is pending.",
+    worktreeCleaned: removed,
+    branchDeleted,
+  });
   return { removed, branchDeleted };
+}
+
+export function cleanupIntegratedWorktree(
+  repoRoot: string,
+  runId: string,
+): WorktreeCleanupResult {
+  const run = getAgentJob(repoRoot, runId);
+  if (run.provider !== "local" || run.executionMode !== "worktree")
+    return { removed: false, branchDeleted: false };
+  if (!run.integratedSessionId)
+    return preserveCleanup(repoRoot, runId, "unmerged_branch", "Cannot clean an isolated worktree before its integration is durably recorded.");
+  return cleanupVerifiedWorktree(repoRoot, runId);
+}
+
+export function cleanupNoChangeWorktree(
+  repoRoot: string,
+  runId: string,
+): WorktreeCleanupResult {
+  const run = getAgentJob(repoRoot, runId);
+  if (run.provider !== "local" || run.executionMode !== "worktree")
+    return { removed: false, branchDeleted: false };
+  const diff = taskRunDiff(repoRoot, runId);
+  if (diff.status || diff.diff || diff.untracked.length > 0) {
+    return preserveCleanup(repoRoot, runId, "dirty_worktree", "Cannot discard a no-change worktree because it contains repository changes.");
+  }
+  return cleanupVerifiedWorktree(repoRoot, runId);
 }
 
 export function taskRunDiff(
