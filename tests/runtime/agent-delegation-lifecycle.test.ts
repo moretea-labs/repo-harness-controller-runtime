@@ -478,7 +478,45 @@ describe('agent delegation lifecycle bootstrap stability', () => {
     expect(existsSync(join(repoRoot, 'tasks/issues', `${durable.id}-${durable.slug}.issue.json`))).toBe(true);
   });
 
-  test('9. unknown write without child reference still fails closed', () => {
+  test('9. replayable validation command safely requeues after Worker loss', () => {
+    const controllerHome = temp('repo-harness-replayable-command-');
+    const created = createExecutionJob(controllerHome, {
+      repoId: 'repo-a',
+      type: 'repository-command',
+      requestId: 'req-replayable-validation',
+      semanticKey: 'repository-tool:repository_command_execute:repo-a:validation',
+      origin: { surface: 'mcp', actor: 'repository_command_execute' },
+      payload: { operation: 'repository_command_execute', arguments: { command: ['bun', 'test'] } },
+      resourceClaims: [{ resourceKey: 'workspace:checkout', mode: 'write' }],
+      maxAttempts: 2,
+      operationMetadata: {
+        mode: 'mutating',
+        idempotent: true,
+        replayable: true,
+        timeoutMs: 60_000,
+        retryPolicy: 'idempotent_request',
+        approvalPolicy: 'request',
+        lockScope: ['workspace:checkout'],
+        resourceClaims: [{ resourceKey: 'workspace:checkout', mode: 'write' }],
+      },
+    }).job;
+    const running = updateExecutionJob(controllerHome, created.repoId, created.jobId, (job) => ({
+      ...job,
+      status: 'running',
+      attempt: 1,
+      workerPid: 999_004,
+      startedAt: new Date().toISOString(),
+      heartbeatAt: new Date(Date.now() - 60_000).toISOString(),
+    }));
+    markOperationStarted(controllerHome, running, 999_004);
+    const summary = reconcileExecutionJobs(controllerHome, created.repoId);
+    const recovered = getExecutionJob(controllerHome, created.repoId, created.jobId);
+    expect(recovered.status).toBe('queued');
+    expect(recovered.error?.code).toBe('WORKER_LOST');
+    expect(summary.requeued).toBeGreaterThanOrEqual(1);
+  });
+
+  test('10. unknown write without child reference still fails closed', () => {
     const controllerHome = temp('repo-harness-deleg-ambiguous-');
     const created = createExecutionJob(controllerHome, {
       repoId: 'repo-a',
@@ -506,7 +544,7 @@ describe('agent delegation lifecycle bootstrap stability', () => {
     expect(summary.terminal).toBeGreaterThanOrEqual(1);
   });
 
-  test('10. fencing/idempotent agent-dispatch claims do not grab workspace leases', () => {
+  test('11. fencing/idempotent agent-dispatch claims do not grab workspace leases', () => {
     const claims = claimsForMcpOperation(
       'quick_agent_session',
       { request_id: 'req-fence', title: 't', objective: 'o', isolate: true },

@@ -15,6 +15,7 @@ import { ensureControllerDaemon } from '../../control-plane/daemon-client';
 import { buildAcceptedQueuedDigest, buildJobOperationDigest } from '../../control-plane/facade/operation-digest';
 import { claimsForMcpOperation } from './resource-policy';
 import { commandValue, normalizeRepositoryCommand } from '../../../cli/repositories/command-normalization';
+import { classifyRepositoryCommand, classifyRepositoryCommandReplay } from '../../../cli/repositories/command-classifier';
 
 const DIRECT_REPOSITORY_TOOLS = new Set(['repository_list', 'repository_get', 'repository_workbench', 'repository_command_preview']);
 /** High-frequency bounded reads execute in the current MCP request. */
@@ -144,11 +145,37 @@ function validateDurableArguments(name: string, definition: McpToolDefinition, a
   }
 }
 
-function operationMetadataForTool(
+export function operationMetadataForTool(
+  name: string,
   definition: McpToolDefinition,
   claims: ReturnType<typeof claimsForMcpOperation>,
   timeoutMs: number,
+  args: Record<string, unknown> = {},
+  defaultBranch?: string,
 ): ExecutionOperationMetadata {
+  if (name === 'repository_command_execute' && args.command !== undefined) {
+    const classification = classifyRepositoryCommand(args.command as string | string[], defaultBranch);
+    const replay = classifyRepositoryCommandReplay(args.command as string | string[], defaultBranch);
+    const mode = classification.risk === 'readonly'
+      ? 'readonly'
+      : classification.risk === 'remote_write'
+        ? 'remote_write'
+        : classification.risk === 'destructive'
+          ? 'destructive'
+          : 'mutating';
+    return {
+      mode,
+      idempotent: replay.idempotent,
+      replayable: replay.replayable,
+      timeoutMs,
+      retryPolicy: replay.retryPolicy,
+      approvalPolicy: classification.risk === 'readonly'
+        ? 'none'
+        : classification.risk === 'destructive' ? 'required' : 'request',
+      lockScope: claims.map((claim) => claim.resourceKey),
+      resourceClaims: claims,
+    };
+  }
   const destructive = definition.annotations?.destructiveHint === true;
   const remoteWrite = claims.some((claim) => claim.resourceKey.startsWith('remote:'));
   const readOnly = definition.annotations?.readOnlyHint === true || claims.length === 0;
@@ -258,9 +285,12 @@ export async function routeDurableMcpCall(
     ? Math.min(typeof args.timeout_ms === 'number' ? args.timeout_ms : 120_000, 120_000)
     : typeof args.timeout_ms === 'number' ? args.timeout_ms : undefined;
   const operationMetadata = operationMetadataForTool(
+    name,
     definition,
     claims,
     Math.max(1_000, Math.min(timeoutMs ?? (agentDelegation ? 120_000 : 15 * 60_000), 24 * 60 * 60_000)),
+    workerArgs,
+    repository?.defaultBranch,
   );
   // Refresh and fence the daemon before persisting work. Creating the Job first
   // can leave a newly submitted operation associated with a stale Controller

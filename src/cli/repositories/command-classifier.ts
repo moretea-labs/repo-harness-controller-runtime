@@ -10,6 +10,15 @@ export interface RepositoryCommandClassification {
   reasons: string[];
 }
 
+export type RepositoryCommandReplayPolicy = 'none' | 'safe_retry' | 'idempotent_request';
+
+export interface RepositoryCommandReplayClassification {
+  replayable: boolean;
+  idempotent: boolean;
+  retryPolicy: RepositoryCommandReplayPolicy;
+  reasons: string[];
+}
+
 const READ_ONLY_PROGRAMS = new Set([
   'pwd', 'ls', 'rg', 'grep', 'egrep', 'fgrep', 'cat', 'head', 'tail', 'wc',
   'sort', 'uniq', 'cut', 'tr', 'stat', 'file', 'which', 'whereis', 'basename',
@@ -153,6 +162,29 @@ function isReadOnlySegment(segment: string): boolean {
   return READ_ONLY_PROGRAMS.has(program);
 }
 
+function isReplaySafeValidationWords(words: string[]): boolean {
+  const program = words[0]?.split(/[\\/]/).at(-1)?.toLowerCase();
+  const subcommand = words[1]?.toLowerCase();
+  if (!program) return false;
+  if (program === 'bun') return subcommand === 'test';
+  if (program === 'node') return words.slice(1).some((word) => word === '--test' || word.startsWith('--test='));
+  if (program === 'go') return subcommand === 'test';
+  if (program === 'cargo') return subcommand === 'test' || subcommand === 'check';
+  if (program === 'swift') return subcommand === 'test';
+  if (program === 'pytest' || program === 'py.test') return true;
+  if ((program === 'python' || program === 'python3') && subcommand === '-m') return words[2]?.toLowerCase() === 'pytest';
+  if (program === 'mvn' || program === 'mvnw') return words.slice(1).some((word) => word === 'test' || word === 'verify');
+  if (program === 'gradle' || program === 'gradlew') return words.slice(1).some((word) => word === 'test' || word === 'check');
+  if (program === 'xcodebuild') {
+    return words.slice(1).some((word) => ['build', 'test', 'build-for-testing', 'test-without-building'].includes(word.toLowerCase()));
+  }
+  return false;
+}
+
+function isReplaySafeValidationSegment(segment: string): boolean {
+  return isReplaySafeValidationWords(firstWords(segment));
+}
+
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -166,6 +198,53 @@ export function classifyRepositoryCommand(
     : normalizeRepositoryCommand(input);
   if (canonical.kind === 'argv') return classifyArgvCommand(canonical, defaultBranch);
   return classifyShellCommand(canonical.shellCommand!, defaultBranch);
+}
+
+export function classifyRepositoryCommandReplay(
+  input: string | readonly string[] | CanonicalRepositoryCommand,
+  defaultBranch?: string,
+): RepositoryCommandReplayClassification {
+  const canonical = 'kind' in Object(input) && (input as CanonicalRepositoryCommand).kind
+    ? input as CanonicalRepositoryCommand
+    : normalizeRepositoryCommand(input);
+  const classification = classifyRepositoryCommand(canonical, defaultBranch);
+  if (classification.risk === 'readonly') {
+    return {
+      replayable: true,
+      idempotent: true,
+      retryPolicy: 'safe_retry',
+      reasons: ['recognized read-only repository command'],
+    };
+  }
+  if (classification.risk === 'remote_write' || classification.risk === 'destructive') {
+    return {
+      replayable: false,
+      idempotent: false,
+      retryPolicy: 'none',
+      reasons: ['remote or destructive commands require outcome review after execution starts'],
+    };
+  }
+  const shellParts = canonical.kind === 'shell' ? shellSegments(canonical.shellCommand!) : [];
+  const validationOnly = canonical.kind === 'argv'
+    ? isReplaySafeValidationWords([canonical.executable!, ...(canonical.args ?? [])])
+    : !hasRepositoryOutputRedirection(canonical.shellCommand!)
+      && !shellParts.some(isSedInPlaceSegment)
+      && shellParts.length > 0
+      && shellParts.every((segment) => isReadOnlySegment(segment) || isReplaySafeValidationSegment(segment));
+  if (validationOnly) {
+    return {
+      replayable: true,
+      idempotent: true,
+      retryPolicy: 'idempotent_request',
+      reasons: ['recognized local validation command with repeatable repository effects'],
+    };
+  }
+  return {
+    replayable: false,
+    idempotent: false,
+    retryPolicy: 'none',
+    reasons: ['command outcome must be reviewed before replay'],
+  };
 }
 
 function classifyArgvCommand(

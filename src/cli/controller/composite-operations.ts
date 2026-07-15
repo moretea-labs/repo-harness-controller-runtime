@@ -146,7 +146,7 @@ export function repositoryChangeVerify(input: RepositoryChangeVerifyInput): Comp
       changedFiles,
       keyOutput: patchPost.failures.join('\n'),
       nextAction: 'revert unexpected paths or conflict markers',
-      details: patchPost,
+      details: { ...patchPost },
     });
   }
 

@@ -19,6 +19,15 @@ function hasPotentialSideEffects(job: ExecutionJob): boolean {
   return job.resourceClaims.some((claim) => claim.mode !== 'read');
 }
 
+function canAutomaticallyReplay(job: ExecutionJob): boolean {
+  if (job.operationMetadata) {
+    return job.operationMetadata.replayable && job.operationMetadata.retryPolicy !== 'none';
+  }
+  // Legacy Jobs predate explicit operation metadata. Preserve the old safe
+  // fallback: read-only claims may replay, writes fail closed.
+  return !hasPotentialSideEffects(job);
+}
+
 function recoverCompletedReceipt(controllerHome: string, job: ExecutionJob): ExecutionJob | undefined {
   const receipt = readOperationReceipt(controllerHome, job.repoId, job.jobId);
   if (!receipt || receipt.attempt !== job.attempt) return undefined;
@@ -286,20 +295,20 @@ function finalizeRunningJob(
     return { requeued: 0, terminal: 1, recovered: 1 };
   }
 
-  const ambiguousMutation = hasPotentialSideEffects(job) && ambiguousStartedOperation(controllerHome, job);
-  if (ambiguousMutation) {
+  const ambiguousOutcome = ambiguousStartedOperation(controllerHome, job) && !canAutomaticallyReplay(job);
+  if (ambiguousOutcome) {
     const terminalJob = transitionExecutionJob(controllerHome, job.repoId, job.jobId, 'human_attention_required', {
       workerPid: undefined,
       leaseRefs: [],
       error: {
         code: 'OPERATION_OUTCOME_AMBIGUOUS',
         message: deadlineElapsed
-          ? 'A mutating Worker exceeded its deadline after execution started. It was stopped and will not be replayed automatically.'
-          : 'A mutating Worker disappeared after execution started. Automatic replay is blocked to prevent duplicate side effects.',
+          ? 'A non-replayable Worker exceeded its deadline after execution started. It was stopped and will not be replayed automatically.'
+          : 'A non-replayable Worker disappeared after execution started. Automatic replay is blocked to prevent duplicate side effects.',
         retryable: false,
       },
     });
-    settleScheduledExecution(controllerHome, terminalJob, 'failed', 'Scheduled mutating operation ended with an ambiguous outcome and requires human review.');
+    settleScheduledExecution(controllerHome, terminalJob, 'failed', 'Scheduled non-replayable operation ended with an ambiguous outcome and requires human review.');
     return { requeued: 0, terminal: 1, recovered: 0 };
   }
 
