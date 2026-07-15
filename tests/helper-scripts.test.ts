@@ -3203,7 +3203,7 @@ describe("Workflow helper scripts", () => {
     }
   });
 
-  test("check-task-workflow should fail strict mode when current snapshot is newer than resume packet", () => {
+  test("check-task-workflow should report remediation without failing strict source checks when current snapshot is newer than resume packet", () => {
     const cwd = tmpWorkspace("helper-check-workflow-current-newer-than-resume");
     try {
       copyHelpers(cwd);
@@ -3222,8 +3222,10 @@ describe("Workflow helper scripts", () => {
 
       const res = run("bash", ["scripts/check-task-workflow.sh", "--strict"], cwd);
 
-      expect(res.status).toBe(1);
+      expect(res.status).toBe(0);
       expect(res.stdout).toContain("Resume packet is older than current status snapshot");
+      expect(res.stdout).toContain("Bootstrap/remediation required");
+      expect(res.stdout).toContain("Supported remediation");
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }

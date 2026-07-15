@@ -99,6 +99,8 @@ describe("durable Task Run cancellation", () => {
     expect(cleaned.cleanupFinishedAt).toBeDefined();
     expect(cleaned.cancellationPids).toEqual([]);
     expect(isProcessAlive(child.pid)).toBe(false);
+    const replayAfterCleanup = cancelAgentJob(repoRoot, runId);
+    expect(replayAfterCleanup.cleanupFinishedAt).toBe(cleaned.cleanupFinishedAt);
 
     const events = readFileSync(join(runRoot, "events.jsonl"), "utf-8")
       .trim()

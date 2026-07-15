@@ -473,11 +473,16 @@ export function completeAgentJobCancellation(repoRoot: string, runId: string): A
     cleaned.cleanupPending = false;
     cleaned.cleanupFinishedAt = new Date().toISOString();
     cleaned.cleanupError = undefined;
+    // Persist the completion event before publishing cleanupPending=false. Readers
+    // that observe terminal cleanup are therefore guaranteed to observe its event.
+    // A crash between these writes is safely replayable without duplicating the event.
+    if (!hasAgentJobEvent(repoRoot, runId, "run_cleanup_completed")) {
+      appendAgentJobEvent(repoRoot, runId, {
+        type: "run_cleanup_completed",
+        message: "Cancelled Run process cleanup completed.",
+      });
+    }
     writeAgentMeta(repoRoot, metaPath(repoRoot, runId), cleaned);
-    appendAgentJobEvent(repoRoot, runId, {
-      type: "run_cleanup_completed",
-      message: "Cancelled Run process cleanup completed.",
-    });
     try {
       const issue = getIssue(repoRoot, cleaned.issueId);
       const task = issue.tasks.find((entry) => entry.id === cleaned.taskId);
@@ -572,6 +577,21 @@ function reconcileLocalRunOwnership(
   meta.workerPid = undefined;
   meta.launchPid = undefined;
   markRunUnknown(repoRoot, path, meta, invalidation.message);
+}
+
+function hasAgentJobEvent(repoRoot: string, runId: string, type: AgentJobEvent["type"]): boolean {
+  const path = eventPath(repoRoot, runId);
+  if (!existsSync(path)) return false;
+  return readFileSync(path, "utf-8")
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .some((line) => {
+      try {
+        return readJsonLine<AgentJobEvent>(line).type === type;
+      } catch (_error) {
+        return false;
+      }
+    });
 }
 
 export function appendAgentJobEvent(
