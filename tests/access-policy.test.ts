@@ -62,32 +62,32 @@ describe('repository access policy', () => {
     expect(loaded).toEqual(written);
   });
 
-  test('falls back to request for malformed policy files', () => {
+  test('falls back to host-managed execution for malformed policy files', () => {
     const home = controllerHome();
     writeRepositoryAccessPolicy(home, 'repo-test', 'full_access');
     const path = repositoryAccessPolicyPath(home, 'repo-test');
     writeFileSync(path, '{invalid-json', 'utf-8');
 
-    expect(readRepositoryAccessPolicy(home, 'repo-test').mode).toBe('request');
+    expect(readRepositoryAccessPolicy(home, 'repo-test').mode).toBe('full_access');
   });
 });
 
 describe('access decision matrix', () => {
-  test('request allows reads and requests local side effects', () => {
+  test('legacy request mode allows normal host-authorized effects', () => {
     expect(evaluateAccessMode('request', 'read')).toBe('allow');
-    expect(evaluateAccessMode('request', 'local_repo_write')).toBe('request');
-    expect(evaluateAccessMode('request', 'local_command')).toBe('request');
-    expect(evaluateAccessMode('request', 'local_git')).toBe('request');
+    expect(evaluateAccessMode('request', 'local_repo_write')).toBe('allow');
+    expect(evaluateAccessMode('request', 'local_command')).toBe('allow');
+    expect(evaluateAccessMode('request', 'local_git')).toBe('allow');
   });
 
-  test('full access allows local repository work only', () => {
+  test('host-managed execution allows ordinary work and keeps hard boundaries', () => {
     expect(evaluateAccessMode('full_access', 'local_repo_write')).toBe('allow');
     expect(evaluateAccessMode('full_access', 'workspace_write')).toBe('allow');
     expect(evaluateAccessMode('full_access', 'local_command')).toBe('allow');
     expect(evaluateAccessMode('full_access', 'dependency_change')).toBe('allow');
     expect(evaluateAccessMode('full_access', 'local_git')).toBe('allow');
-    expect(evaluateAccessMode('full_access', 'external_network')).toBe('request');
-    expect(evaluateAccessMode('full_access', 'remote_write')).toBe('request');
+    expect(evaluateAccessMode('full_access', 'external_network')).toBe('allow');
+    expect(evaluateAccessMode('full_access', 'remote_write')).toBe('allow');
     expect(evaluateAccessMode('full_access', 'destructive')).toBe('request');
     expect(evaluateAccessMode('full_access', 'outside_repository')).toBe('request');
     expect(evaluateAccessMode('full_access', 'secret_access')).toBe('deny');
@@ -95,8 +95,8 @@ describe('access decision matrix', () => {
 
   test('descriptors explain the remaining hard boundaries', () => {
     const full = accessModeDescriptor('full_access');
-    expect(full.shortLabel).toBe('Full Access');
-    expect(full.stillRequiresApproval.join(' ')).toContain('remote');
+    expect(full.shortLabel).toBe('Host managed');
+    expect(full.stillRequiresApproval.join(' ')).toContain('Outside-repository');
     expect(full.alwaysDenied.join(' ')).toContain('secrets');
   });
 });
@@ -107,8 +107,8 @@ describe('policy gate access mode integration', () => {
     expect(evaluatePolicyGate({ risk: 'local_repo_write', accessMode: 'full_access' }).decision).toBe('allowed');
   });
 
-  test('request still requires approval outside bounded direct edits', () => {
-    expect(evaluatePolicyGate({ risk: 'workspace_write', accessMode: 'request' }).decision).toBe('approval_required');
+  test('legacy request mode no longer adds approval for normal repository work', () => {
+    expect(evaluatePolicyGate({ risk: 'workspace_write', accessMode: 'request' }).decision).toBe('allowed');
     expect(evaluatePolicyGate({
       risk: 'local_repo_write',
       accessMode: 'request',
@@ -121,15 +121,15 @@ describe('policy gate access mode integration', () => {
     }).decision).toBe('allowed');
   });
 
-  test('full access cannot bypass remote destructive or secret gates', () => {
-    expect(evaluatePolicyGate({ risk: 'remote_write', accessMode: 'full_access' }).decision).toBe('approval_required');
+  test('ordinary remote writes proceed while destructive and secret gates remain', () => {
+    expect(evaluatePolicyGate({ risk: 'remote_write', accessMode: 'full_access' }).decision).toBe('allowed');
     expect(evaluatePolicyGate({ risk: 'destructive', accessMode: 'full_access' }).decision).toBe('approval_required');
     expect(evaluatePolicyGate({ risk: 'raw_secret_config', accessMode: 'full_access' }).decision).toBe('denied');
   });
 });
 
 describe('access-aware work routing', () => {
-  test('request mode creates an approval handoff for explicitly approval-gated work', () => {
+  test('legacy request mode creates work without an approval handoff', () => {
     const home = controllerHome();
     const ctx = workloopContext(home);
     writeRepositoryAccessPolicy(home, 'repo-test', 'request');
@@ -144,12 +144,12 @@ describe('access-aware work routing', () => {
       requestedBy: 'user',
     });
 
-    expect(result.status).toBe('approval_required');
-    expect(result.data.workContractCreated).toBe(false);
-    expect(listHandoffItems({ controllerHome: home, repoId: 'repo-test', status: 'pending' })).toHaveLength(1);
+    expect(result.status).toBe('ok');
+    expect(result.data.workContractCreated).toBe(true);
+    expect(listHandoffItems({ controllerHome: home, repoId: 'repo-test', status: 'pending' })).toHaveLength(0);
   });
 
-  test('request mode cannot bypass approval when the caller omits an approval hint', () => {
+  test('legacy request mode does not require an approval hint', () => {
     const home = controllerHome();
     const ctx = workloopContext(home);
     writeRepositoryAccessPolicy(home, 'repo-test', 'request');
@@ -164,10 +164,9 @@ describe('access-aware work routing', () => {
       requestedBy: 'user',
     });
 
-    expect(result.status).toBe('approval_required');
-    expect(result.data.workContractCreated).toBe(false);
-    const [handoff] = listHandoffItems({ controllerHome: home, repoId: 'repo-test', status: 'pending' });
-    expect(handoff?.approvalAction?.payload.accessMode).toBe('request');
+    expect(result.status).toBe('ok');
+    expect(result.data.workContractCreated).toBe(true);
+    expect(listHandoffItems({ controllerHome: home, repoId: 'repo-test', status: 'pending' })).toHaveLength(0);
   });
 
   test('repository full access creates work and captures the permission snapshot', () => {
@@ -191,7 +190,7 @@ describe('access-aware work routing', () => {
     const workId = String((result.data.work as { workId?: string }).workId ?? '');
     const work = getWorkContract({ controllerHome: home, repoId: 'repo-test' }, workId);
     expect(work?.constraints.accessMode).toBe('full_access');
-    expect(work?.policyDecisions[0]?.reason).toContain('Full Access');
+    expect(work?.policyDecisions[0]?.reason).toContain('host AI permission model');
   });
 
   test('rh_work constraints may override the repository default for one task', () => {

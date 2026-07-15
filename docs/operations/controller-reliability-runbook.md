@@ -75,6 +75,8 @@ The restart coordinator provides these guarantees:
 
 A full Gateway restart can close the single in-flight MCP HTTP request. It cannot preserve that socket. The supported continuity contract is the stable domain plus durable request, Work, and Job identifiers: retry the same conversation after the endpoint is healthy and continue reading the existing durable state. Do not recreate the ChatGPT Connector when the endpoint, OAuth configuration, and tool schema are unchanged. Recreate or rescan only after an auth/schema change or an explicit `UNKNOWN_TOOL`/connector-staleness result.
 
+KeepAlive tolerates brief local `/health` failures so one transient probe does not tear down active sessions. A continuously unresponsive Gateway is replaced after 45 seconds, rather than being preserved for several minutes, because a live process with a blocked request path presents externally as repeated 502 responses. Large status and error payloads must remain bounded and heavy reads must execute through the durable control plane instead of the Gateway hot path.
+
 After a restart, confirm:
 
 1. `controller_ready` reports Gateway, Daemon, Worker loop, Local Bridge, and projection ready.

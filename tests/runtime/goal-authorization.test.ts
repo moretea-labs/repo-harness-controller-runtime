@@ -76,21 +76,21 @@ async function prepare(ctx: MultiRepositoryMcpToolContext, repoId: string, goalI
 }
 
 describe('GPT risk delegation and resumable authorization', () => {
-  test('Full Access automatically allows an ordinary local operation', async () => {
+  test('host-managed execution automatically allows an ordinary local operation', async () => {
     const { ctx, repository } = fixture();
     const workId = await prepare(ctx, repository.repoId);
     const response = structured(await callExecutionTool(ctx, 'work_execute', { work_id: workId, command: 'printf ordinary-local-command' }));
     expect(response.commands[0].status).toBe('executed');
-    expect(response.commands[0].authorizationDecision).toMatchObject({ decision: 'allow', source: 'full_access' });
+    expect(response.commands[0].authorizationDecision).toMatchObject({ decision: 'allow', source: 'gpt_risk_delegate' });
     expect(response.commands[0].approvalRequestId).toBeUndefined();
   });
 
-  test('Request mode uses the current Goal delegation for ordinary repository work', async () => {
+  test('legacy Request mode does not create a second approval layer for ordinary repository work', async () => {
     const { ctx, repository } = fixture('request');
     const workId = await prepare(ctx, repository.repoId);
     const response = structured(await callExecutionTool(ctx, 'work_execute', { work_id: workId, command: 'printf delegated-local-command > goal-output.txt' }));
     expect(response.commands[0].status).toBe('executed');
-    expect(response.commands[0].authorizationDecision).toMatchObject({ decision: 'allow', source: 'gpt_risk_delegate' });
+    expect(response.commands[0].authorizationDecision).toMatchObject({ decision: 'allow' });
   });
 
   test('the composite tool surfaces outside-worktree writes as resumable approval', async () => {
@@ -154,12 +154,12 @@ describe('GPT risk delegation and resumable authorization', () => {
     expect(() => resolveAuthorizationRequest({ controllerHome, repositoryId: 'repo-a', approvalRequestId: pending.approvalRequestId, sessionId: 'session-1', principalId: 'principal-1', workId: 'work-1', permissionSnapshotVersion: 2, confirm: true })).toThrow('APPROVAL_REQUEST_STALE_PERMISSION');
   });
 
-  test('Goal delegation is bounded by repository, Goal, work, and permission version', () => {
+  test('Goal delegation remains bounded provenance while ordinary mismatches fall back to host policy', () => {
     const delegation = createGoalDelegation({ sessionId: 'session-1', repositoryId: 'repo-a', workId: 'work-1', goalId: 'goal-1', allowedRiskClasses: ['workspace_write'], deniedRiskClasses: ['destructive'], permissionSnapshotVersion: 3, source: 'gpt_risk_delegate' });
     expect(decideAuthorization(allowContext({ accessMode: 'request', sessionId: 'session-1', repositoryId: 'repo-a', workId: 'work-1', boundWorkId: 'work-1', goalId: 'goal-1', boundGoalId: 'goal-1', permissionSnapshotVersion: 3, delegation }))).toMatchObject({ decision: 'allow', source: 'gpt_risk_delegate' });
-    expect(decideAuthorization(allowContext({ accessMode: 'request', sessionId: 'session-1', repositoryId: 'repo-b', workId: 'work-1', boundWorkId: 'work-1', goalId: 'goal-1', permissionSnapshotVersion: 3, delegation }))).toMatchObject({ decision: 'user_confirmation_required' });
-    expect(decideAuthorization(allowContext({ accessMode: 'request', sessionId: 'session-1', repositoryId: 'repo-a', workId: 'work-1', boundWorkId: 'work-1', goalId: 'goal-2', boundGoalId: 'goal-2', permissionSnapshotVersion: 3, delegation }))).toMatchObject({ decision: 'user_confirmation_required' });
-    expect(decideAuthorization(allowContext({ accessMode: 'request', sessionId: 'session-1', repositoryId: 'repo-a', workId: 'work-1', boundWorkId: 'work-1', goalId: 'goal-1', permissionSnapshotVersion: 4, delegation }))).toMatchObject({ decision: 'user_confirmation_required' });
+    expect(decideAuthorization(allowContext({ accessMode: 'request', sessionId: 'session-1', repositoryId: 'repo-b', currentRepositoryId: 'repo-b', workId: 'work-1', boundWorkId: 'work-1', goalId: 'goal-1', permissionSnapshotVersion: 3, delegation }))).toMatchObject({ decision: 'allow', source: 'policy' });
+    expect(decideAuthorization(allowContext({ accessMode: 'request', sessionId: 'session-1', repositoryId: 'repo-a', workId: 'work-1', boundWorkId: 'work-1', goalId: 'goal-2', boundGoalId: 'goal-2', permissionSnapshotVersion: 3, delegation }))).toMatchObject({ decision: 'allow', source: 'policy' });
+    expect(decideAuthorization(allowContext({ accessMode: 'request', sessionId: 'session-1', repositoryId: 'repo-a', workId: 'work-1', boundWorkId: 'work-1', goalId: 'goal-1', permissionSnapshotVersion: 4, delegation }))).toMatchObject({ decision: 'allow', source: 'policy' });
   });
 
   test('secret access is denied and never becomes an approval request', () => {

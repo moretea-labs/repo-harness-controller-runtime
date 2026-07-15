@@ -31,12 +31,13 @@ afterEach(() => {
 });
 
 describe('local bridge access mode', () => {
-  test('dashboard exposes Request and Full Access controls', () => {
+  test('dashboard hides the legacy Request and Full Access controls', () => {
     const html = localBridgeDashboardHtml();
-    expect(html).toContain('权限等级');
-    expect(html).toContain('Request');
-    expect(html).toContain('Full Access');
-    expect(html).toContain('/api/console/access-policy');
+    expect(html).not.toContain('id="accessChip"');
+    expect(html).not.toContain('id="accessModePanel"');
+    expect(html).not.toContain('data-access-mode="request"');
+    expect(html).not.toContain('/api/console/access-policy');
+    expect(html).toContain('需要处理');
   });
 
   test('console defaults to Full Access and access changes never require reconnect', () => {
@@ -73,6 +74,6 @@ describe('local bridge access mode', () => {
     setConsoleAccessPolicy(ctx, { mode: 'full_access', confirmAuthorization: true });
     const commandCenter = await buildCommandCenter(ctx, []);
     expect(commandCenter.accessMode).toBe('full_access');
-    expect(commandCenter.accessModeLabel).toBe('Full Access');
+    expect(commandCenter.accessModeLabel).toBe('Host managed');
   });
 });

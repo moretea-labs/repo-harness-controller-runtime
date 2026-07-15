@@ -1046,22 +1046,11 @@ printf '%s\n' '{"type":"turn.completed"}'
     const listed = await fetch(new URL("/api/plugins", handle.url), { headers }).then((response) => response.json());
     expect(listed.plugins.map((plugin: { pluginId: string }) => plugin.pluginId)).toContain("github");
 
-    const denied = await fetch(new URL("/api/plugins/github/actions/configure", handle.url), {
-      method: "POST",
-      headers: { ...headers, "content-type": "application/json" },
-      body: JSON.stringify({
-        requestId: "plugin-config-local-1",
-        arguments: { enabled: true, repository: "owner/repo", sync_mode: "checkpoint" },
-      }),
-    }).then((response) => response.json());
-    expect(denied.error).toContain("PLUGIN_CONFIRMATION_REQUIRED");
-
     const accepted = await fetch(new URL("/api/plugins/github/actions/configure", handle.url), {
       method: "POST",
       headers: { ...headers, "content-type": "application/json" },
       body: JSON.stringify({
         requestId: "plugin-config-local-1",
-        confirmAuthorization: true,
         arguments: { enabled: true, repository: "owner/repo", sync_mode: "checkpoint" },
       }),
     }).then((response) => response.json());
@@ -1314,7 +1303,7 @@ printf '%s\n' '{"type":"turn.completed"}'
     const dashboard = await fetch(handle.url).then((response) => response.text());
     expect(dashboard).toContain("执行助手控制台");
     expect(dashboard).toContain("指挥中心");
-    expect(dashboard).toContain("审批与决定");
+    expect(dashboard).toContain("需要处理");
     expect(dashboard).toContain("当前任务");
     expect(dashboard).toContain("selectRepo");
     expect(dashboard).toContain("removeRepo");

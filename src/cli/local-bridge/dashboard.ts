@@ -36,7 +36,6 @@ button,input,textarea{font:inherit}button{cursor:pointer}.mono{font-family:ui-mo
 .composer textarea{min-height:120px;resize:vertical}
 .composer .row{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:center}
 .mode-card{display:grid;gap:6px}.mode-card .label{font-weight:800;font-size:16px}
-.access-panel{margin-top:12px;padding:12px;border:1px solid var(--line);border-radius:14px;background:rgba(255,255,255,.025)}.access-picker{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px}.access-option{display:grid;gap:3px;text-align:left;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:rgba(255,255,255,.025);color:var(--text)}.access-option strong{font-size:14px}.access-option span{font-size:12px;color:var(--muted)}.access-option.active{border-color:rgba(52,211,153,.5);background:rgba(52,211,153,.1)}.access-option.full.active{border-color:rgba(251,191,36,.55);background:rgba(251,191,36,.09)}
 .pill{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;font-size:12px;font-weight:700;border-radius:999px}
 .pill.green{background:rgba(52,211,153,.12);color:#a7f3d0;border-color:rgba(52,211,153,.28)}
 .pill.amber{background:rgba(251,191,36,.12);color:#fde68a;border-color:rgba(251,191,36,.28)}
@@ -77,11 +76,10 @@ details.advanced{margin-top:12px;border-top:1px dashed var(--line);padding-top:1
   <header class="top">
     <div class="brand"><span class="logo">∞</span><span>执行助手控制台</span></div>
     <button class="chip" id="repoChip" onclick="switchView('repositories')">仓库 · <strong id="topRepo">—</strong></button>
-    <button class="chip" id="accessChip" onclick="focusAccessMode()">权限 · <strong id="topAccessMode">Request</strong></button>
     <span class="chip"><span class="dot" id="readyDot"></span><strong id="topReady">检查中</strong></span>
     <span class="chip"><span class="dot" id="connectorDot"></span><span id="topConnector">连接</span></span>
     <button class="chip" onclick="switchView('capabilities')">插件 <strong id="topPlugins">—</strong></button>
-    <button class="chip" onclick="switchView('inbox')">待审批 / 决定 <span class="count" id="topHandoffs">0</span></button>
+    <button class="chip" onclick="switchView('inbox')">需要处理 <span class="count" id="topHandoffs">0</span></button>
     <div class="top-actions">
       <button class="btn ghost" onclick="refreshAll()">刷新</button>
       <button class="btn ghost" onclick="switchView('advanced')">高级</button>
@@ -91,7 +89,7 @@ details.advanced{margin-top:12px;border-top:1px dashed var(--line);padding-top:1
     <aside class="side">
       <nav class="nav">
         <button class="active" data-view="home">⌂ 指挥中心</button>
-        <button data-view="inbox">△ 审批与决定 <span class="count" id="sideHandoffs">0</span></button>
+        <button data-view="inbox">△ 需要处理 <span class="count" id="sideHandoffs">0</span></button>
         <button data-view="work">▷ 当前任务</button>
         <button data-view="capabilities">◇ 能力 / 插件 <span class="count" id="sidePlugins" style="display:none">0</span></button>
         <button data-view="automation">⚙ 模型与工具</button>
@@ -126,7 +124,6 @@ function pill(tone,label){return '<span class="pill '+esc(tone||'gray')+'">'+esc
 function setDot(id,tone){document.getElementById(id).className='dot '+(tone&&tone!=='green'?tone:'')}
 
 var selectedRepoId=queryRepoId()||safeGet('repoHarnessSelectedRepoId')||'';
-var selectedAccessMode='full_access';
 var commandCenter=null;
 var automationSettings=null;
 var selectedWorkId=safeGet('repoHarnessSelectedWorkId')||'';
@@ -280,10 +277,9 @@ function advancedBlock(data){
 }
 
 function renderChrome(){
-  var cc=obj(commandCenter), ready=obj(cc.readiness), repo=obj(cc.currentRepository), access=obj(cc.access);
+  var cc=obj(commandCenter), ready=obj(cc.readiness), repo=obj(cc.currentRepository);
   var plug=obj(cc.pluginSummary);
   document.getElementById('topRepo').textContent=repo.name||'未选择';
-  document.getElementById('topAccessMode').textContent=access.effectiveAccessModeLabel||cc.accessModeLabel||(selectedAccessMode==='full_access'?'Full Access':'Request');
   document.getElementById('topReady').textContent=ready.label||'未知';
   setDot('readyDot', ready.state==='blocked'?'red':ready.state==='needs_setup'?'amber':'green');
   document.getElementById('topConnector').textContent=ready.connectorLabel||'连接';
@@ -302,20 +298,11 @@ function renderChrome(){
 }
 
 function renderHome(){
-  var cc=obj(commandCenter), ready=obj(cc.readiness), work=obj(cc.currentWork), handoffs=arr(cc.handoffs).slice(0,3), access=obj(cc.access);
+  var cc=obj(commandCenter), ready=obj(cc.readiness), work=obj(cc.currentWork), handoffs=arr(cc.handoffs).slice(0,3);
   var repo=obj(cc.currentRepository);
   var setup=obj(cc.setupGuide);
   var warnings=arr(cc.warnings).map(function(w){return '<div class="warn">'+esc(w)+'</div>'}).join('');
   var mode=obj(modePreview||cc.modePreviewDefault);
-  var accessMode=selectedAccessMode||cc.accessMode||'full_access';
-  var accessLabel=accessMode==='full_access'?'Full Access':'Request';
-  var accessDescription=accessMode==='full_access'
-    ? '允许当前仓库内文件修改、命令、依赖和本地 Git；远程、破坏性、仓库外路径和密钥仍需确认或保持禁止。'
-    : '在安全边界内执行；需要命令、依赖、本地 Git 或更高权限时向你请求。';
-  var accessDetails=
-    '<div class="muted" style="margin-top:10px">已配置：<strong>'+esc(access.configuredAccessModeLabel||accessLabel)+'</strong> · 实际生效：<strong>'+esc(access.effectiveAccessModeLabel||accessLabel)+'</strong> · 工具面：<strong>'+esc(access.effectiveToolset||'—')+'</strong></div>'+
-    '<div class="faint" style="margin-top:4px">修订：'+esc(String(access.exposureRevision||0))+(access.lastAppliedAt?' · 最近应用：'+esc(access.lastAppliedAt):'')+'</div>'+
-    '<div class="faint" style="margin-top:8px">工具 schema 固定；切换权限只改变审批策略，不需要重启或重连。</div>';
   var el=document.getElementById('view-home');
   var setupHtml=setup.needed
     ? '<div class="setup"><strong>'+esc(setup.title||'需要先设置仓库')+'</strong><p class="muted" style="margin:6px 0 10px">'+esc(setup.body||'')+'</p>'+btn(setup.actionLabel||'去设置仓库','data-nav="repositories"','primary')+'</div>'
@@ -329,11 +316,6 @@ function renderHome(){
     '<div class="panel composer">'+
       '<div class="section-title"><div><h2>你想让它完成什么？</h2><p class="hint">直接描述目标。路径、验收标准和执行模式由系统先判断，你仍可在开始前预览。</p></div>'+pill(ready.state==='ready'?'green':ready.state==='needs_setup'?'amber':'red',ready.label||'未知')+'</div>'+
       '<textarea id="taskObjective" placeholder="例如：优化 Controller 首页的信息层级，让当前任务和待决定事项更容易找到，不改变后端行为。"></textarea>'+
-      '<div class="access-panel" id="accessModePanel"><div class="section-title" style="margin:0"><div><strong>权限等级</strong><div class="faint">本设置对当前仓库的新任务生效</div></div>'+pill(accessMode==='full_access'?'amber':'green',accessLabel)+'</div>'+
-        '<div class="access-picker">'+
-          '<button class="access-option '+(accessMode==='request'?'active':'')+'" data-access-mode="request"><strong>Request</strong><span>需要提升权限时请求确认</span></button>'+
-          '<button class="access-option full '+(accessMode==='full_access'?'active':'')+'" data-access-mode="full_access"><strong>Full Access</strong><span>当前仓库内正常开发不再反复询问</span></button>'+
-        '</div><p class="muted" style="margin:9px 0 0">'+esc(accessDescription)+'</p>'+accessDetails+'</div>'+
       '<details class="advanced" style="margin-top:10px"><summary>补充验收标准和允许修改的路径</summary>'+
         '<div class="row" style="margin-top:10px"><input class="input" id="taskAcceptance" placeholder="验收标准（可选，用分号分隔）" style="flex:1"></div>'+
         '<div class="row"><input class="input" id="taskPaths" placeholder="允许修改的路径（可选，逗号分隔）" style="flex:1"><input class="input" id="taskFiles" type="number" min="0" placeholder="预计文件数" style="width:140px"></div>'+
@@ -347,7 +329,7 @@ function renderHome(){
     '</div>'+
     '<div class="grid two" style="margin-top:16px">'+
       renderWorkCard(work, '当前任务')+
-      '<div class="panel"><div class="section-title"><h2>待审批 / 决定</h2>'+btn('查看全部','data-nav="inbox"','ghost')+'</div>'+
+      '<div class="panel"><div class="section-title"><h2>需要处理</h2>'+btn('查看全部','data-nav="inbox"','ghost')+'</div>'+
         (handoffs.length?handoffs.map(function(h){return handoffMini(h)}).join(''):'<div class="empty">目前没有需要你拍板的事项</div>')+
       '</div>'+
     '</div>'+
@@ -410,7 +392,7 @@ function renderWorkCard(work, title){
   return '<div class="panel work-card" data-work-id="'+id+'">'+
     '<div class="section-title"><h2>'+esc(title||'当前任务')+'</h2>'+pill(work.tone, work.statusLabel||work.phaseLabel||'状态')+'</div>'+
     '<h3 style="margin:0 0 6px">'+esc(work.title||work.objective||'未命名任务')+'</h3>'+
-    '<div class="muted">模式：'+esc(work.modeLabel||'—')+' · 权限：'+esc(work.accessModeLabel||(work.accessMode==='full_access'?'Full Access':'Request'))+' · 阶段：'+esc(work.phaseLabel||work.statusLabel||'—')+'</div>'+
+    '<div class="muted">模式：'+esc(work.modeLabel||'—')+' · 阶段：'+esc(work.phaseLabel||work.statusLabel||'—')+'</div>'+
     '<div class="muted" style="margin-top:4px">最近动作：'+esc(work.latestAction||primary)+'</div>'+
     (work.latestSummary?'<p class="muted" style="margin:8px 0 0">'+esc(work.latestSummary)+'</p>':'')+
     stepsHtml(work.progressSteps)+
@@ -452,7 +434,7 @@ function renderInbox(){
   if(!detail&&items.length){selectedHandoffId=items[0].id;detail=items[0]}
   var root=document.getElementById('view-inbox');
   root.innerHTML=
-    '<div class="page-head"><div><h1>审批与决定</h1><p>每项都说明你在批准什么、为何需要、会产生什么影响，以及处理后系统是否真的继续。</p></div><button class="btn" onclick="refreshAll()">刷新</button></div>'+
+    '<div class="page-head"><div><h1>需要处理</h1><p>这里只展示真正阻塞执行的业务决定、不可逆操作和无法自动恢复的问题。</p></div><button class="btn" onclick="refreshAll()">刷新</button></div>'+
     '<div class="grid two">'+
       '<div class="list">'+(items.length?items.map(function(h){
         var id=esc(h.id);var d=obj(h.decision);
@@ -600,7 +582,7 @@ function renderCapabilities(){
   var failed=plugins.filter(function(p){return p.status==='failed'||p.status==='disabled'}).length;
   var root=document.getElementById('view-capabilities');
   root.innerHTML=
-    '<div class="page-head"><div><h1>能力 / 插件</h1><p>预览并管理 repo-harness 可调用的助手插件；动作可预览/试运行，高风险写入需确认。</p></div>'+
+    '<div class="page-head"><div><h1>能力 / 插件</h1><p>预览并管理 repo-harness 可调用的助手插件；普通动作直接执行，不可逆操作需要强确认。</p></div>'+
       '<div class="actions"><button class="btn" onclick="refreshPlugins()">检查连接</button></div></div>'+
     '<div class="grid stats" style="margin-bottom:14px">'+
       '<div class="panel stat"><span>能力总数</span><strong>'+plugins.length+'</strong></div>'+
@@ -649,7 +631,7 @@ function renderPluginDetail(p){
     '<div style="margin-top:14px"><div class="section-title"><h3 style="margin:0">预览 / 状态动作</h3><span class="muted">只读或配置检查，优先使用</span></div>'+
       (previewActions.length?previewActions.map(function(a){return pluginActionRow(p.id,a,true)}).join(''):'<div class="empty">没有可预览动作</div>')+
     '</div>'+
-    '<div style="margin-top:14px"><div class="section-title"><h3 style="margin:0">写入 / 高风险动作</h3><span class="muted">执行前会要求确认</span></div>'+
+    '<div style="margin-top:14px"><div class="section-title"><h3 style="margin:0">写入动作</h3><span class="muted">只有不可逆操作需要强确认</span></div>'+
       (otherActions.length?otherActions.map(function(a){return pluginActionRow(p.id,a,false)}).join(''):'<div class="empty">没有写入动作</div>')+
     '</div>'+
     advancedBlock(p.advanced);
@@ -755,7 +737,6 @@ function renderAutomation(){
   var tools=arr(s.localTools);
   var creds=arr(s.credentials);
   var routing=obj(s.routing);
-  var policy=obj(s.policy);
   var warnings=arr(s.warnings).map(function(w){return '<div class="warn">'+esc(w)+'</div>'}).join('');
   root.innerHTML=
     '<div class="page-head"><div><h1>模型与工具提供方</h1><p>控制 goal loop 可用哪些 LLM / 本地工具、优先级与安全策略。密钥只读状态，永不展示值。</p></div>'+
@@ -817,26 +798,8 @@ function renderAutomation(){
           '<strong>'+esc(key)+'</strong><div class="muted mono" style="margin-top:6px">'+esc(order.join(' → ')||'—')+'</div></div>';
       }).join('')+
       '<p class="faint">若无可直接调用提供方：repo-harness 会创建 continuation packet，而不是假装调用 ChatGPT 会话。</p>'+
-    '</div>'+
-    '<div class="panel"><div class="section-title"><h2>策略与审批</h2></div>'+
-      '<div class="list">'+
-        policyToggleRow('外部写入需审批','requireApprovalForExternalWrites',policy.requireApprovalForExternalWrites!==false)+
-        policyToggleRow('破坏性变更需审批','requireApprovalForDestructiveChanges',policy.requireApprovalForDestructiveChanges!==false)+
-        policyToggleRow('大规模重构需审批','requireApprovalForBroadRefactors',policy.requireApprovalForBroadRefactors!==false)+
-        policyToggleRow('浏览器表单提交需审批','requireApprovalForBrowserFormSubmit',policy.requireApprovalForBrowserFormSubmit!==false)+
-        policyToggleRow('Gmail 发送/删除需审批','requireApprovalForGmailSendOrTrash',policy.requireApprovalForGmailSendOrTrash!==false)+
-        policyToggleRow('App Store Connect 写入需审批','requireApprovalForAppStoreConnectWrites',policy.requireApprovalForAppStoreConnectWrites!==false)+
-        policyToggleRow('最终合并前需审批','requireApprovalBeforeFinalMerge',policy.requireApprovalBeforeFinalMerge!==false)+
-      '</div>'+
-      '<p class="muted" style="margin-top:10px">阈值文件阈值：'+esc(String(policy.maxChangedFilesWithoutConfirmation||40))+' · 行数：'+esc(String(policy.maxChangedLinesWithoutConfirmation||2000))+' · 重试预算：'+esc(String(policy.defaultRetryBudget||5))+'</p>'+
-      '<p class="faint">没有“一键关闭全部安全”的开关。</p>'+
-    '</div>';
+    '</div>'; 
   bindNav(root);
-}
-
-function policyToggleRow(label,key,on){
-  return '<div class="action-row"><div><strong>'+esc(label)+'</strong></div>'+
-    '<button class="btn" onclick="setPolicyFlag(\\''+esc(key)+'\\','+(on?'false':'true')+')">'+(on?'已要求审批 · 点击放宽':'已放宽 · 点击要求审批')+'</button></div>';
 }
 
 function providerCardHtml(p){
@@ -961,13 +924,6 @@ function toggleGoalLoop(on){
     toast(on?'Goal Loop 已启用':'Goal Loop 已暂停');return loadAutomationSettings();
   }).catch(function(e){toast(e.message)}).finally(function(){setBusy(false)});
 }
-function setPolicyFlag(key,value){
-  var body={};body[key]=value===true||value==='true';
-  setBusy(true,'更新策略');
-  api('/api/console/goal-loop-policy'+repoQuery(),{method:'POST',body:JSON.stringify(body)}).then(function(){
-    toast('策略已更新');return loadAutomationSettings();
-  }).catch(function(e){toast(e.message)}).finally(function(){setBusy(false)});
-}
 function previewRoute(){
   api('/api/console/executor-route-preview'+repoQuery(),{method:'POST',body:JSON.stringify({task_intent:'code_implementation'})}).then(function(res){
     toast(res.explanation||res.whyThisProvider||'路由预览完成');
@@ -999,9 +955,6 @@ function bindNav(root){
 
 function bindActions(root){
   if(!root)return;
-  root.querySelectorAll('[data-access-mode]').forEach(function(el){
-    el.addEventListener('click',function(ev){ev.stopPropagation();setAccessMode(el.getAttribute('data-access-mode'))});
-  });
   root.querySelectorAll('[data-work-act]').forEach(function(el){
     el.addEventListener('click',function(ev){ev.stopPropagation();workAction(el.getAttribute('data-work-act'),el.getAttribute('data-work-id'))});
   });
@@ -1092,17 +1045,13 @@ function runPluginAction(pluginId, actionId){
   var action=arr(plugin.actions).find(function(a){return a.id===actionId})||{id:actionId,title:actionId};
   var confirmAuth=false;
   var confirmationText=undefined;
-  if(action.confirmation&&action.confirmation!=='none'){
-    if(action.requiredConfirmationText){
-      var typed=prompt('该动作需要强确认，请输入：'+action.requiredConfirmationText,'');
-      if(typed==null)return;
-      if(typed!==action.requiredConfirmationText){toast('确认文本不匹配');return}
-      confirmationText=typed;
-      confirmAuth=true;
-    } else {
-      if(!confirm('确认执行插件动作「'+(action.title||actionId)+'」？\\n风险：'+(action.riskLabel||action.risk||'未知')))return;
-      confirmAuth=true;
-    }
+  if(action.requiredConfirmationText||action.confirmation==='strong_confirmation'){
+    var required=action.requiredConfirmationText||('CONFIRM '+actionId);
+    var typed=prompt('该动作不可逆，请输入强确认文本：'+required,'');
+    if(typed==null)return;
+    if(typed!==required){toast('确认文本不匹配');return}
+    confirmationText=typed;
+    confirmAuth=true;
   }
   var requestId='gui-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,8);
   setBusy(true,'运行插件动作…');
@@ -1137,24 +1086,6 @@ function runPluginAction(pluginId, actionId){
 function copyText(text){if(!text){toast('没有可复制内容');return}navigator.clipboard.writeText(text).then(function(){toast('已复制')}).catch(function(){toast('复制失败')})}
 function toggleAddRepo(){var el=document.getElementById('repoAdd');if(el)el.style.display=el.style.display==='none'?'block':'none'}
 
-function focusAccessMode(){var el=document.getElementById('accessModePanel');if(el)el.scrollIntoView({behavior:'smooth',block:'center'})}
-function setAccessMode(mode){
-  if(mode!=='request'&&mode!=='full_access'){toast('无效权限模式');return}
-  if(busy||mode===selectedAccessMode)return;
-  if(mode==='full_access'){
-    var ok=confirm('启用 Full Access？\\n\\n允许：当前仓库内文件修改、命令、依赖和本地 Git。\\n仍需确认：远程写入、破坏性操作、仓库外路径。\\n始终禁止：原始密钥和凭据。');
-    if(!ok)return;
-  }
-  setBusy(true,'更新权限等级…');
-  api('/api/console/access-policy'+repoQuery(),{method:'POST',body:JSON.stringify({mode:mode,confirmAuthorization:true})}).then(function(res){
-    var policy=obj(res.policy);var descriptor=obj(res.descriptor);
-    var access=obj(res.access);
-    selectedAccessMode=policy.mode==='full_access'?'full_access':'request';
-    commandCenter=commandCenter||{};commandCenter.accessMode=selectedAccessMode;commandCenter.accessModeLabel=descriptor.shortLabel||(selectedAccessMode==='full_access'?'Full Access':'Request');commandCenter.accessModeDescription=descriptor.description||'';commandCenter.access=access;
-    toast('权限已切换为 '+commandCenter.accessModeLabel);renderChrome();renderHome();
-  }).catch(function(e){toast(e.message||'权限更新失败')}).finally(function(){setBusy(false)});
-}
-
 function taskPayload(){
   var objective=(document.getElementById('taskObjective')||{}).value||'';
   var acceptance=((document.getElementById('taskAcceptance')||{}).value||'').split(/[;；\\n]/).map(function(s){return s.trim()}).filter(Boolean);
@@ -1165,7 +1096,6 @@ function taskPayload(){
     acceptanceCriteria:acceptance,
     allowedPaths:paths,
     expectedFiles:files,
-    accessMode:selectedAccessMode,
     scopeClear:true
   };
 }
@@ -1339,7 +1269,6 @@ function refreshAll(opts){
   refreshInFlight=true;
   return api('/api/console/command-center'+repoQuery()).then(function(res){
     commandCenter=res;
-    selectedAccessMode=(obj(res.access).configuredAccessMode||res.accessMode)==='request'?'request':'full_access';
     lastRefreshedAt=new Date().toLocaleTimeString();
     var repo=obj(res.currentRepository);
     if(repo.id)rememberRepo(repo.id);

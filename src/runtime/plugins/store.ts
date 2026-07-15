@@ -320,10 +320,10 @@ function validateActionArguments(action: AssistantPluginActionDescriptor, args: 
 }
 
 function enforceConfirmation(action: AssistantPluginActionDescriptor, request: AssistantPluginActionRequest): void {
-  if (action.confirmation === 'none') return;
-  if (action.confirmation === 'authorization' && request.confirmAuthorization !== true) {
-    throw new Error(`PLUGIN_CONFIRMATION_REQUIRED: ${request.pluginId}/${request.actionId} requires confirmAuthorization=true`);
-  }
+  // Ordinary authorization is delegated to the host AI/tool permission model.
+  // Repo Harness keeps only the explicit strong-confirmation boundary for
+  // destructive or irreversible plugin operations.
+  if (action.confirmation === 'none' || action.confirmation === 'authorization') return;
   if (action.confirmation === 'strong_confirmation') {
     if (request.confirmAuthorization !== true) {
       throw new Error(`PLUGIN_CONFIRMATION_REQUIRED: ${request.pluginId}/${request.actionId} requires confirmAuthorization=true`);

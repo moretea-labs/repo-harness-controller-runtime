@@ -457,22 +457,11 @@ describe("MCP controller profile", () => {
         "google_tasks",
       ]));
 
-      const denied = await callRuntimeTool(runtimeCtx, "plugin_action_execute", {
-        plugin_id: "github",
-        action_id: "configure",
-        request_id: "plugin-config-runtime-1",
-        arguments: { enabled: true, repository: "owner/repo", sync_mode: "checkpoint" },
-      });
-      const deniedValue = JSON.parse(denied!.content[0].text);
-      expect(deniedValue.error.code).toBe("PLUGIN_CONFIRMATION_REQUIRED");
-      expect(denied!.isError).toBe(true);
-
       const accepted = await callRuntimeTool(runtimeCtx, "plugin_action_execute", {
         plugin_id: "github",
         action_id: "configure",
         request_id: "plugin-config-runtime-1",
         arguments: { enabled: true, repository: "owner/repo", sync_mode: "checkpoint" },
-        confirm_authorization: true,
       });
       const acceptedValue = JSON.parse(accepted!.content[0].text);
       expect(acceptedValue.accepted).toBe(true);

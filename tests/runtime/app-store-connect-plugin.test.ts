@@ -125,16 +125,18 @@ describe('app store connect plugin', () => {
     expect(dryAssign.request).toBeDefined();
   });
 
-  test('write without authorization fails at submission boundary', async () => {
+  test('ordinary writes inherit host authorization at the submission boundary', async () => {
     const { repoRoot, controllerHome, repository } = fullFixture();
     await enableMock(repoRoot);
-    expect(() => submitAssistantPluginAction(controllerHome, repository, {
+    const accepted = submitAssistantPluginAction(controllerHome, repository, {
       pluginId: 'app_store_connect',
       actionId: 'update_app_info_localization',
       requestId: 'asc-write-1',
       args: { localization_id: 'loc-1', name: 'X' },
       origin: { surface: 'local-ui', actor: 'test' },
-    })).toThrow('PLUGIN_CONFIRMATION_REQUIRED');
+    });
+    expect(accepted.action.confirmation).toBe('authorization');
+    expect(accepted.job.status).toBe('queued');
   });
 
   test('strong confirmation mismatch fails for production actions', async () => {

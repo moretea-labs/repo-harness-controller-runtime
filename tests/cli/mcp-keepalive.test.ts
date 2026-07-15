@@ -51,6 +51,7 @@ describe('mcp keepalive helpers', () => {
 
   test('does not restart a live gateway during transient health failures', () => {
     const now = 1_000_000;
+    expect(DEFAULT_MCP_UNHEALTHY_RESTART_WINDOW_MS).toBeLessThanOrEqual(60_000);
     expect(shouldRestartMcpServer(true, 1, now, now)).toBe(false);
     expect(shouldRestartMcpServer(true, 2, now, now + 30_000)).toBe(false);
   });

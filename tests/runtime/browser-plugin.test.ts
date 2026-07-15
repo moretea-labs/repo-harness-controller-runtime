@@ -183,7 +183,7 @@ describe('browser plugin', () => {
     }
   });
 
-  test('interaction actions require explicit authorization before job submission', () => {
+  test('interaction actions inherit host authorization before job submission', () => {
     const { repoRoot, controllerHome, repository } = repoFixture();
     writeBrowserConfig(repoRoot, {
       schemaVersion: 1,
@@ -196,20 +196,11 @@ describe('browser plugin', () => {
       moduleAvailable: () => true,
     });
 
-    expect(() => submitAssistantPluginAction(controllerHome, repository, {
-      pluginId: 'browser',
-      actionId: 'click',
-      requestId: 'browser-click-1',
-      args: { url: 'https://example.com/', selector: '#cta' },
-      origin: { surface: 'local-ui', actor: 'test' },
-    })).toThrow('PLUGIN_CONFIRMATION_REQUIRED');
-
     const accepted = submitAssistantPluginAction(controllerHome, repository, {
       pluginId: 'browser',
       actionId: 'click',
       requestId: 'browser-click-1',
       args: { url: 'https://example.com/', selector: '#cta' },
-      confirmAuthorization: true,
       origin: { surface: 'local-ui', actor: 'test' },
     });
     expect(accepted.action.confirmation).toBe('authorization');
@@ -387,20 +378,11 @@ describe('browser plugin', () => {
       moduleAvailable: () => true,
     });
 
-    expect(() => submitAssistantPluginAction(controllerHome, repository, {
-      pluginId: 'browser',
-      actionId: 'wait_for_selector',
-      requestId: 'browser-wait-missing-confirm',
-      args: { url: 'https://example.com/', selector: '#ready' },
-      origin: { surface: 'local-ui', actor: 'test' },
-    })).toThrow('PLUGIN_CONFIRMATION_REQUIRED');
-
     const accepted = submitAssistantPluginAction(controllerHome, repository, {
       pluginId: 'browser',
       actionId: 'wait_for_selector',
-      requestId: 'browser-wait-confirmed',
+      requestId: 'browser-wait-host-authorized',
       args: { url: 'https://example.com/', selector: '#ready' },
-      confirmAuthorization: true,
       origin: { surface: 'local-ui', actor: 'test' },
     });
     expect(accepted.action.readOnly).toBe(true);

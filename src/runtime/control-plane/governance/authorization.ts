@@ -149,16 +149,13 @@ function requestDecision(context: AuthorizationContext, reason: string): Authori
 export function decideAuthorization(context: AuthorizationContext): AuthorizationDecision {
   if (context.risk === 'secret_access') return { decision: 'deny', reason: 'Credential, keychain, token, and raw secret access is always denied.' };
   if (!scopeMatches(context)) return requestDecision(context, 'The operation is outside the active repository, worktree, or Goal scope.');
-  if (['outside_repository', 'remote_write', 'destructive'].includes(context.risk)) {
-    return context.approvedByUser ? { decision: 'allow', source: 'user_confirmation', reason: 'The user explicitly confirmed the scoped high-risk operation.' } : requestDecision(context, `Explicit user confirmation is required for ${context.risk}.`);
-  }
-  if (context.accessMode === 'full_access') {
-    return { decision: 'allow', source: 'full_access', reason: 'Full Access allows ordinary development operations inside the active repository/worktree.' };
+  if (['outside_repository', 'destructive'].includes(context.risk)) {
+    return context.approvedByUser ? { decision: 'allow', source: 'user_confirmation', reason: 'The user explicitly confirmed the scoped catastrophic operation.' } : requestDecision(context, `Explicit user confirmation is required for ${context.risk}.`);
   }
   if (delegationMatches(context)) {
-    return { decision: 'allow', source: context.delegation?.source ?? 'gpt_risk_delegate', reason: 'The operation is a current-Goal, current-worktree operation within the versioned delegation risk envelope.' };
+    return { decision: 'allow', source: context.delegation?.source ?? 'gpt_risk_delegate', reason: 'The operation is within the current Goal and repository scope.' };
   }
-  return requestDecision(context, 'Request mode requires a resumable confirmation because no matching Goal delegation covers this operation.');
+  return { decision: 'allow', source: 'policy', reason: 'Normal scoped operations follow the host AI permission model; Repo Harness only gates catastrophic effects.' };
 }
 
 export function createGoalDelegation(input: Omit<GoalDelegation, 'schemaVersion' | 'createdAt' | 'version'> & { expiresAt?: string }): GoalDelegation {

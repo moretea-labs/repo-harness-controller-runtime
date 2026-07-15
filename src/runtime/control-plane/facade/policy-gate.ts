@@ -101,9 +101,9 @@ export function evaluatePolicyGate(input: PolicyGateInput): PolicyDecision {
   if (evaluateAccessMode(accessMode, accessEffectFromSideEffect(sideEffect)) === 'allow') {
     return {
       decision: 'allowed',
-      reason: 'Full Access permits this local repository operation without another approval prompt.',
+      reason: 'Normal operations follow the host AI permission model without a second Repo Harness approval layer.',
       capabilityId,
-      warnings: ['Remote writes, destructive actions, outside-repository access, and raw secrets remain separately gated.'],
+      warnings: ['Destructive actions, outside-repository access, and raw secrets remain separately gated.'],
       suggestedNextActions: [],
     };
   }
@@ -141,9 +141,7 @@ export function evaluatePolicyGate(input: PolicyGateInput): PolicyDecision {
 
   return {
     decision: 'approval_required',
-    reason: accessMode === 'request'
-      ? 'Request mode requires approval for side effects outside the bounded Direct Control path.'
-      : 'This operation is outside the local repository permissions granted by Full Access.',
+    reason: 'This operation crosses a hard Repo Harness safety boundary and requires explicit confirmation.',
     capabilityId,
     warnings,
     suggestedNextActions: [approvalAction('Approval is required before execution.', capabilityId)],

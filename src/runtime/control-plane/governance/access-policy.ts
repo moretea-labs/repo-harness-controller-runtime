@@ -48,21 +48,21 @@ export interface AccessModeDescriptor {
 export const ACCESS_MODE_DESCRIPTORS: Record<AccessMode, AccessModeDescriptor> = {
   request: {
     mode: 'request',
-    label: 'Request — elevated local effects request approval',
-    shortLabel: 'Request',
-    description: 'All tools remain visible. Normal reads and bounded edits proceed; broader local side effects request approval.',
-    automaticallyAllowed: ['Read/search the selected repository', 'Bounded explicit-path edits', 'Registered checks and readonly diagnosis'],
-    stillRequiresApproval: ['Broad local commands', 'Dependency changes', 'Local Git writes', 'Network and remote writes'],
-    alwaysDenied: ['Raw secrets or credentials', 'Bypassing controller policy'],
+    label: 'Compatibility mode — host permissions are authoritative',
+    shortLabel: 'Compatibility',
+    description: 'Legacy Request settings are retained for stored-state compatibility only. Normal repository and remote operations follow the host AI permission model.',
+    automaticallyAllowed: ['Repository reads and writes', 'Repository-scoped commands and Git', 'Dependencies, network access, and ordinary remote writes'],
+    stillRequiresApproval: ['Outside-repository access', 'Irreversible or destructive operations'],
+    alwaysDenied: ['Raw secrets or credentials', 'Bypassing controller safety boundaries'],
   },
   full_access: {
     mode: 'full_access',
-    label: 'Full Access — normal local repository development',
-    shortLabel: 'Full Access',
-    description: 'Allows normal work inside the selected repository without repeated prompts. Remote, destructive, secret, and outside-repository effects remain gated.',
-    automaticallyAllowed: ['Repository file reads/writes', 'Repository-scoped local commands', 'Dependency changes', 'Local Git and checks'],
-    stillRequiresApproval: ['Outside-repository paths', 'External network access', 'Git push or remote service writes', 'Irreversible/destructive actions'],
-    alwaysDenied: ['Raw secrets or credentials', 'Bypassing managed policy'],
+    label: 'Host-managed execution — normal work proceeds',
+    shortLabel: 'Host managed',
+    description: 'Normal work follows the host AI permission model. Repo Harness only keeps hard safety gates for secrets, outside-repository access, and destructive operations.',
+    automaticallyAllowed: ['Repository file reads/writes', 'Repository-scoped commands and Git', 'Dependencies, network access, and ordinary remote writes'],
+    stillRequiresApproval: ['Outside-repository access', 'Irreversible or destructive operations'],
+    alwaysDenied: ['Raw secrets or credentials', 'Bypassing controller safety boundaries'],
   },
 };
 
@@ -97,9 +97,9 @@ export function readRepositoryAccessPolicy(controllerHome: string, repoId: strin
     return {
       schemaVersion: 1,
       repoId,
-      // A malformed existing policy fails closed to Request, while a missing
-      // policy uses the usability-first Full Access default above.
-      mode: normalizeAccessMode(parsed.mode, 'request'),
+      // Legacy values remain readable, but malformed policy no longer creates
+      // a user-facing approval mode. Hard safety gates are evaluated separately.
+      mode: normalizeAccessMode(parsed.mode, 'full_access'),
       revision: typeof parsed.revision === 'number' && Number.isFinite(parsed.revision)
         ? Math.max(1, Math.trunc(parsed.revision))
         : 1,
@@ -109,7 +109,7 @@ export function readRepositoryAccessPolicy(controllerHome: string, repoId: strin
       updatedBy: parsed.updatedBy === 'user' ? 'user' : 'system',
     };
   } catch {
-    return { ...defaultPolicy(repoId), mode: 'request' };
+    return defaultPolicy(repoId);
   }
 }
 
@@ -136,17 +136,10 @@ export function writeRepositoryAccessPolicy(
   return policy;
 }
 
-export function evaluateAccessMode(mode: AccessMode, effect: AccessEffect): AccessDecision {
-  if (effect === 'read') return 'allow';
+export function evaluateAccessMode(_mode: AccessMode, effect: AccessEffect): AccessDecision {
   if (effect === 'secret_access') return 'deny';
-  if (mode === 'full_access' && [
-    'local_repo_write',
-    'workspace_write',
-    'local_command',
-    'dependency_change',
-    'local_git',
-  ].includes(effect)) return 'allow';
-  return 'request';
+  if (effect === 'outside_repository' || effect === 'destructive') return 'request';
+  return 'allow';
 }
 
 export function accessModeDescriptor(mode: AccessMode): AccessModeDescriptor {

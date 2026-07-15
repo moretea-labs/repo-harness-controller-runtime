@@ -82,20 +82,11 @@ describe("personal assistant plugin runtime", () => {
     expect(github?.actions.some((action) => action.actionId === "configure")).toBe(true);
     expect(github?.actions.find((action) => action.actionId === "close_issue")?.confirmation).toBe("strong_confirmation");
 
-    expect(() => submitAssistantPluginAction(controllerHome, repository, {
-      pluginId: "github",
-      actionId: "configure",
-      requestId: "plugin-config-1",
-      args: { enabled: true, repository: "owner/repo", sync_mode: "checkpoint" },
-      origin: { surface: "local-ui", actor: "test" },
-    })).toThrow("PLUGIN_CONFIRMATION_REQUIRED");
-
     const first = submitAssistantPluginAction(controllerHome, repository, {
       pluginId: "github",
       actionId: "configure",
       requestId: "plugin-config-1",
       args: { enabled: true, repository: "owner/repo", sync_mode: "checkpoint" },
-      confirmAuthorization: true,
       origin: { surface: "local-ui", actor: "test" },
     });
     const second = submitAssistantPluginAction(controllerHome, repository, {

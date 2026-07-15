@@ -55,7 +55,7 @@ const STARTUP_HEALTH_GRACE_MS = 5_000;
 const STARTUP_HEALTH_RETRY_MS = 250;
 const LOCAL_FAILURE_THRESHOLD = 2;
 const PUBLIC_FAILURE_THRESHOLD = 2;
-export const DEFAULT_MCP_UNHEALTHY_RESTART_WINDOW_MS = 5 * 60_000;
+export const DEFAULT_MCP_UNHEALTHY_RESTART_WINDOW_MS = 45_000;
 export const DEFAULT_MCP_TUNNEL_UNHEALTHY_RESTART_WINDOW_MS = 2 * 60_000;
 const LOCAL_HEALTH_WARNING_INTERVAL_MS = 60_000;
 const QUICK_TUNNEL_PATTERN = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/i;
@@ -988,9 +988,9 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
         const remainingSeconds = Math.ceil(Math.max(0, unhealthyRestartWindowMs - elapsedMs) / 1000);
         const message = 'local MCP health is degraded at '
           + localHealthUrl(host, port)
-          + '; preserving the live Gateway and its sessions for at least '
+          + '; preserving the live Gateway briefly, then restarting it in at most '
           + remainingSeconds
-          + 's while health recovers';
+          + 's if health does not recover';
         console.error('[repo-harness mcp keepalive] ' + message);
         recordError('health', message);
         lastLocalHealthWarningAt = now;
