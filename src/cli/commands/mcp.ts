@@ -6,7 +6,7 @@ import { startMcpStdio } from '../mcp/transports/stdio';
 import { callMcpTool } from '../mcp/tools';
 import { callAccessTool } from '../mcp/access-tools';
 import { runMcpKeepalive } from '../mcp/keepalive';
-import { runMcpRestart } from '../mcp/restart';
+import { assertControllerLifecycleOwner } from '../controller/lifecycle-authority';
 import {
   runMcpDoctor,
   runMcpInstallSkill,
@@ -43,20 +43,6 @@ interface McpKeepaliveOptions extends McpServeOptions {
   localUiHost?: string;
   localUiPort?: string;
   openLocalUi?: boolean;
-}
-
-interface McpRestartOptions {
-  repo?: string;
-  controllerHome?: string;
-  logFile?: string;
-  skipCodexSetup?: boolean;
-  skipPublicCheck?: boolean;
-  skipToolsSmoke?: boolean;
-  skipGithubPlugin?: boolean;
-  githubRepo?: string;
-  githubSyncMode?: string;
-  githubIncludeTasks?: boolean;
-  githubExcludeTasks?: boolean;
 }
 
 interface McpAccessOptions {
@@ -221,6 +207,7 @@ export function buildMcpCommand(): Command {
           return;
         }
         if (rawOpts.transport === 'http') {
+          if (rawOpts.profile === 'controller') assertControllerLifecycleOwner('Controller MCP HTTP server');
           await startMcpHttp({
             repo: rawOpts.repo,
             controllerHome: rawOpts.controllerHome,
@@ -270,6 +257,7 @@ export function buildMcpCommand(): Command {
     .option('--open-local-ui', 'Open the Local Controller in the default browser at startup')
     .action(async (rawOpts: McpKeepaliveOptions) => {
       await runMcpAction(async () => {
+        if (rawOpts.profile === 'controller') assertControllerLifecycleOwner('Controller MCP keepalive');
         const devRunnerTimeoutMs = parsePositiveIntegerOption('dev-runner-timeout-ms', rawOpts.devRunnerTimeoutMs);
         const devRunnerMaxTimeoutMs = parsePositiveIntegerOption('dev-runner-max-timeout-ms', rawOpts.devRunnerMaxTimeoutMs);
         const checkIntervalMs = parsePositiveIntegerOption('check-interval-ms', rawOpts.checkIntervalMs);
@@ -299,45 +287,6 @@ export function buildMcpCommand(): Command {
           localUiPort: parsePort(rawOpts.localUiPort ?? '8766'),
           openLocalUi: rawOpts.openLocalUi === true,
         });
-      });
-    });
-
-  mcp
-    .command('restart')
-    .description('Refresh MCP config, stop old repo-local MCP processes, start the latest keepalive, and verify the local/public surface')
-    .option('--repo <path>', 'Repository root to restart', '.')
-    .option('--controller-home <path>', 'Controller state root; defaults to repo _ops/controller-home when present')
-    .option('--log-file <path>', 'Combined keepalive stdout/stderr log file')
-    .option('--skip-codex-setup', 'Skip repo-harness mcp setup codex')
-    .option('--skip-public-check', 'Skip public endpoint tool-surface verification')
-    .option('--skip-tools-smoke', 'Skip authenticated MCP tools smoke validation')
-    .option('--skip-github-plugin', 'Skip GitHub plugin configuration refresh')
-    .option('--github-repo <owner/repo>', 'Explicit GitHub repository for the controller plugin')
-    .option('--github-sync-mode <mode>', 'manual or checkpoint', 'manual')
-    .option('--github-include-tasks', 'Mirror Tasks as GitHub sub-issues')
-    .option('--github-exclude-tasks', 'Do not mirror Tasks as GitHub sub-issues')
-    .action(async (rawOpts: McpRestartOptions) => {
-      await runMcpAction(async () => {
-        if (rawOpts.githubIncludeTasks && rawOpts.githubExcludeTasks) {
-          throw new Error('restart: choose either --github-include-tasks or --github-exclude-tasks');
-        }
-        const result = await runMcpRestart({
-          repo: rawOpts.repo,
-          controllerHome: rawOpts.controllerHome,
-          logFile: rawOpts.logFile,
-          skipCodexSetup: rawOpts.skipCodexSetup === true,
-          skipPublicCheck: rawOpts.skipPublicCheck === true,
-          skipToolsSmoke: rawOpts.skipToolsSmoke === true,
-          skipGithubPlugin: rawOpts.skipGithubPlugin === true,
-          githubRepo: rawOpts.githubRepo,
-          githubSyncMode: rawOpts.githubSyncMode,
-          githubIncludeTasks: rawOpts.githubIncludeTasks
-            ? true
-            : rawOpts.githubExcludeTasks
-              ? false
-              : undefined,
-        });
-        console.log(result.lines.join('\n'));
       });
     });
 

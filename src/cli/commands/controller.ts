@@ -24,8 +24,7 @@ import {
 } from '../controller/lifecycle';
 import { formatControllerRestartScheduled, requestControllerServiceRestart } from '../controller/restart-coordinator';
 import { dispatchLocalBridgeJob,
-  executeLocalBridgeJob, loadLocalBridgeConfig, submitLocalBridgeJob } from '../local-bridge/job-store';
-import { startLocalBridgeServer } from '../local-bridge/server';
+  executeLocalBridgeJob, submitLocalBridgeJob } from '../local-bridge/job-store';
 
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled']);
 
@@ -626,40 +625,8 @@ export function buildControllerCommand(): Command {
     });
 
 
-  command.command('ui')
-    .description('Start the localhost-only visual Issue, Task, Run, approval, and Agent-session control surface')
-    .option('--repo <path>', 'Repository root')
-    .option('--controller-home <path>', 'Controller state root; defaults to repo _ops/controller-home when present')
-    .option('--host <host>', 'Loopback bind host, or 0.0.0.0 only with --mobile-lan', '127.0.0.1')
-    .option('--port <port>', 'Local UI port')
-    .option('--mobile-lan', 'Allow /mobile/intent on LAN while keeping UI and /api loopback-gated')
-    .option('--no-open', 'Do not open the browser automatically')
-    .action(async (opts: { repo?: string; controllerHome?: string; host?: string; port?: string; open?: boolean; mobileLan?: boolean }) => {
-      const root = repoRoot(opts.repo);
-      const config = loadLocalBridgeConfig(root);
-      const handle = await startLocalBridgeServer({
-        repoRoot: root,
-        controllerHome: opts.controllerHome,
-        host: opts.host ?? config.host ?? '127.0.0.1',
-        port: opts.port ? Number(opts.port) : config.port ?? 8766,
-        openBrowser: opts.open !== false,
-        allowLanMobileIntents: opts.mobileLan === true,
-      });
-      console.log(`repo-harness Local Controller: ${handle.url}`);
-      console.log(opts.mobileLan === true
-        ? 'Press Ctrl+C to stop. Non-loopback requests are restricted to /mobile/intent and require a device token.'
-        : 'Press Ctrl+C to stop. The UI is bound to loopback and is not exposed through the MCP tunnel.');
-      await new Promise<void>((resolvePromise) => {
-        const stop = () => { void handle.close().finally(resolvePromise); };
-        process.once('SIGINT', stop);
-        process.once('SIGTERM', stop);
-      });
-    });
-
-  const service = command.command('service')
-    .description('Manage the detached Controller stack that supervises the daemon, MCP Gateway, and Local Bridge');
-
-  service.command('start')
+  command.command('start')
+    .description('Start the complete Controller stack through the single lifecycle supervisor')
     .option('--repo <path>', 'Repository root')
     .option('--controller-home <path>', 'Controller state root; defaults to repo _ops/controller-home when present')
     .option('--log-file <path>', 'Combined supervisor log file')
@@ -669,7 +636,8 @@ export function buildControllerCommand(): Command {
       output(opts.json ? result : formatControllerServiceStatus(result.status), opts.json === true);
     });
 
-  service.command('stop')
+  command.command('stop')
+    .description('Stop the complete Controller stack')
     .option('--repo <path>', 'Repository root')
     .option('--controller-home <path>', 'Controller state root; defaults to repo _ops/controller-home when present')
     .option('--log-file <path>', 'Combined supervisor log file')
@@ -679,7 +647,8 @@ export function buildControllerCommand(): Command {
       output(opts.json ? result : formatControllerServiceStatus(result.status), opts.json === true);
     });
 
-  service.command('status')
+  command.command('status')
+    .description('Report one coherent Controller lifecycle and runtime generation')
     .option('--repo <path>', 'Repository root')
     .option('--controller-home <path>', 'Controller state root; defaults to repo _ops/controller-home when present')
     .option('--log-file <path>', 'Combined supervisor log file')
@@ -689,7 +658,8 @@ export function buildControllerCommand(): Command {
       output(opts.json ? result : formatControllerServiceStatus(result), opts.json === true);
     });
 
-  service.command('restart')
+  command.command('restart')
+    .description('Replace the complete Controller stack through the restart coordinator')
     .option('--repo <path>', 'Repository root')
     .option('--controller-home <path>', 'Controller state root; defaults to repo _ops/controller-home when present')
     .option('--log-file <path>', 'Combined supervisor log file')
@@ -704,7 +674,7 @@ export function buildControllerCommand(): Command {
         logFile: opts.logFile,
         requestId: opts.requestId,
         reason: opts.reason,
-        requestedBy: 'controller-service-cli',
+        requestedBy: 'controller-cli',
         mode: opts.detached ? 'detached' : 'auto',
       });
       output(
@@ -717,7 +687,8 @@ export function buildControllerCommand(): Command {
       );
     });
 
-  service.command('logs')
+  command.command('logs')
+    .description('Read the combined Controller supervisor log')
     .option('--repo <path>', 'Repository root')
     .option('--controller-home <path>', 'Controller state root; defaults to repo _ops/controller-home when present')
     .option('--log-file <path>', 'Combined supervisor log file')

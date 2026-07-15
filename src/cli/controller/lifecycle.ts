@@ -4,7 +4,8 @@ import { createConnection } from "net";
 import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
 import { listAgentJobs, reconcileAgentJobs } from "../agent-jobs/job-manager";
-import { bootstrapRepoLaunchAgents, bootoutRepoLaunchAgents, findRepoLaunchAgents } from "./launch-agents";
+import { bootoutRepoLaunchAgents, findRepoLaunchAgents } from "./launch-agents";
+import { CONTROLLER_LIFECYCLE_OWNER_ENV } from "./lifecycle-authority";
 import { listLocalBridgeJobs, reconcileLocalBridgeJobs } from "../local-bridge/job-store";
 import {
   loadMcpLocalConfig,
@@ -490,6 +491,7 @@ export function buildControllerServiceEnv(
   return {
     ...withDirectNetworkProxyBypass(baseEnv),
     REPO_HARNESS_CONTROLLER_HOME: controllerHome,
+    [CONTROLLER_LIFECYCLE_OWNER_ENV]: '1',
   };
 }
 
@@ -808,83 +810,64 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
   ensureStartableStatus(status);
   reconcileAgentJobs(repoRoot);
   reconcileLocalBridgeJobs(repoRoot);
+  // The lifecycle starts the isolated Daemon before keepalive. Daemon owns the
+  // generation rotation; keepalive and Gateway reuse that same record.
   ensureControllerDaemon(config.controllerHome);
+
+  // Legacy per-component LaunchAgents create a second lifecycle owner. Boot them
+  // out before starting the single Controller supervisor; they remain readable
+  // for migration, but are never bootstrapped by the modern lifecycle.
   const launchAgents = findRepoLaunchAgents(repoRoot);
+  if (launchAgents.length > 0) bootoutRepoLaunchAgents(launchAgents);
 
   const cli = resolveSelfCliInvocation();
   const serviceEnv = buildControllerServiceEnv(config.controllerHome);
-  const localControllerPid = spawnDetached(
+  const keepaliveArgs = [
+    ...cli.args,
+    "mcp",
+    "keepalive",
+    "--repo",
+    repoRoot,
+    "--controller-home",
+    config.controllerHome,
+    "--host",
+    config.mcpHost,
+    "--port",
+    String(config.mcpPort),
+    "--profile",
+    config.profile,
+    "--auth",
+    config.authMode,
+    "--toolset",
+    config.toolset,
+    "--local-ui",
+    "--local-ui-host",
+    config.localControllerHost,
+    "--local-ui-port",
+    String(config.localControllerPort),
+    "--tunnel",
+    config.tunnelMode,
+  ];
+  if (config.enableDevRunner) {
+    keepaliveArgs.push("--enable-dev-runner");
+    if (config.devRunnerAgents.length > 0) {
+      keepaliveArgs.push("--dev-runner-agents", config.devRunnerAgents.join(","));
+    }
+    if (config.devRunnerTimeoutMs) {
+      keepaliveArgs.push("--dev-runner-timeout-ms", String(config.devRunnerTimeoutMs));
+    }
+    if (config.devRunnerMaxTimeoutMs) {
+      keepaliveArgs.push("--dev-runner-max-timeout-ms", String(config.devRunnerMaxTimeoutMs));
+    }
+  }
+  if (config.publicEndpoint) keepaliveArgs.push("--public-endpoint", config.publicEndpoint);
+  const pid = spawnDetached(
     cli.command,
-    [
-      ...cli.args,
-      "controller",
-      "ui",
-      "--repo",
-      repoRoot,
-      "--controller-home",
-      config.controllerHome,
-      "--host",
-      config.localControllerHost,
-      "--port",
-      String(config.localControllerPort),
-      "--no-open",
-    ],
+    keepaliveArgs,
     repoRoot,
     config.logPath,
     serviceEnv,
   );
-  let pid: number | undefined;
-  try {
-    if (launchAgents.length > 0) {
-      bootstrapRepoLaunchAgents(launchAgents);
-    } else {
-      const keepaliveArgs = [
-        ...cli.args,
-        "mcp",
-        "keepalive",
-        "--repo",
-        repoRoot,
-        "--controller-home",
-        config.controllerHome,
-        "--host",
-        config.mcpHost,
-        "--port",
-        String(config.mcpPort),
-        "--profile",
-        config.profile,
-        "--auth",
-        config.authMode,
-        "--toolset",
-        config.toolset,
-        "--no-local-ui",
-        "--tunnel",
-        config.tunnelMode,
-      ];
-      if (config.enableDevRunner) {
-        keepaliveArgs.push("--enable-dev-runner");
-        if (config.devRunnerAgents.length > 0) {
-          keepaliveArgs.push("--dev-runner-agents", config.devRunnerAgents.join(","));
-        }
-        if (config.devRunnerTimeoutMs) {
-          keepaliveArgs.push("--dev-runner-timeout-ms", String(config.devRunnerTimeoutMs));
-        }
-        if (config.devRunnerMaxTimeoutMs) {
-          keepaliveArgs.push("--dev-runner-max-timeout-ms", String(config.devRunnerMaxTimeoutMs));
-        }
-      }
-      if (config.publicEndpoint) keepaliveArgs.push("--public-endpoint", config.publicEndpoint);
-      pid = spawnDetached(
-        cli.command,
-        keepaliveArgs,
-        repoRoot,
-        config.logPath,
-        serviceEnv,
-      );
-    }
-  } catch (error) {
-    await stopPid(localControllerPid, opts.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS);
-    throw error;
-  }
   writeControllerServiceState(repoRoot, {
     schemaVersion: 1,
     repoRoot,
@@ -898,8 +881,10 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
       logPath: config.logPath,
       startedAt: nowIso(),
     },
+    // Local UI is hosted inside the supervisor process, so all public Controller
+    // surfaces share one lifecycle PID and one runtime generation.
     localController: {
-      pid: localControllerPid,
+      pid,
       startedAt: nowIso(),
     },
     config: {
@@ -916,20 +901,6 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
   const startTimeoutMs = opts.startTimeoutMs
     ?? (Number.isFinite(configuredStartTimeout) && configuredStartTimeout >= 2_000 ? Math.trunc(configuredStartTimeout) : DEFAULT_START_TIMEOUT_MS);
   status = await waitForHealthyStart(repoRoot, startTimeoutMs, config.logPath, config.controllerHome);
-  if (launchAgents.length > 0) {
-    const persisted = loadControllerServiceState(repoRoot);
-    if (persisted) {
-      writeControllerServiceState(repoRoot, {
-        ...persisted,
-        updatedAt: nowIso(),
-        supervisor: {
-          ...persisted.supervisor,
-          pid: status.mcpRuntime?.server.pid,
-        },
-      });
-      status = await controllerServiceStatus({ repo: repoRoot, logFile: config.logPath, controllerHome: config.controllerHome });
-    }
-  }
   return { action: "started", cleanedPids: cleaned, status };
 }
 

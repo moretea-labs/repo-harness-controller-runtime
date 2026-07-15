@@ -14,7 +14,7 @@ const fixtures: Array<{ repoRoot: string; controllerHome: string }> = [];
 
 afterEach(async () => {
   for (const fixture of fixtures.splice(0)) {
-    spawnSync("bun", [CLI, "controller", "service", "stop", "--repo", fixture.repoRoot], {
+    spawnSync("bun", [CLI, "controller", "stop", "--repo", fixture.repoRoot], {
       cwd: ROOT,
       encoding: "utf-8",
       env: {
@@ -124,7 +124,7 @@ function parseJsonPrefix<T>(text: string): T {
 async function waitForRunning(repoRoot: string, controllerHome: string, running: boolean): Promise<Record<string, unknown>> {
   let payload: Record<string, unknown> = {};
   for (let attempt = 0; attempt < 80; attempt += 1) {
-    const result = runCli(controllerHome, ["controller", "service", "status", "--repo", repoRoot, "--json"]);
+    const result = runCli(controllerHome, ["controller", "status", "--repo", repoRoot, "--json"]);
     expect(result.status).toBe(0);
     payload = JSON.parse(result.stdout) as Record<string, unknown>;
     if (payload.running === running) return payload;
@@ -134,14 +134,16 @@ async function waitForRunning(repoRoot: string, controllerHome: string, running:
 }
 
 describe("controller service lifecycle", () => {
-  test("prints help for the service lifecycle group", () => {
-    const result = runCli("/tmp/unused", ["controller", "service", "--help"]);
+  test("exposes one top-level Controller lifecycle", () => {
+    const result = runCli("/tmp/unused", ["controller", "--help"]);
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("start");
     expect(result.stdout).toContain("stop");
     expect(result.stdout).toContain("status");
     expect(result.stdout).toContain("restart");
     expect(result.stdout).toContain("logs");
+    expect(result.stdout).not.toMatch(/^\s+service\b/m);
+    expect(result.stdout).not.toMatch(/^\s+ui\b/m);
   });
 
   test("starts, reports, logs, restarts, and stops the detached Controller stack idempotently", async () => {
@@ -156,7 +158,10 @@ describe("controller service lifecycle", () => {
         serviceStatePath: string;
         runtimeStatePath: string;
         controllerHome: string;
-        mcpRuntime?: { server?: { toolset?: string } };
+        mcpRuntime?: {
+          server?: { toolset?: string };
+          localController?: { pid?: number };
+        };
         supervisor: { pid?: number };
       };
     }>(start.stdout);
@@ -166,6 +171,7 @@ describe("controller service lifecycle", () => {
       realpathSync(join(repoRoot, ".ai", "local", "state", "controller-service.json")),
     );
     expect(firstStart.status.supervisor.pid).toBeTruthy();
+    expect(firstStart.status.mcpRuntime?.localController?.pid).toBe(firstStart.status.supervisor.pid);
     expect(realpathSync(firstStart.status.controllerHome)).toBe(realpathSync(controllerHome));
     expect(realpathSync(firstStart.status.runtimeStatePath)).toBe(
       realpathSync(join(controllerHome, 'mcp', 'mcp.runtime.json')),
@@ -191,9 +197,18 @@ describe("controller service lifecycle", () => {
 
     const restart = runCli(controllerHome, ["restart", "--repo", repoRoot, "--json"], { useScript: true });
     expect(restart.status, restart.stderr || restart.stdout).toBe(0);
-    const restarted = parseJsonPrefix<{ action: string; status: { running: boolean } }>(restart.stdout);
+    const restarted = parseJsonPrefix<{
+      action: string;
+      status: {
+        running: boolean;
+        supervisor: { pid?: number };
+        mcpRuntime?: { localController?: { pid?: number } };
+      };
+    }>(restart.stdout);
     expect(restarted.action).toBe("restarted");
     expect(restarted.status.running).toBe(true);
+    expect(restarted.status.supervisor.pid).not.toBe(firstStart.status.supervisor.pid);
+    expect(restarted.status.mcpRuntime?.localController?.pid).toBe(restarted.status.supervisor.pid);
 
     const stop = runCli(controllerHome, ["stop", "--repo", repoRoot, "--json"], { useScript: true });
     expect(stop.status).toBe(0);
@@ -225,7 +240,7 @@ describe("controller service lifecycle", () => {
       }, null, 2)}\n`,
     );
 
-    const status = runCli(controllerHome, ["controller", "service", "status", "--repo", repoRoot, "--json"]);
+    const status = runCli(controllerHome, ["controller", "status", "--repo", repoRoot, "--json"]);
     expect(status.status).toBe(0);
     const payload = JSON.parse(status.stdout) as { infos?: string[]; warnings?: string[] };
     expect(payload.infos?.some((line) => line.includes("Legacy repo-local MCP config diverges from controllerHome"))).toBe(true);

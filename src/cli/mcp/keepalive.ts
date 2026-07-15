@@ -26,6 +26,7 @@ import {
 import { controllerExposureSnapshot } from './toolset';
 import { applyDirectNetworkProxyBypass, withDirectNetworkProxyBypass } from './proxy-env';
 import { collectRuntimeSourceIdentity, ensureRuntimeGeneration } from '../../runtime/control-plane/runtime-generation';
+import { assertControllerLifecycleOwner } from '../controller/lifecycle-authority';
 
 export interface McpKeepaliveOptions extends McpServerOptions {
   repo?: string;
@@ -393,6 +394,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
   const runtimeGeneration = ensureRuntimeGeneration(controllerHome, runtimeSource);
   const serviceConfig = loadMcpServiceLocalConfig(controllerHome, repoRoot);
   const profile = rawOpts.profile ?? serviceConfig?.profile ?? 'controller';
+  if (profile === 'controller') assertControllerLifecycleOwner('Controller MCP keepalive');
   const localConfig = serviceConfig;
   const host = rawOpts.host ?? localConfig?.server?.host ?? '127.0.0.1';
   const port = rawOpts.port ?? localConfig?.server?.port ?? 8765;
@@ -790,6 +792,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
     try {
       localBridge = await startLocalBridgeServer({
         repoRoot,
+        controllerHome,
         host: localUiHost,
         port: localUiPort,
         openBrowser: openLocalUi,

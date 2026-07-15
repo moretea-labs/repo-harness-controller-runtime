@@ -64,7 +64,7 @@ fi
 run_controller_service() {
   local action="${1:?controller service action is required}"
   shift
-  "$LOCAL_CLI" controller service "$action" --repo "$ROOT" --controller-home "$REPO_HARNESS_CONTROLLER_HOME" "$@"
+  "$LOCAL_CLI" controller "$action" --repo "$ROOT" --controller-home "$REPO_HARNESS_CONTROLLER_HOME" "$@"
 }
 
 RESTART_ENTRY="$ROOT/src/cli/controller/restart-coordinator-entry.ts"
@@ -156,9 +156,9 @@ case "$COMMAND" in
       fi
       exec "$LEGACY_NGROK_MANAGER" logs --repo "$ROOT" --config "$TUNNEL_CONFIG" "$@"
     fi
-    exec "$LOCAL_CLI" controller service logs --repo "$ROOT" --controller-home "$REPO_HARNESS_CONTROLLER_HOME" "$@"
+    exec "$LOCAL_CLI" controller logs --repo "$ROOT" --controller-home "$REPO_HARNESS_CONTROLLER_HOME" "$@"
     ;;
   *)
-    exec "$LOCAL_CLI" controller service "$COMMAND" --repo "$ROOT" --controller-home "$REPO_HARNESS_CONTROLLER_HOME" "$@"
+    exec "$LOCAL_CLI" controller "$COMMAND" --repo "$ROOT" --controller-home "$REPO_HARNESS_CONTROLLER_HOME" "$@"
     ;;
 esac
