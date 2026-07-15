@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { spawn, spawnSync } from 'child_process';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { ensureControllerEpoch } from '../../src/cli/agent-jobs/worker-lifecycle';
@@ -199,6 +199,8 @@ describe('runtime consistency hardening', () => {
     const target = join(controllerHome, 'repositories', record.repoId, 'worktrees');
     mkdirSync(join(source, 'stale'), { recursive: true });
     writeFileSync(join(source, 'stale', 'source.txt'), 'source');
+    mkdirSync(join(source, 'stale', 'node_modules', 'dependency'), { recursive: true });
+    writeFileSync(join(source, 'stale', 'node_modules', 'dependency', 'generated.bin'), 'generated');
     mkdirSync(join(target, 'stale'), { recursive: true });
     writeFileSync(join(target, 'stale', 'target.txt'), 'target');
     const report = ensureRepositoryRuntimeStorage(record, controllerHome);
@@ -209,6 +211,9 @@ describe('runtime consistency hardening', () => {
     expect(existsSync(join(target, 'stale', 'target.txt'))).toBe(true);
     const quarantineRoot = join(controllerHome, 'repositories', record.repoId, 'quarantine', 'runtime-storage', 'worktrees');
     expect(existsSync(quarantineRoot)).toBe(true);
+    const [quarantinedEntry] = readdirSync(quarantineRoot);
+    expect(existsSync(join(quarantineRoot, quarantinedEntry, 'source.txt'))).toBe(true);
+    expect(existsSync(join(quarantineRoot, quarantinedEntry, 'node_modules'))).toBe(false);
   });
 
   test('terminates no-change Campaign tasks without review or rescheduling', () => {

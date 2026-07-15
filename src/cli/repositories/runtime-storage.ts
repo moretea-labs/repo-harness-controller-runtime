@@ -86,6 +86,21 @@ function quarantinePath(controllerRoot: string, spec: RuntimeStorageSpec, entry:
   return join(controllerRoot, 'quarantine', 'runtime-storage', spec.name, `${stamp}-${entry}`);
 }
 
+const QUARANTINE_GENERATED_DIRECTORY_NAMES = new Set(['node_modules']);
+
+function pruneQuarantineGeneratedDirectories(path: string): void {
+  if (!existsSync(path)) return;
+  for (const entry of readdirSync(path, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const entryPath = join(path, entry.name);
+    if (QUARANTINE_GENERATED_DIRECTORY_NAMES.has(entry.name)) {
+      rmSync(entryPath, { recursive: true, force: true });
+      continue;
+    }
+    pruneQuarantineGeneratedDirectories(entryPath);
+  }
+}
+
 function mergeRuntimeDirectory(
   source: string,
   target: string,
@@ -105,6 +120,7 @@ function mergeRuntimeDirectory(
     const quarantine = quarantinePath(controllerRoot, spec, entry);
     mkdirSync(dirname(quarantine), { recursive: true });
     renameSync(sourceEntry, quarantine);
+    if (spec.name === 'worktrees') pruneQuarantineGeneratedDirectories(quarantine);
     quarantined.push(quarantine);
   }
   return { merged, quarantined };
