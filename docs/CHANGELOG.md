@@ -12,6 +12,10 @@ All notable changes to this skill are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Isolated Controller Runtime Source Identity from execution repositories. MCP `rh_status`, CLI controller status, and Local Bridge access state now compare startup runtime source against the package/source authority instead of the selected business repository, eliminating false `RUNTIME_SOURCE_SNAPSHOT_STALE` when switching multi-repo sessions. Missing runtime snapshots remain fail-closed with structured reasons.
+
 ## [1.3.0] - 2026-06-22
 
 ### Added

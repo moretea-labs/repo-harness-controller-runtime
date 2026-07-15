@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 5,
+  "id": "ISS-20260715-9E34AD",
+  "title": "Isolate Controller Runtime Source Identity from execution repositories",
+  "slug": "runtime-source-identity-isolation",
+  "kind": "bug",
+  "status": "done",
+  "summary": "False RUNTIME_SOURCE_SNAPSHOT_STALE when selecting a business repository was caused by comparing daemon Runtime Source against execution canonicalRoot. Fixed by a unique Controller Runtime Source resolver shared across MCP, CLI, and Local Bridge; generation rotation remains start/restart only; missing snapshots stay fail-closed.",
+  "goals": [
+    "Keep Runtime Source Identity controller-scoped and package/source-derived.",
+    "Share one drift evaluation path across MCP, CLI, and Local Bridge.",
+    "Preserve true runtime dirty/commit/root drift protection and fail-closed missing snapshots."
+  ],
+  "nonGoals": [
+    "Do not change business project execution logic.",
+    "Do not require runtime root to equal execution root.",
+    "Do not delete genuine runtime dirty checks."
+  ],
+  "acceptanceCriteria": [
+    "Execution repository selection does not set RUNTIME_SOURCE_SNAPSHOT_STALE.",
+    "Session/repository switch does not rotate runtime generation.",
+    "True runtime source change still blocks mutating readiness.",
+    "Missing snapshot returns structured fail-closed error.",
+    "Targeted isolation tests and typecheck pass."
+  ],
+  "relatedArtifacts": [
+    "src/runtime/control-plane/runtime-generation.ts",
+    "docs/architecture/current/architecture-invariants.md",
+    "tests/runtime/runtime-source-isolation.test.ts",
+    "docs/CHANGELOG.md"
+  ],
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Runtime Source isolation fix",
+      "objective": "Introduce unique runtime source resolver; stop comparing execution repository roots; pin daemon/keepalive startup source; add targeted tests and architecture invariant.",
+      "status": "done",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src/runtime/control-plane/**",
+        "src/runtime/gateway/mcp/**",
+        "src/cli/controller/**",
+        "src/cli/mcp/**",
+        "src/cli/local-bridge/**",
+        "tests/runtime/**",
+        "tests/cli/**",
+        "docs/**",
+        "tasks/**"
+      ],
+      "forbiddenPaths": [
+        "_ops/**",
+        "node_modules/**",
+        "dist/**"
+      ],
+      "checks": [
+        "bun test tests/runtime/runtime-source-isolation.test.ts",
+        "bun run check:type"
+      ],
+      "acceptanceCriteria": [
+        "No runtime drift call uses execution canonicalRoot as current source.",
+        "Daemon/keepalive capture package/source authority, not ambient business cwd.",
+        "Targeted tests cover multi-repo false drift, true dirty, and missing snapshot."
+      ],
+      "risk": "medium",
+      "notes": [
+        "Root cause confirmed as false comparison, not generation overwrite by session_bind/work_prepare.",
+        "evaluateRuntimeSourceDrift(undefined, current) restored to fail-closed missing snapshot behavior."
+      ],
+      "runIds": [],
+      "createdAt": "2026-07-15T12:40:00.000Z",
+      "updatedAt": "2026-07-15T12:45:00.000Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    }
+  ],
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+  "createdAt": "2026-07-15T12:40:00.000Z",
+  "updatedAt": "2026-07-15T12:45:00.000Z"
+}

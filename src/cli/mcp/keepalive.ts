@@ -25,7 +25,12 @@ import {
 } from '../controller/runtime-config';
 import { controllerExposureSnapshot } from './toolset';
 import { applyDirectNetworkProxyBypass, withDirectNetworkProxyBypass } from './proxy-env';
-import { collectRuntimeSourceIdentity, ensureRuntimeGeneration } from '../../runtime/control-plane/runtime-generation';
+import {
+  collectCurrentControllerRuntimeSourceIdentity,
+  CONTROLLER_RUNTIME_SOURCE_ROOT_ENV,
+  ensureRuntimeGeneration,
+  resolveControllerRuntimeSourceRoot,
+} from '../../runtime/control-plane/runtime-generation';
 
 export interface McpKeepaliveOptions extends McpServerOptions {
   repo?: string;
@@ -389,7 +394,18 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
 
   const repoRoot = resolveMcpRepoRoot(rawOpts.repo ?? '.');
   const controllerHome = ensureRepoPreferredControllerHome(repoRoot, rawOpts.controllerHome);
-  const runtimeSource = collectRuntimeSourceIdentity(repoRoot);
+  // Runtime generation is controller-scoped. Capture package/source authority —
+  // never the selected execution repository passed via --repo.
+  const resolvedRuntimeRoot = resolveControllerRuntimeSourceRoot();
+  const runtimeSource = collectCurrentControllerRuntimeSourceIdentity();
+  if (!runtimeSource || !resolvedRuntimeRoot.root) {
+    throw new Error(
+      `Controller MCP keepalive cannot resolve runtime source root: ${resolvedRuntimeRoot.detail ?? resolvedRuntimeRoot.reason}. `
+      + `Set ${CONTROLLER_RUNTIME_SOURCE_ROOT_ENV} to the controller package/source checkout.`,
+    );
+  }
+  // Only create generation when missing; never rotate on keepalive re-entry.
+  // Daemon start remains the primary rotator; keepalive fills a bootstrap gap.
   const runtimeGeneration = ensureRuntimeGeneration(controllerHome, runtimeSource);
   const serviceConfig = loadMcpServiceLocalConfig(controllerHome, repoRoot);
   const profile = rawOpts.profile ?? serviceConfig?.profile ?? 'controller';

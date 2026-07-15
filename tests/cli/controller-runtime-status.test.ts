@@ -10,14 +10,21 @@ import { writeMcpServiceLocalConfig, writeMcpServiceRuntimeState } from '../../s
 import { registerRepository } from '../../src/cli/repositories/registry';
 import { markRepositoryProjectionDirty } from '../../src/runtime/projections/invalidation';
 import { writeJsonAtomic } from '../../src/runtime/shared/json-files';
-import { collectRuntimeSourceIdentity, rotateRuntimeGeneration } from '../../src/runtime/control-plane/runtime-generation';
+import {
+  collectRuntimeSourceIdentity,
+  CONTROLLER_RUNTIME_SOURCE_ROOT_ENV,
+  rotateRuntimeGeneration,
+} from '../../src/runtime/control-plane/runtime-generation';
 
 const roots: string[] = [];
 const servers: Server[] = [];
+const previousRuntimeSourceEnv = process.env[CONTROLLER_RUNTIME_SOURCE_ROOT_ENV];
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  if (previousRuntimeSourceEnv === undefined) delete process.env[CONTROLLER_RUNTIME_SOURCE_ROOT_ENV];
+  else process.env[CONTROLLER_RUNTIME_SOURCE_ROOT_ENV] = previousRuntimeSourceEnv;
 });
 
 function tempRoot(prefix: string): string {
@@ -62,6 +69,9 @@ describe('controller runtime status', () => {
     const repoRoot = tempRoot('repo-harness-runtime-status-repo-');
     const controllerHome = tempRoot('repo-harness-runtime-status-home-');
     initRepo(repoRoot);
+    // Pin the Controller Runtime Source authority to this fixture so status does
+    // not compare against the ambient package checkout of the test process.
+    process.env[CONTROLLER_RUNTIME_SOURCE_ROOT_ENV] = repoRoot;
 
     const startedFrom = collectRuntimeSourceIdentity(repoRoot);
     rotateRuntimeGeneration(controllerHome, startedFrom);
@@ -101,12 +111,14 @@ describe('controller runtime status', () => {
     const controllerHome = tempRoot('repo-harness-runtime-projection-home-');
     initRepo(repoRoot);
     initRepo(otherRepoRoot);
+    process.env[CONTROLLER_RUNTIME_SOURCE_ROOT_ENV] = repoRoot;
     mkdirSync(join(repoRoot, '.ai', 'harness'), { recursive: true });
     writeFileSync(join(repoRoot, '.ai', 'harness', 'policy.json'), '{}\n');
     const livePid = process.ppid > 1 ? process.ppid : process.pid;
 
     const generation = rotateRuntimeGeneration(controllerHome, collectRuntimeSourceIdentity(repoRoot));
-    const mcpPort = await startHealthServer({ status: 'ok' });
+    // Gateway health requires generation identity when a runtime generation is active.
+    const mcpPort = await startHealthServer({ status: 'ok', generation: generation.generation });
     const localControllerPort = await startHealthServer({
       status: 'ok',
       toolSurface: CONTROLLER_TOOL_SURFACE,

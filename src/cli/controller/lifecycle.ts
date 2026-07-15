@@ -28,9 +28,10 @@ import { listRepositories } from "../repositories/registry";
 import { runProcess } from "../../effects/process-runner";
 import { ensureControllerDaemon, readControllerDaemonStatus, type ControllerDaemonStatus } from "../../runtime/control-plane/daemon-client";
 import {
-  collectRuntimeSourceIdentity,
-  evaluateRuntimeSourceDrift,
+  CONTROLLER_RUNTIME_SOURCE_ROOT_ENV,
+  evaluateActiveRuntimeSourceDrift,
   readRuntimeGeneration,
+  resolveControllerRuntimeSourceRoot,
   type RuntimeSourceIdentity,
 } from "../../runtime/control-plane/runtime-generation";
 import { projectionBlocksReadiness, readRepositoryProjectionSnapshot } from "../../runtime/projections/materialized-view";
@@ -487,9 +488,15 @@ export function buildControllerServiceEnv(
   controllerHome: string,
   baseEnv: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
+  const runtimeSource = resolveControllerRuntimeSourceRoot({ env: baseEnv });
   return {
     ...withDirectNetworkProxyBypass(baseEnv),
     REPO_HARNESS_CONTROLLER_HOME: controllerHome,
+    // Pin Controller Runtime Source for daemon/keepalive children so ambient
+    // execution-repository cwd cannot redefine generation identity.
+    ...(runtimeSource.root
+      ? { [CONTROLLER_RUNTIME_SOURCE_ROOT_ENV]: runtimeSource.root }
+      : {}),
   };
 }
 
@@ -579,8 +586,9 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
     runtimeState: resolveMcpRuntimeAuthority(config.controllerHome, repoRoot, "runtime-state"),
   };
   const runtimeGeneration = readRuntimeGeneration(config.controllerHome);
-  const currentSource = collectRuntimeSourceIdentity(repoRoot);
-  const sourceDrift = evaluateRuntimeSourceDrift(runtimeGeneration?.source, currentSource);
+  // Drift compares startup Runtime Source against the Controller package authority.
+  // opts.repo / execution repository root is never used as "current" runtime source.
+  const sourceDrift = evaluateActiveRuntimeSourceDrift(runtimeGeneration?.source);
   const runtimeStatePath = serviceRuntime
     ? mcpControllerHomeRuntimeStatePath(config.controllerHome)
     : mcpRuntimeStatePath(repoRoot);

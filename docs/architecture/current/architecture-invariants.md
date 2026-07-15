@@ -291,6 +291,29 @@ Versioned design documents cannot override the current set.
 
 A capability may be labeled implemented only when a repository path and an executable check support the claim. Future gaps or regressions must be linked to an Issue/Task or ADR rather than hidden by documentation wording. The completed migration record is not permission to weaken a boundary without updating code, tests and the current architecture set.
 
+## Invariant 26 — Runtime Source Identity Is Controller-Scoped
+
+**Current Implementation — MUST**
+
+Controller Runtime Source Identity is controller-scoped state. It is not session-scoped and not execution-repository-scoped.
+
+MUST:
+
+- Persist Runtime Source Identity only under `controllerHome` (`system/runtime-generation.json` and daemon `state.json` source snapshot).
+- Resolve the current Runtime Source from one authority: explicit handoff, `REPO_HARNESS_CONTROLLER_RUNTIME_SOURCE_ROOT` / `REPO_HARNESS_SOURCE_ROOT`, package/source entrypoint root, or cwd only when that cwd itself is the controller package.
+- Compare drift only between the startup Runtime Source snapshot and the current Controller Runtime Source.
+- Treat a missing startup snapshot as fail-closed (`RUNTIME_SOURCE_SNAPSHOT_MISSING`) rather than silent pass.
+- Keep execution repository git state (`canonicalRoot`, branch, head, dirty) in repository status fields only.
+
+MUST NOT:
+
+- Use the selected execution repository `canonicalRoot` as the current Runtime Source for drift evaluation.
+- Rotate Runtime Source generation on `session_bind_repository`, work preparation, worktree creation, or ordinary branch switches.
+- Treat Runtime Source root differing from the selected execution repository as an error.
+- Hardcode a clone directory name or user absolute path as the Runtime Source.
+
+Primary implementation: `src/runtime/control-plane/runtime-generation.ts`, with shared consumers in MCP `rh_status`, CLI `controllerServiceStatus`, Local Bridge access state, keepalive, and daemon start.
+
 ## Review Use
 
 Every architecture-sensitive Task should cite the invariants it affects. Verification should include a statement that the resulting implementation preserves them or an accepted ADR that changes them.

@@ -14,7 +14,11 @@ import { readExecutionArtifact } from '../../evidence/artifact-store';
 import { readExecutionEvidence } from '../../evidence/evidence-store';
 import { ensureControllerDaemon, readControllerDaemonStatus } from '../../control-plane/daemon-client';
 import { readSchedulerHealthSnapshot } from '../../control-plane/global-scheduler/scheduler';
-import { collectRuntimeSourceIdentity, evaluateRuntimeSourceDrift, type RuntimeSourceIdentity } from '../../control-plane/runtime-generation';
+import {
+  evaluateActiveRuntimeSourceDrift,
+  formatRuntimeSourceDriftMessage,
+  type RuntimeSourceIdentity,
+} from '../../control-plane/runtime-generation';
 import { rebuildRepositoryProjection, readRepositoryProjectionSnapshot } from '../../projections/materialized-view';
 import { applyScheduleDedupe, buildScheduleDedupeReport, createSchedule, getSchedule, getScheduleDecision, listOccurrences, listSchedules, saveSchedule } from '../../workflow/schedules/store';
 import { evaluateSchedule } from '../../workflow/schedules/engine';
@@ -1564,10 +1568,25 @@ function runFacadeVerify(
   }
 }
 
-export function runtimeSourceSnapshotStatus(active: RuntimeSourceIdentity | undefined, repoRoot: string) {
-  const current = collectRuntimeSourceIdentity(repoRoot);
-  const drift = evaluateRuntimeSourceDrift(active, current);
-  return { current, ...drift };
+/**
+ * Runtime Source drift for MCP readiness.
+ *
+ * `currentRuntimeRoot` is only for tests that pin a Controller Runtime Source
+ * fixture. Callers must never pass an execution repository canonicalRoot here.
+ */
+export function runtimeSourceSnapshotStatus(
+  active: RuntimeSourceIdentity | undefined,
+  currentRuntimeRoot?: string,
+) {
+  const drift = evaluateActiveRuntimeSourceDrift(active, {
+    currentRuntimeRoot,
+  });
+  return {
+    current: drift.current,
+    restartRequired: drift.restartRequired,
+    reasons: drift.reasons,
+    code: drift.code,
+  };
 }
 
 export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: string, args: Record<string, unknown>): Promise<CallToolResult | undefined> {
@@ -1585,7 +1604,9 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         }
         const readiness = controllerReadiness(ctx, repository);
         const liveGit = gitSnapshot(repository.canonicalRoot);
-        const runtimeSource = runtimeSourceSnapshotStatus(readiness.daemon.source, repository.canonicalRoot);
+        // Compare startup Runtime Source against the Controller package authority —
+        // never against the selected execution repository.
+        const runtimeSource = runtimeSourceSnapshotStatus(readiness.daemon.source);
         const sourceSnapshotStale = runtimeSource.restartRequired;
         // Dynamic import avoids a static cycle: toolset.ts composes runtimeToolDefinitions.
         const exposure = (await import('../../../cli/mcp/toolset')).controllerExposureSnapshot(ctx);
@@ -1600,8 +1621,12 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         }
         if (sourceSnapshotStale) {
           readinessReasons.push({
-            code: 'RUNTIME_SOURCE_SNAPSHOT_STALE',
-            message: `Controller runtime source changed: ${runtimeSource.reasons.join('; ')}. Restart is required before mutating work.`,
+            code: runtimeSource.code === 'RUNTIME_SOURCE_SNAPSHOT_MISSING'
+              ? 'RUNTIME_SOURCE_SNAPSHOT_MISSING'
+              : runtimeSource.code === 'RUNTIME_SOURCE_CURRENT_UNAVAILABLE'
+                ? 'RUNTIME_SOURCE_CURRENT_UNAVAILABLE'
+                : 'RUNTIME_SOURCE_SNAPSHOT_STALE',
+            message: formatRuntimeSourceDriftMessage(runtimeSource),
           });
         }
         const readinessWithToolSurface = {
@@ -1645,7 +1670,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
                 : undefined,
               sourceSnapshotStale,
               sourceSnapshotReasons: runtimeSource.reasons,
-              runtimeSourceDirty: runtimeSource.current.dirty,
+              runtimeSourceDirty: runtimeSource.current?.dirty === true,
             },
             capabilityCount: capabilities.length,
             capabilityGroups: summarizeCapabilityGroups(manifests),
