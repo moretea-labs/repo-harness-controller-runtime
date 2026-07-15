@@ -230,14 +230,17 @@ function dependencyState(campaign: Campaign, task: CampaignTask): 'ready' | 'wai
 function taskOperation(task: CampaignTask): { operation: string; arguments: Record<string, unknown> } {
   const operation = assertCampaignOperationSupported(task.operation);
   const base = { ...(task.arguments ?? {}) };
-  if (AGENT_OPERATIONS.has(operation)) base.isolate = true;
+  if (operation === 'quick_agent_session') {
+    if (typeof base.title !== 'string' || !String(base.title).trim()) base.title = task.title;
+    if (typeof base.objective !== 'string' || !String(base.objective).trim()) base.objective = task.objective;
+  }
   if (task.supervisorInstructions) base.supervisor_instructions = task.supervisorInstructions;
   if (task.runId && operation === 'dispatch_task') {
     return {
       operation: 'retry_task_run',
       arguments: {
         run_id: task.runId,
-        isolate: true,
+        ...('isolate' in base ? { isolate: base.isolate } : {}),
         timeout_ms: task.executor?.runnerTimeoutMs,
         supervisor_instructions: task.supervisorInstructions,
       },
@@ -249,6 +252,16 @@ function taskOperation(task: CampaignTask): { operation: string; arguments: Reco
 function taskClaims(campaign: Campaign, task: CampaignTask, operation: string, args: Record<string, unknown>): ResourceClaimSpec[] {
   if (task.resourceClaims.length > 0) return task.resourceClaims;
   return claimsForMcpOperation(operation, args, campaign.repoId, campaign.checkoutId);
+}
+
+function withCampaignWorkspaceDefaults(
+  campaign: Campaign,
+  operation: string,
+  args: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!AGENT_OPERATIONS.has(operation)) return args;
+  if (typeof args.isolate === 'boolean') return args;
+  return { ...args, isolate: campaign.workspace.mode === 'isolated' };
 }
 
 function dispatchTask(controllerHome: string, campaign: Campaign, task: CampaignTask): boolean {
@@ -275,7 +288,8 @@ function dispatchTask(controllerHome: string, campaign: Campaign, task: Campaign
     return false;
   }
   if (CAMPAIGN_CONTROL_OPERATIONS.has(execution.operation)) throw new Error(`CAMPAIGN_RECURSIVE_OPERATION_DENIED: ${execution.operation}`);
-  assertAutomatedOperationAllowed(execution.operation, execution.arguments);
+  const executionArguments = withCampaignWorkspaceDefaults(campaign, execution.operation, execution.arguments);
+  assertAutomatedOperationAllowed(execution.operation, executionArguments);
   const requestId = `${campaign.requestId}:task:${task.taskId}:attempt:${nextAttempt}`;
   const created = createExecutionJob(controllerHome, {
     repoId: campaign.repoId,
@@ -286,7 +300,7 @@ function dispatchTask(controllerHome: string, campaign: Campaign, task: Campaign
     origin: { surface: 'system', actor: campaign.campaignId, correlationId: campaign.campaignId },
     payload: {
       operation: execution.operation,
-      arguments: { ...execution.arguments, request_id: requestId },
+      arguments: { ...executionArguments, request_id: requestId },
       target: 'mcp-tool',
       profile: 'controller',
       enableDevRunner: task.executor?.enableDevRunner ?? true,
@@ -298,7 +312,7 @@ function dispatchTask(controllerHome: string, campaign: Campaign, task: Campaign
       campaignTaskId: task.taskId,
     },
     priority: task.priority,
-    resourceClaims: taskClaims(campaign, task, execution.operation, execution.arguments),
+    resourceClaims: taskClaims(campaign, task, execution.operation, executionArguments),
     timeoutMs: campaign.budget.taskTimeoutMs,
     maxAttempts: 1,
   });

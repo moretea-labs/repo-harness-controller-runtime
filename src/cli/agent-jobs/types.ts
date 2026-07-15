@@ -11,6 +11,24 @@ export type AgentJobStatus =
   | "failed"
   | "cancelled"
   | "unknown";
+export type AgentJobClosureState =
+  | "none"
+  | "integration_pending"
+  | "integrating"
+  | "cleanup_pending"
+  | "cleaning"
+  | "preserved"
+  | "completed";
+export type AgentJobPreservationReason =
+  | "dirty_worktree"
+  | "active_worktree"
+  | "protected_branch"
+  | "unknown_worktree_state"
+  | "unmerged_branch"
+  | "main_workspace_occupied"
+  | "integration_review_required"
+  | "integration_failed"
+  | "cleanup_failed";
 export type AgentExecutionProvider = "local" | "github";
 export type AgentExecutionMode = "workspace" | "worktree" | "github";
 export type AgentProgressPhase =
@@ -95,12 +113,17 @@ export interface AgentJobMeta {
   lastHeartbeatAt?: string;
   progress?: AgentJobProgress;
   autoIntegrate?: boolean;
+  closureState?: AgentJobClosureState;
+  closureUpdatedAt?: string;
   autoIntegrationError?: string;
   worktreeCleanedAt?: string;
+  cleanupBranchDeletedAt?: string;
   diffArtifactPath?: string;
   changeOutcome?: "changed" | "no_change" | "already_integrated";
   changedFiles?: string[];
   integrationReviewPath?: string;
+  preservationReason?: AgentJobPreservationReason;
+  preservationDetails?: string;
   terminationReason?: "timeout" | "cancelled" | "signal" | "spawn_error";
   cancellationRequestedAt?: string;
   cancellationPids?: number[];

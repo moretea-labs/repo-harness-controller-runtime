@@ -100,6 +100,13 @@ function normalizeAgentMeta(
         ? "workspace"
         : "worktree");
   meta.autoIntegrate = meta.autoIntegrate ?? meta.executionMode === "worktree";
+  meta.closureState = meta.closureState ?? (
+    meta.executionMode === "worktree" && meta.provider === "local" && !meta.integratedSessionId
+      ? "integration_pending"
+      : meta.status === "succeeded"
+        ? "completed"
+        : "none"
+  );
   meta.eventsPath =
     meta.eventsPath ??
     relative(repoRoot, eventPath(repoRoot, runId)).replace(/\\/g, "/");
@@ -707,6 +714,10 @@ function reconcileIncompleteAutoIntegration(
   const message = meta.autoIntegrationError?.trim() || "automatic worktree integration did not finish after the worker exited; the isolated worktree was preserved for manual integration";
   const progressedAt = new Date().toISOString();
   meta.status = "waiting_for_user";
+  meta.closureState = "preserved";
+  meta.closureUpdatedAt = progressedAt;
+  meta.preservationReason = meta.integrationReviewPath ? "integration_review_required" : "integration_failed";
+  meta.preservationDetails = message;
   meta.autoIntegrationError = message;
   meta.lastHeartbeatAt = progressedAt;
   delete meta.finishedAt;
