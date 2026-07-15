@@ -217,7 +217,7 @@ export function inspectProjectGovernance(repoRoot: string): ProjectGovernanceSna
   const archived = issues.filter((issue) => Boolean(issue.archivedAt));
   const findings: GovernanceFinding[] = [];
 
-  const focus = state.currentIssueId ? issues.find((issue) => issue.id === state.currentIssueId) : undefined;
+  const focus = state.currentIssueId ? active.find((issue) => issue.id === state.currentIssueId) : undefined;
   if (!focus && active.length > 1) {
     findings.push({
       id: findingId("CURRENT_ISSUE_MISSING"),
@@ -433,7 +433,7 @@ export function inspectProjectGovernance(repoRoot: string): ProjectGovernanceSna
     generatedAt: new Date().toISOString(),
     health,
     status: governanceStatusSummary({ activeIssueCount: active.length, executionQueue, findings }),
-    currentIssueId: state.currentIssueId,
+    currentIssueId: focus?.id,
     currentIssueTitle: focus?.title,
     activeIssueCount: active.length,
     archivedIssueCount: archived.length,

@@ -5,6 +5,8 @@ import { listExecutionJobs } from '../execution/jobs/store';
 import { collectRuntimePerformanceDiagnostics, type RuntimePerformanceDiagnostics } from '../diagnostics/performance';
 import { listSchedules } from '../workflow/schedules/store';
 
+const ACTIVE_AGENT_STATUSES = new Set(['queued', 'starting', 'running']);
+
 export interface WorkflowWatchdogFinding {
   severity: 'info' | 'warning' | 'critical';
   code: string;
@@ -77,7 +79,7 @@ export function buildWorkflowWatchdogReport(controllerHome: string, repository: 
       .map((job) => ({ kind: 'execution' as const, id: job.jobId, status: job.status, updatedAt: job.updatedAt, ageMinutes: ageMinutes(job.updatedAt), summary: job.payload.operation })),
     ...localJobs.filter((job) => ['approved', 'running', 'dispatched'].includes(job.status) && (ageMinutes(job.updatedAt) ?? 0) >= staleThreshold)
       .map((job) => ({ kind: 'local_bridge' as const, id: job.jobId, status: job.status, updatedAt: job.updatedAt, ageMinutes: ageMinutes(job.updatedAt), summary: job.action })),
-    ...agentJobs.filter((job) => (ageMinutes(job.progress?.lastActivityAt ?? job.lastHeartbeatAt ?? job.startedAt ?? job.createdAt) ?? 0) >= staleThreshold)
+    ...agentJobs.filter((job) => ACTIVE_AGENT_STATUSES.has(job.status) && (ageMinutes(job.progress?.lastActivityAt ?? job.lastHeartbeatAt ?? job.startedAt ?? job.createdAt) ?? 0) >= staleThreshold)
       .map((job) => {
         const updatedAt = job.progress?.lastActivityAt ?? job.lastHeartbeatAt ?? job.startedAt ?? job.createdAt;
         return { kind: 'agent' as const, id: job.runId, status: job.status, updatedAt, ageMinutes: ageMinutes(updatedAt), summary: job.progress?.currentActivity ?? job.taskId ?? job.issueId };

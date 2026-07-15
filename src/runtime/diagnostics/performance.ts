@@ -1,7 +1,7 @@
 import { execFileSync } from 'child_process';
-import { existsSync, readdirSync, statSync } from 'fs';
+import { existsSync, lstatSync, readdirSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { basename, dirname, join, resolve } from 'path';
 
 export interface RuntimeProcessSample {
   pid: number;
@@ -23,6 +23,7 @@ export interface RuntimeTempEntry {
   mtime: string;
   ageMinutes: number;
   occupiedByPid?: number;
+  symbolicLink?: boolean;
   cleanupCandidate: boolean;
 }
 
@@ -77,6 +78,8 @@ const MAX_DIAGNOSTIC_RECOMMENDATIONS = 5;
 const MAX_DIAGNOSTIC_PROCESSES = 80;
 const MAX_DIAGNOSTIC_TEMP_ENTRIES = 80;
 const MAX_DIAGNOSTIC_CLEANUP_PREVIEW = 50;
+export const RUNTIME_TEMP_RETENTION_MINUTES = 24 * 60;
+const RUNTIME_TEMP_NAME = /^repo-harness(?:[-_.]|$)/;
 
 function parseNumber(value: string | undefined): number {
   const parsed = Number(value);
@@ -198,24 +201,65 @@ export function inferLocalControllerProcess(repoRoot: string): { running: boolea
   return { running: true, pid: sample.pid, endpoint: 'http://' + host + ':' + port + '/', source: 'process-scan' };
 }
 
-function scanTempEntries(processes: RuntimeProcessSample[]): { roots: string[]; entries: RuntimeTempEntry[] } {
-  const roots = Array.from(new Set([tmpdir(), '/private/tmp'].filter((root) => existsSync(root))));
+function normalizedRuntimeTempRoots(roots?: string[]): string[] {
+  return Array.from(new Set((roots ?? [tmpdir(), '/private/tmp'])
+    .filter((root) => existsSync(root))
+    .map((root) => resolve(root))));
+}
+
+export function scanRuntimeTempEntries(
+  processes: RuntimeProcessSample[],
+  options: { roots?: string[]; minAgeMinutes?: number; maxEntries?: number } = {},
+): { roots: string[]; entries: RuntimeTempEntry[] } {
+  const roots = normalizedRuntimeTempRoots(options.roots);
+  const minAgeMinutes = options.minAgeMinutes ?? RUNTIME_TEMP_RETENTION_MINUTES;
+  const maxEntries = Math.max(1, Math.min(options.maxEntries ?? 500, 2_000));
   const now = Date.now();
   const entries: RuntimeTempEntry[] = [];
   for (const root of roots) {
     let names: string[] = [];
-    try { names = readdirSync(root).filter((name) => name.startsWith('repo-harness')); } catch (_error) { continue; }
-    for (const name of names.slice(0, 200)) {
+    try { names = readdirSync(root).filter((name) => RUNTIME_TEMP_NAME.test(name)); } catch (_error) { continue; }
+    for (const name of names.slice(0, maxEntries)) {
       const path = join(root, name);
       try {
-        const stat = statSync(path);
+        const stat = lstatSync(path);
+        const symbolicLink = stat.isSymbolicLink();
         const occupied = processes.find((process) => process.command.includes(path));
         const ageMinutes = Math.max(0, Math.round((now - stat.mtimeMs) / 60000));
-        entries.push({ path, mtime: stat.mtime.toISOString(), ageMinutes, occupiedByPid: occupied?.pid, cleanupCandidate: !occupied && ageMinutes >= 60 });
+        entries.push({
+          path,
+          mtime: stat.mtime.toISOString(),
+          ageMinutes,
+          occupiedByPid: occupied?.pid,
+          symbolicLink,
+          cleanupCandidate: !symbolicLink && !occupied && ageMinutes >= minAgeMinutes,
+        });
       } catch (_error) {}
     }
   }
   return { roots, entries: entries.sort((a, b) => b.ageMinutes - a.ageMinutes) };
+}
+
+export function removeRuntimeTempEntry(
+  path: string,
+  options: { roots?: string[]; minAgeMinutes?: number; processes?: RuntimeProcessSample[] } = {},
+): string {
+  const roots = normalizedRuntimeTempRoots(options.roots);
+  const resolvedPath = resolve(path);
+  const root = roots.find((candidate) => dirname(resolvedPath) === candidate);
+  if (!root) throw new Error('RUNTIME_TEMP_PATH_OUTSIDE_ROOT');
+  if (!RUNTIME_TEMP_NAME.test(basename(resolvedPath))) throw new Error('RUNTIME_TEMP_NAME_INVALID');
+  const stat = lstatSync(resolvedPath);
+  if (stat.isSymbolicLink()) throw new Error('RUNTIME_TEMP_SYMLINK_REFUSED');
+  const minAgeMinutes = options.minAgeMinutes ?? RUNTIME_TEMP_RETENTION_MINUTES;
+  const ageMinutes = Math.max(0, Math.round((Date.now() - stat.mtimeMs) / 60000));
+  if (ageMinutes < minAgeMinutes) throw new Error(`RUNTIME_TEMP_TOO_RECENT: ${ageMinutes}m < ${minAgeMinutes}m`);
+  const processes = options.processes ?? collectRuntimeProcesses();
+  if (processes.some((process) => process.command.includes(resolvedPath) || process.command.includes(path))) {
+    throw new Error('RUNTIME_TEMP_ENTRY_OCCUPIED');
+  }
+  rmSync(resolvedPath, { recursive: stat.isDirectory(), force: true });
+  return resolvedPath;
 }
 
 export function collectRuntimePerformanceDiagnostics(input: DiagnosticsInput): RuntimePerformanceDiagnostics {
@@ -236,7 +280,9 @@ export function collectRuntimePerformanceDiagnostics(input: DiagnosticsInput): R
   const highCpuPeerMcp = peerMcpProcesses;
   const localController = repoProcesses.find((process) => process.kind === 'local-controller');
   const localControllerRunning = localController !== undefined || input.localControllerRunning === true;
-  const temp = input.includeTempDirs === false ? { roots: [] as string[], entries: [] as RuntimeTempEntry[] } : scanTempEntries(processes);
+  const temp = input.includeTempDirs === false
+    ? { roots: [] as string[], entries: [] as RuntimeTempEntry[] }
+    : scanRuntimeTempEntries(processes);
   const findings: RuntimePerformanceDiagnostics['findings'] = [];
   if (orphanWorkers.length > 0) findings.push({ severity: orphanWorkers.length >= 3 ? 'critical' : 'warning', code: 'ORPHAN_WORKERS', message: 'Detected ' + orphanWorkers.length + ' orphan worker process(es).' });
   const totalCpu = Math.round(repoProcesses.reduce((sum, process) => sum + process.cpu, 0) * 10) / 10;
@@ -244,7 +290,8 @@ export function collectRuntimePerformanceDiagnostics(input: DiagnosticsInput): R
   if (highCpuPeerMcp.length > 0) findings.push({ severity: 'warning', code: 'HIGH_CPU_PEER_MCP', message: 'Detected ' + highCpuPeerMcp.length + ' high-CPU MCP process(es) owned by another repository.' });
   if (staleControllerDaemons.length > 0) findings.push({ severity: 'warning', code: 'STALE_CONTROLLER_DAEMONS', message: 'Detected ' + staleControllerDaemons.length + ' detached stale controller daemon(s).' });
   if ((input.queueDepth ?? 0) === 0 && (input.runningWorkers ?? 0) === 0 && orphanWorkers.length > 0) findings.push({ severity: 'critical', code: 'CONTROL_PLANE_IDLE_HOST_BUSY', message: 'Controller queue is idle but host still has orphan worker process(es).' });
-  if (temp.entries.length >= 100) findings.push({ severity: 'warning', code: 'TEMP_DIR_ACCUMULATION', message: 'Detected ' + temp.entries.length + ' repo-harness temp entries.' });
+  const tempCleanupCandidates = temp.entries.filter((entry) => entry.cleanupCandidate);
+  if (tempCleanupCandidates.length >= 100) findings.push({ severity: 'warning', code: 'TEMP_DIR_ACCUMULATION', message: 'Detected ' + tempCleanupCandidates.length + ' stale repo-harness temp entries.' });
   if (!localController && input.localControllerRunning !== true) findings.push({ severity: 'info', code: 'LOCAL_CONTROLLER_NOT_IN_PROCESS_LIST', message: 'No Local Controller process was found for this repository.' });
   const cleanupProcessCandidates = [...orphanWorkers, ...highCpuPeerMcp, ...staleControllerDaemons]
     .filter((sample, index, samples) => samples.findIndex((candidate) => candidate.pid === sample.pid) === index);
@@ -253,7 +300,7 @@ export function collectRuntimePerformanceDiagnostics(input: DiagnosticsInput): R
   const summary = buildRuntimeDiagnosticSummary(status, findings);
   const recommendations = status === 'normal' ? ['No restart is recommended from this diagnostic snapshot.'] : [
     ...(orphanWorkers.length ? ['Terminate orphan workers only after reviewing cleanupPreview.safeToTerminate.'] : []),
-    ...(temp.entries.some((entry) => entry.cleanupCandidate) ? ['Remove stale temp entries only after reviewing cleanupPreview.safeToRemoveTempEntries.'] : []),
+    ...(tempCleanupCandidates.length ? ['Remove stale temp entries through runtime_maintenance_apply after reviewing cleanupPreview.safeToRemoveTempEntries.'] : []),
     ...(highCpu.length ? ['Inspect highCpuProcesses before restarting the controller stack.'] : []),
   ];
   return {
@@ -269,13 +316,13 @@ export function collectRuntimePerformanceDiagnostics(input: DiagnosticsInput): R
     temp: {
       scannedRoots: temp.roots,
       totalEntries: temp.entries.length,
-      cleanupCandidates: temp.entries.filter((entry) => entry.cleanupCandidate).length,
+      cleanupCandidates: tempCleanupCandidates.length,
       entries: temp.entries.slice(0, MAX_DIAGNOSTIC_TEMP_ENTRIES),
     },
     cleanupPreview: input.cleanupPreview === true
       ? {
         safeToTerminate: rawCleanupProcesses,
-        safeToRemoveTempEntries: temp.entries.filter((entry) => entry.cleanupCandidate).slice(0, MAX_DIAGNOSTIC_CLEANUP_PREVIEW),
+        safeToRemoveTempEntries: tempCleanupCandidates.slice(0, MAX_DIAGNOSTIC_CLEANUP_PREVIEW),
         requiresConfirmation: true,
       }
       : undefined,
@@ -284,7 +331,7 @@ export function collectRuntimePerformanceDiagnostics(input: DiagnosticsInput): R
       processes: repoProcesses.length > MAX_DIAGNOSTIC_PROCESSES,
       tempEntries: temp.entries.length > MAX_DIAGNOSTIC_TEMP_ENTRIES,
       cleanupPreview: cleanupProcessCandidates.length > MAX_DIAGNOSTIC_CLEANUP_PREVIEW
-        || temp.entries.filter((entry) => entry.cleanupCandidate).length > MAX_DIAGNOSTIC_CLEANUP_PREVIEW,
+        || tempCleanupCandidates.length > MAX_DIAGNOSTIC_CLEANUP_PREVIEW,
       recommendations: recommendations.length > MAX_DIAGNOSTIC_RECOMMENDATIONS,
     },
     findings,

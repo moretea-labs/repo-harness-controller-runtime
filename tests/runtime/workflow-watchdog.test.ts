@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { spawnSync } from 'child_process';
@@ -29,5 +29,27 @@ describe('workflow watchdog', () => {
     expect(report.repoId).toBe(repository.repoId);
     expect(report.queues.schedules.total).toBe(0);
     expect(report.recoveryPlan.every((entry) => entry.risk !== 'destructive')).toBe(true);
+  });
+
+  it('does not classify terminal Agent Runs as stale active work', () => {
+    const { controllerHome, repository } = fixture();
+    const runRoot = join(repository.canonicalRoot, '.ai/harness/jobs', 'RUN-terminal');
+    mkdirSync(runRoot, { recursive: true });
+    writeFileSync(join(runRoot, 'meta.json'), `${JSON.stringify({
+      schemaVersion: 1,
+      runId: 'RUN-terminal',
+      issueId: 'ISS-test',
+      taskId: 'T1',
+      status: 'succeeded',
+      provider: 'local',
+      agent: 'codex',
+      createdAt: '2026-07-01T00:00:00.000Z',
+      finishedAt: '2026-07-01T00:01:00.000Z',
+      lastHeartbeatAt: '2026-07-01T00:01:00.000Z',
+      progress: { lastActivityAt: '2026-07-01T00:01:00.000Z', currentActivity: 'done' },
+    }, null, 2)}\n`);
+    const report = buildWorkflowWatchdogReport(controllerHome, repository, { includeProcesses: false, staleMinutes: 10 });
+    expect(report.staleWork.some((entry) => entry.id === 'RUN-terminal')).toBe(false);
+    expect(report.findings.some((entry) => entry.code === 'STALE_WORK_ITEMS')).toBe(false);
   });
 });

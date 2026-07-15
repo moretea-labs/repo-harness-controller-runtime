@@ -15,7 +15,7 @@ import type {
   TaskVerification,
   TaskReadiness,
 } from './types';
-import { loadControllerProjectState, saveControllerProjectState } from './project-state';
+import { clearCurrentIssue, loadControllerProjectState, saveControllerProjectState } from './project-state';
 import { readActiveRunEvidence, readIssueRunEvidence, readTaskRunEvidence } from './run-evidence';
 import {
   resolveEffectiveTaskState,
@@ -162,6 +162,10 @@ function writeIssue(repoRoot: string, issue: ControllerIssue): ControllerIssue {
   }
   writeFileSync(expectedJson, `${JSON.stringify(issue, null, 2)}\n`, 'utf-8');
   writeFileSync(expectedMarkdown, renderIssueMarkdown(issue), 'utf-8');
+  const projectState = loadControllerProjectState(repoRoot);
+  if (projectState.currentIssueId === issue.id && (issue.archivedAt || ['done', 'cancelled'].includes(issue.status))) {
+    clearCurrentIssue(repoRoot, 'issue-terminal-convergence');
+  }
   return issue;
 }
 
@@ -942,6 +946,10 @@ export function projectBoard(repoRoot: string): {
 } {
   const issues = listIssues(repoRoot);
   const projectState = loadControllerProjectState(repoRoot);
+  const currentIssueId = projectState.currentIssueId
+    && issues.some((issue) => issue.id === projectState.currentIssueId && !issue.archivedAt && !['done', 'cancelled'].includes(issue.status))
+    ? projectState.currentIssueId
+    : undefined;
   const counts: Record<string, number> = {};
   const declaredCounts: Record<string, number> = {};
   const archivedCounts: Record<string, number> = {};
@@ -985,7 +993,7 @@ export function projectBoard(repoRoot: string): {
         github: issue.github,
         archivedAt: issue.archivedAt,
         updatedAt: issue.updatedAt,
-        isCurrent: issue.id === projectState.currentIssueId,
+        isCurrent: issue.id === currentIssueId,
         tasks: issue.tasks.map((task) => {
           const state = states.get(task.id)!;
           const readiness = readinessByTask.get(`${issue.id}/${task.id}`)!;
@@ -1029,7 +1037,7 @@ export function projectBoard(repoRoot: string): {
     // Every active Issue contributes independent Tasks. Current focus is informational only.
     readyTasks,
     queueableTasks,
-    currentIssueId: projectState.currentIssueId,
+    currentIssueId,
     archivedIssueCount: issues.filter((issue) => Boolean(issue.archivedAt)).length,
   };
 }

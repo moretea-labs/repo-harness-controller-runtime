@@ -4,7 +4,7 @@
   "title": "Fix Campaign dispatch and durable Run closure",
   "slug": "fix-campaign-dispatch-and-durable-run-closure",
   "kind": "investigation",
-  "status": "planned",
+  "status": "done",
   "summary": "Work directly in the canonical current checkout on main. First fix Campaign quick-agent dispatch so task title/objective are propagated and workspace.mode=current with arguments.isolate=false is honored instead of being forced to an isolated worktree. Add regression tests. Then implement durable Run closure: explicit integration/cleanup state, no premature succeeded terminal state, restart-resumable and idempotent finish, safe worktree/temporary branch cleanup, preservation with explicit reasons for dirty/active/protected/unknown/unmerged cases, historical orphan reconciliation, main-occupancy diagnosis, and Needs Attention projection. Inspect exact relevant source only, run focused tests, package:check:type and package:check:controller-v8, commit locally on main, leave clean, do not push.",
   "goals": [
     "Work directly in the canonical current checkout on main. First fix Campaign quick-agent dispatch so task title/objective are propagated and workspace.mode=current with arguments.isolate=false is honored instead of being forced to an isolated worktree. Add regression tests. Then implement durable Run closure: explicit integration/cleanup state, no premature succeeded terminal state, restart-resumable and idempotent finish, safe worktree/temporary branch cleanup, preservation with explicit reasons for dirty/active/protected/unknown/unmerged cases, historical orphan reconciliation, main-occupancy diagnosis, and Needs Attention projection. Inspect exact relevant source only, run focused tests, package:check:type and package:check:controller-v8, commit locally on main, leave clean, do not push."
@@ -25,7 +25,7 @@
       "id": "T1",
       "title": "Fix Campaign dispatch and durable Run closure",
       "objective": "Work directly in the canonical current checkout on main. First fix Campaign quick-agent dispatch so task title/objective are propagated and workspace.mode=current with arguments.isolate=false is honored instead of being forced to an isolated worktree. Add regression tests. Then implement durable Run closure: explicit integration/cleanup state, no premature succeeded terminal state, restart-resumable and idempotent finish, safe worktree/temporary branch cleanup, preservation with explicit reasons for dirty/active/protected/unknown/unmerged cases, historical orphan reconciliation, main-occupancy diagnosis, and Needs Attention projection. Inspect exact relevant source only, run focused tests, package:check:type and package:check:controller-v8, commit locally on main, leave clean, do not push.",
-      "status": "blocked",
+      "status": "done",
       "dependsOn": [],
       "allowedPaths": [
         "src/runtime/workflow/campaigns/**",
@@ -63,17 +63,18 @@
       "notes": [
         "Accepted RUN-iss-20260712-14ba0c-t1-1783858648854-274c91fd for asynchronous launch.",
         "Dispatched RUN-iss-20260712-14ba0c-t1-1783858648854-274c91fd to codex.",
-        "RUN-iss-20260712-14ba0c-t1-1783858648854-274c91fd ended as unknown; explicit retry is required. worker process is no longer running and no result file was produced"
+        "RUN-iss-20260712-14ba0c-t1-1783858648854-274c91fd ended as unknown; explicit retry is required. worker process is no longer running and no result file was produced",
+        "Implemented and integrated on main through commits 0fd5d85d and a96b321d, with focused Campaign/direct-current/isolated workspace, delegation lifecycle, integration recovery, completion, orphan recovery, TypeScript, task workflow and Controller V8 validation. The original isolated worktree commit 6e08bb92 was patch-equivalent and safely removed. Durable Run closure now persists integration/cleanup/preservation phases and exposes bounded closure fields. Marking the stale blocked task done to remove it from current focus and retry attention."
       ],
       "runIds": [
         "RUN-iss-20260712-14ba0c-t1-1783858648854-274c91fd"
       ],
       "createdAt": "2026-07-12T12:17:28.847Z",
-      "updatedAt": "2026-07-12T12:29:08.884Z",
+      "updatedAt": "2026-07-15T10:59:58.395Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     }
   ],
   "createdAt": "2026-07-12T12:17:28.847Z",
-  "updatedAt": "2026-07-12T12:29:08.884Z",
+  "updatedAt": "2026-07-15T10:59:58.395Z",
   "repoId": "repo_123b7cf58b6b17b5cbe46a56"
 }

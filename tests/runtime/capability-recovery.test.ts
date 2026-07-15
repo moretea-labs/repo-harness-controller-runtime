@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'bun:test';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { afterEach, describe, expect, it } from 'bun:test';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import {
@@ -22,6 +22,12 @@ import {
   previewExternalFilesystemGrant,
   readExternalFilesystemSnapshot,
 } from '../../src/runtime/safe-tooling';
+
+const temporaryRoots: string[] = [];
+
+afterEach(() => {
+  for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
 
 describe('capability recovery classifier', () => {
   it('classifies platform blocks without treating them as local failures', () => {
@@ -195,6 +201,7 @@ describe('authorized recovery actions', () => {
 describe('runtime maintenance executor', () => {
   function tempRepo() {
     const root = mkdtempSync(join(tmpdir(), 'repo-harness-maintenance-test-'));
+    temporaryRoots.push(root);
     const controllerHome = join(root, '_controller_home');
     const localJobs = join(root, '.ai/harness/local-jobs');
     mkdirSync(localJobs, { recursive: true });
@@ -243,6 +250,40 @@ describe('runtime maintenance executor', () => {
     expect(legacyApplied || typedApplied).toBe(true);
   });
 
+  it('removes only stale direct repo-harness temp entries during full maintenance', () => {
+    const { root, controllerHome, repository } = tempRepo();
+    const runtimeTempRoot = join(root, 'system-temp');
+    mkdirSync(runtimeTempRoot, { recursive: true });
+    const staleEntry = join(runtimeTempRoot, 'repo-harness-old-entry');
+    const recentEntry = join(runtimeTempRoot, 'repo-harness-recent-entry');
+    const target = join(runtimeTempRoot, 'target.txt');
+    const symbolicLink = join(runtimeTempRoot, 'repo-harness-symlink');
+    mkdirSync(staleEntry, { recursive: true });
+    mkdirSync(recentEntry, { recursive: true });
+    writeFileSync(target, 'preserve');
+    symlinkSync(target, symbolicLink);
+    const old = new Date(Date.now() - 26 * 60 * 60 * 1_000);
+    utimesSync(staleEntry, old, old);
+
+    const boundedRepository = { ...repository, runtimeTempRoots: [runtimeTempRoot] };
+    const status = buildRuntimeMaintenanceStatus(boundedRepository, controllerHome, { minAgeMinutes: 0, maxCandidates: 50 });
+    expect(status.readyForExecution).toBe(true);
+    expect(status.summary.staleRuntimeTempEntries).toBe(1);
+    expect(status.candidates.filter((candidate) => candidate.kind === 'stale_runtime_temp_entry').map((candidate) => candidate.path)).toEqual([staleEntry]);
+
+    const applied = applyRuntimeMaintenance(boundedRepository, controllerHome, {
+      actionId: 'full_maintenance_pass',
+      confirmMaintenance: true,
+      minAgeMinutes: 0,
+      maxCandidates: 50,
+    });
+    expect(applied.applied.some((candidate) => candidate.kind === 'stale_runtime_temp_entry' && candidate.applied)).toBe(true);
+    expect(existsSync(staleEntry)).toBe(false);
+    expect(existsSync(recentEntry)).toBe(true);
+    expect(existsSync(symbolicLink)).toBe(true);
+    expect(readFileSync(target, 'utf8')).toBe('preserve');
+  });
+
   it('plans model repair only after bounded local recovery and restart fallback', () => {
     const plan = buildSelfHealingLoopPlan({
       objective: 'fix repeated TypeError in recovery apply',
@@ -287,6 +328,7 @@ describe('auth and external filesystem handoffs', () => {
   it('previews, applies, and reads bounded external filesystem targets', () => {
     const repoRoot = mkdtempSync(join(tmpdir(), 'repo-harness-external-fs-repo-'));
     const externalRoot = mkdtempSync(join(tmpdir(), 'repo-harness-external-fs-target-'));
+    temporaryRoots.push(repoRoot, externalRoot);
     writeFileSync(join(externalRoot, 'note.txt'), 'hello external');
     const preview = previewExternalFilesystemGrant(repoRoot, {
       grant_key: 'notes',

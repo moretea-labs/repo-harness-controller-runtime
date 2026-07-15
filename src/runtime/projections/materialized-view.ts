@@ -69,6 +69,7 @@ function buildRepositoryProjection(
   // active/unresolved records should influence "current readiness" decisions.
   const currentAttentionJobs = attentionJobs.filter((job) => !job.finishedAt || activeJobIds.has(job.jobId));
   const campaigns = listCampaigns(controllerHome, repoId, 1_000);
+  const reviewableCampaigns = campaigns.filter((campaign) => ['active', 'waiting_for_supervisor'].includes(campaign.status));
   const repository = listRepositories(controllerHome).find((entry) => entry.repoId === repoId);
   const plugins = repository ? listAssistantPluginManifests(controllerHome, repository, {
     preferStored: true,
@@ -104,7 +105,7 @@ function buildRepositoryProjection(
     campaigns: {
       active: campaigns.filter((campaign) => campaign.status === 'active').length,
       waitingForSupervisor: campaigns.filter((campaign) => campaign.status === 'waiting_for_supervisor').length,
-      pendingReviews: campaigns.reduce((count, campaign) => count + campaign.checkpoints.filter((checkpoint) => checkpoint.status === 'open').length, 0),
+      pendingReviews: reviewableCampaigns.reduce((count, campaign) => count + campaign.checkpoints.filter((checkpoint) => checkpoint.status === 'open').length, 0),
       readyForHumanAcceptance: campaigns.filter((campaign) => campaign.status === 'ready_for_human_acceptance').length,
     },
   };

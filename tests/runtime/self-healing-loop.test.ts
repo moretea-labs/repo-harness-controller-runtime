@@ -96,6 +96,17 @@ describe('self-healing loop', () => {
     expect(result.suggestedNextActions.some((action) => action.tool === 'rh_status' && action.operation === 'get')).toBe(true);
   });
 
+  test('diagnose reports stale durable scheduler as a controller recovery issue', () => {
+    const { ctx } = fixture();
+    const result = runSelfHealingLoop(ctx, {
+      operation: 'diagnose',
+      diagnostics: { schedulerUnhealthy: true },
+    });
+    const issues = (result.data as { issues: Array<{ kind: string }> }).issues;
+    expect(issues.map((issue) => issue.kind)).toContain('durable_scheduler_health');
+    expect(result.summary).toContain('Diagnosed 1 self-healing issue');
+  });
+
   test('ChatGPT pull failure is not task acceptance failure', () => {
     const { ctx } = fixture();
     const result = runSelfHealingLoop(ctx, {

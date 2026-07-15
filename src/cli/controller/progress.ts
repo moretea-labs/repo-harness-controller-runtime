@@ -415,8 +415,12 @@ export function getProjectProgress(repoRoot: string): ProjectProgressSnapshot {
   const now = Date.now();
   const allIssues = listIssues(repoRoot);
   const state = loadControllerProjectState(repoRoot);
+  const currentIssueId = state.currentIssueId
+    && allIssues.some((issue) => issue.id === state.currentIssueId && !issue.archivedAt && !['done', 'cancelled'].includes(issue.status))
+    ? state.currentIssueId
+    : undefined;
   const runs = listAgentJobs(repoRoot, 5000);
-  const views = allIssues.map((issue) => issueProgress(repoRoot, issue, state.currentIssueId));
+  const views = allIssues.map((issue) => issueProgress(repoRoot, issue, currentIssueId));
   const issues = views.filter((issue) => !issue.archivedAt);
   const archivedIssues = views.filter((issue) => Boolean(issue.archivedAt));
   const totals: Record<string, number> = {};
@@ -466,7 +470,7 @@ export function getProjectProgress(repoRoot: string): ProjectProgressSnapshot {
     taskCount: allIssues.reduce((sum, issue) => sum + issue.tasks.length, 0),
     activeRunCount: runs.filter((run) => ACTIVE_RUNS.has(run.status)).length,
     completedTaskCount: countedTasks.filter((task) => task.effectiveStatus === "done").length,
-    currentIssueId: state.currentIssueId,
+    currentIssueId,
     totals,
     throughput: {
       completedLast24Hours,

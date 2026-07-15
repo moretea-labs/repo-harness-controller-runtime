@@ -1343,6 +1343,7 @@ function runFacadeRepair(
   }
 
   const daemon = readControllerDaemonStatus(ctx.controllerHome);
+  const readiness = controllerReadiness(ctx, repository);
   const facade = runSelfHealingLoop(
     { repoId: repository.repoId, handoffStore: store },
     {
@@ -1361,6 +1362,7 @@ function runFacadeRepair(
         watchdogSummary,
         performanceSummary,
         controllerDaemonUnhealthy: daemon.status !== 'ready',
+        schedulerUnhealthy: readiness.durableScheduler.status !== 'ready',
         codexUnavailable: args.codex_available === false,
         grokUnavailable: args.grok_available === false || args.target === 'grok',
         pluginUnavailable: args.plugin_unavailable === true,

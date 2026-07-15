@@ -129,6 +129,15 @@ describe("Controller v6 effective Task state", () => {
     expect(state.dispatchable).toBe(false);
   });
 
+  test("terminal Task ignores retry requirements from historical failed Run evidence", () => {
+    const value = task("done", { runIds: ["RUN-failed"] });
+    const state = resolveEffectiveTaskState({ issue: issue(value, "done"), task: value, runs: [run("failed")] });
+    expect(state.effectiveStatus).toBe("done");
+    expect(state.retryable).toBe(false);
+    expect(state.requiresExplicitRetry).toBe(false);
+    expect(state.dispatchable).toBe(false);
+  });
+
   test("active Run only overrides a non-terminal active Task", () => {
     const value = task("ready", { runIds: ["RUN-running"] });
     const state = resolveEffectiveTaskState({ issue: issue(value), task: value, runs: [run("running")] });

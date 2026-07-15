@@ -16,6 +16,7 @@ export type SelfHealingIssueKind =
   | 'plugin_capability_unavailable'
   | 'codex_claude_unavailable'
   | 'controller_daemon_health'
+  | 'durable_scheduler_health'
   | 'local_bridge_health';
 
 export interface SelfHealingIssue {
@@ -51,6 +52,7 @@ export interface SelfHealingInput {
     grokUnavailable?: boolean;
     pluginUnavailable?: boolean;
     controllerDaemonUnhealthy?: boolean;
+    schedulerUnhealthy?: boolean;
     localBridgeUnhealthy?: boolean;
   };
   /** ChatGPT pull failure must not become task failure. */
@@ -148,6 +150,16 @@ function defaultDiagnoseIssues(input: SelfHealingInput): SelfHealingIssue[] {
       suggestedAction: 'restart_controller_or_bridge',
     });
   }
+  if (input.diagnostics?.schedulerUnhealthy) {
+    issues.push({
+      kind: 'durable_scheduler_health',
+      summary: 'Durable scheduler heartbeat is stale or unavailable.',
+      severity: 'error',
+      safeToAutoRepair: false,
+      requiresApproval: true,
+      suggestedAction: 'restart_controller_or_bridge',
+    });
+  }
   if (input.diagnostics?.localBridgeUnhealthy) {
     issues.push({
       kind: 'local_bridge_health',
@@ -206,6 +218,7 @@ function repairPlanFor(issue: SelfHealingIssue): {
         risk: 'readonly',
       };
     case 'controller_daemon_health':
+    case 'durable_scheduler_health':
     case 'local_bridge_health':
       return {
         action: 'restart_controller_or_bridge',

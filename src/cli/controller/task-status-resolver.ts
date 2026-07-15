@@ -175,7 +175,10 @@ function finalizeState(
 ): EffectiveTaskState {
   const latestRunStatus = base.latestRunStatus;
   const requiresExplicitRetry =
-    latestRunStatus !== undefined && RETRYABLE_RUN.has(latestRunStatus);
+    !terminal &&
+    !inactive &&
+    latestRunStatus !== undefined &&
+    RETRYABLE_RUN.has(latestRunStatus);
   const dispatchable =
     !terminal &&
     !inactive &&

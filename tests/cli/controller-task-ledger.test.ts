@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { createIssue, updateTask } from "../../src/cli/controller/issue-store";
+import { createIssue, updateIssue, updateTask } from "../../src/cli/controller/issue-store";
 import {
   buildControllerTaskLedgerProjection,
   controllerTaskLedgerArtifactPaths,
@@ -53,6 +53,22 @@ describe("controller task ledger projection", () => {
     expect(projection.status.nextAction).toContain("inspect raw diff");
     expect(projection.suggestedNextActions.join("\n")).toContain("Review Task");
     expect(projection.contextContract.rawCodeRequiredForImplementation).toBe(true);
+  });
+
+  test("clears current focus when the selected Issue becomes terminal", () => {
+    const root = repo();
+    const issue = createIssue(root, {
+      title: "Terminal focus",
+      summary: "Terminal issues must leave current focus.",
+      tasks: [{ title: "Finish", objective: "Complete the issue." }],
+    });
+    expect(buildControllerTaskLedgerProjection(root).currentIssueId).toBe(issue.id);
+
+    updateIssue(root, issue.id, { status: "done" });
+
+    const projection = buildControllerTaskLedgerProjection(root);
+    expect(projection.currentIssueId).toBeUndefined();
+    expect(projection.attention).toHaveLength(0);
   });
 
   test("writes JSON and markdown handoff artifacts for fresh-session recovery", () => {

@@ -1,8 +1,15 @@
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs';
 import { basename, dirname, join, relative, resolve } from 'path';
+import { tmpdir } from 'os';
 import { ensureRepositoryRuntimeStorage, type RepositoryRuntimeStorageReport } from '../../cli/repositories/runtime-storage';
 import type { RepositoryRecord } from '../../cli/repositories/types';
 import { rebuildRepositoryProjection } from '../projections/materialized-view';
+import {
+  collectRuntimeProcesses,
+  removeRuntimeTempEntry,
+  RUNTIME_TEMP_RETENTION_MINUTES,
+  scanRuntimeTempEntries,
+} from '../diagnostics/performance';
 import { classifyFailure, dominantRecoveryClass } from './classifier';
 import type { RecoveryClass } from './types';
 import {
@@ -24,11 +31,14 @@ export type RuntimeMaintenanceCandidateKind =
   | 'pending_approval_local_job'
   | 'unreadable_local_job'
   | 'missing_job_metadata'
-  | 'runtime_storage_warning';
+  | 'runtime_storage_warning'
+  | 'stale_runtime_temp_entry';
 
 export interface RuntimeMaintenanceRepository {
   repoId: string;
   canonicalRoot: string;
+  /** Test-only or embedded-runtime override. Production defaults to system temp roots. */
+  runtimeTempRoots?: string[];
 }
 
 export interface RuntimeMaintenanceOptions {
@@ -75,6 +85,7 @@ export interface RuntimeMaintenanceSummary {
   unreadableLocalJobs: number;
   missingJobMetadata: number;
   runtimeStorageWarnings: number;
+  staleRuntimeTempEntries: number;
 }
 
 export interface RuntimeMaintenanceStatus {
@@ -161,7 +172,7 @@ interface LocalJobState {
 }
 
 const VALID_MAINTENANCE_ACTIONS = new Set<RuntimeMaintenanceActionId>(['local_jobs_reconcile', 'quarantine_unreadable_local_jobs', 'runtime_storage_finalize_relocation', 'rebuild_projection', 'full_maintenance_pass']);
-export const AUTOMATIC_RUNTIME_MAINTENANCE_ACTION_ALLOWLIST = new Set<RuntimeMaintenanceActionId>(['local_jobs_reconcile']);
+export const AUTOMATIC_RUNTIME_MAINTENANCE_ACTION_ALLOWLIST = new Set<RuntimeMaintenanceActionId>(['local_jobs_reconcile', 'full_maintenance_pass']);
 const ACTIVE_LOCAL_JOB_STATUSES = new Set(['pending_approval', 'approved', 'dispatched', 'running']);
 const TERMINAL_LOCAL_JOB_STATUSES = new Set(['succeeded', 'failed', 'cancelled', 'timed_out', 'orphaned', 'stale', 'rejected']);
 const DEFAULT_MIN_AGE_MINUTES = 10;
@@ -238,6 +249,7 @@ function summarize(candidates: RuntimeMaintenanceCandidate[]): RuntimeMaintenanc
     unreadableLocalJobs: candidates.filter((candidate) => candidate.kind === 'unreadable_local_job').length,
     missingJobMetadata: candidates.filter((candidate) => candidate.kind === 'missing_job_metadata').length,
     runtimeStorageWarnings: candidates.filter((candidate) => candidate.kind === 'runtime_storage_warning').length,
+    staleRuntimeTempEntries: candidates.filter((candidate) => candidate.kind === 'stale_runtime_temp_entry').length,
   };
 }
 
@@ -365,6 +377,37 @@ function scanLocalJobCandidates(repoRoot: string, options: Required<RuntimeMaint
   return candidates.slice(0, options.maxCandidates);
 }
 
+function pathAtOrWithin(root: string, path: string): boolean {
+  const rel = relative(resolve(root), resolve(path));
+  return rel === '' || (!rel.startsWith('..') && !rel.includes('../'));
+}
+
+function scanRuntimeTempCandidates(
+  repository: RuntimeMaintenanceRepository,
+  maxCandidates: number,
+): RuntimeMaintenanceCandidate[] {
+  const explicitRoots = repository.runtimeTempRoots;
+  const defaultRoots = [tmpdir(), '/private/tmp'].filter((root) => existsSync(root));
+  if (!explicitRoots && defaultRoots.some((root) => pathAtOrWithin(root, repository.canonicalRoot))) return [];
+  const scan = scanRuntimeTempEntries(collectRuntimeProcesses(), {
+    roots: explicitRoots,
+    minAgeMinutes: RUNTIME_TEMP_RETENTION_MINUTES,
+    maxEntries: Math.max(maxCandidates * 3, 500),
+  });
+  return scan.entries
+    .filter((entry) => entry.cleanupCandidate)
+    .slice(0, maxCandidates)
+    .map((entry) => ({
+      kind: 'stale_runtime_temp_entry',
+      id: `runtime-temp-${safeId(entry.path)}`,
+      path: entry.path,
+      safe: true,
+      reason: `Repo-harness temp entry is unoccupied, not a symbolic link, and ${entry.ageMinutes} minute(s) old.`,
+      ageMinutes: entry.ageMinutes,
+      suggestedAction: 'full_maintenance_pass',
+    }));
+}
+
 function normalizedOptions(options: RuntimeMaintenanceOptions = {}): Required<RuntimeMaintenanceOptions> {
   return {
     minAgeMinutes: clampNumber(options.minAgeMinutes, DEFAULT_MIN_AGE_MINUTES, 0, 7 * 24 * 60),
@@ -454,11 +497,13 @@ export function buildRuntimeMaintenanceStatus(
   });
   const localJobCandidates = scanLocalJobCandidates(repository.canonicalRoot, normalized);
   const storageCandidates = runtimeStorageCandidates(storage.report);
-  const candidates = [...localJobCandidates, ...storageCandidates].slice(0, normalized.maxCandidates);
+  const tempCandidates = scanRuntimeTempCandidates(repository, normalized.maxCandidates);
+  const candidates = [...localJobCandidates, ...storageCandidates, ...tempCandidates].slice(0, normalized.maxCandidates);
   const summary = summarize(candidates);
+  const blockingCandidates = candidates.filter((candidate) => candidate.kind !== 'stale_runtime_temp_entry');
   const readyForExecution = storage.report?.readyForExecution === true
-    && summary.safeCandidates === 0
-    && summary.unsafeCandidates === 0
+    && blockingCandidates.filter((candidate) => candidate.safe).length === 0
+    && blockingCandidates.filter((candidate) => !candidate.safe).length === 0
     && runtimeStorageRepair.safeCandidateCount === 0
     && runtimeStorageRepair.unsafeCandidateCount === 0;
   return {
@@ -497,6 +542,7 @@ export function buildRuntimeMaintenanceStatus(
     warnings: [
       'Runtime maintenance only edits repo-harness metadata under .ai/harness and controller-home for the selected repository.',
       'Pending approvals are not cancelled unless cancel_pending_approvals is explicitly enabled.',
+      'System temp cleanup only removes direct repo-harness-prefixed children of approved temp roots after a 24-hour retention period and a fresh process-occupancy check.',
       'Source repair should be delegated to ChatGPT/Codex/DeepSeek only after local maintenance and restart fallbacks fail.',
     ],
   };
@@ -703,6 +749,17 @@ export function applyRuntimeMaintenance(
       }
       if (candidate.kind === 'unreadable_local_job' || candidate.kind === 'missing_job_metadata') {
         return { ...candidate, applied: true, result: quarantineLocalJob(repository.canonicalRoot, candidate) };
+      }
+      if (candidate.kind === 'stale_runtime_temp_entry') {
+        if (!candidate.path) throw new Error('RUNTIME_TEMP_PATH_MISSING');
+        return {
+          ...candidate,
+          applied: true,
+          result: removeRuntimeTempEntry(candidate.path, {
+            roots: repository.runtimeTempRoots,
+            minAgeMinutes: RUNTIME_TEMP_RETENTION_MINUTES,
+          }),
+        };
       }
       return { ...candidate, applied: false, result: 'unsupported_candidate' };
     } catch (error) {
