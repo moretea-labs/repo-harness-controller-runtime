@@ -6,7 +6,7 @@ import { fileURLToPath } from "url";
 import { listAgentJobs, reconcileAgentJobs } from "../agent-jobs/job-manager";
 import { bootoutRepoLaunchAgents, findRepoLaunchAgents } from "./launch-agents";
 import { CONTROLLER_LIFECYCLE_OWNER_ENV } from "./lifecycle-authority";
-import { listLocalBridgeJobs, reconcileLocalBridgeJobs } from "../local-bridge/job-store";
+import { listLocalBridgeJobs, loadLocalBridgeConfig, reconcileLocalBridgeJobs } from "../local-bridge/job-store";
 import {
   loadMcpLocalConfig,
   loadMcpRuntimeState,
@@ -441,6 +441,7 @@ function resolveServiceConfig(repoRoot: string, explicitLogFile?: string, explic
   mcpPort: number;
   localControllerHost: string;
   localControllerPort: number;
+  allowLanMobileIntents: boolean;
   tunnelMode: "none" | "quick" | "named" | "tailscale";
   publicEndpoint?: string;
   toolset: "core" | "advanced" | "full";
@@ -454,6 +455,7 @@ function resolveServiceConfig(repoRoot: string, explicitLogFile?: string, explic
 } {
   const controllerHome = resolveRepoPreferredControllerHome(repoRoot, explicitControllerHome);
   const localConfig = loadMcpServiceLocalConfig(controllerHome, repoRoot) ?? loadMcpLocalConfig(repoRoot);
+  const localBridgeConfig = loadLocalBridgeConfig(repoRoot);
   const runtime = loadMcpServiceRuntimeState(controllerHome, repoRoot) ?? loadMcpRuntimeState(repoRoot);
   const publicEndpoint = normalizeKeepalivePublicEndpoint(localConfig?.chatgpt?.endpoint);
   const tunnelMode = publicEndpoint || runtime?.tunnel?.name
@@ -470,8 +472,9 @@ function resolveServiceConfig(repoRoot: string, explicitLogFile?: string, explic
     packageVersion: currentPackageVersion(),
     mcpHost: localConfig?.server?.host ?? "127.0.0.1",
     mcpPort: localConfig?.server?.port ?? 8765,
-    localControllerHost: localConfig?.localController?.host ?? "127.0.0.1",
-    localControllerPort: localConfig?.localController?.port ?? 8766,
+    localControllerHost: localBridgeConfig.host ?? localConfig?.localController?.host ?? "127.0.0.1",
+    localControllerPort: localBridgeConfig.port ?? localConfig?.localController?.port ?? 8766,
+    allowLanMobileIntents: localBridgeConfig.allowLanMobileIntents === true,
     tunnelMode,
     publicEndpoint,
     toolset,
@@ -854,6 +857,7 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
     config.localControllerHost,
     "--local-ui-port",
     String(config.localControllerPort),
+    ...(config.allowLanMobileIntents ? ["--mobile-lan"] : []),
     "--tunnel",
     config.tunnelMode,
   ];

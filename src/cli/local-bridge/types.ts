@@ -168,6 +168,8 @@ export interface LocalBridgeConfig {
   host?: string;
   port?: number;
   autoOpen?: boolean;
+  /** Allow only authenticated /mobile/intent requests on a wildcard/LAN bind. */
+  allowLanMobileIntents?: boolean;
   approvals?: Partial<Record<LocalBridgeJobAction, LocalBridgeApproval>>;
   defaultTimeoutMs?: number;
   maxTimeoutMs?: number;

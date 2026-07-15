@@ -52,6 +52,7 @@ export interface McpKeepaliveOptions extends McpServerOptions {
   localUiHost?: string;
   localUiPort?: number;
   openLocalUi?: boolean;
+  mobileLan?: boolean;
 }
 
 const DEFAULT_CHECK_INTERVAL_MS = 15_000;
@@ -812,6 +813,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
         host: localUiHost,
         port: localUiPort,
         openBrowser: openLocalUi,
+        allowLanMobileIntents: rawOpts.mobileLan === true || localBridgeConfig.allowLanMobileIntents === true,
       });
       runtime.localController = {
         endpoint: localBridge.url,

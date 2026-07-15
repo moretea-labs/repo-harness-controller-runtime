@@ -43,6 +43,7 @@ interface McpKeepaliveOptions extends McpServeOptions {
   localUiHost?: string;
   localUiPort?: string;
   openLocalUi?: boolean;
+  mobileLan?: boolean;
 }
 
 interface McpAccessOptions {
@@ -255,6 +256,7 @@ export function buildMcpCommand(): Command {
     .option('--local-ui-host <host>', 'Local Controller loopback host', '127.0.0.1')
     .option('--local-ui-port <port>', 'Local Controller port', '8766')
     .option('--open-local-ui', 'Open the Local Controller in the default browser at startup')
+    .option('--mobile-lan', 'Allow authenticated /mobile/intent requests on a LAN bind')
     .action(async (rawOpts: McpKeepaliveOptions) => {
       await runMcpAction(async () => {
         if (rawOpts.profile === 'controller') assertControllerLifecycleOwner('Controller MCP keepalive');
@@ -286,6 +288,7 @@ export function buildMcpCommand(): Command {
           localUiHost: rawOpts.localUiHost,
           localUiPort: parsePort(rawOpts.localUiPort ?? '8766'),
           openLocalUi: rawOpts.openLocalUi === true,
+          mobileLan: rawOpts.mobileLan === true,
         });
       });
     });
