@@ -13,8 +13,8 @@ import {
 } from '../src/cli/mcp/toolset';
 
 // Versioned v8 stable surface. Update deliberately when the exported contract changes.
-const EXPECTED_STABLE_TOOL_COUNT = 129;
-const MAX_STABLE_TOOL_COUNT = 129;
+const EXPECTED_STABLE_TOOL_COUNT = 128;
+const MAX_STABLE_TOOL_COUNT = 128;
 
 const policy = runtimePolicy(process.cwd(), {
   profile: 'controller',

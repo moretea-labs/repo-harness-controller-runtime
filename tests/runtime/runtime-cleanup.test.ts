@@ -223,6 +223,23 @@ describe('runtime cleanup', () => {
     expect(cleanupEntries(home).at(-1)?.budgetExhausted).toBe(true);
   });
 
+  test('bounds removals with a cycle-wide budget and reports the reason', () => {
+    const home = controllerHome();
+    mkdirSync(join(home, 'daemon'), { recursive: true });
+    const first = join(home, 'daemon', 'first.tmp');
+    const second = join(home, 'daemon', 'second.tmp');
+    writeFileSync(first, 'temporary\n', 'utf8');
+    writeFileSync(second, 'temporary\n', 'utf8');
+    age(first);
+    age(second);
+
+    const report = cleanupControllerRuntimeState(home, { maxEntries: 100, maxRemovals: 1 });
+
+    expect(report.removedTemporaryPaths.length).toBe(1);
+    expect(report.cycle.budgetExhausted).toBe(true);
+    expect(report.cycle.skippedByReason.cleanup_budget_exhausted).toBeGreaterThan(0);
+  });
+
   test('terminal cancelled Runs release worktrees while unknown Runs remain protected', () => {
     const home = controllerHome();
     const cancelledWorktree = join(home, 'repositories', 'repo-a', 'worktrees', 'RUN-cancelled');
@@ -385,5 +402,61 @@ describe('runtime cleanup', () => {
     } finally {
       console.error = originalError;
     }
+  });
+});
+
+
+describe('automatic runtime cleanup loop', () => {
+  test('uses a 24-hour minimum age and bounded removal budget', async () => {
+    const { runAutomaticRuntimeCleanupCycle } = await import('../../src/runtime/control-plane/daemon-entry');
+    let observed: Record<string, unknown> | undefined;
+    const result = runAutomaticRuntimeCleanupCycle('/repo', {
+      maxRemovals: 7,
+      cleanup: (_repoRoot, options) => {
+        observed = options as Record<string, unknown>;
+        return { mode: 'apply' } as never;
+      },
+    });
+
+    expect(result).toBeDefined();
+    expect(observed).toMatchObject({
+      minAgeMinutes: 1440,
+      maxRemovals: 7,
+      includeTempDirs: true,
+      includeTerminalLocalJobs: false,
+      includeLegacyRuns: false,
+      includeHistoricalAttention: false,
+      confirmCleanup: true,
+    });
+  });
+
+  test('keeps cleanup failures non-fatal', async () => {
+    const { runAutomaticRuntimeCleanupCycle } = await import('../../src/runtime/control-plane/daemon-entry');
+    const errors: unknown[] = [];
+    const result = runAutomaticRuntimeCleanupCycle('/repo', {
+      cleanup: () => { throw new Error('cleanup failed'); },
+      onError: (error) => errors.push(error),
+    });
+
+    expect(result).toBeUndefined();
+    expect(errors).toHaveLength(1);
+  });
+
+  test('stops the periodic loop when the daemon aborts', async () => {
+    const { runAutomaticRuntimeCleanupLoop } = await import('../../src/runtime/control-plane/daemon-entry');
+    const abort = new AbortController();
+    let cycles = 0;
+    const loop = runAutomaticRuntimeCleanupLoop('/repo', abort.signal, {
+      initialDelayMs: 0,
+      intervalMs: 60_000,
+      cleanup: () => {
+        cycles += 1;
+        abort.abort();
+        return { mode: 'apply' } as never;
+      },
+    });
+
+    await loop;
+    expect(cycles).toBe(1);
   });
 });

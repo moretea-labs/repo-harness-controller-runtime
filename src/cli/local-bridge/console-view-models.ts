@@ -163,6 +163,9 @@ export interface SystemReadinessViewModel {
   connectorLabel: string;
   connectorTone: PlainStatusTone;
   pendingHandoffCount: number;
+  /** Shared runtime classification used by MCP, lifecycle, recovery, and GUI surfaces. */
+  runtimeHealth?: import('../../runtime/health').RuntimeHealthEvaluation;
+  operationalView?: import('../../runtime/health').RuntimeOperationalView;
   /** Normalized connector freshness; distinguishes local MCP vs ChatGPT snapshot. */
   connectorFreshness?: ConnectorFreshnessViewModel;
   sections: Array<{

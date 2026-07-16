@@ -149,7 +149,8 @@ export const STABLE_CONTROLLER_TOOL_NAMES = [
   'assistant_readiness',
 
   // iOS/Xcode/simulator and visual evidence.
-  'ios_app_launch',
+  // Keep specialized app launch in the exhaustive `full` profile so the
+  // stable connector remains within the MCP schema budget.
   'ios_simulator_screenshot',
   'ios_simulator_log_tail',
   'ios_ui_smoke_test',

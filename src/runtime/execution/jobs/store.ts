@@ -368,6 +368,7 @@ export function createExecutionJob(controllerHome: string, input: CreateExecutio
       attempt: 0,
       maxAttempts: Math.max(1, Math.min(input.maxAttempts ?? 1, 10)),
       operationMetadata: input.operationMetadata,
+      resources: input.resources,
       timings: {
         durablePersistedAt: createdAt,
         schedulerNotifiedAt: createdAt,

@@ -14,6 +14,7 @@ import { listControllerChecks, runControllerCheck } from '../controller/check-ru
 import { createMcpToolContext, type MultiRepositoryMcpToolContext } from '../mcp/multi-repository';
 import { readControllerDaemonStatus } from '../../runtime/control-plane/daemon-client';
 import { readSchedulerHealthSnapshot } from '../../runtime/control-plane/global-scheduler/scheduler';
+import { controllerServiceStatus } from '../controller/lifecycle';
 import { evaluateActiveRuntimeSourceDrift, readRuntimeGeneration } from '../../runtime/control-plane/runtime-generation';
 import {
   getAssistantPluginManifest,
@@ -50,6 +51,7 @@ import {
   type WorkContract,
 } from '../../runtime/control-plane/facade';
 import { buildRuntimeMaintenanceStatus } from '../../runtime/recovery';
+import { buildRuntimeOperationalView } from '../../runtime/health';
 import { applySafePatch } from '../repositories/safe-patch';
 import { withControllerLock } from '../repositories/locks';
 import { loadMcpServiceLocalConfig, loadMcpServiceRuntimeState } from '../mcp/auth';
@@ -722,20 +724,34 @@ export async function buildSystemReadiness(
   opts: { connectorToolNames?: readonly string[] | null; refreshRuntimeFile?: boolean } = {},
 ): Promise<SystemReadinessViewModel> {
   const daemon = readControllerDaemonStatus(ctx.controllerHome);
+  const serviceStatus = await controllerServiceStatus({
+    repo: ctx.repository.canonicalRoot,
+    controllerHome: ctx.controllerHome,
+  });
+  const runtimeHealth = serviceStatus.healthEvaluation;
   const freshness = await evaluateConsoleConnectorFreshness(ctx, {
     connectorToolNames: opts.connectorToolNames,
     refreshRuntimeFile: opts.refreshRuntimeFile,
   });
-  const pendingHandoffs = listHandoffItems({ ...store(ctx), status: 'pending', limit: 50 });
+  const handoffs = listHandoffItems({ ...store(ctx), status: 'all', limit: 100 });
+  const operationalView = runtimeHealth
+    ? buildRuntimeOperationalView({
+      health: runtimeHealth,
+      handoffs,
+      jobs: listExecutionJobs(ctx.controllerHome, ctx.repository.repoId, 100),
+    })
+    : undefined;
+  const pendingHandoffCount = operationalView?.attention.pending.length
+    ?? handoffs.filter((item) => item.status === 'pending').length;
   const checks = listControllerChecks(ctx.repository.canonicalRoot);
   const automation = buildAutomationReadinessSection(ctx);
   const sections: SystemReadinessViewModel['sections'] = [
     {
       id: 'controller',
       title: '控制器',
-      statusLabel: daemon.status === 'ready' ? '就绪' : '未就绪',
-      tone: daemon.status === 'ready' ? 'green' : 'red',
-      detail: daemon.status === 'ready' ? '后台控制器可接受任务。' : `控制器状态：${daemon.status}`,
+      statusLabel: runtimeHealth?.components.daemon.ready ? '就绪' : '未就绪',
+      tone: runtimeHealth?.components.daemon.ready ? 'green' : 'red',
+      detail: runtimeHealth?.components.daemon.ready ? '后台控制器可接受任务。' : runtimeHealth?.activeBlockers[0]?.message ?? `控制器状态：${daemon.status}`,
     },
     {
       id: 'connector',
@@ -747,9 +763,15 @@ export async function buildSystemReadiness(
     {
       id: 'bridge',
       title: '本地控制台',
-      statusLabel: '运行中',
-      tone: 'green',
-      detail: '本地控制台服务可用。',
+      statusLabel: runtimeHealth?.components.localBridge.state === 'disabled'
+        ? '已禁用'
+        : runtimeHealth?.components.localBridge.ready ? '运行中' : '不可用',
+      tone: runtimeHealth?.components.localBridge.ready || runtimeHealth?.components.localBridge.state === 'disabled' ? 'green' : 'red',
+      detail: runtimeHealth?.components.localBridge.ready
+        ? '本地控制台服务可用。'
+        : runtimeHealth?.components.localBridge.state === 'disabled'
+          ? '本地控制台由配置禁用。'
+          : runtimeHealth?.components.localBridge.activeBlockers[0]?.message ?? '本地控制台不可用。',
     },
     {
       id: 'repository',
@@ -768,13 +790,13 @@ export async function buildSystemReadiness(
     {
       id: 'handoffs',
       title: '待你决定',
-      statusLabel: pendingHandoffs.length ? `${pendingHandoffs.length} 项` : '无',
-      tone: pendingHandoffs.length ? 'amber' : 'green',
-      detail: pendingHandoffs.length ? '有事项需要你的判断后才能继续。' : '没有待处理决策。',
+      statusLabel: pendingHandoffCount ? `${pendingHandoffCount} 项` : '无',
+      tone: pendingHandoffCount ? 'amber' : 'green',
+      detail: pendingHandoffCount ? '有事项需要你的判断后才能继续。' : '没有待处理决策。',
     },
     automation,
   ];
-  const blocked = daemon.status !== 'ready';
+  const blocked = runtimeHealth ? !runtimeHealth.ready : daemon.status !== 'ready';
   const needsSetup = ctx.repository.enabled === false;
   const state: SystemReadinessViewModel['state'] = blocked ? 'blocked' : needsSetup ? 'needs_setup' : 'ready';
   return {
@@ -789,7 +811,9 @@ export async function buildSystemReadiness(
     connectorLabel: freshness.connectorLabel,
     connectorTone: freshness.connectorTone,
     connectorFreshness: mapConnectorFreshnessView(freshness),
-    pendingHandoffCount: pendingHandoffs.length,
+    pendingHandoffCount,
+    runtimeHealth,
+    operationalView,
     sections,
   };
 }

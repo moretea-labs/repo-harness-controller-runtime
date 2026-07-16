@@ -6,6 +6,10 @@ export interface ControllerContextProjection {
   schemaVersion: 1;
   repoId: string;
   generatedAt: string;
+  /** Source identity is additive and is not a heartbeat. */
+  sourceRevision?: string;
+  contentFingerprint?: string;
+  lastSuccessfulBuildAt?: string;
   payload: Record<string, unknown>;
 }
 
@@ -17,11 +21,16 @@ export function writeControllerContextProjection(
   controllerHome: string,
   repoId: string,
   payload: Record<string, unknown>,
+  options: { sourceRevision?: string; contentFingerprint?: string } = {},
 ): ControllerContextProjection {
+  const generatedAt = new Date().toISOString();
   const projection: ControllerContextProjection = {
     schemaVersion: 1,
     repoId,
-    generatedAt: new Date().toISOString(),
+    generatedAt,
+    ...(options.sourceRevision ? { sourceRevision: options.sourceRevision } : {}),
+    ...(options.contentFingerprint ? { contentFingerprint: options.contentFingerprint } : {}),
+    lastSuccessfulBuildAt: generatedAt,
     payload,
   };
   writeJsonAtomic(contextProjectionPath(controllerHome, repoId), projection);
@@ -45,4 +54,13 @@ export function controllerContextProjectionAgeMs(projection: ControllerContextPr
   if (!projection) return Number.POSITIVE_INFINITY;
   const timestamp = Date.parse(projection.generatedAt);
   return Number.isFinite(timestamp) ? Math.max(0, Date.now() - timestamp) : Number.POSITIVE_INFINITY;
+}
+
+export function controllerContextProjectionNeedsRefresh(
+  projection: ControllerContextProjection | undefined,
+  sourceRevision?: string,
+): boolean {
+  if (!projection) return true;
+  if (!sourceRevision) return false;
+  return projection.sourceRevision !== sourceRevision;
 }

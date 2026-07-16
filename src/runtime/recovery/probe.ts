@@ -9,9 +9,9 @@ import type {
   RecoveryClass,
   RecoveryEvidence,
 } from './types';
+import type { ComponentHealth, RuntimeHealthEvaluation } from '../health';
 
 const SCHEDULER_STALE_MS = 10_000;
-const CONTEXT_PROJECTION_STALE_MS = 30_000;
 
 function evidence(source: string, message: string, at: string, details?: Record<string, unknown>): RecoveryEvidence[] {
   return [{ source, message, at, details }];
@@ -89,43 +89,83 @@ function commandExecuteActions(recoveryClass: RecoveryClass): RecoveryActionDesc
   return suggestedActionsForClass(recoveryClass);
 }
 
+function capabilityFromSharedHealth(
+  at: string,
+  id: string,
+  label: string,
+  componentHealth: ComponentHealth,
+  recoveryClass: RecoveryClass,
+  suggestedActions: RecoveryActionDescriptor[] = [],
+): CapabilityStatus {
+  const evidenceItem = componentHealth.activeBlockers[0] ?? componentHealth.warnings[0];
+  if (!evidenceItem || componentHealth.state === 'disabled') {
+    return capability(at, id, label, 'ready', 'unknown', componentHealth.state === 'disabled' ? `${label} is disabled by configuration.` : `${label} is healthy.`, [], {
+      sharedHealthState: componentHealth.state,
+    });
+  }
+  return capability(
+    at,
+    id,
+    label,
+    componentHealth.state === 'unavailable' ? 'unavailable' : componentHealth.ready ? 'ready' : 'degraded',
+    recoveryClass,
+    evidenceItem.message,
+    componentHealth.ready ? [] : suggestedActions,
+    { sharedHealthCode: evidenceItem.code, sharedHealthState: componentHealth.state, ...evidenceItem.details },
+  );
+}
+
 export function buildCapabilityRecoverySnapshot(input: CapabilityRecoveryInput): CapabilityRecoverySnapshot {
   const at = input.generatedAt ?? new Date().toISOString();
   const capabilities: CapabilityStatus[] = [];
-  const daemonReady = input.daemonStatus === undefined || input.daemonStatus === 'ready';
-  capabilities.push(daemonReady
-    ? capability(at, 'controller.daemon', 'Controller daemon', 'ready', 'unknown', 'Controller daemon is ready.', [], { status: input.daemonStatus ?? 'unknown' })
-    : capability(at, 'controller.daemon', 'Controller daemon', 'unavailable', 'local_recoverable', `Controller daemon is ${input.daemonStatus ?? 'unknown'}.`, [RECOVERY_ACTIONS.restartController], { status: input.daemonStatus, error: input.daemonError }));
-
-  const schedulerAge = input.schedulerHeartbeatAgeMs;
-  const schedulerStale = typeof schedulerAge === 'number' && schedulerAge > SCHEDULER_STALE_MS;
-  capabilities.push(schedulerStale || input.schedulerStatus === 'degraded' || input.schedulerStatus === 'not_ready'
-    ? capability(at, 'durable.scheduler', 'Durable scheduler', 'degraded', 'stale_runtime_state', 'Scheduler heartbeat is stale or degraded.', [RECOVERY_ACTIONS.reconcileJobs, RECOVERY_ACTIONS.restartController], { schedulerStatus: input.schedulerStatus, schedulerHeartbeatAgeMs: schedulerAge })
-    : capability(at, 'durable.scheduler', 'Durable scheduler', 'ready', 'unknown', 'Scheduler heartbeat is healthy.', [], { schedulerStatus: input.schedulerStatus, schedulerHeartbeatAgeMs: schedulerAge }));
-
   const queueDepth = input.queueDepth ?? 0;
   const runningWorkers = input.runningWorkers ?? 0;
   const activeLeases = input.activeLeases ?? 0;
-  const queueStalled = queueDepth > 0 && runningWorkers === 0;
-  capabilities.push(queueStalled || activeLeases > 0 && runningWorkers === 0
-    ? capability(at, 'worker.loop', 'Worker loop', 'degraded', 'stale_runtime_state', 'Queued work or leases may be stuck without active workers.', [RECOVERY_ACTIONS.reconcileJobs], { queueDepth, runningWorkers, activeLeases })
-    : capability(at, 'worker.loop', 'Worker loop', 'ready', 'unknown', 'Worker loop has no stuck queue evidence.', [], { queueDepth, runningWorkers, activeLeases }));
+  const sharedHealth = input.runtimeHealth;
+  if (sharedHealth) {
+    capabilities.push(
+      capabilityFromSharedHealth(at, 'controller.daemon', 'Controller daemon', sharedHealth.components.daemon, 'local_recoverable', [RECOVERY_ACTIONS.restartController]),
+      capabilityFromSharedHealth(at, 'durable.scheduler', 'Durable scheduler', sharedHealth.components.scheduler, 'stale_runtime_state', [RECOVERY_ACTIONS.reconcileJobs, RECOVERY_ACTIONS.restartController]),
+      capabilityFromSharedHealth(at, 'worker.loop', 'Worker loop', sharedHealth.components.workers, 'stale_runtime_state', [RECOVERY_ACTIONS.reconcileJobs]),
+      capabilityFromSharedHealth(at, 'local.bridge', 'Local bridge', sharedHealth.components.localBridge, 'local_recoverable', [RECOVERY_ACTIONS.restartLocalBridge]),
+      capabilityFromSharedHealth(at, 'runtime.projection', 'Runtime projection', sharedHealth.components.projection, 'stale_runtime_state', [RECOVERY_ACTIONS.rebuildProjection]),
+      capabilityFromSharedHealth(at, 'runtime.storage', 'Runtime storage', sharedHealth.components.runtimeStorage, 'runtime_storage_not_ready', runtimeStorageActions('runtime_storage_not_ready')),
+    );
+  } else {
+    const daemonReady = input.daemonStatus === undefined || input.daemonStatus === 'ready';
+    capabilities.push(daemonReady
+      ? capability(at, 'controller.daemon', 'Controller daemon', 'ready', 'unknown', 'Controller daemon is ready.', [], { status: input.daemonStatus ?? 'unknown' })
+      : capability(at, 'controller.daemon', 'Controller daemon', 'unavailable', 'local_recoverable', `Controller daemon is ${input.daemonStatus ?? 'unknown'}.`, [RECOVERY_ACTIONS.restartController], { status: input.daemonStatus, error: input.daemonError }));
 
-  capabilities.push(input.localBridgeRunning === false
-    ? capability(at, 'local.bridge', 'Local bridge', 'unavailable', 'local_recoverable', 'Local bridge is not running.', [RECOVERY_ACTIONS.restartLocalBridge], { error: input.localBridgeError })
-    : capability(at, 'local.bridge', 'Local bridge', 'ready', 'unknown', 'Local bridge is available.', [], { running: input.localBridgeRunning }));
+    const schedulerAge = input.schedulerHeartbeatAgeMs;
+    const schedulerStale = typeof schedulerAge === 'number' && schedulerAge > SCHEDULER_STALE_MS;
+    capabilities.push(schedulerStale || input.schedulerStatus === 'degraded' || input.schedulerStatus === 'not_ready'
+      ? capability(at, 'durable.scheduler', 'Durable scheduler', 'degraded', 'stale_runtime_state', 'Scheduler heartbeat is stale or degraded.', [RECOVERY_ACTIONS.reconcileJobs, RECOVERY_ACTIONS.restartController], { schedulerStatus: input.schedulerStatus, schedulerHeartbeatAgeMs: schedulerAge })
+      : capability(at, 'durable.scheduler', 'Durable scheduler', 'ready', 'unknown', 'Scheduler heartbeat is healthy.', [], { schedulerStatus: input.schedulerStatus, schedulerHeartbeatAgeMs: schedulerAge }));
+
+    const queueStalled = queueDepth > 0 && runningWorkers === 0;
+    capabilities.push(queueStalled || activeLeases > 0 && runningWorkers === 0
+      ? capability(at, 'worker.loop', 'Worker loop', 'degraded', 'stale_runtime_state', 'Queued work or leases may be stuck without active workers.', [RECOVERY_ACTIONS.reconcileJobs], { queueDepth, runningWorkers, activeLeases })
+      : capability(at, 'worker.loop', 'Worker loop', 'ready', 'unknown', 'Worker loop has no stuck queue evidence.', [], { queueDepth, runningWorkers, activeLeases }));
+
+    capabilities.push(input.localBridgeRunning === false
+      ? capability(at, 'local.bridge', 'Local bridge', 'unavailable', 'local_recoverable', 'Local bridge is not running.', [RECOVERY_ACTIONS.restartLocalBridge], { error: input.localBridgeError })
+      : capability(at, 'local.bridge', 'Local bridge', 'ready', 'unknown', 'Local bridge is available.', [], { running: input.localBridgeRunning }));
+  }
 
   capabilities.push(input.connectorHealthy === false
     ? capability(at, 'chatgpt.connector', 'ChatGPT connector', 'degraded', 'local_recoverable', 'Connector runtime state does not match the expected tool surface.', [RECOVERY_ACTIONS.restartLocalBridge], { mismatch: input.connectorMismatch })
     : capability(at, 'chatgpt.connector', 'ChatGPT connector', 'ready', 'unknown', 'Connector runtime state matches expected configuration.', [], { healthy: input.connectorHealthy }));
 
-  capabilities.push(input.runtimeProjectionStale === true || input.runtimeProjectionPersisted === false
-    ? capability(at, 'runtime.projection', 'Runtime projection', 'degraded', 'stale_runtime_state', 'Runtime projection is stale or missing from persisted state.', [RECOVERY_ACTIONS.rebuildProjection], { stale: input.runtimeProjectionStale, persisted: input.runtimeProjectionPersisted })
-    : capability(at, 'runtime.projection', 'Runtime projection', 'ready', 'unknown', 'Runtime projection is available.', [], { stale: input.runtimeProjectionStale, persisted: input.runtimeProjectionPersisted }));
+  if (!sharedHealth) {
+    capabilities.push(input.runtimeProjectionStale === true || input.runtimeProjectionPersisted === false
+      ? capability(at, 'runtime.projection', 'Runtime projection', 'degraded', 'stale_runtime_state', 'Runtime projection is stale or missing from persisted state.', [RECOVERY_ACTIONS.rebuildProjection], { stale: input.runtimeProjectionStale, persisted: input.runtimeProjectionPersisted })
+      : capability(at, 'runtime.projection', 'Runtime projection', 'ready', 'unknown', 'Runtime projection is available.', [], { stale: input.runtimeProjectionStale, persisted: input.runtimeProjectionPersisted }));
+  }
 
   capabilities.push(input.contextProjectionStale === true
-    ? capability(at, 'context.projection', 'Context projection', 'degraded', 'stale_runtime_state', 'Controller context projection is stale.', [RECOVERY_ACTIONS.rebuildProjection], { stale: true, staleThresholdMs: CONTEXT_PROJECTION_STALE_MS })
-    : capability(at, 'context.projection', 'Context projection', 'ready', 'unknown', 'Controller context projection is fresh enough.', [], { stale: input.contextProjectionStale }));
+    ? capability(at, 'context.projection', 'Context projection', 'degraded', 'stale_runtime_state', 'Controller context projection source identity is behind the current runtime projection.', [RECOVERY_ACTIONS.rebuildProjection], { stale: true, ageIsNotFailure: true })
+    : capability(at, 'context.projection', 'Context projection', 'ready', 'unknown', 'Controller context projection is usable; cache age is not a health failure.', [], { stale: input.contextProjectionStale, ageIsNotFailure: true }));
 
   const storageClass = runtimeStorageClass(input);
   if (input.runtimeStorageReady === false || (input.runtimeStorageWarnings ?? []).length > 0) {
@@ -228,5 +268,7 @@ export function buildCapabilityRecoverySnapshot(input: CapabilityRecoveryInput):
     notes: platformBlocked
       ? ['One or more calls appear blocked before reaching repo-harness. Avoid local restart loops; use patch handoff or narrower typed tools.']
       : (input.runtimeStorageReady === false ? ['Runtime storage is not ready. Use runtime_maintenance_status/runtime_maintenance_apply; do not try to repair repository_command_execute with repository_command_execute.'] : []),
+    runtimeHealth: sharedHealth,
+    runtimeOperationalView: input.runtimeOperationalView,
   };
 }

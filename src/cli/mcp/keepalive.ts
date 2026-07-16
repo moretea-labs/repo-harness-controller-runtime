@@ -33,6 +33,7 @@ import {
   resolveControllerRuntimeSourceRoot,
 } from '../../runtime/control-plane/runtime-generation';
 import { assertControllerLifecycleOwner } from '../controller/lifecycle-authority';
+import { runtimeSlotForHome } from '../controller/runtime-slots';
 
 export interface McpKeepaliveOptions extends McpServerOptions {
   repo?: string;
@@ -830,10 +831,13 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
         port: localUiPort,
         openBrowser: openLocalUi,
         allowLanMobileIntents: rawOpts.mobileLan === true || localBridgeConfig.allowLanMobileIntents === true,
+        mode: 'embedded',
+        slot: runtimeSlotForHome(controllerHome),
       });
       runtime.localController = {
         endpoint: localBridge.url,
         running: true,
+        mode: 'embedded',
         pid: process.pid,
         startedAt: nowIso(),
         generation: runtimeGeneration.generation,
@@ -845,6 +849,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
       runtime.localController = {
         endpoint: `http://${localUiHost === '::1' ? '[::1]' : localUiHost}:${localUiPort}/`,
         running: false,
+        mode: 'embedded',
         generation: runtimeGeneration.generation,
         error: message,
       };
@@ -869,6 +874,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
       ? {
           endpoint,
           running: true,
+          mode: localBridge ? 'embedded' : runtime.localController?.mode ?? 'standalone',
           ...(localBridge ? { pid: process.pid } : {}),
           startedAt: runtime.localController?.startedAt ?? nowIso(),
           generation: runtimeGeneration.generation,
@@ -876,6 +882,7 @@ export async function runMcpKeepalive(rawOpts: McpKeepaliveOptions): Promise<voi
       : {
           endpoint,
           running: false,
+          mode: localBridge ? 'embedded' : runtime.localController?.mode ?? 'standalone',
           ...(localBridge ? { pid: process.pid } : {}),
           generation: runtimeGeneration.generation,
           error: `health check failed at ${localControllerHealthUrl(localUiHost, localUiPort)}`,

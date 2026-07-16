@@ -2,6 +2,7 @@ import { execFileSync } from 'child_process';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs';
 import { basename, dirname, join, relative, resolve } from 'path';
 import { tmpdir } from 'os';
+import type { CleanupCycleSummary } from '../control-plane/runtime-cleanup';
 
 export interface RuntimeCleanupCandidate {
   kind: 'temp_dir' | 'local_job' | 'legacy_run' | 'attention_marker';
@@ -11,6 +12,7 @@ export interface RuntimeCleanupCandidate {
   ageMinutes?: number;
   occupiedByPid?: number;
   safe: boolean;
+  ownershipStatus?: 'explicit' | 'unknown';
 }
 
 export interface RuntimeCleanupPreview {
@@ -30,6 +32,7 @@ export interface RuntimeCleanupPreview {
     attentionMarkers: number;
   };
   warnings: string[];
+  cycle: CleanupCycleSummary;
 }
 
 export interface RuntimeCleanupApplyResult extends Omit<RuntimeCleanupPreview, 'mode'> {
@@ -44,6 +47,7 @@ export interface RuntimeCleanupOptions {
   includeLegacyRuns?: boolean;
   includeHistoricalAttention?: boolean;
   maxCandidates?: number;
+  maxRemovals?: number;
   confirmCleanup?: boolean;
 }
 
@@ -61,6 +65,7 @@ function normalizeOptions(options: RuntimeCleanupOptions): Required<Omit<Runtime
     includeLegacyRuns: options.includeLegacyRuns === true,
     includeHistoricalAttention: options.includeHistoricalAttention === true,
     maxCandidates: Math.max(1, Math.min(safeNumber(options.maxCandidates, 200), 200)),
+    maxRemovals: Math.max(1, Math.min(safeNumber(options.maxRemovals, 50), 50)),
     confirmCleanup: options.confirmCleanup === true,
   };
 }
@@ -260,9 +265,17 @@ export function previewRuntimeCleanup(repoRoot: string, options: RuntimeCleanupO
     ...(normalized.includeHistoricalAttention ? scanHistoricalAttention(repoRoot) : []),
   ];
   const candidates = allCandidates.slice(0, normalized.maxCandidates);
+  const generatedAt = now();
+  const skippedByReason = candidates.reduce<Record<string, number>>((counts, candidate) => {
+    if (!candidate.safe) {
+      const reason = candidate.ownershipStatus === 'unknown' ? 'unknown_ownership' : candidate.occupiedByPid ? 'process_occupied' : 'retained';
+      counts[reason] = (counts[reason] ?? 0) + 1;
+    }
+    return counts;
+  }, {});
   return {
     schemaVersion: 1,
-    generatedAt: now(),
+    generatedAt,
     repoRoot,
     mode: 'preview',
     candidates,
@@ -273,6 +286,22 @@ export function previewRuntimeCleanup(repoRoot: string, options: RuntimeCleanupO
       'Legacy run cleanup only archives directories proven to be old no-op waiting_for_user runs with no matching process.',
       'Historical attention cleanup is intentionally represented as acknowledgement guidance unless an explicit reconciler is added.',
     ],
+    cycle: {
+      scanned: allCandidates.length,
+      eligible: candidates.filter((candidate) => candidate.safe).length,
+      attempted: 0,
+      removed: 0,
+      retained: candidates.filter((candidate) => !candidate.safe).length,
+      skipped: Math.max(0, allCandidates.length - candidates.length),
+      failed: 0,
+      truncated: allCandidates.length > candidates.length,
+      budgetExhausted: allCandidates.length > candidates.length,
+      skippedByReason,
+      failedByType: {},
+      startedAt: generatedAt,
+      finishedAt: generatedAt,
+      durationMs: 0,
+    },
   };
 }
 
@@ -292,7 +321,8 @@ export function applyRuntimeCleanup(repoRoot: string, options: RuntimeCleanupOpt
   const normalized = normalizeOptions(options);
   if (!normalized.confirmCleanup) throw new Error('RUNTIME_CLEANUP_CONFIRMATION_REQUIRED: confirmCleanup=true is required.');
   const preview = previewRuntimeCleanup(repoRoot, normalized);
-  const applied = preview.candidates.filter((candidate) => candidate.safe).map((candidate) => {
+  const eligible = preview.candidates.filter((candidate) => candidate.safe);
+  const applied: Array<RuntimeCleanupCandidate & { applied: boolean; error?: string }> = eligible.slice(0, normalized.maxRemovals).map((candidate) => {
     try {
       if (candidate.kind === 'temp_dir' && candidate.path && isSafeRepoHarnessTemp(candidate.path)) {
         rmSync(candidate.path, { recursive: true, force: true });
@@ -323,9 +353,36 @@ export function applyRuntimeCleanup(repoRoot: string, options: RuntimeCleanupOpt
       return { ...candidate, applied: false, error: error instanceof Error ? error.message : String(error) };
     }
   });
+  const finishedAt = now();
+  const attempted = applied.length;
+  const removed = applied.filter((candidate) => candidate.applied).length;
+  const failed = applied.filter((candidate) => !candidate.applied && candidate.error).length;
+  const cycle: CleanupCycleSummary = {
+    ...preview.cycle,
+    attempted,
+    removed,
+    failed,
+    skipped: preview.cycle.skipped
+      + applied.filter((candidate) => !candidate.applied && !candidate.error).length
+      + Math.max(0, eligible.length - applied.length),
+    truncated: preview.cycle.truncated || eligible.length > applied.length,
+    budgetExhausted: preview.cycle.budgetExhausted || eligible.length > applied.length,
+    skippedByReason: {
+      ...preview.cycle.skippedByReason,
+      ...(eligible.length > applied.length ? { cleanup_budget_exhausted: Math.max(0, eligible.length - applied.length) } : {}),
+    },
+    failedByType: applied.reduce<Record<string, number>>((counts, candidate) => {
+      if (!candidate.error) return counts;
+      counts[candidate.kind] = (counts[candidate.kind] ?? 0) + 1;
+      return counts;
+    }, {}),
+    finishedAt,
+    durationMs: Math.max(0, Date.parse(finishedAt) - Date.parse(preview.generatedAt)),
+  };
   return {
     ...preview,
     mode: 'apply',
     applied,
+    cycle,
   };
 }

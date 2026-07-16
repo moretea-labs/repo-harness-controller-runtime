@@ -69,6 +69,7 @@ Read the architecture in this order:
 15. `operations-runbook.md` — health, recovery and release operations.
 16. `governance.md` — ownership, ADR, drift, and maintenance rules.
 17. `session-aware-execution-and-authorization.md` — Session Context, Work Handle, Goal delegation, and resumable approval boundaries.
+18. `runtime-health-and-resource-lifecycle.md` — shared health evaluation, projection freshness, capability status, attention/history, and bounded ownership-aware cleanup.
 
 
 ## Architecture Layers

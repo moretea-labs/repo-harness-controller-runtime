@@ -190,6 +190,8 @@ export interface LocalBridgeServerOptions {
   openBrowser?: boolean;
   token?: string;
   allowLanMobileIntents?: boolean;
+  mode?: "standalone" | "embedded" | "remote" | "disabled" | "unknown";
+  slot?: "blue" | "green";
 }
 
 export interface LocalBridgeServerHandle {
@@ -969,6 +971,8 @@ export async function startLocalBridgeServer(
     response.json({
       status: "ok",
       localOnly: true,
+      mode: options.mode ?? "standalone",
+      ...(options.slot ? { slot: options.slot } : {}),
       toolSurface: CONTROLLER_TOOL_SURFACE,
       schemaVersion: CONTROLLER_SCHEMA_VERSION,
       toolSurfaceVersion: CONTROLLER_TOOL_SURFACE_VERSION,

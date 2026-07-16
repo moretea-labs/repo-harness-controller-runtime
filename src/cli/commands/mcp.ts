@@ -14,6 +14,7 @@ import {
   runMcpSetupChatgpt,
   runMcpSetupCodex,
 } from '../mcp/setup';
+import { runMcpRestart, type McpRestartOptions } from '../mcp/restart';
 
 export interface McpServeOptions {
   repo?: string;
@@ -302,6 +303,29 @@ export function buildMcpCommand(): Command {
       void runMcpAction(() => {
         const result = runMcpDoctor(rawOpts);
         console.log(result.lines.join('\n'));
+      });
+    });
+
+  mcp
+    // Retain the compatibility command for explicit callers, but keep the
+    // single Controller lifecycle surface out of the top-level help menu.
+    .command('restart', { hidden: true })
+    .description('Reconcile MCP setup and request a bounded Controller restart')
+    .option('--repo <path>', 'Repository root to restart', '.')
+    .option('--controller-home <path>', 'Controller state root; defaults to repo _ops/controller-home when present')
+    .option('--log-file <path>', 'Controller restart log path')
+    .option('--skip-codex-setup', 'Skip repo-harness mcp setup codex during restart')
+    .option('--skip-public-check', 'Skip public endpoint verification during restart')
+    .option('--skip-tools-smoke', 'Skip authenticated MCP tools smoke check during restart')
+    .option('--skip-github-plugin', 'Skip GitHub plugin refresh during restart')
+    .option('--github-repo <owner/repo>', 'Explicit GitHub repository')
+    .option('--github-sync-mode <mode>', 'GitHub sync mode: manual|checkpoint')
+    .option('--github-include-tasks', 'Include task updates in GitHub sync')
+    .action(async (rawOpts: McpRestartOptions) => {
+      await runMcpAction(async () => {
+        const result = await runMcpRestart(rawOpts);
+        console.log(result.lines.join('\n'));
+        if (result.status !== 'ok') process.exitCode = 1;
       });
     });
 

@@ -22,6 +22,7 @@ export type RecoveryClass =
 
 export type RecoveryRisk = 'readonly' | 'low' | 'medium' | 'high' | 'destructive';
 export type RecoveryConfirmation = 'none' | 'authorization' | 'strong_confirmation';
+import type { RuntimeHealthEvaluation, RuntimeOperationalView } from '../health';
 
 export interface RecoveryEvidence {
   source: string;
@@ -68,6 +69,10 @@ export interface CapabilityRecoveryInput {
   runtimeProjectionStale?: boolean;
   runtimeProjectionPersisted?: boolean;
   contextProjectionStale?: boolean;
+  /** Shared health classification used by lifecycle/MCP/recovery consumers. */
+  runtimeHealth?: RuntimeHealthEvaluation;
+  /** Shared current-attention/history view; persisted jobs and handoffs remain authoritative. */
+  runtimeOperationalView?: RuntimeOperationalView;
   commandPreviewAvailable?: boolean;
   commandExecuteAvailable?: boolean;
   issueToolsAvailable?: boolean;
@@ -107,6 +112,8 @@ export interface CapabilityRecoverySnapshot {
   recommendedActions: RecoveryActionDescriptor[];
   summary: CapabilityRecoverySummary;
   notes: string[];
+  runtimeHealth?: RuntimeHealthEvaluation;
+  runtimeOperationalView?: RuntimeOperationalView;
 }
 
 export interface RecoveryAuditRecord {

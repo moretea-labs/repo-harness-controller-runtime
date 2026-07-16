@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 5,
+  "id": "ISS-20260716-34A906",
+  "title": "Stop runtime temporary resource accumulation",
+  "slug": "stop-runtime-temporary-resource-accumulation",
+  "kind": "bug",
+  "status": "planned",
+  "summary": "Complete the existing uncommitted runtime health/resource lifecycle changes by adding bounded automatic garbage collection for abandoned repo-harness temp directories and validating lifecycle ownership protections.",
+  "goals": [
+    "Run bounded automatic cleanup after daemon startup and periodically",
+    "Keep a minimum 24-hour TTL and process-occupancy protection",
+    "Limit removals per cycle and never affect Controller readiness",
+    "Preserve blue/green active and rollback slot resources",
+    "Complete and commit the existing coherent lifecycle changes on main"
+  ],
+  "nonGoals": [
+    "Aggressive deletion of unknown non-repo-harness paths",
+    "Changing blue/green deployment semantics",
+    "Deleting active jobs, leases, worktrees, artifacts, or slots"
+  ],
+  "acceptanceCriteria": [
+    "Old unoccupied repo-harness temp directories are removed automatically in bounded batches",
+    "Recent or process-owned temp directories remain protected",
+    "Cleanup failure is logged but does not fail the daemon",
+    "Existing resource lifecycle and health tests pass",
+    "Type, MCP compatibility, runtime architecture, and Controller V8 checks pass",
+    "Main is committed and clean"
+  ],
+  "relatedArtifacts": [],
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Complete bounded automatic runtime GC",
+      "objective": "Review and complete the current main working tree changes. Add daemon-owned startup/periodic bounded GC for repo-harness temp directories using existing safe cleanup primitives, add regression tests, run focused and package checks, commit on main, then restart to the latest commit and verify readiness.",
+      "status": "ready",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src/runtime/**",
+        "src/cli/**",
+        "tests/runtime/**",
+        "tests/cli/**",
+        "docs/architecture/current/**",
+        "tasks/notes/**"
+      ],
+      "forbiddenPaths": [],
+      "checks": [
+        "package:check:type",
+        "package:check:mcp-compatibility",
+        "package:check:runtime-architecture",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "Automatic GC uses TTL >= 24h by default",
+        "Maximum removals per cycle is bounded",
+        "Cleanup is abortable with daemon lifecycle",
+        "Failures are non-fatal",
+        "Active process paths and blue/green slot resources are protected"
+      ],
+      "risk": "medium",
+      "recommendedAgent": "codex",
+      "notes": [],
+      "runIds": [],
+      "createdAt": "2026-07-16T11:28:35.847Z",
+      "updatedAt": "2026-07-16T11:28:35.847Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    }
+  ],
+  "createdAt": "2026-07-16T11:28:35.847Z",
+  "updatedAt": "2026-07-16T11:28:35.847Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+}

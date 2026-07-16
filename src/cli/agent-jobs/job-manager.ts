@@ -42,6 +42,7 @@ import {
   isPidAlive,
 } from "./worker-lifecycle";
 import { terminateProcessTreeSync } from "../../runtime/shared/process-tree";
+import { managedResource } from "../../runtime/resources";
 import type {
   AgentExecutionMode,
   AgentJobEvent,
@@ -1130,6 +1131,7 @@ function baseMeta(
     : undefined;
   const executionRoot = plannedWorktree?.path ?? isolation.path;
   const branch = plannedWorktree?.branch ?? isolation.branch;
+  const createdAt = new Date().toISOString();
   return {
     schemaVersion: 3,
     repoId: identity.repoId,
@@ -1166,7 +1168,18 @@ function baseMeta(
       lastActivityAt: new Date().toISOString(),
       activityCount: 0,
     },
-    createdAt: new Date().toISOString(),
+    createdAt,
+    resources: executionMode === "worktree" && executionRoot !== opts.repoRoot
+      ? [managedResource({
+        resourceId: `worktree:${runId}`,
+        type: "worktree",
+        owner: { kind: "agent_run", id: runId },
+        createdAt,
+        state: "active",
+        path: executionRoot,
+        ...(branch ? { branch } : {}),
+      })]
+      : undefined,
   };
 }
 
@@ -1296,6 +1309,20 @@ export function launchAcceptedTaskJob(
   meta.worktreePath = isolation.path;
   meta.branch = isolation.branch;
   meta.baseRevision = isolation.baseRevision;
+  if (executionMode === "worktree" && isolation.path !== repoRoot) {
+    const createdAt = meta.resources?.find((resource) => resource.resourceId === `worktree:${runId}`)?.createdAt
+      ?? meta.createdAt;
+    meta.resources = [managedResource({
+      resourceId: `worktree:${runId}`,
+      type: "worktree",
+      owner: { kind: "agent_run", id: runId },
+      createdAt,
+      lastSeenAt: new Date().toISOString(),
+      state: "active",
+      path: isolation.path,
+      ...(isolation.branch ? { branch: isolation.branch } : {}),
+    })];
+  }
   const basePrompt = taskPrompt(issue.title, issue.summary, task, repoRoot, isolation.path, provider, executionMode);
   const prompt = meta.supervisorInstructions
     ? `${basePrompt}
@@ -1977,6 +2004,17 @@ export function markAgentJobClosure(
   meta.closureUpdatedAt = changedAt;
   if (input.worktreeCleaned) meta.worktreeCleanedAt = meta.worktreeCleanedAt ?? changedAt;
   if (input.branchDeleted) meta.cleanupBranchDeletedAt = meta.cleanupBranchDeletedAt ?? changedAt;
+  if (meta.resources) {
+    meta.resources = meta.resources.map((resource) => ({
+      ...resource,
+      lastSeenAt: changedAt,
+      ...(input.worktreeCleaned && resource.type === "worktree"
+        ? { state: "removed" as const, cleanupAfter: undefined }
+        : input.state === "preserved"
+          ? { state: "retained" as const, retentionReason: input.details }
+          : {}),
+    }));
+  }
   if (input.state === "preserved") {
     meta.status = "waiting_for_user";
     delete meta.finishedAt;
@@ -2023,6 +2061,15 @@ export function markAgentJobReviewedCompletion(
   meta.status = "succeeded";
   meta.finishedAt = meta.finishedAt ?? completedAt;
   meta.lastHeartbeatAt = completedAt;
+  if (meta.resources) {
+    meta.resources = meta.resources.map((resource) => ({
+      ...resource,
+      lastSeenAt: completedAt,
+      ...(options.worktreeCleaned && resource.type === "worktree"
+        ? { state: "removed" as const, cleanupAfter: undefined }
+        : {}),
+    }));
+  }
   if (options.changeOutcome) meta.changeOutcome = options.changeOutcome;
   if (options.changedFiles) meta.changedFiles = options.changedFiles;
   if (options.worktreeCleaned) meta.worktreeCleanedAt = meta.worktreeCleanedAt ?? completedAt;

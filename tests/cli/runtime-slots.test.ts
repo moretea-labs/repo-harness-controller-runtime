@@ -10,6 +10,8 @@ import {
   markRollbackAuthority,
   oppositeSlot,
   readActiveSlotAuthority,
+  readSlotIdentity,
+  runtimeSlotForHome,
   slotsShareRuntimeState,
   writeActiveSlotAuthority,
   writeSlotIdentity,
@@ -37,6 +39,9 @@ describe('runtime slot authority (level 1)', () => {
     expect(slotsShareRuntimeState(blue, green)).toBe(false);
     expect(blue).toContain('/runtime-slots/blue');
     expect(green).toContain('/runtime-slots/green');
+    expect(runtimeSlotForHome(blue)).toBe('blue');
+    expect(runtimeSlotForHome(green)).toBe('green');
+    expect(runtimeSlotForHome(home)).toBeUndefined();
   });
 
   test('inactive slot ports are offset from active base ports', () => {
@@ -80,5 +85,12 @@ describe('runtime slot authority (level 1)', () => {
       logDir: join(home, 'runtime-slots', 'green', 'logs'),
     });
     expect(readActiveSlotAuthority(home).activeSlot).toBe('blue');
+    const identity = readSlotIdentity(home, 'green');
+    expect(identity?.resources?.[0]).toMatchObject({
+      type: 'runtime_slot',
+      owner: { kind: 'runtime_slot' },
+      state: 'active',
+      path: identity?.slotHome,
+    });
   });
 });

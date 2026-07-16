@@ -19,7 +19,14 @@ import {
   formatRuntimeSourceDriftMessage,
   type RuntimeSourceIdentity,
 } from '../../control-plane/runtime-generation';
-import { rebuildRepositoryProjection, readRepositoryProjectionSnapshot } from '../../projections/materialized-view';
+import { rebuildRepositoryProjection, projectionObservation, readRepositoryProjectionSnapshot } from '../../projections/materialized-view';
+import {
+  buildRuntimeOperationalView,
+  evaluateRuntimeHealth,
+  RUNTIME_HEALTH_THRESHOLDS,
+  type RuntimeHealthEvaluation,
+  type RuntimeOperationalView,
+} from '../../health';
 import { applyScheduleDedupe, buildScheduleDedupeReport, createSchedule, getSchedule, getScheduleDecision, listOccurrences, listSchedules, saveSchedule } from '../../workflow/schedules/store';
 import { evaluateSchedule } from '../../workflow/schedules/engine';
 import { createPortfolioWorkflow, getPortfolioWorkflow, listPortfolioWorkflows } from '../../workflow/portfolio/store';
@@ -64,10 +71,13 @@ import {
 import type { TaskRisk } from '../../../cli/controller/types';
 import {
   controllerContextProjectionAgeMs,
+  controllerContextProjectionNeedsRefresh,
   readControllerContextProjection,
   writeControllerContextProjection,
 } from '../../projections/controller-context';
 import { loadMcpRuntimeState } from '../../../cli/mcp/auth';
+import { isExpectedLocalControllerHealth } from '../../../cli/mcp/keepalive';
+import { readActiveSlotAuthority } from '../../../cli/controller/runtime-slots';
 import { redactMcpText } from '../../../cli/mcp/redaction';
 import { controllerPluginRepository, executeAssistantPluginReadDirect, getAssistantPluginManifest, isDirectPluginReadAction, listAssistantPluginManifests, submitAssistantPluginAction } from '../../plugins/store';
 import {
@@ -1067,8 +1077,6 @@ function expectedRevision(args: Record<string, unknown>, key = 'expected_revisio
   return typeof args[key] === 'number' ? Math.trunc(args[key] as number) : undefined;
 }
 
-const SCHEDULER_HEARTBEAT_STALE_MS = 5_000;
-const QUEUE_PROGRESS_STALE_MS = 10_000;
 const CONTROLLER_CONTEXT_PROJECTION_REFRESH_MS = 5_000;
 
 function ageMs(value: string | undefined): number | undefined {
@@ -1077,57 +1085,119 @@ function ageMs(value: string | undefined): number | undefined {
   return Number.isFinite(parsed) ? Math.max(0, Date.now() - parsed) : undefined;
 }
 
-function controllerReadiness(ctx: MultiRepositoryMcpToolContext, repository = ctx.explicitRepository) {
+async function probeLocalControllerHealth(endpoint: string | undefined): Promise<Record<string, unknown> | null> {
+  if (!endpoint) return null;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 1_500);
+  try {
+    const url = new URL(endpoint);
+    url.pathname = '/health';
+    url.search = '';
+    url.hash = '';
+    const response = await fetch(url, { signal: controller.signal, headers: { accept: 'application/json' } });
+    if (!response.ok) return null;
+    return await response.json() as Record<string, unknown>;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function controllerReadiness(ctx: MultiRepositoryMcpToolContext, repository = ctx.explicitRepository) {
   const daemon = readControllerDaemonStatus(ctx.controllerHome);
   const scheduler = readSchedulerHealthSnapshot(ctx.controllerHome);
-  const projection = repository ? readRepositoryProjectionSnapshot(ctx.controllerHome, repository.repoId).projection : undefined;
-  const localBridge = repository ? loadMcpRuntimeState(repository.canonicalRoot)?.localController : undefined;
+  const projectionSnapshot = repository ? readRepositoryProjectionSnapshot(ctx.controllerHome, repository.repoId) : undefined;
+  const projection = projectionSnapshot?.projection;
+  const runtimeState = repository ? loadMcpRuntimeState(repository.canonicalRoot) : undefined;
+  const localBridge = runtimeState?.localController;
   // Process-table scans are expensive (~100ms+). Only fall back when runtime state is missing.
   const inferredLocalBridge = repository && !(localBridge?.running)
     ? inferLocalControllerProcess(repository.canonicalRoot)
     : undefined;
+  const localBridgeEndpoint = localBridge?.endpoint ?? inferredLocalBridge?.endpoint;
+  const localBridgeLiveHealth = await probeLocalControllerHealth(localBridgeEndpoint);
+  const localBridgeEndpointReachable = localBridgeLiveHealth !== null;
+  const localBridgeExpectedSurface = isExpectedLocalControllerHealth(localBridgeLiveHealth, {
+    repoRoot: repository?.canonicalRoot,
+    generation: runtimeState?.generation,
+  });
+  const expectedActiveSlot = readActiveSlotAuthority(ctx.controllerHome).activeSlot;
+  const observedSlot = localBridgeLiveHealth?.slot === 'blue' || localBridgeLiveHealth?.slot === 'green'
+    ? localBridgeLiveHealth.slot
+    : undefined;
   const schedulerHeartbeatAgeMs = ageMs(scheduler.lastTickAt);
   const dispatchHeartbeatAgeMs = ageMs(scheduler.lastDispatchAt);
-  const schedulerFresh = daemon.status === 'ready'
-    && schedulerHeartbeatAgeMs !== undefined
-    && schedulerHeartbeatAgeMs <= SCHEDULER_HEARTBEAT_STALE_MS;
-  const reasons: Array<{ code: string; message: string }> = [];
-
-  if (daemon.status !== 'ready') {
+  const localBridgeObservation = {
+    enabled: Boolean(localBridge || inferredLocalBridge) && localBridge?.mode !== 'disabled',
+    requiredForReadiness: Boolean(localBridge || inferredLocalBridge) && localBridge?.mode !== 'disabled',
+    mode: localBridge?.mode ?? (inferredLocalBridge ? 'standalone' as const : 'unknown' as const),
+    endpoint: localBridgeEndpoint,
+    endpointReachable: localBridgeEndpointReachable,
+    expectedSurface: localBridgeExpectedSurface,
+    activeSlot: observedSlot ? observedSlot === expectedActiveSlot : undefined,
+    generationMatches: runtimeState?.generation
+      ? localBridgeLiveHealth?.generation === runtimeState.generation
+      : undefined,
+    processAlive: localBridge?.running ?? inferredLocalBridge?.running,
+    runtimeStateFresh: localBridge !== undefined,
+    error: localBridge?.error,
+  };
+  const runtimeHealth = evaluateRuntimeHealth({
+    daemon: { status: daemon.status, error: daemon.error },
+    scheduler: {
+      status: daemon.degraded ? 'degraded' : daemon.status,
+      heartbeatAgeMs: schedulerHeartbeatAgeMs,
+      dispatchHeartbeatAgeMs,
+    },
+    workers: {
+      queueDepth: projection?.queueDepth,
+      runningWorkers: projection?.runningWorkers,
+      activeLeases: projection?.activeLeases,
+      activeAttentionCount: projection?.currentAttention.length,
+    },
+    projection: projectionSnapshot ? projectionObservation(projectionSnapshot) : {
+      readable: true,
+      persisted: true,
+    },
+    localBridge: localBridgeObservation,
+    runtimeStorage: { readable: true, ready: true },
+  });
+  const operationalView: RuntimeOperationalView = buildRuntimeOperationalView({
+    health: runtimeHealth,
+    handoffs: repository
+      ? listHandoffItems({ controllerHome: ctx.controllerHome, repoId: repository.repoId, status: 'all', limit: 100 })
+      : [],
+    jobs: repository ? listExecutionJobs(ctx.controllerHome, repository.repoId, 100) : [],
+  });
+  const reasons: Array<{ code: string; message: string }> = runtimeHealth.activeBlockers.map((item) => ({
+    code: item.code === 'SCHEDULER_NOT_PROGRESSING'
+      ? 'DISPATCH_LOOP_STALLED'
+      : item.code === 'LEASE_WITHOUT_WORKER' || item.code === 'WORKER_NOT_RUNNING'
+        ? 'WORKER_NOT_RUNNING'
+        : item.code,
+    message: item.message,
+  }));
+  if (
+    reasons.some((item) => item.code === 'WORKER_NOT_RUNNING')
+    && (dispatchHeartbeatAgeMs === undefined || dispatchHeartbeatAgeMs > RUNTIME_HEALTH_THRESHOLDS.queueProgressStaleMs)
+  ) {
     reasons.push({
-      code: 'DAEMON_NOT_READY',
-      message: `Controller daemon is ${daemon.status}.`,
+      code: 'QUEUE_NOT_PROGRESSING',
+      message: 'Queued Jobs have not received a recent dispatch heartbeat.',
     });
   }
-
-  if (projection?.queueDepth && !schedulerFresh) {
-    reasons.push({
-      code: 'DISPATCH_LOOP_STALLED',
-      message: 'The durable scheduler heartbeat is stale while queued Jobs are waiting.',
-    });
-  }
-
-  if (projection?.queueDepth && projection.runningWorkers === 0 && projection.activeLeases === 0) {
-    reasons.push({
-      code: 'WORKER_NOT_RUNNING',
-      message: 'Queued Jobs exist but no Worker is currently running.',
-    });
-    if (dispatchHeartbeatAgeMs === undefined || dispatchHeartbeatAgeMs > QUEUE_PROGRESS_STALE_MS) {
-      reasons.push({
-        code: 'QUEUE_NOT_PROGRESSING',
-        message: 'Queued Jobs have not received a recent dispatch heartbeat.',
-      });
-    }
-  }
-
-  const ready = reasons.length === 0;
+  const ready = runtimeHealth.ready;
   return {
     ready,
-    state: ready ? 'ready' as const : daemon.status === 'ready' ? 'degraded' as const : 'not_ready' as const,
+    state: ready ? runtimeHealth.state === 'healthy' ? 'ready' as const : 'degraded' as const : daemon.status === 'ready' ? 'degraded' as const : 'not_ready' as const,
     reasons,
+    warnings: runtimeHealth.warnings.map((item) => ({ code: item.code, message: item.message })),
+    health: runtimeHealth,
+    operationalView,
     daemon,
     durableScheduler: {
-      status: schedulerFresh ? 'ready' : daemon.status === 'ready' ? 'degraded' : 'not_ready',
+      status: runtimeHealth.components.scheduler.ready ? 'ready' : daemon.status === 'ready' ? 'degraded' : 'not_ready',
       loopStartedAt: scheduler.loopStartedAt,
       lastTickAt: scheduler.lastTickAt,
       lastDispatchAt: scheduler.lastDispatchAt,
@@ -1140,26 +1210,31 @@ function controllerReadiness(ctx: MultiRepositoryMcpToolContext, repository = ct
       queueDepth: projection?.queueDepth ?? 0,
       runningWorkers: projection?.runningWorkers ?? 0,
       activeLeases: projection?.activeLeases ?? 0,
+      activeAttentionCount: projection?.currentAttention.length ?? 0,
       consuming: (projection?.queueDepth ?? 0) === 0 || (projection?.runningWorkers ?? 0) > 0,
     },
     localBridge: repository ? {
-      running: localBridge?.running ?? inferredLocalBridge?.running ?? false,
-      endpoint: localBridge?.endpoint ?? inferredLocalBridge?.endpoint,
+      running: runtimeHealth.components.localBridge.ready && localBridgeEndpointReachable && localBridgeExpectedSurface,
+      endpoint: localBridgeEndpoint,
       error: localBridge?.error,
       inferredPid: inferredLocalBridge?.pid,
-      statusSource: localBridge?.running ? 'runtime-state' : inferredLocalBridge ? 'process-scan' : 'runtime-state',
+      statusSource: localBridgeEndpointReachable ? 'endpoint' : localBridge?.running ? 'runtime-state' : inferredLocalBridge ? 'process-scan' : 'runtime-state',
+      activeSlot: observedSlot ? observedSlot === expectedActiveSlot : undefined,
+      health: runtimeHealth.components.localBridge,
     } : undefined,
     projection,
+    projectionSnapshot,
   };
 }
 
-function capabilityRecoveryInput(ctx: MultiRepositoryMcpToolContext, repository: ReturnType<typeof selected>, args: Record<string, unknown>) {
-  const readiness = controllerReadiness(ctx, repository);
+async function capabilityRecoveryInput(ctx: MultiRepositoryMcpToolContext, repository: ReturnType<typeof selected>, args: Record<string, unknown>) {
+  const readiness = await controllerReadiness(ctx, repository);
   const runtimeSnapshot = readRepositoryProjectionSnapshot(ctx.controllerHome, repository.repoId);
   const localBridge = loadMcpRuntimeState(repository.canonicalRoot)?.localController;
   const inferredLocalBridge = inferLocalControllerProcess(repository.canonicalRoot);
   const contextProjection = readControllerContextProjection(ctx.controllerHome, repository.repoId);
-  const contextProjectionAgeMs = controllerContextProjectionAgeMs(contextProjection);
+  const contextProjectionSourceRevision = String(runtimeSnapshot.projection.metadata?.contentRevision ?? runtimeSnapshot.projection.revision);
+  const contextProjectionStale = Boolean(contextProjection && controllerContextProjectionNeedsRefresh(contextProjection, contextProjectionSourceRevision));
   const recentErrors = Array.isArray(args.recent_errors) ? args.recent_errors.map(String) : [];
   let runtimeStorageReady: boolean | undefined;
   let runtimeStorageWarnings: string[] = [];
@@ -1188,10 +1263,12 @@ function capabilityRecoveryInput(ctx: MultiRepositoryMcpToolContext, repository:
     activeLeases: readiness.workerLoop.activeLeases,
     localBridgeRunning: localBridge?.running ?? inferredLocalBridge?.running,
     localBridgeError: localBridge?.error,
+    runtimeHealth: readiness.health as RuntimeHealthEvaluation,
+    runtimeOperationalView: readiness.operationalView,
     connectorHealthy: undefined,
     runtimeProjectionStale: runtimeSnapshot.stale,
     runtimeProjectionPersisted: runtimeSnapshot.persisted,
-    contextProjectionStale: Number.isFinite(contextProjectionAgeMs) ? contextProjectionAgeMs > 30_000 : undefined,
+    contextProjectionStale,
     commandPreviewAvailable: args.command_preview_available === undefined ? true : args.command_preview_available === true,
     commandExecuteAvailable: args.command_execute_available === undefined ? true : args.command_execute_available === true,
     issueToolsAvailable: args.issue_tools_available === undefined ? true : args.issue_tools_available === true,
@@ -1213,8 +1290,8 @@ function capabilityRecoveryInput(ctx: MultiRepositoryMcpToolContext, repository:
   };
 }
 
-function capabilityRecoverySnapshot(ctx: MultiRepositoryMcpToolContext, repository: ReturnType<typeof selected>, args: Record<string, unknown>) {
-  return buildCapabilityRecoverySnapshot(capabilityRecoveryInput(ctx, repository, args));
+async function capabilityRecoverySnapshot(ctx: MultiRepositoryMcpToolContext, repository: ReturnType<typeof selected>, args: Record<string, unknown>) {
+  return buildCapabilityRecoverySnapshot(await capabilityRecoveryInput(ctx, repository, args));
 }
 
 function workPhase(status: ExecutionJob['status']): 'queued' | 'running' | 'attention' | 'completed' {
@@ -1321,11 +1398,11 @@ function invalidFacadeOperation(tool: FacadeTool, operation: string): CallToolRe
   return result(facade as unknown as Record<string, unknown>, true);
 }
 
-function runFacadeRepair(
+async function runFacadeRepair(
   ctx: MultiRepositoryMcpToolContext,
   repository: ReturnType<typeof selected>,
   args: Record<string, unknown>,
-): CallToolResult {
+): Promise<CallToolResult> {
   const store = { controllerHome: ctx.controllerHome, repoId: repository.repoId };
   let maintenanceStatus: {
     readyForExecution?: boolean;
@@ -1385,7 +1462,7 @@ function runFacadeRepair(
   }
 
   const daemon = readControllerDaemonStatus(ctx.controllerHome);
-  const readiness = controllerReadiness(ctx, repository);
+  const readiness = await controllerReadiness(ctx, repository);
   const facade = runSelfHealingLoop(
     { repoId: repository.repoId, handoffStore: store },
     {
@@ -1638,9 +1715,9 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         }
         const store = { controllerHome: ctx.controllerHome, repoId: repository.repoId };
         if (operation === 'repair') {
-          return runFacadeRepair(ctx, repository, args);
+          return await runFacadeRepair(ctx, repository, args);
         }
-        const readiness = controllerReadiness(ctx, repository);
+        const readiness = await controllerReadiness(ctx, repository);
         const liveGit = gitSnapshot(repository.canonicalRoot);
         // Compare startup Runtime Source against the Controller package authority —
         // never against the selected execution repository.
@@ -1938,7 +2015,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         };
 
         if (operation === 'repair') {
-          return runFacadeRepair(ctx, repository, args);
+          return await runFacadeRepair(ctx, repository, args);
         }
 
         if (operation === 'verify') {
@@ -2165,14 +2242,102 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         const repository = selected(ctx, args);
         const runtime = loadMcpRuntimeState(repository.canonicalRoot);
         const inferredLocalBridge = inferLocalControllerProcess(repository.canonicalRoot);
+        const mode = runtime?.localController?.mode ?? (inferredLocalBridge ? 'standalone' : 'unknown');
+        const capabilityEnabled = mode !== 'disabled';
+        const capabilityRequired = capabilityEnabled && Boolean(runtime?.localController || inferredLocalBridge);
+        const endpoint = runtime?.localController?.endpoint ?? inferredLocalBridge?.endpoint ?? 'http://127.0.0.1:8766/';
+        const liveHealth = await probeLocalControllerHealth(endpoint);
+        const endpointReachable = liveHealth !== null;
+        const expectedSurface = isExpectedLocalControllerHealth(liveHealth, {
+          repoRoot: repository.canonicalRoot,
+          generation: runtime?.generation,
+        });
+        const expectedActiveSlot = readActiveSlotAuthority(ctx.controllerHome).activeSlot;
+        const observedSlot = liveHealth?.slot === 'blue' || liveHealth?.slot === 'green' ? liveHealth.slot : undefined;
+        const activeSlot = observedSlot ? observedSlot === expectedActiveSlot : undefined;
+        const processAlive = runtime?.localController?.running ?? inferredLocalBridge?.running;
+        const projectionSnapshot = readRepositoryProjectionSnapshot(ctx.controllerHome, repository.repoId);
+        const daemon = readControllerDaemonStatus(ctx.controllerHome);
+        const scheduler = readSchedulerHealthSnapshot(ctx.controllerHome);
+        const schedulerHeartbeatAgeMs = ageMs(scheduler.lastTickAt);
+        const schedulerDispatchHeartbeatAgeMs = ageMs(scheduler.lastDispatchAt);
+        const runtimeStorage = ensureRepositoryRuntimeStorage(repository, ctx.controllerHome);
+        const health = evaluateRuntimeHealth({
+          daemon: { status: daemon.status, error: daemon.error },
+          scheduler: {
+            status: daemon.degraded ? 'degraded' : daemon.status,
+            heartbeatAgeMs: schedulerHeartbeatAgeMs,
+            dispatchHeartbeatAgeMs: schedulerDispatchHeartbeatAgeMs,
+          },
+          workers: {
+            queueDepth: projectionSnapshot.projection.queueDepth,
+            runningWorkers: projectionSnapshot.projection.runningWorkers,
+            activeLeases: projectionSnapshot.projection.activeLeases,
+            activeAttentionCount: projectionSnapshot.projection.currentAttention.length,
+          },
+          projection: projectionObservation(projectionSnapshot),
+          localBridge: {
+            enabled: capabilityEnabled,
+            requiredForReadiness: capabilityRequired,
+            mode,
+            endpoint,
+            endpointReachable,
+            expectedSurface,
+            activeSlot,
+            generationMatches: runtime?.generation
+              ? liveHealth?.generation === runtime.generation
+              : undefined,
+            processAlive,
+            runtimeStateFresh: runtime?.localController !== undefined,
+            error: runtime?.localController?.error,
+          },
+          runtimeStorage: {
+            readable: true,
+            ready: runtimeStorage.readyForExecution,
+            warnings: runtimeStorage.warnings,
+          },
+        });
         const jobs = listLocalBridgeJobSnapshots(repository.canonicalRoot, 12);
         const active = jobs.filter((job) => ['approved', 'running', 'dispatched'].includes(job.status)).length;
         return result({
-          endpoint: runtime?.localController?.endpoint ?? inferredLocalBridge?.endpoint ?? 'http://127.0.0.1:8766/',
-          running: runtime?.localController?.running ?? inferredLocalBridge?.running ?? false,
+          endpoint,
+          running: health.components.localBridge.ready && endpointReachable && expectedSurface,
+          capability: {
+            enabled: capabilityEnabled,
+            requiredForReadiness: capabilityRequired,
+            mode,
+            health: health.components.localBridge.state,
+            ready: health.components.localBridge.ready,
+            endpointReachable,
+            expectedSurface,
+            activeSlot,
+            generationMatches: runtime?.generation
+              ? liveHealth?.generation === runtime.generation
+              : undefined,
+            observedAt: new Date().toISOString(),
+            owner: {
+              kind: mode === 'embedded' ? 'mcp-keepalive' : mode === 'remote' ? 'external' : mode === 'standalone' ? 'controller-service' : 'unknown',
+              ...(runtime?.localController?.pid ?? inferredLocalBridge?.pid ? { pid: runtime?.localController?.pid ?? inferredLocalBridge?.pid } : {}),
+              ...(runtime?.generation ? { generation: runtime.generation } : {}),
+              ...(observedSlot ? { slot: observedSlot } : {}),
+            },
+            evidence: {
+              endpointReachable,
+              expectedSurface,
+              ...(processAlive !== undefined ? { processAlive } : {}),
+              runtimeStateFresh: runtime?.localController !== undefined,
+              observedAt: new Date().toISOString(),
+            },
+          },
+          health: {
+            state: health.state,
+            ready: health.ready,
+            activeBlockers: health.activeBlockers,
+            warnings: health.warnings,
+          },
           error: runtime?.localController?.error,
           inferredPid: inferredLocalBridge?.pid,
-          statusSource: runtime?.localController?.running ? 'runtime-state' : inferredLocalBridge ? 'process-scan' : 'runtime-state',
+          statusSource: endpointReachable ? 'endpoint' : runtime?.localController?.running ? 'runtime-state' : inferredLocalBridge ? 'process-scan' : 'runtime-state',
           counts: jobs.reduce<Record<string, number>>((counts, job) => {
             counts[job.status] = (counts[job.status] ?? 0) + 1;
             return counts;
@@ -2197,7 +2362,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           fallback: 'Open the localhost Local Controller to launch work or inspect execution when a ChatGPT write action is unavailable.',
           repoId: repository.repoId,
           repository: repositorySummary(repository),
-          runtimeStorage: ensureRepositoryRuntimeStorage(repository, ctx.controllerHome),
+          runtimeStorage,
           nonBlocking: true,
         });
       }
@@ -2266,9 +2431,10 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         };
         const runtimeSnapshot = readRepositoryProjectionSnapshot(ctx.controllerHome, repository.repoId);
         const runtimeProjection = runtimeSnapshot.projection;
+        const contextSourceRevision = String(runtimeProjection.metadata?.contentRevision ?? runtimeProjection.revision);
         const cached = readControllerContextProjection(ctx.controllerHome, repository.repoId);
         const projectionAgeMs = controllerContextProjectionAgeMs(cached);
-        const readiness = controllerReadiness(ctx, repository);
+        const readiness = await controllerReadiness(ctx, repository);
         const activeCheckout = repository.checkouts.find((checkout) => checkout.checkoutId === repository.activeCheckoutId);
         const liveGit = gitSnapshot(repository.canonicalRoot);
         const board = projectBoard(repository.canonicalRoot);
@@ -2373,6 +2539,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             stale: runtimeSnapshot.stale,
             persisted: runtimeSnapshot.persisted,
           },
+          operationalView: readiness.operationalView,
           controllerReady: readiness,
         };
         const cachedPayload = cached?.payload;
@@ -2380,6 +2547,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           || typeof cachedPayload !== 'object'
           || !('repoId' in cachedPayload)
           || !('runtimeProjectionState' in cachedPayload)
+          || !('operationalView' in cachedPayload)
           || !('controllerReady' in cachedPayload);
         let projectionRecord = cached;
         if (
@@ -2389,7 +2557,10 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           || projectionAgeMs >= CONTROLLER_CONTEXT_PROJECTION_REFRESH_MS
         ) {
           try {
-            projectionRecord = writeControllerContextProjection(ctx.controllerHome, repository.repoId, payload);
+            projectionRecord = writeControllerContextProjection(ctx.controllerHome, repository.repoId, payload, {
+              sourceRevision: contextSourceRevision,
+              contentFingerprint: runtimeProjection.metadata?.contentFingerprint,
+            });
           } catch {
             projectionRecord = cached;
           }
@@ -2400,7 +2571,9 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           contextProjection: {
             generatedAt: projectionRecord?.generatedAt,
             ageMs: Number.isFinite(refreshedProjectionAgeMs) ? refreshedProjectionAgeMs : undefined,
-            stale: refreshedProjectionAgeMs > 10_000,
+            stale: runtimeSnapshot.stale || controllerContextProjectionNeedsRefresh(projectionRecord, contextSourceRevision),
+            healthImpact: false,
+            sourceRevision: projectionRecord?.sourceRevision,
             strategy: 'event-driven',
             refreshJobId: undefined,
             readOnly: true,
@@ -2557,7 +2730,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         const repository = explicitRepoId
           ? selected(ctx, args)
           : (ctx.explicitRepository ?? (registered.length === 1 ? registered[0] : undefined));
-        const readiness = controllerReadiness(ctx, repository);
+        const readiness = await controllerReadiness(ctx, repository);
         const exposure = (await import('../../../cli/mcp/toolset')).controllerExposureSnapshot(ctx);
         const toolSurfaceReady = exposure.ready && exposure.missingToolNames.length === 0;
         const effectiveReady = readiness.ready && toolSurfaceReady;
@@ -2575,6 +2748,8 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             queueable: taskLedger.queueableTasks.length,
           } : undefined,
           gateway: { ready: true, thin: true, longOperationsAreDurable: true },
+          health: readiness.health,
+          operationalView: readiness.operationalView,
           daemon: readiness.daemon,
           durableScheduler: readiness.durableScheduler,
           workerLoop: readiness.workerLoop,
@@ -2625,12 +2800,12 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
       }
       case 'capability_recovery_probe': {
         const repository = selected(ctx, args);
-        const snapshot = capabilityRecoverySnapshot(ctx, repository, args);
+        const snapshot = await capabilityRecoverySnapshot(ctx, repository, args);
         return result({ recovery: snapshot, audit: listRecoveryAuditRecords(ctx.controllerHome, repository.repoId, 10) });
       }
       case 'capability_recovery_plan': {
         const repository = selected(ctx, args);
-        const snapshot = capabilityRecoverySnapshot(ctx, repository, args);
+        const snapshot = await capabilityRecoverySnapshot(ctx, repository, args);
         return result({
           repoId: repository.repoId,
           generatedAt: snapshot.generatedAt,
@@ -2680,7 +2855,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         const repository = selected(ctx, args);
         const recentErrors = Array.isArray(args.recent_errors) ? args.recent_errors.map(String) : undefined;
         const plugins = listAssistantPluginManifests(ctx.controllerHome, repository);
-        const recovery = capabilityRecoverySnapshot(ctx, repository, { ...args, recent_errors: recentErrors });
+        const recovery = await capabilityRecoverySnapshot(ctx, repository, { ...args, recent_errors: recentErrors });
         const maintenance = buildRuntimeMaintenanceStatus(repository, ctx.controllerHome, { recentErrors });
         const auth = buildWorkspaceAuthStatus(plugins);
         const browserManifest = getAssistantPluginManifest(ctx.controllerHome, repository, 'browser');
@@ -2919,7 +3094,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         let affectedPaths: string[] = [];
         switch (action.id) {
           case 'recovery.probe_again':
-            payload = { recovery: capabilityRecoverySnapshot(ctx, repository, args) };
+            payload = { recovery: await capabilityRecoverySnapshot(ctx, repository, args) };
             break;
           case 'recovery.rebuild_projection': {
             const projection = rebuildRepositoryProjection(ctx.controllerHome, repository.repoId);

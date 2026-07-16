@@ -35,6 +35,7 @@ export interface McpLocalConfig {
   };
   localController?: {
     enabled?: boolean;
+    mode?: 'standalone' | 'embedded' | 'remote' | 'disabled' | 'unknown';
     host?: string;
     port?: number;
     autoOpen?: boolean;
@@ -98,6 +99,7 @@ export interface McpRuntimeState {
   localController?: {
     endpoint: string;
     running: boolean;
+    mode?: 'standalone' | 'embedded' | 'remote' | 'disabled' | 'unknown';
     pid?: number;
     startedAt?: string;
     generation?: string;

@@ -14,6 +14,7 @@ import {
   type RuntimeGenerationRecord,
 } from './runtime-generation';
 import { reconcileControllerStartup, type ControllerStartupRecoveryResult } from './startup-recovery';
+import { applyRuntimeCleanup, type RuntimeCleanupApplyResult } from '../maintenance/cleanup';
 
 function option(name: string): string | undefined {
   const index = process.argv.indexOf(name);
@@ -24,6 +25,79 @@ function optionOrEnv(name: string, envName: string): string | undefined {
   return option(name) ?? process.env[envName];
 }
 
+const DEFAULT_AUTOMATIC_CLEANUP_INITIAL_DELAY_MS = 60_000;
+const DEFAULT_AUTOMATIC_CLEANUP_INTERVAL_MS = 60 * 60_000;
+const DEFAULT_AUTOMATIC_CLEANUP_MIN_AGE_MINUTES = 24 * 60;
+const DEFAULT_AUTOMATIC_CLEANUP_MAX_REMOVALS = 50;
+
+function numericEnv(name: string, fallback: number, minimum: number): number {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) ? Math.max(minimum, Math.trunc(parsed)) : fallback;
+}
+
+export interface AutomaticRuntimeCleanupOptions {
+  initialDelayMs?: number;
+  intervalMs?: number;
+  minAgeMinutes?: number;
+  maxRemovals?: number;
+  cleanup?: (repoRoot: string, options: Parameters<typeof applyRuntimeCleanup>[1]) => RuntimeCleanupApplyResult;
+  onError?: (error: unknown) => void;
+}
+
+function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted || ms <= 0) return Promise.resolve();
+  return new Promise((resolveDelay) => {
+    const timer = setTimeout(finish, ms);
+    timer.unref?.();
+    signal.addEventListener('abort', finish, { once: true });
+    function finish(): void {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', finish);
+      resolveDelay();
+    }
+  });
+}
+
+export function runAutomaticRuntimeCleanupCycle(
+  repoRoot: string,
+  options: AutomaticRuntimeCleanupOptions = {},
+): RuntimeCleanupApplyResult | undefined {
+  try {
+    const maxRemovals = options.maxRemovals
+      ?? numericEnv('REPO_HARNESS_AUTOMATIC_CLEANUP_MAX_REMOVALS', DEFAULT_AUTOMATIC_CLEANUP_MAX_REMOVALS, 1);
+    return (options.cleanup ?? applyRuntimeCleanup)(repoRoot, {
+      minAgeMinutes: options.minAgeMinutes
+        ?? numericEnv('REPO_HARNESS_AUTOMATIC_CLEANUP_MIN_AGE_MINUTES', DEFAULT_AUTOMATIC_CLEANUP_MIN_AGE_MINUTES, 60),
+      includeTempDirs: true,
+      includeTerminalLocalJobs: false,
+      includeLegacyRuns: false,
+      includeHistoricalAttention: false,
+      maxCandidates: Math.max(1, Math.min(maxRemovals * 3, 200)),
+      maxRemovals,
+      confirmCleanup: true,
+    });
+  } catch (error) {
+    (options.onError ?? ((failure) => console.error('[repo-harness cleanup] automatic cleanup failed:', failure)))(error);
+    return undefined;
+  }
+}
+
+export async function runAutomaticRuntimeCleanupLoop(
+  repoRoot: string,
+  signal: AbortSignal,
+  options: AutomaticRuntimeCleanupOptions = {},
+): Promise<void> {
+  const initialDelayMs = options.initialDelayMs
+    ?? numericEnv('REPO_HARNESS_AUTOMATIC_CLEANUP_INITIAL_DELAY_MS', DEFAULT_AUTOMATIC_CLEANUP_INITIAL_DELAY_MS, 0);
+  const intervalMs = options.intervalMs
+    ?? numericEnv('REPO_HARNESS_AUTOMATIC_CLEANUP_INTERVAL_MS', DEFAULT_AUTOMATIC_CLEANUP_INTERVAL_MS, 60_000);
+  await abortableDelay(initialDelayMs, signal);
+  while (!signal.aborted) {
+    runAutomaticRuntimeCleanupCycle(repoRoot, options);
+    await abortableDelay(intervalMs, signal);
+  }
+}
+
 export function startControllerDaemon(controllerHome: string): void {
   const statePath = join(controllerHome, 'daemon', 'state.json');
   const pidPath = join(controllerHome, 'daemon', 'controller.pid');
@@ -32,6 +106,7 @@ export function startControllerDaemon(controllerHome: string): void {
   for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => abort.abort());
 
   const runtime = publishReadyAfterStartupRecovery(controllerHome, startedAt);
+  void runAutomaticRuntimeCleanupLoop(runtime.generationRecord.source.repoRoot, abort.signal);
 
   const scheduler = new GlobalScheduler(controllerHome, {}, {
     controllerPid: process.pid,
@@ -55,6 +130,7 @@ export function startControllerDaemon(controllerHome: string): void {
       process.exitCode = 1;
     })
     .finally(() => {
+      abort.abort();
       if (!controllerDaemonOwnsPidFile(pidPath, process.pid)) return;
       rmSync(pidPath, { force: true });
       writeJsonAtomic(statePath, {

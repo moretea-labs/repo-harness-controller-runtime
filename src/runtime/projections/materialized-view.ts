@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { join } from 'path';
 import { listActiveExecutionJobs, listExecutionJobs } from '../execution/jobs/store';
 import type { ExecutionJob } from '../execution/jobs/types';
@@ -8,12 +9,26 @@ import { listRepositories } from '../../cli/repositories/registry';
 import { clearRepositoryProjectionDirty, readRepositoryProjectionDirty, repositoryProjectionIsDirty } from './invalidation';
 import { listCampaigns } from '../workflow/campaigns/store';
 import { listAssistantPluginManifests } from '../plugins/store';
+import type { ProjectionObservation } from '../health';
+import { RUNTIME_HEALTH_THRESHOLDS } from '../health';
+
+export interface ProjectionMetadata {
+  contentRevision: number;
+  generatedFromRevision?: string;
+  contentFingerprint?: string;
+  lastSuccessfulBuildAt: string;
+  lastBuildAttemptAt?: string;
+  lastBuildError?: string;
+  producerGeneration?: string;
+}
 
 export interface RepositoryRuntimeProjection {
   schemaVersion: 1;
   repoId: string;
   generatedAt: string;
   revision: number;
+  /** Additive metadata; revision remains the compatibility field. */
+  metadata?: ProjectionMetadata;
   releaseFrozen: boolean;
   activeJobs: Array<Pick<ExecutionJob, 'jobId' | 'type' | 'status' | 'priority' | 'updatedAt' | 'workerPid'>>;
   queueDepth: number;
@@ -56,7 +71,10 @@ function buildRepositoryProjection(
   controllerHome: string,
   repoId: string,
   previous?: RepositoryRuntimeProjection,
+  sourceRevision?: string,
 ): RepositoryRuntimeProjection {
+  const generatedAt = new Date().toISOString();
+  const revision = (previous?.revision ?? 0) + 1;
   const activeJobs = listActiveExecutionJobs(controllerHome, repoId);
   const activeJobIds = new Set(activeJobs.map((job) => job.jobId));
   const leases = listActiveLeases(controllerHome, repoId);
@@ -74,11 +92,18 @@ function buildRepositoryProjection(
   const plugins = repository ? listAssistantPluginManifests(controllerHome, repository, {
     preferStored: true,
   }) : [];
-  return {
+  const projection: RepositoryRuntimeProjection = {
     schemaVersion: 1,
     repoId,
-    generatedAt: new Date().toISOString(),
-    revision: (previous?.revision ?? 0) + 1,
+    generatedAt,
+    revision,
+    metadata: {
+      contentRevision: revision,
+      generatedFromRevision: sourceRevision,
+      lastSuccessfulBuildAt: generatedAt,
+      lastBuildAttemptAt: generatedAt,
+      ...(previous?.metadata?.producerGeneration ? { producerGeneration: previous.metadata.producerGeneration } : {}),
+    },
     releaseFrozen: leases.some((lease) => lease.resourceKey.startsWith('release:')),
     activeJobs: activeJobs.map((job) => ({
       jobId: job.jobId,
@@ -109,13 +134,29 @@ function buildRepositoryProjection(
       readyForHumanAcceptance: campaigns.filter((campaign) => campaign.status === 'ready_for_human_acceptance').length,
     },
   };
+  projection.metadata = {
+    ...projection.metadata!,
+    contentFingerprint: createHash('sha256').update(JSON.stringify({
+      repoId: projection.repoId,
+      releaseFrozen: projection.releaseFrozen,
+      activeJobs: projection.activeJobs,
+      queueDepth: projection.queueDepth,
+      runningWorkers: projection.runningWorkers,
+      activeLeases: projection.activeLeases,
+      currentAttention: projection.currentAttention,
+      attention: projection.attention,
+      plugins: projection.plugins,
+      campaigns: projection.campaigns,
+    })).digest('hex'),
+  };
+  return projection;
 }
 
 export function rebuildRepositoryProjection(controllerHome: string, repoId: string): RepositoryRuntimeProjection {
   dirtyProjectionReadCache.delete(dirtyProjectionReadCacheKey(controllerHome, repoId));
   const dirtyMarker = readRepositoryProjectionDirty(controllerHome, repoId);
   const previous = readJsonFile<RepositoryRuntimeProjection | undefined>(projectionPath(controllerHome, repoId), undefined);
-  const projection = buildRepositoryProjection(controllerHome, repoId, previous);
+  const projection = buildRepositoryProjection(controllerHome, repoId, previous, dirtyMarker?.nonce);
   writeJsonAtomic(projectionPath(controllerHome, repoId), projection);
   clearRepositoryProjectionDirty(controllerHome, repoId, dirtyMarker);
   return projection;
@@ -125,15 +166,41 @@ export interface RepositoryRuntimeProjectionSnapshot {
   projection: RepositoryRuntimeProjection;
   stale: boolean;
   persisted: boolean;
+  dirtySinceAt?: string;
+  buildError?: string;
 }
 
 export function projectionBlocksReadiness(snapshot: RepositoryRuntimeProjectionSnapshot): boolean {
-  return snapshot.stale && (
-    snapshot.projection.activeJobs.length > 0
+  const ageMs = snapshot.dirtySinceAt
+    ? Math.max(0, Date.now() - Date.parse(snapshot.dirtySinceAt))
+    : 0;
+  const activeInvariantAtRisk = snapshot.projection.activeJobs.length > 0
     || snapshot.projection.queueDepth > 0
     || snapshot.projection.runningWorkers > 0
-    || snapshot.projection.activeLeases > 0
-  );
+    || snapshot.projection.activeLeases > 0;
+  return snapshot.stale && activeInvariantAtRisk && ageMs >= RUNTIME_HEALTH_THRESHOLDS.projectionRefreshGraceMs;
+}
+
+export function projectionObservation(snapshot: RepositoryRuntimeProjectionSnapshot): ProjectionObservation {
+  const dirtyAgeMs = snapshot.dirtySinceAt
+    ? Math.max(0, Date.now() - Date.parse(snapshot.dirtySinceAt))
+    : undefined;
+  const activeInvariantAtRisk = snapshot.projection.activeJobs.length > 0
+    || snapshot.projection.queueDepth > 0
+    || snapshot.projection.runningWorkers > 0
+    || snapshot.projection.activeLeases > 0;
+  return {
+    readable: Boolean(snapshot.projection),
+    persisted: snapshot.persisted,
+    dirty: snapshot.stale,
+    sourceRevisionChanged: snapshot.stale,
+    refreshPending: snapshot.stale,
+    refreshGraceElapsed: dirtyAgeMs !== undefined && dirtyAgeMs >= RUNTIME_HEALTH_THRESHOLDS.projectionRefreshGraceMs,
+    activeInvariantAtRisk,
+    lastBuildError: snapshot.buildError ?? snapshot.projection.metadata?.lastBuildError,
+    contentRevision: snapshot.projection.metadata?.contentRevision ?? snapshot.projection.revision,
+    generatedFromRevision: snapshot.projection.metadata?.generatedFromRevision,
+  };
 }
 
 export function readRepositoryProjectionSnapshot(
@@ -169,9 +236,10 @@ export function readRepositoryProjectionSnapshot(
     return cached.value;
   }
   const value: RepositoryRuntimeProjectionSnapshot = {
-    projection: buildRepositoryProjection(controllerHome, repoId, persisted),
+    projection: buildRepositoryProjection(controllerHome, repoId, persisted, dirtyMarker?.nonce),
     stale,
     persisted: Boolean(persisted),
+    dirtySinceAt: dirtyMarker?.markedAt,
   };
   if (dirtyMarker) {
     dirtyProjectionReadCache.set(cacheKey, {

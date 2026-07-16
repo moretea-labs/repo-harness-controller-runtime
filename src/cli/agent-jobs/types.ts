@@ -1,6 +1,7 @@
 import type { ControllerAgent } from "../controller/types";
 import type { TaskExecutionClass } from "../controller/execution-policy";
 import type { ExecutorHealth } from "./executor-health";
+import type { ManagedResource } from "../../runtime/resources";
 
 export type AgentJobStatus =
   | "queued"
@@ -149,6 +150,8 @@ export interface AgentJobMeta {
     createPullRequest?: boolean;
     raw?: Record<string, unknown>;
   };
+  /** Additive ownership metadata; legacy Run records without it are protected. */
+  resources?: ManagedResource[];
 }
 
 export interface AgentJobWorkerConfig {

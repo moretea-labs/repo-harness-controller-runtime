@@ -468,10 +468,15 @@ export async function verifyControllerRestart(
   deps: RestartCoordinatorDependencies = {},
 ): Promise<ControllerRestartVerification> {
   const failures: string[] = [];
+  const sharedHealth = status.healthEvaluation;
   const localMcp = status.health.mcp && status.readiness.gateway;
-  const controllerDaemon = status.daemon.status === "ready" && status.readiness.daemon;
-  const localBridge = status.health.localController && status.readiness.localController;
-  const projection = status.readiness.projection;
+  const controllerDaemon = sharedHealth
+    ? sharedHealth.components.daemon.ready
+    : status.daemon.status === "ready" && status.readiness.daemon;
+  const localBridge = sharedHealth
+    ? sharedHealth.components.localBridge.ready
+    : status.health.localController && status.readiness.localController;
+  const projection = sharedHealth ? sharedHealth.components.projection.ready : status.readiness.projection;
   const runtimeSourceCurrent = status.restartRequired === false;
   const runtimeGenerationPresent = Boolean(status.runtimeGeneration);
   const runtimeGenerationChanged = !state.previousGeneration || (

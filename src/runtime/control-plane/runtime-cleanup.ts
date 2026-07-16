@@ -108,6 +108,8 @@ export interface RuntimeCleanupOptions {
   nowMs?: number;
   protectedControllerPid?: number;
   maxEntries?: number;
+  /** Global removal budget for one cycle; automatic cleanup defaults to 50. */
+  maxRemovals?: number;
   inspectProcess?: (pid: number) => RuntimeProcessSnapshot;
 }
 
@@ -123,11 +125,34 @@ export interface RuntimeCleanupReport {
   budgetExhausted: boolean;
   errors: string[];
   logPath: string;
+  cycle: CleanupCycleSummary;
+}
+
+export interface CleanupCycleSummary {
+  scanned: number;
+  eligible: number;
+  attempted: number;
+  removed: number;
+  retained: number;
+  skipped: number;
+  failed: number;
+  truncated: boolean;
+  budgetExhausted: boolean;
+  skippedByReason: Record<string, number>;
+  failedByType: Record<string, number>;
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
 }
 
 interface ScanBudget {
   remaining: number;
   inspected: number;
+  exhausted: boolean;
+}
+
+interface RemovalBudget {
+  remaining: number;
   exhausted: boolean;
 }
 
@@ -208,6 +233,7 @@ function cleanupDaemonPidFile(
   nowIso: string,
   options: RuntimeCleanupOptions,
   errors: string[],
+  removalBudget: RemovalBudget,
 ): { removed: string[]; skipped: string[] } {
   const pidPath = join(controllerHome, 'daemon', 'controller.pid');
   if (!existsSync(pidPath)) return { removed: [], skipped: [] };
@@ -217,6 +243,11 @@ function cleanupDaemonPidFile(
     parsedPid = Number.isInteger(candidate) && candidate > 0 ? candidate : undefined;
   } catch (error) {
     errors.push(errorText('daemon/controller.pid read failed', error));
+  }
+
+  if (removalBudget.remaining <= 0) {
+    removalBudget.exhausted = true;
+    return { removed: [], skipped: [relativeHomePath(controllerHome, pidPath)] };
   }
 
   if (parsedPid) {
@@ -235,6 +266,7 @@ function cleanupDaemonPidFile(
   }
 
   try {
+    removalBudget.remaining -= 1;
     rmSync(pidPath, { force: true });
     updateDaemonStateForStalePid(controllerHome, parsedPid, nowIso);
     return { removed: [relativeHomePath(controllerHome, pidPath)], skipped: [] };
@@ -399,9 +431,12 @@ function cleanupOrphanWorktrees(
   budget: ScanBudget,
   nowMs: number,
   errors: string[],
-): { removed: string[]; skippedActive: string[] } {
+  removalBudget: RemovalBudget,
+): { removed: string[]; skippedActive: string[]; skippedByReason: Record<string, number> } {
   const removed: string[] = [];
   const skippedActive: string[] = [];
+  const skippedByReason: Record<string, number> = {};
+  const skip = (reason: string): void => { skippedByReason[reason] = (skippedByReason[reason] ?? 0) + 1; };
   const repositoriesRoot = join(controllerHome, 'repositories');
   visitDirectoryEntries(repositoriesRoot, budget, errors, (repoEntry) => {
     if (!repoEntry.isDirectory()) return;
@@ -414,10 +449,20 @@ function cleanupOrphanWorktrees(
       const canonical = canonicalPath(path);
       if (!references.complete || references.unsafeRepositories.has(repoId) || references.referenced.has(canonical)) {
         skippedActive.push(relativePath);
+        skip(references.referenced.has(canonical) ? 'active_owner' : 'unknown_ownership');
         return;
       }
       try {
-        if (nowMs - lstatSync(path).mtimeMs < ORPHAN_WORKTREE_TTL_MS) return;
+        if (nowMs - lstatSync(path).mtimeMs < ORPHAN_WORKTREE_TTL_MS) {
+          skip('ttl_not_expired');
+          return;
+        }
+        if (removalBudget.remaining <= 0) {
+          removalBudget.exhausted = true;
+          skip('cleanup_budget_exhausted');
+          return;
+        }
+        removalBudget.remaining -= 1;
         if (removeOrphanWorktreeDirectory(path, errors, relativePath)) {
           removed.push(relativePath);
         }
@@ -426,7 +471,7 @@ function cleanupOrphanWorktrees(
       }
     });
   });
-  return { removed, skippedActive };
+  return { removed, skippedActive, skippedByReason };
 }
 
 function worktreeContentPath(relativePath: string): boolean {
@@ -441,9 +486,20 @@ function removeStaleTempEntry(
   nowMs: number,
   removed: string[],
   errors: string[],
+  removalBudget: RemovalBudget,
+  skippedByReason: Record<string, number>,
 ): void {
-  if (nowMs - mtimeMs < TEMP_STATE_TTL_MS) return;
+  if (nowMs - mtimeMs < TEMP_STATE_TTL_MS) {
+    skippedByReason.ttl_not_expired = (skippedByReason.ttl_not_expired ?? 0) + 1;
+    return;
+  }
+  if (removalBudget.remaining <= 0) {
+    removalBudget.exhausted = true;
+    skippedByReason.cleanup_budget_exhausted = (skippedByReason.cleanup_budget_exhausted ?? 0) + 1;
+    return;
+  }
   try {
+    removalBudget.remaining -= 1;
     rmSync(path, { recursive: isDirectory, force: true });
     removed.push(relativePath);
   } catch (error) {
@@ -456,6 +512,8 @@ function cleanupTemporaryStatePaths(
   budget: ScanBudget,
   nowMs: number,
   errors: string[],
+  removalBudget: RemovalBudget,
+  skippedByReason: Record<string, number>,
 ): string[] {
   const removed: string[] = [];
   const visit = (directory: string, depth: number, leafOnly = false): void => {
@@ -475,7 +533,7 @@ function cleanupTemporaryStatePaths(
       }
 
       if (entry.name.endsWith('.tmp')) {
-        removeStaleTempEntry(path, relativePath, entry.isDirectory(), stats.mtimeMs, nowMs, removed, errors);
+        removeStaleTempEntry(path, relativePath, entry.isDirectory(), stats.mtimeMs, nowMs, removed, errors, removalBudget, skippedByReason);
         return;
       }
 
@@ -520,18 +578,26 @@ export function cleanupControllerRuntimeState(
   const nowMs = options.nowMs ?? Date.now();
   const nowIso = new Date(nowMs).toISOString();
   const maxEntries = numericSetting(String(options.maxEntries ?? DEFAULT_SCAN_BUDGET), DEFAULT_SCAN_BUDGET, 1);
+  const removalBudget: RemovalBudget = {
+    remaining: numericSetting(String(options.maxRemovals ?? 50), 50, 1),
+    exhausted: false,
+  };
   // Separate phase budgets so a huge permanent-state tree cannot starve
   // worktree reference collection or orphan worktree removal.
   const referenceBudget = createScanBudget(maxEntries);
   const worktreeBudget = createScanBudget(maxEntries);
   const tempBudget = createScanBudget(maxEntries);
   const errors: string[] = [];
-  const pidFiles = cleanupDaemonPidFile(home, nowIso, options, errors);
+  const skippedByReason: Record<string, number> = {};
+  const pidFiles = cleanupDaemonPidFile(home, nowIso, options, errors, removalBudget);
   const references = collectReferencedWorktrees(home, referenceBudget, errors);
-  const worktrees = cleanupOrphanWorktrees(home, references, worktreeBudget, nowMs, errors);
-  const removedTemporaryPaths = cleanupTemporaryStatePaths(home, tempBudget, nowMs, errors).sort();
+  const worktrees = cleanupOrphanWorktrees(home, references, worktreeBudget, nowMs, errors, removalBudget);
+  Object.entries(worktrees.skippedByReason).forEach(([key, value]) => { skippedByReason[key] = (skippedByReason[key] ?? 0) + value; });
+  const removedTemporaryPaths = cleanupTemporaryStatePaths(home, tempBudget, nowMs, errors, removalBudget, skippedByReason).sort();
   const inspectedPaths = referenceBudget.inspected + worktreeBudget.inspected + tempBudget.inspected;
-  const budgetExhausted = referenceBudget.exhausted || worktreeBudget.exhausted || tempBudget.exhausted;
+  const budgetExhausted = referenceBudget.exhausted || worktreeBudget.exhausted || tempBudget.exhausted || removalBudget.exhausted;
+  if (pidFiles.skipped.length > 0 && removalBudget.exhausted) skippedByReason.cleanup_budget_exhausted = (skippedByReason.cleanup_budget_exhausted ?? 0) + pidFiles.skipped.length;
+  if (pidFiles.skipped.length > 0 && !removalBudget.exhausted) skippedByReason.active_owner = (skippedByReason.active_owner ?? 0) + pidFiles.skipped.length;
   const report: RuntimeCleanupReport = {
     at: nowIso,
     reason: options.reason ?? 'manual',
@@ -544,6 +610,26 @@ export function cleanupControllerRuntimeState(
     budgetExhausted,
     errors: errors.sort(),
     logPath: runtimeCleanupLogPath(home),
+    cycle: {
+      scanned: inspectedPaths,
+      eligible: pidFiles.removed.length + worktrees.removed.length + removedTemporaryPaths.length,
+      attempted: pidFiles.removed.length + worktrees.removed.length + removedTemporaryPaths.length + errors.length,
+      removed: pidFiles.removed.length + worktrees.removed.length + removedTemporaryPaths.length,
+      retained: pidFiles.skipped.length + worktrees.skippedActive.length,
+      skipped: Math.max(0, inspectedPaths - pidFiles.removed.length - worktrees.removed.length - removedTemporaryPaths.length - errors.length),
+      failed: errors.length,
+      truncated: budgetExhausted,
+      budgetExhausted,
+      skippedByReason,
+      failedByType: errors.reduce<Record<string, number>>((counts, error) => {
+        const type = error.split(/[: ]/, 1)[0] || 'unknown';
+        counts[type] = (counts[type] ?? 0) + 1;
+        return counts;
+      }, {}),
+      startedAt: nowIso,
+      finishedAt: new Date().toISOString(),
+      durationMs: Math.max(0, Date.now() - nowMs),
+    },
   };
   if (shouldPersistCleanupAudit(report)) {
     try {

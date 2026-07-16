@@ -36,6 +36,9 @@ import {
   type RuntimeSourceIdentity,
 } from "../../runtime/control-plane/runtime-generation";
 import { projectionBlocksReadiness, readRepositoryProjectionSnapshot } from "../../runtime/projections/materialized-view";
+import { projectionObservation } from "../../runtime/projections/materialized-view";
+import { readSchedulerHealthSnapshot } from "../../runtime/control-plane/global-scheduler/scheduler";
+import { evaluateRuntimeHealth, type RuntimeHealthEvaluation } from "../../runtime/health";
 import { isProcessAlive, terminateProcessTree } from "../../runtime/shared/process-tree";
 
 const DEFAULT_START_TIMEOUT_MS = 60_000;
@@ -128,6 +131,8 @@ export interface ControllerServiceStatus {
   daemon: ControllerDaemonStatus;
   mcpRuntime: McpRuntimeState | null;
   health: ControllerServiceHealth;
+  /** Shared semantic evaluation; legacy boolean health fields remain compatible. */
+  healthEvaluation?: RuntimeHealthEvaluation;
   ports: {
     mcp: number;
     localController: number;
@@ -509,6 +514,7 @@ function resolveServiceConfig(repoRoot: string, explicitLogFile?: string, explic
   mcpPort: number;
   localControllerHost: string;
   localControllerPort: number;
+  localControllerEnabled: boolean;
   allowLanMobileIntents: boolean;
   tunnelMode: "none" | "quick" | "named" | "tailscale";
   publicEndpoint?: string;
@@ -542,6 +548,7 @@ function resolveServiceConfig(repoRoot: string, explicitLogFile?: string, explic
     mcpPort: localConfig?.server?.port ?? 8765,
     localControllerHost: localBridgeConfig.host ?? localConfig?.localController?.host ?? "127.0.0.1",
     localControllerPort: localBridgeConfig.port ?? localConfig?.localController?.port ?? 8766,
+    localControllerEnabled: localConfig?.localController?.enabled ?? true,
     allowLanMobileIntents: localBridgeConfig.allowLanMobileIntents === true,
     tunnelMode,
     publicEndpoint,
@@ -585,6 +592,7 @@ async function healthSummary(
   health: ControllerServiceHealth;
   mcpReachable: boolean;
   localControllerReachable: boolean;
+  localControllerPayload: Record<string, unknown> | null;
 }> {
   const [mcpHealth, localControllerHealth, mcpReachable, localControllerReachable] = await Promise.all([
     jsonHealth(localMcpHealthUrl(host, mcpPort)),
@@ -600,6 +608,7 @@ async function healthSummary(
     },
     mcpReachable,
     localControllerReachable,
+    localControllerPayload: localControllerHealth,
   };
 }
 
@@ -692,6 +701,62 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
   const blockingStaleProjectionRepos = projectionSnapshots
     .filter(({ snapshot }) => projectionBlocksReadiness(snapshot))
     .map(({ repoId }) => repoId);
+  const scheduler = readSchedulerHealthSnapshot(config.controllerHome);
+  const schedulerHeartbeatAgeMs = scheduler.lastTickAt
+    ? Math.max(0, Date.now() - Date.parse(scheduler.lastTickAt))
+    : undefined;
+  const schedulerDispatchHeartbeatAgeMs = scheduler.lastDispatchAt
+    ? Math.max(0, Date.now() - Date.parse(scheduler.lastDispatchAt))
+    : undefined;
+  const projectionObservations = projectionSnapshots.map(({ snapshot }) => projectionObservation(snapshot));
+  const projectionHealth = projectionObservations.length === 0
+    ? {
+      readable: true,
+      persisted: true,
+      producerHealthy: daemon.status === "ready" && daemon.degraded !== true,
+    }
+    : {
+      readable: projectionObservations.every((observation) => observation.readable),
+      persisted: projectionObservations.every((observation) => observation.persisted),
+      dirty: projectionObservations.some((observation) => observation.dirty),
+      sourceRevisionChanged: projectionObservations.some((observation) => observation.sourceRevisionChanged),
+      refreshPending: projectionObservations.some((observation) => observation.refreshPending),
+      refreshGraceElapsed: projectionObservations.some((observation) => observation.refreshGraceElapsed),
+      activeInvariantAtRisk: projectionObservations.some((observation) => observation.activeInvariantAtRisk),
+      producerHealthy: daemon.status === "ready" && daemon.degraded !== true,
+    };
+  const healthEvaluation = evaluateRuntimeHealth({
+    daemon: {
+      status: daemon.status,
+      error: daemon.error,
+    },
+    scheduler: {
+      status: daemon.degraded ? "degraded" : daemon.status,
+      heartbeatAgeMs: schedulerHeartbeatAgeMs,
+      dispatchHeartbeatAgeMs: schedulerDispatchHeartbeatAgeMs,
+    },
+    workers: {
+      queueDepth: projectionSnapshots.reduce((sum, { snapshot }) => sum + snapshot.projection.queueDepth, 0),
+      runningWorkers: projectionSnapshots.reduce((sum, { snapshot }) => sum + snapshot.projection.runningWorkers, 0),
+      activeLeases: projectionSnapshots.reduce((sum, { snapshot }) => sum + snapshot.projection.activeLeases, 0),
+      activeAttentionCount: projectionSnapshots.reduce((sum, { snapshot }) => sum + snapshot.projection.currentAttention.length, 0),
+    },
+    projection: projectionHealth,
+    localBridge: {
+      enabled: config.localControllerEnabled,
+      requiredForReadiness: config.localControllerEnabled,
+      mode: config.localControllerEnabled ? runtime?.localController?.mode ?? "standalone" : "disabled",
+      endpoint: localControllerHealthUrl(config.localControllerHost, config.localControllerPort),
+      endpointReachable: ports.localControllerReachable,
+      expectedSurface: ports.health.localController,
+      generationMatches: runtimeGeneration?.generation
+        ? ports.localControllerPayload?.generation === runtimeGeneration.generation
+        : undefined,
+      processAlive: runtime?.localController?.running,
+      runtimeStateFresh: runtime?.localController !== undefined,
+    },
+    runtimeStorage: { readable: true, ready: true },
+  });
   const processes = collectControllerServiceProcesses(repoRoot, state, config.controllerHome);
   const trackedChildPids = trackedActiveChildProcessPids(repoRoot, config.controllerHome);
   const orphanedProcesses = classifyDetachedControllerServiceProcesses(processes, {
@@ -703,7 +768,6 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
   const warnings: string[] = [];
   const problems: string[] = [];
   const restartReasons = [...sourceDrift.reasons];
-  const daemonReady = daemon.status === "ready" && daemon.degraded !== true;
   const publicReady = !runtime?.tunnel?.publicEndpoint || runtime?.tunnel?.healthy === true;
   const connectorReady = !runtime?.tunnel?.publicEndpoint || (
     publicReady
@@ -711,12 +775,12 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
     && (!runtimeGeneration?.generation || runtime?.generation === runtimeGeneration.generation)
     && (!runtimeGeneration?.generation || runtime?.server.generation === runtimeGeneration.generation)
   );
-  const projectionReady = blockingStaleProjectionRepos.length === 0;
+  const projectionReady = healthEvaluation.components.projection.ready;
   const readiness: ControllerServiceReadiness = {
     gateway: ports.health.mcp,
-    daemon: daemonReady,
-    scheduler: daemonReady,
-    localController: ports.health.localController,
+    daemon: healthEvaluation.components.daemon.ready,
+    scheduler: healthEvaluation.components.scheduler.ready,
+    localController: healthEvaluation.components.localBridge.ready,
     projection: projectionReady,
     public: publicReady,
     connector: connectorReady,
@@ -749,7 +813,7 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
   }
   if (daemon.status === "failed" || daemon.degraded) problems.push(`Controller daemon is unhealthy: ${daemon.error ?? "unknown error"}`);
   if (runtime?.server.healthMismatch) problems.push(`MCP runtime generation/tool surface mismatch: ${runtime.server.healthMismatch}`);
-  if (!projectionReady) problems.push(`Runtime projection is stale for ${blockingStaleProjectionRepos.join(", ")}.`);
+  if (!projectionReady) problems.push(`Runtime projection is stale for ${blockingStaleProjectionRepos.join(", ") || "active runtime state"}.`);
   if (staleProjectionRepos.length > 0 && blockingStaleProjectionRepos.length === 0) {
     infos.push(`Ignoring stale idle runtime projections for ${staleProjectionRepos.join(", ")}.`);
   }
@@ -765,7 +829,7 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
     serviceStatePath: controllerServiceStatePath(repoRoot, config.controllerHome),
     runtimeStatePath,
     logPath: config.logPath,
-    running: supervisorAlive && ports.health.mcp && ports.health.localController,
+    running: supervisorAlive && ports.health.mcp && (!config.localControllerEnabled || ports.health.localController),
     ready,
     readiness,
     restartRequired: sourceDrift.restartRequired,
@@ -780,6 +844,7 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
     daemon,
     mcpRuntime: runtime,
     health: ports.health,
+    healthEvaluation,
     ports: {
       mcp: config.mcpPort,
       localController: config.localControllerPort,

@@ -1,4 +1,5 @@
 export type ExecutionJobPriority = 'P0' | 'P1' | 'P2' | 'P3' | 'P4';
+import type { ManagedResource } from '../../resources';
 
 export type ExecutionJobType =
   | 'mcp-tool'
@@ -121,6 +122,8 @@ export interface ExecutionJob {
   maxAttempts: number;
   timings?: ExecutionJobTimings;
   operationMetadata?: ExecutionOperationMetadata;
+  /** Additive ownership metadata; absent on legacy Jobs means unknown ownership. */
+  resources?: ManagedResource[];
   result?: Record<string, unknown>;
   outcome?: ExecutionJobOutcome;
   error?: { code: string; message: string; retryable: boolean; details?: Record<string, unknown> };
@@ -141,6 +144,7 @@ export interface CreateExecutionJobInput {
   timeoutMs?: number;
   maxAttempts?: number;
   operationMetadata?: ExecutionOperationMetadata;
+  resources?: ManagedResource[];
 }
 
 export interface ExecutionJobEvent {

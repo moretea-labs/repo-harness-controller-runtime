@@ -74,6 +74,7 @@ export interface RuntimeMaintenanceCandidate {
   workerPid?: number;
   deadlineAt?: string;
   suggestedAction: RuntimeMaintenanceActionId;
+  ownershipStatus?: 'explicit' | 'unknown';
 }
 
 export interface RuntimeMaintenanceSummary {
@@ -172,7 +173,9 @@ interface LocalJobState {
 }
 
 const VALID_MAINTENANCE_ACTIONS = new Set<RuntimeMaintenanceActionId>(['local_jobs_reconcile', 'quarantine_unreadable_local_jobs', 'runtime_storage_finalize_relocation', 'rebuild_projection', 'full_maintenance_pass']);
-export const AUTOMATIC_RUNTIME_MAINTENANCE_ACTION_ALLOWLIST = new Set<RuntimeMaintenanceActionId>(['local_jobs_reconcile', 'full_maintenance_pass']);
+// Automatic maintenance is intentionally limited to the narrowly-scoped local
+// job reconciliation action. Broader passes remain explicit/manual operations.
+export const AUTOMATIC_RUNTIME_MAINTENANCE_ACTION_ALLOWLIST = new Set<RuntimeMaintenanceActionId>(['local_jobs_reconcile']);
 const ACTIVE_LOCAL_JOB_STATUSES = new Set(['pending_approval', 'approved', 'dispatched', 'running']);
 const TERMINAL_LOCAL_JOB_STATUSES = new Set(['succeeded', 'failed', 'cancelled', 'timed_out', 'orphaned', 'stale', 'rejected']);
 const DEFAULT_MIN_AGE_MINUTES = 10;
@@ -394,6 +397,7 @@ function scanRuntimeTempCandidates(
     minAgeMinutes: RUNTIME_TEMP_RETENTION_MINUTES,
     maxEntries: Math.max(maxCandidates * 3, 500),
   });
+  const ownershipStatus = explicitRoots ? 'explicit' as const : 'unknown' as const;
   return scan.entries
     .filter((entry) => entry.cleanupCandidate)
     .slice(0, maxCandidates)
@@ -401,10 +405,17 @@ function scanRuntimeTempCandidates(
       kind: 'stale_runtime_temp_entry',
       id: `runtime-temp-${safeId(entry.path)}`,
       path: entry.path,
-      safe: true,
-      reason: `Repo-harness temp entry is unoccupied, not a symbolic link, and ${entry.ageMinutes} minute(s) old.`,
+      safe: entry.cleanupCandidate && ownershipStatus === 'explicit',
+      reason: ownershipStatus === 'unknown'
+        ? 'Temp entry has unknown durable ownership; it is protected until an owning lifecycle record or safe reconciliation proves eligibility.'
+        : entry.symbolicLink
+          ? 'Symbolic links are never eligible for automatic cleanup.'
+          : entry.occupiedByPid
+            ? `Temp entry is referenced by live process ${entry.occupiedByPid}.`
+            : `Repo-harness temp entry is unoccupied, not a symbolic link, and ${entry.ageMinutes} minute(s) old.`,
       ageMinutes: entry.ageMinutes,
       suggestedAction: 'full_maintenance_pass',
+      ownershipStatus,
     }));
 }
 

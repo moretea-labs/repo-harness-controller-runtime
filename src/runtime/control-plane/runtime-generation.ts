@@ -378,7 +378,9 @@ export function evaluateActiveRuntimeSourceDrift(
     ? (() => {
       try {
         if (!options.currentRuntimeRoot || !existsSync(options.currentRuntimeRoot)) return undefined;
-        return collectRuntimeSourceIdentityCached(options.currentRuntimeRoot);
+        // Explicit roots are test/diagnostic fixtures and must observe edits
+        // immediately; the authority-root cache is only for status storms.
+        return collectRuntimeSourceIdentity(options.currentRuntimeRoot);
       } catch {
         return undefined;
       }
