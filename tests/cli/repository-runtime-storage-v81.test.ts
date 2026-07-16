@@ -26,7 +26,7 @@ function writeRun(root: string, runId: string, status: string, marker: string): 
   }, null, 2)}\n`, 'utf-8');
 }
 
-function writeLocalJob(root: string, jobId: string, status: string, marker: string): void {
+function writeLocalJob(root: string, jobId: string, status: string, marker: string, runId?: string): void {
   const directory = join(root, '.ai', 'harness', 'local-jobs', jobId);
   mkdirSync(directory, { recursive: true });
   writeFileSync(join(directory, 'job.json'), `${JSON.stringify({
@@ -34,6 +34,7 @@ function writeLocalJob(root: string, jobId: string, status: string, marker: stri
     jobId,
     status,
     marker,
+    ...(runId ? { runId } : {}),
   }, null, 2)}\n`, 'utf-8');
 }
 
@@ -121,6 +122,26 @@ describe('v8.1 repository runtime storage isolation', () => {
       expect(binding?.status).toBe('legacy-active');
       expect(lstatSync(source).isSymbolicLink()).toBe(false);
       expect(readFileSync(join(source, 'JOB-active', 'job.json'), 'utf-8')).toContain('active');
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test('does not let a stale running Local Job block relocation after its linked Run failed', () => {
+    const fixture = repositoryFixture();
+    try {
+      writeRun(fixture.repoA.canonicalRoot, 'RUN-failed', 'failed', 'terminal-run');
+      writeLocalJob(fixture.repoA.canonicalRoot, 'JOB-stale-running', 'running', 'stale-projection', 'RUN-failed');
+
+      const storage = ensureRepositoryRuntimeStorage(fixture.repoA, fixture.controllerHome);
+      const localJobs = storage.bindings.find((entry) => entry.name === 'local-jobs');
+      const source = join(fixture.repoA.canonicalRoot, '.ai', 'harness', 'local-jobs');
+      const target = join(repositoryControllerRoot(fixture.controllerHome, fixture.repoA.repoId), 'local-jobs');
+
+      expect(storage.readyForExecution).toBe(true);
+      expect(localJobs?.status).toBe('migrated');
+      expect(lstatSync(source).isSymbolicLink()).toBe(true);
+      expect(readFileSync(join(target, 'JOB-stale-running', 'job.json'), 'utf-8')).toContain('RUN-failed');
     } finally {
       fixture.cleanup();
     }

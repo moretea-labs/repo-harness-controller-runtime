@@ -155,6 +155,18 @@ function hasActiveRuns(path: string): boolean {
   return false;
 }
 
+function linkedRunIsTerminal(localJobsPath: string, runId: unknown): boolean {
+  if (typeof runId !== 'string' || !/^[A-Za-z0-9._-]+$/.test(runId)) return false;
+  const metaPath = join(dirname(localJobsPath), 'jobs', runId, 'meta.json');
+  if (!existsSync(metaPath)) return false;
+  try {
+    const meta = JSON.parse(readFileSync(metaPath, 'utf-8')) as { status?: string };
+    return typeof meta.status === 'string' && !ACTIVE_RUN_STATUSES.has(meta.status);
+  } catch (_error) {
+    return false;
+  }
+}
+
 function hasActiveLocalJobs(path: string): boolean {
   if (!existsSync(path)) return false;
   for (const entry of readdirSync(path, { withFileTypes: true })) {
@@ -162,8 +174,11 @@ function hasActiveLocalJobs(path: string): boolean {
     const jobPath = join(path, entry.name, 'job.json');
     if (!existsSync(jobPath)) return true;
     try {
-      const job = JSON.parse(readFileSync(jobPath, 'utf-8')) as { status?: string };
-      if (job.status && ACTIVE_LOCAL_JOB_STATUSES.has(job.status)) return true;
+      const job = JSON.parse(readFileSync(jobPath, 'utf-8')) as { status?: string; runId?: string };
+      if (job.status && ACTIVE_LOCAL_JOB_STATUSES.has(job.status)) {
+        if (linkedRunIsTerminal(path, job.runId)) continue;
+        return true;
+      }
     } catch (_error) {
       return true;
     }
