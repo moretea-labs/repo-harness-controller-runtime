@@ -88,6 +88,9 @@ function runCli(
         // Keep lifecycle integration tests bounded independently of the
         // production restart recovery window.
         REPO_HARNESS_CONTROLLER_START_TIMEOUT_MS: "45000",
+        // Detached test daemons must self-expire even if the test process is
+        // interrupted before afterEach can stop the temporary controllerHome.
+        REPO_HARNESS_DAEMON_MAX_LIFETIME_MS: "120000",
         REPO_HARNESS_NGROK_ROTATION_CONFIG: join(controllerHome, "disabled-ngrok-rotation.env"),
       },
     },

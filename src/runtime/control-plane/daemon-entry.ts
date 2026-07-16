@@ -104,6 +104,11 @@ export function startControllerDaemon(controllerHome: string): void {
   const abort = new AbortController();
   const startedAt = new Date().toISOString();
   for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => abort.abort());
+  const configuredMaxLifetimeMs = Number(process.env.REPO_HARNESS_DAEMON_MAX_LIFETIME_MS);
+  const maxLifetimeTimer = Number.isFinite(configuredMaxLifetimeMs) && configuredMaxLifetimeMs >= 1_000
+    ? setTimeout(() => abort.abort(), Math.trunc(configuredMaxLifetimeMs))
+    : undefined;
+  maxLifetimeTimer?.unref?.();
 
   const runtime = publishReadyAfterStartupRecovery(controllerHome, startedAt);
   void runAutomaticRuntimeCleanupLoop(runtime.generationRecord.source.repoRoot, abort.signal);
@@ -131,6 +136,7 @@ export function startControllerDaemon(controllerHome: string): void {
     })
     .finally(() => {
       abort.abort();
+      if (maxLifetimeTimer) clearTimeout(maxLifetimeTimer);
       if (!controllerDaemonOwnsPidFile(pidPath, process.pid)) return;
       rmSync(pidPath, { force: true });
       writeJsonAtomic(statePath, {
