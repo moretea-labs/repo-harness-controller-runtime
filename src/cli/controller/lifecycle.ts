@@ -303,6 +303,15 @@ async function portReachable(host: string, port: number): Promise<boolean> {
   });
 }
 
+function processCommandLine(pid: number | undefined): string | undefined {
+  if (!pid || pid <= 0 || !isPidAlive(pid)) return undefined;
+  const result = runProcess("ps", ["-o", "command=", "-p", String(pid)], {
+    timeoutMs: 1_000,
+    maxOutputBytes: 16 * 1024,
+  });
+  return result.ok ? result.stdout.trim() || undefined : undefined;
+}
+
 function processMatchesRepoHarness(
   commandLine: string,
   repoRoot: string,
@@ -443,32 +452,37 @@ function collectControllerServiceProcesses(
     : currentProcessAncestry();
   for (const pid of trackedActiveChildProcessPids(repoRoot, controllerHome)) protectedPids.add(pid);
   const add = (pid: number | undefined, command: string, kind: ControllerServiceProcess["kind"]) => {
-    if (!pid || pid <= 0 || protectedPids.has(pid)) return;
+    if (!pid || pid <= 0 || protectedPids.has(pid) || !isPidAlive(pid)) return;
     if (!seen.has(pid)) seen.set(pid, { pid, command, kind });
+  };
+  const addRecorded = (pid: number | undefined, kind: ControllerServiceProcess["kind"]) => {
+    const commandLine = processCommandLine(pid);
+    if (!commandLine || !processMatchesRepoHarness(commandLine, repoRoot, controllerHome)) return;
+    add(pid, commandLine, kind);
   };
 
   // Only trust state PIDs when the recorded controllerHome matches this slot.
   const stateOwnsHome = !state?.controllerHome
     || resolve(state.controllerHome) === resolve(controllerHome);
   if (stateOwnsHome) {
-    add(state?.supervisor.pid, "controller service supervisor", "supervisor");
-    add(state?.localController?.pid, "local controller", "local-controller");
+    addRecorded(state?.supervisor.pid, "supervisor");
+    addRecorded(state?.localController?.pid, "local-controller");
   }
   const serviceRuntime = loadMcpServiceRuntimeState(controllerHome, repoRoot);
   // Slot homes must only adopt controller-home runtime PIDs. Falling back to
   // repo-local runtime would let one slot stop another slot's gateway.
   if (serviceRuntime) {
-    add(serviceRuntime.server.pid, "mcp serve", "mcp-serve");
-    add(serviceRuntime.localController?.pid, "local controller", "local-controller");
-    add(serviceRuntime.tunnel?.pid, "cloudflared tunnel", "unknown");
+    addRecorded(serviceRuntime.server.pid, "mcp-serve");
+    addRecorded(serviceRuntime.localController?.pid, "local-controller");
+    addRecorded(serviceRuntime.tunnel?.pid, "unknown");
   } else if (stateOwnsHome) {
     const legacyRuntime = loadMcpRuntimeState(repoRoot);
-    add(legacyRuntime?.server.pid, "mcp serve", "mcp-serve");
-    add(legacyRuntime?.localController?.pid, "local controller", "local-controller");
-    add(legacyRuntime?.tunnel?.pid, "cloudflared tunnel", "unknown");
+    addRecorded(legacyRuntime?.server.pid, "mcp-serve");
+    addRecorded(legacyRuntime?.localController?.pid, "local-controller");
+    addRecorded(legacyRuntime?.tunnel?.pid, "unknown");
   }
   const daemon = readControllerDaemonStatus(controllerHome);
-  add(daemon.pid, "controller daemon", "controller-daemon");
+  addRecorded(daemon.pid, "controller-daemon");
 
   const ps = runProcess("ps", ["ax", "-o", "pid=", "-o", "command="], {
     timeoutMs: 5_000,

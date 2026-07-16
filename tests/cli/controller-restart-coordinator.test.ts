@@ -209,6 +209,64 @@ describe("controller restart coordinator", () => {
     expect(readControllerRestartState(controllerHome)).toBeNull();
   });
 
+  test("reclaims a fresh lock whose persisted owner PID is already dead", () => {
+    const { repoRoot, controllerHome } = fixture();
+    const lockPath = join(controllerRestartDirectory(controllerHome), "schedule.lock");
+    mkdirSync(dirname(lockPath), { recursive: true });
+    writeFileSync(lockPath, `${JSON.stringify({ pid: 4242, createdAt: "2026-07-15T00:00:00.000Z" })}\n`);
+    let launches = 0;
+
+    const result = scheduleControllerServiceRestart({
+      repo: repoRoot,
+      controllerHome,
+      requestId: "restart-dead-lock-owner",
+      mode: "detached",
+    }, {
+      now: () => new Date("2026-07-15T00:00:01.000Z"),
+      isPidAlive: () => false,
+      launch: () => { launches += 1; return 5001; },
+    });
+
+    expect(result.deduplicated).toBe(false);
+    expect(launches).toBe(1);
+  });
+
+  test("allows a failed request id to be retried", () => {
+    const { repoRoot, controllerHome } = fixture();
+    const failed: ControllerRestartState = {
+      schemaVersion: 1,
+      requestId: "restart-retry",
+      repoRoot,
+      controllerHome,
+      phase: "failed",
+      requestedAt: "2026-07-15T00:00:00.000Z",
+      updatedAt: "2026-07-15T00:00:01.000Z",
+      requestedBy: "test",
+      delayMs: 250,
+      completedAt: "2026-07-15T00:00:01.000Z",
+      error: "previous restart failed",
+    };
+    mkdirSync(dirname(controllerRestartStatePath(controllerHome, failed.requestId)), { recursive: true });
+    writeFileSync(controllerRestartStatePath(controllerHome, failed.requestId), `${JSON.stringify(failed)}\n`);
+    writeFileSync(controllerRestartStatePath(controllerHome), `${JSON.stringify(failed)}\n`);
+    let launches = 0;
+
+    const result = scheduleControllerServiceRestart({
+      repo: repoRoot,
+      controllerHome,
+      requestId: failed.requestId,
+      mode: "detached",
+    }, {
+      isPidAlive: () => false,
+      launch: () => { launches += 1; return 5002; },
+    });
+
+    expect(result.deduplicated).toBe(false);
+    expect(result.state.phase).toBe("scheduled");
+    expect(result.state.error).toBeUndefined();
+    expect(launches).toBe(1);
+  });
+
   test("records a bounded failed terminal state when post-restart verification fails", async () => {
     const { repoRoot, controllerHome } = fixture();
     scheduleControllerServiceRestart({

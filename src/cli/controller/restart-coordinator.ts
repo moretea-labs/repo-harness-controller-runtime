@@ -212,8 +212,10 @@ function stateAgeMs(state: ControllerRestartState, deps: RestartCoordinatorDepen
 
 function stateIsActive(state: ControllerRestartState | null, deps: RestartCoordinatorDependencies): state is ControllerRestartState {
   if (!state || !ACTIVE_PHASES.has(state.phase)) return false;
-  const alive = (deps.isPidAlive ?? isProcessAlive)(state.coordinatorPid ?? state.launcherPid);
-  return alive || stateAgeMs(state, deps) < ACTIVE_STATE_MAX_AGE_MS;
+  const trackedPid = state.coordinatorPid ?? state.launcherPid;
+  if (trackedPid !== undefined) return (deps.isPidAlive ?? isProcessAlive)(trackedPid);
+  // Allow only the narrow publication race before a launcher PID is persisted.
+  return state.phase === "scheduled" && stateAgeMs(state, deps) < ACTIVE_STATE_MAX_AGE_MS;
 }
 
 function createOwnedLock(path: string, deps: RestartCoordinatorDependencies): number {
@@ -241,7 +243,11 @@ function acquireLock(path: string, current: ControllerRestartState | null, deps:
         return null;
       }
     }
-    if ((deps.isPidAlive ?? isProcessAlive)(ownerPid) || lockAgeMs < ACTIVE_STATE_MAX_AGE_MS) return null;
+    if (ownerPid !== undefined) {
+      if ((deps.isPidAlive ?? isProcessAlive)(ownerPid)) return null;
+    } else if (lockAgeMs < ACTIVE_STATE_MAX_AGE_MS) {
+      return null;
+    }
     rmSync(path, { force: true });
     return createOwnedLock(path, deps);
   }
@@ -350,7 +356,7 @@ export function scheduleControllerServiceRestart(
   const statePath = controllerRestartStatePath(controllerHome, requestId);
   const logPath = controllerRestartLogPath(controllerHome);
   const previousRequest = readControllerRestartState(controllerHome, requestId);
-  if (previousRequest) {
+  if (previousRequest && previousRequest.phase !== "failed") {
     return {
       action: "restart_scheduled",
       accepted: true,
