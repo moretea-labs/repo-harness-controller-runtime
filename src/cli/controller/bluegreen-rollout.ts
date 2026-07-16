@@ -30,6 +30,9 @@ import { readRuntimeGeneration } from '../../runtime/control-plane/runtime-gener
 import { createExecutionJob, getExecutionJob } from '../../runtime/execution/jobs/store';
 import { CONTROLLER_SCOPE_REPO_ID } from '../repositories/controller-home';
 import { randomUUID } from 'crypto';
+import { isStableSupervisorInstalled } from '../../runtime/supervisor/paths';
+import { installSupervisorRelease } from '../../runtime/supervisor/installer';
+import { resolveControllerRuntimeSourceRoot } from '../../runtime/control-plane/runtime-generation';
 
 export interface BlueGreenRolloutOptions {
   repo?: string;
@@ -203,6 +206,20 @@ export async function startInactiveSlot(
   };
   const ports = allocateSlotPorts(candidate, active, basePorts, opts.candidatePorts);
   writeSlotConfig(candidateHome, ports, loadMcpServiceLocalConfig(activeHome, repoRoot) ?? rootConfig);
+
+  // A Controller with an installed stable Supervisor must not bootstrap a
+  // candidate through the legacy detached KeepAlive. Candidate slots are
+  // isolated Controller Homes, so install the same immutable Supervisor
+  // release into the candidate home before using the existing slot authority
+  // and verification flow.
+  if (isStableSupervisorInstalled(rootHome) && !isStableSupervisorInstalled(candidateHome)) {
+    const runtimeSource = resolveControllerRuntimeSourceRoot();
+    installSupervisorRelease({
+      controllerHome: candidateHome,
+      repoRoot,
+      sourceRoot: runtimeSource.root ?? repoRoot,
+    });
+  }
 
   // Ensure active is not sharing candidate home.
   if (activeHome === candidateHome) {

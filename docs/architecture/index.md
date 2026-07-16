@@ -69,6 +69,7 @@ The maintained current architecture set contains:
 - `verification-and-release-gates.md` — exact-revision evidence, integration gates, release freeze, and human authorization;
 - `implementation-status.md` — verified implementation coverage and explicit migration gaps;
 - `migration-roadmap.md` — evidence-driven implementation convergence order.
+- `stable-external-runtime-supervisor.md` — immutable lifecycle ownership, recovery control surfaces, fencing, and blue/green migration rules.
 
 A missing or proposed rule must be recorded in an accepted architecture request or ADR and must not be inferred from historical material.
 

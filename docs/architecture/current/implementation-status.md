@@ -25,6 +25,7 @@ The migration preserves the existing Issue, Task, Run, Edit Session, Local Job, 
 | Thin MCP Gateway | Implemented | `src/runtime/gateway/mcp/router.ts`, `src/cli/mcp/server.ts`, `src/cli/mcp/transports/http.ts` |
 | Persist-before-execute durable commands | Implemented | `src/runtime/execution/jobs/store.ts`, global request index and semantic conflict detection |
 | Independently restartable Controller Daemon | Implemented | `src/runtime/control-plane/daemon-entry.ts`, `daemon-client.ts` |
+| Stable external lifecycle Supervisor | Implemented | `src/runtime/supervisor/`, immutable release installer, lifecycle bridge, typed Rescue MCP, durable operation store, identity fencing, and bounded recovery policy |
 | Isolated Worker processes | Implemented | `src/runtime/execution/workers/worker-entry.ts`, Scheduler process spawning |
 | Per-Repository Actor | Implemented | `src/runtime/control-plane/repo-actor/actor.ts`, actor registry and repository mailbox lock |
 | Resource Claims | Implemented | `src/runtime/gateway/mcp/resource-policy.ts`, `resources/claims/conflicts.ts` |

@@ -47,6 +47,8 @@ import {
 import { ensureRepositoryRuntimeStorage } from '../../../cli/repositories/runtime-storage';
 import { assessWorkMode } from '../../../cli/controller/work-mode';
 import { scheduleControllerServiceRestart } from '../../../cli/controller/restart-coordinator';
+import { stableSupervisorFacadeMutation, stableSupervisorFacadeOperation, stableSupervisorFacadeStatus } from '../../supervisor/facade';
+import type { SupervisorOperationKind } from '../../supervisor/types';
 import { projectBoard } from '../../../cli/controller/issue-store';
 import {
   buildControllerTaskLedgerProjection,
@@ -202,7 +204,7 @@ const repoId = { type: 'string', description: 'Stable repository id.' };
 export const runtimeToolDefinitions: McpToolDefinition[] = [
   definition('rh_status', 'Preferred ChatGPT facade: bounded controller status, capability readiness, and self-healing diagnose/repair.', {
     repo_id: repoId,
-    operation: { type: 'string', enum: ['list', 'get', 'repair'], description: 'Defaults to get.' },
+    operation: { type: 'string', enum: ['list', 'get', 'repair', 'runtime_status', 'runtime_operation_get'], description: 'Defaults to get.' },
     detail_level: { type: 'string', enum: ['summary', 'detail'], description: 'Defaults to summary.' },
     repair_operation: { type: 'string', enum: ['diagnose', 'repair', 'verify', 'handoff'] },
     dry_run: { type: 'boolean', description: 'Defaults to true for repair/diagnose.' },
@@ -210,6 +212,7 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
     chatgpt_pull_failed: { type: 'boolean' },
     destructive: { type: 'boolean' },
     process_kill_or_restart: { type: 'boolean' },
+    operation_id: { type: 'string', description: 'Stable Supervisor operation ID for runtime_operation_get.' },
   }),
   definition('rh_inbox', 'Preferred ChatGPT facade: pending handoff decisions only (not logs).', {
     repo_id: repoId,
@@ -235,7 +238,7 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
   }),
   definition('rh_work', 'Preferred ChatGPT facade: direct control, goal workloop, verify, finalize, stop, repair, and small-brain delegate (codex/grok/claude).', {
     repo_id: repoId,
-    operation: { type: 'string', enum: ['start', 'continue', 'verify', 'repair', 'finalize', 'stop', 'delegate'], description: 'Defaults to start.' },
+    operation: { type: 'string', enum: ['start', 'continue', 'verify', 'repair', 'finalize', 'stop', 'delegate', 'runtime_status', 'runtime_operation_get', 'runtime_restart_controller', 'runtime_restart_gateway', 'runtime_restart_full', 'runtime_rollout', 'runtime_rollback', 'runtime_unlock_and_recover'], description: 'Defaults to start.' },
     objective: { type: 'string' },
     work_id: { type: 'string' },
     expected_files: { type: 'number' },
@@ -271,6 +274,9 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
     check_failed: { type: 'boolean' },
     authorize_destructive_cleanup: { type: 'boolean' },
     detail_level: { type: 'string', enum: ['summary', 'detail'] },
+    request_id: { type: 'string', description: 'Stable idempotency key for runtime operations.' },
+    operation_id: { type: 'string', description: 'Stable Supervisor operation ID.' },
+    reason: { type: 'string', description: 'Bounded reason for a runtime operation.' },
   }, [], false),
   definition('work_submit', 'Submit one durable repository operation and return a resumable Work handle.', {
     repo_id: repoId,
@@ -1398,6 +1404,109 @@ function invalidFacadeOperation(tool: FacadeTool, operation: string): CallToolRe
   return result(facade as unknown as Record<string, unknown>, true);
 }
 
+function supervisorOperationKind(operation: string): SupervisorOperationKind | undefined {
+  const values: Record<string, SupervisorOperationKind> = {
+    runtime_restart_controller: 'restart_controller',
+    runtime_restart_gateway: 'restart_gateway',
+    runtime_restart_full: 'restart_full',
+    runtime_rollout: 'rollout',
+    runtime_rollback: 'rollback',
+    runtime_unlock_and_recover: 'unlock_and_recover',
+  };
+  return values[operation];
+}
+
+async function runRuntimeSupervisorFacade(
+  ctx: MultiRepositoryMcpToolContext,
+  repository: ReturnType<typeof selected>,
+  operation: string,
+  args: Record<string, unknown>,
+): Promise<CallToolResult> {
+  const view = stableSupervisorFacadeStatus(ctx.controllerHome);
+  if (operation === 'runtime_status') {
+    const facade = buildFacadeResult({
+      status: view.installed && !view.available ? 'blocked' : 'ok',
+      summary: !view.installed
+        ? 'Stable External Runtime Supervisor is not installed; legacy lifecycle remains the fallback.'
+        : view.available
+          ? 'Stable External Runtime Supervisor is running.'
+          : 'Stable External Runtime Supervisor is installed but not currently available.',
+      data: { runtimeSupervisor: view },
+      warnings: !view.installed ? ['stable_supervisor_not_installed'] : view.available ? [] : ['stable_supervisor_unavailable'],
+      suggestedNextActions: !view.installed ? [{ label: 'Install Stable Supervisor', tool: 'rh_work', operation: 'runtime_restart_full', risk: 'workspace_write', confidence: 'low', reason: 'Install the stable release before using Supervisor-owned recovery.' }] : [],
+      rawAvailable: false,
+      detailLevel: 'summary',
+    });
+    return result(facade as unknown as Record<string, unknown>, facade.status === 'blocked');
+  }
+  if (operation === 'runtime_operation_get') {
+    const operationId = typeof args.operation_id === 'string' ? args.operation_id.trim() : '';
+    if (!operationId) return result({ error: { code: 'OPERATION_ID_REQUIRED', message: 'runtime_operation_get requires operation_id.' } }, true);
+    const stored = stableSupervisorFacadeOperation(ctx.controllerHome, operationId);
+    return result({ runtimeSupervisor: { installed: view.installed, operation: stored }, ...(stored ? {} : { error: { code: 'OPERATION_NOT_FOUND', operationId } }) }, !stored);
+  }
+
+  const kind = supervisorOperationKind(operation);
+  if (!kind) return invalidFacadeOperation('rh_work', operation);
+  const requestId = typeof args.request_id === 'string' ? args.request_id.trim() : '';
+  if (!requestId) return result({ error: { code: 'REQUEST_ID_REQUIRED', message: `${operation} requires request_id for reconnect-safe idempotency.` } }, true);
+  const reason = typeof args.reason === 'string' ? args.reason.slice(0, 500) : undefined;
+  const accepted = await stableSupervisorFacadeMutation({
+    controllerHome: ctx.controllerHome,
+    requestId,
+    kind,
+    actor: 'rh_work',
+    reason,
+  });
+  if (!accepted.installed && kind === 'restart_full') {
+    const fallback = scheduleControllerServiceRestart({
+      repo: repository.canonicalRoot,
+      controllerHome: ctx.controllerHome,
+      requestId,
+      requestedBy: 'rh_work',
+      reason,
+      mode: 'detached',
+    });
+    return result(buildFacadeResult({
+      status: 'ok',
+      summary: 'Stable Supervisor is not installed; legacy restart coordinator accepted the restart request.',
+      data: { runtimeSupervisor: { installed: false, fallback, mayDisconnect: true } },
+      warnings: ['legacy_restart_coordinator_fallback'],
+      suggestedNextActions: [{ label: 'Read restart status', tool: 'rh_status', operation: 'runtime_operation_get', payload: { operation_id: requestId }, risk: 'readonly', confidence: 'medium' }],
+      rawAvailable: false,
+      detailLevel: 'summary',
+    }) as unknown as Record<string, unknown>);
+  }
+  if (!accepted.accepted || !accepted.operation) {
+    return result(buildFacadeResult({
+      status: accepted.installed ? 'blocked' : 'failed',
+      summary: accepted.error ?? 'Stable Supervisor operation was not accepted.',
+      data: { runtimeSupervisor: { installed: accepted.installed, available: view.available, requestId } },
+      warnings: [accepted.error ?? 'supervisor_operation_not_accepted'],
+      rawAvailable: false,
+      detailLevel: 'summary',
+    }) as unknown as Record<string, unknown>, true);
+  }
+  return result(buildFacadeResult({
+    status: 'ok',
+    summary: `${kind} accepted by the Stable External Runtime Supervisor.`,
+    data: {
+      runtimeSupervisor: {
+        installed: true,
+        accepted: true,
+        deduplicated: accepted.deduplicated === true,
+        operation: accepted.operation,
+        operationId: accepted.operation.operationId,
+        reconnectContract: accepted.operation.reconnectContract,
+        mayDisconnect: true,
+      },
+    },
+    suggestedNextActions: [{ label: 'Read runtime operation', tool: 'rh_status', operation: 'runtime_operation_get', payload: { operation_id: accepted.operation.operationId }, risk: 'readonly', confidence: 'high' }],
+    rawAvailable: false,
+    detailLevel: 'summary',
+  }) as unknown as Record<string, unknown>);
+}
+
 async function runFacadeRepair(
   ctx: MultiRepositoryMcpToolContext,
   repository: ReturnType<typeof selected>,
@@ -1713,6 +1822,9 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         if (!allowedFacadeOperations('rh_status').includes(operation)) {
           return invalidFacadeOperation('rh_status', operation);
         }
+        if (operation === 'runtime_status' || operation === 'runtime_operation_get') {
+          return await runRuntimeSupervisorFacade(ctx, repository, operation, args);
+        }
         const store = { controllerHome: ctx.controllerHome, repoId: repository.repoId };
         if (operation === 'repair') {
           return await runFacadeRepair(ctx, repository, args);
@@ -2005,6 +2117,9 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         const operation = String(args.operation ?? 'start');
         if (!allowedFacadeOperations('rh_work').includes(operation)) {
           return invalidFacadeOperation('rh_work', operation);
+        }
+        if (operation.startsWith('runtime_')) {
+          return await runRuntimeSupervisorFacade(ctx, repository, operation, args);
         }
         const checks = listControllerChecks(repository.canonicalRoot);
         const workloopCtx = {

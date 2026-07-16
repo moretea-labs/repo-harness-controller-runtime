@@ -30,6 +30,8 @@ A failure in one domain must not automatically terminate or corrupt another doma
 
 ## 3. Client and Transport Failure
 
+An installed Controller Home has an external Stable Runtime Supervisor as the lifecycle owner. Accepted runtime operations are persisted under `supervisor/operations/` before Gateway or Daemon shutdown. The recovery Connector is loopback-only Rescue MCP; public Connector continuity uses the stable Gateway domain and durable identifiers.
+
 Examples:
 
 - MCP client disconnects;
