@@ -1,0 +1,204 @@
+import { closeSync, mkdirSync, openSync } from 'fs';
+import { spawn, type ChildProcess } from 'child_process';
+import { dirname, join, resolve } from 'path';
+import { randomUUID } from 'crypto';
+import { loadLocalBridgeConfig } from '../../cli/local-bridge/job-store';
+import { loadMcpServiceLocalConfig } from '../../cli/mcp/auth';
+import { inferMcpTunnelMode } from '../../cli/mcp/keepalive';
+import { readActiveSlotAuthority, readSlotIdentity, type RuntimeSlotId } from '../../cli/controller/runtime-slots';
+import { terminateProcessTree } from '../shared/process-tree';
+import { captureProcessIdentity, defaultProcessIdentityProbe, executableFingerprint, newProcessInstanceId, processIdentityMatches, type ProcessIdentityProbe } from './identity';
+import type { ProcessIdentity, SupervisorComponentName } from './types';
+
+export interface SupervisorProcessManagerOptions {
+  repoRoot: string;
+  controllerHome: string;
+  ownerEpoch: number;
+  runtimeSourceRoot: string;
+  runtimeExecutable?: string;
+  daemonExecutable?: string;
+  logPath: string;
+  slot?: RuntimeSlotId;
+  identityProbe?: ProcessIdentityProbe;
+}
+
+export interface SpawnedSupervisorProcess {
+  identity: ProcessIdentity;
+  child?: ChildProcess;
+  command: string;
+  args: string[];
+  component: SupervisorComponentName;
+  home: string;
+}
+
+export type ProcessObservation = 'alive' | 'dead' | 'unknown';
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+}
+
+function configuredRuntimeSourceRoot(input: string): string {
+  return resolve(input);
+}
+
+function componentHome(baseHome: string, slot: RuntimeSlotId | undefined): string {
+  if (!slot) return resolve(baseHome);
+  const identity = readSlotIdentity(baseHome, slot);
+  return identity?.slotHome ? resolve(identity.slotHome) : resolve(baseHome);
+}
+
+function processCommand(command: string, args: string[]): string {
+  return [command, ...args].join(' ');
+}
+
+export class SupervisorProcessManager {
+  readonly options: SupervisorProcessManagerOptions;
+  private readonly probe: ProcessIdentityProbe;
+
+  constructor(options: SupervisorProcessManagerOptions) {
+    this.options = { ...options, repoRoot: resolve(options.repoRoot), controllerHome: resolve(options.controllerHome) };
+    this.probe = options.identityProbe ?? defaultProcessIdentityProbe;
+  }
+
+  private runtimeCli(): string {
+    return this.options.runtimeExecutable ?? join(configuredRuntimeSourceRoot(this.options.runtimeSourceRoot), 'src', 'cli', 'index.ts');
+  }
+
+  private runtimeDaemon(): string {
+    return this.options.daemonExecutable ?? join(configuredRuntimeSourceRoot(this.options.runtimeSourceRoot), 'src', 'runtime', 'control-plane', 'daemon-entry.ts');
+  }
+
+  private spawnDetached(component: SupervisorComponentName, home: string, args: string[], instanceId: string): SpawnedSupervisorProcess {
+    const command = process.execPath;
+    mkdirSync(dirname(this.options.logPath), { recursive: true });
+    const fd = openSync(this.options.logPath, 'a');
+    let child: ChildProcess;
+    try {
+      child = spawn(command, args, {
+        cwd: this.options.repoRoot,
+        detached: true,
+        stdio: ['ignore', fd, fd],
+        env: {
+          ...process.env,
+          REPO_HARNESS_CONTROLLER_HOME: home,
+          REPO_HARNESS_CONTROLLER_LIFECYCLE_OWNER: '1',
+          REPO_HARNESS_SUPERVISOR_CHILD: '1',
+          REPO_HARNESS_SUPERVISOR_EPOCH: String(this.options.ownerEpoch),
+          REPO_HARNESS_CONTROLLER_RUNTIME_SOURCE_ROOT: this.options.runtimeSourceRoot,
+          REPO_HARNESS_DAEMON_INSTANCE_ID: instanceId,
+          ...(this.options.slot ? { REPO_HARNESS_RUNTIME_SLOT: this.options.slot } : {}),
+        },
+      });
+      child.unref();
+    } finally {
+      closeSync(fd);
+    }
+    if (!child.pid) throw new Error(`SUPERVISOR_${component.toUpperCase()}_SPAWN_FAILED`);
+    const commandText = processCommand(command, args);
+    return {
+      identity: {
+        pid: child.pid,
+        instanceId,
+        processStartTime: new Date().toISOString(),
+        executableFingerprint: executableFingerprint(commandText),
+        controllerHome: home,
+        ...(this.options.slot ? { slot: this.options.slot } : {}),
+        ownerEpoch: this.options.ownerEpoch,
+      },
+      child,
+      command,
+      args,
+      component,
+      home,
+    };
+  }
+
+  private async identify(spawned: SpawnedSupervisorProcess): Promise<SpawnedSupervisorProcess> {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const identity = captureProcessIdentity(spawned.identity.pid, {
+        controllerHome: spawned.identity.controllerHome,
+        instanceId: spawned.identity.instanceId,
+        ...(spawned.identity.slot ? { slot: spawned.identity.slot } : {}),
+        ownerEpoch: spawned.identity.ownerEpoch,
+      }, this.probe);
+      if (identity) return { ...spawned, identity };
+      await sleep(25);
+    }
+    try { spawned.child?.kill('SIGTERM'); } catch { /* child may have already exited */ }
+    throw new Error(`SUPERVISOR_${spawned.component.toUpperCase()}_IDENTITY_PROBE_FAILED`);
+  }
+
+  async startDaemon(): Promise<SpawnedSupervisorProcess> {
+    const slot = this.options.slot ?? readActiveSlotAuthority(this.options.controllerHome).activeSlot;
+    const home = componentHome(this.options.controllerHome, slot);
+    const instanceId = newProcessInstanceId('daemon');
+    const args = [
+      this.runtimeDaemon(),
+      '--controller-home', home,
+      '--runtime-source-root', this.options.runtimeSourceRoot,
+      '--owner-epoch', String(this.options.ownerEpoch),
+      '--instance-id', instanceId,
+      '--slot', slot,
+    ];
+    return this.identify(this.spawnDetached('controllerDaemon', home, args, instanceId));
+  }
+
+  gatewayArgs(home: string): string[] {
+    const localConfig = loadMcpServiceLocalConfig(home, this.options.repoRoot);
+    const bridge = loadLocalBridgeConfig(this.options.repoRoot);
+    const host = localConfig?.server?.host ?? '127.0.0.1';
+    const port = localConfig?.server?.port ?? 8765;
+    const profile = localConfig?.profile ?? 'controller';
+    const auth = localConfig?.auth?.mode ?? 'oauth';
+    const toolset = localConfig?.toolset ?? 'advanced';
+    const localHost = localConfig?.localController?.host ?? bridge.host ?? '127.0.0.1';
+    const localPort = localConfig?.localController?.port ?? bridge.port ?? 8766;
+    const publicEndpoint = localConfig?.chatgpt?.endpoint;
+    const tunnelMode = publicEndpoint ? inferMcpTunnelMode(undefined, publicEndpoint, undefined) : 'none';
+    const args = [
+      this.runtimeCli(), 'mcp', 'keepalive',
+      '--repo', this.options.repoRoot,
+      '--controller-home', home,
+      '--host', host,
+      '--port', String(port),
+      '--profile', profile,
+      '--auth', auth,
+      '--toolset', toolset,
+      '--local-ui',
+      '--local-ui-host', localHost,
+      '--local-ui-port', String(localPort),
+      '--tunnel', tunnelMode,
+    ];
+    if (publicEndpoint) args.push('--public-endpoint', publicEndpoint);
+    if (localConfig?.devMode?.agentRunner) {
+      args.push('--enable-dev-runner');
+      if (localConfig.devMode.allowedAgents?.length) args.push('--dev-runner-agents', localConfig.devMode.allowedAgents.join(','));
+      if (localConfig.devMode.timeoutMs) args.push('--dev-runner-timeout-ms', String(localConfig.devMode.timeoutMs));
+      if (localConfig.devMode.maxTimeoutMs) args.push('--dev-runner-max-timeout-ms', String(localConfig.devMode.maxTimeoutMs));
+    }
+    return args;
+  }
+
+  async startGateway(): Promise<SpawnedSupervisorProcess> {
+    const activeSlot = this.options.slot ?? readActiveSlotAuthority(this.options.controllerHome).activeSlot;
+    const home = componentHome(this.options.controllerHome, activeSlot);
+    const instanceId = newProcessInstanceId('gateway');
+    return this.identify(this.spawnDetached('gatewayHost', home, this.gatewayArgs(home), instanceId));
+  }
+
+  observe(identity: ProcessIdentity | undefined): ProcessObservation {
+    if (!identity || !this.probe.isAlive(identity.pid)) return 'dead';
+    const command = this.probe.command(identity.pid);
+    const startTime = this.probe.startTime(identity.pid);
+    if (!command || !startTime) return 'unknown';
+    return processIdentityMatches(identity, identity.pid, this.probe).matches ? 'alive' : 'unknown';
+  }
+
+  async stop(identity: ProcessIdentity | undefined): Promise<{ stopped: boolean; observation: ProcessObservation }> {
+    const observation = this.observe(identity);
+    if (!identity || observation === 'dead') return { stopped: true, observation };
+    if (observation === 'unknown') throw new Error(`SUPERVISOR_PROCESS_IDENTITY_MISMATCH: refusing to terminate pid=${identity.pid}`);
+    const result = await terminateProcessTree(identity.pid, { gracePeriodMs: 1_500, killAfterMs: 8_000, pollIntervalMs: 100 });
+    return { stopped: result.exited, observation: result.exited ? 'dead' : 'unknown' };
+  }
+}

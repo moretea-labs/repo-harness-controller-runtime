@@ -14,6 +14,7 @@ import {
 } from './runtime-generation';
 import { cleanupControllerRuntimeState } from './runtime-cleanup';
 import type { ControllerStartupRecoveryResult } from './startup-recovery';
+import { isStableSupervisorInstalled, supervisorStatePath } from '../supervisor/paths';
 
 export interface ControllerDaemonStatus {
   schemaVersion: 1;
@@ -30,6 +31,9 @@ export interface ControllerDaemonStatus {
   source?: RuntimeSourceIdentity;
   restartRequired?: boolean;
   restartReasons?: string[];
+  instanceId?: string;
+  ownerEpoch?: number;
+  slot?: 'blue' | 'green';
 }
 
 function daemonPidPath(controllerHome: string): string { return join(ensureControllerHome(controllerHome), 'daemon', 'controller.pid'); }
@@ -82,13 +86,32 @@ export function readControllerDaemonStatus(controllerHome: string): ControllerDa
   return { ...withGeneration, pid };
 }
 
-export function ensureControllerDaemon(controllerHome: string): ControllerDaemonStatus {
+export function ensureControllerDaemon(
+  controllerHome: string,
+  options: { ownerEpoch?: number; instanceId?: string; slot?: 'blue' | 'green' } = {},
+): ControllerDaemonStatus {
   const home = ensureControllerHome(controllerHome);
   // Hot path: a live Controller daemon needs neither cleanup I/O nor the global
   // lock. Durable MCP jobs call this on every mutating request; scanning a large
   // controllerHome on each call was a multi-ms tax even when the daemon was up.
   const live = readControllerDaemonStatus(home);
   if (pidAlive(live.pid)) return live;
+
+  // Once a stable release is installed, the external Supervisor is the only
+  // process allowed to create or replace the Controller Daemon. MCP/Gateway
+  // callers must surface the unavailable state and let the Supervisor perform
+  // identity-safe recovery instead of spawning a competing owner.
+  if (isStableSupervisorInstalled(home)) {
+    const supervisor = readJsonFile<{ desiredState?: string; supervisor?: { pid?: number } }>(supervisorStatePath(home), {});
+    return {
+      ...live,
+      status: 'unavailable',
+      error: supervisor?.desiredState === 'running' && pidAlive(supervisor.supervisor?.pid)
+        ? 'SUPERVISOR_OWNS_DAEMON'
+        : 'SUPERVISOR_REQUIRED',
+      restartRequired: true,
+    };
+  }
 
   // Cleanup only when we may actually start a daemon. Bounded, but still FS-heavy.
   try {
@@ -113,6 +136,9 @@ export function ensureControllerDaemon(controllerHome: string): ControllerDaemon
     if (runtimeSource.root) {
       args.push('--runtime-source-root', runtimeSource.root);
     }
+    if (options.ownerEpoch !== undefined) args.push('--owner-epoch', String(options.ownerEpoch));
+    if (options.instanceId) args.push('--instance-id', options.instanceId);
+    if (options.slot) args.push('--slot', options.slot);
     const child = spawn(process.execPath, args, {
       detached: true,
       stdio: 'ignore',
@@ -131,6 +157,9 @@ export function ensureControllerDaemon(controllerHome: string): ControllerDaemon
       startedAt: new Date().toISOString(),
       gatewaySeparated: true,
       workerIsolation: true,
+      ...(options.ownerEpoch !== undefined ? { ownerEpoch: options.ownerEpoch } : {}),
+      ...(options.instanceId ? { instanceId: options.instanceId } : {}),
+      ...(options.slot ? { slot: options.slot } : {}),
     };
     // Persist the spawn intent before releasing the global lock. Concurrent
     // Gateway requests will observe this PID instead of starting another daemon.

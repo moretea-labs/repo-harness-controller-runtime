@@ -70,6 +70,7 @@ Read the architecture in this order:
 16. `governance.md` — ownership, ADR, drift, and maintenance rules.
 17. `session-aware-execution-and-authorization.md` — Session Context, Work Handle, Goal delegation, and resumable approval boundaries.
 18. `runtime-health-and-resource-lifecycle.md` — shared health evaluation, projection freshness, capability status, attention/history, and bounded ownership-aware cleanup.
+19. `stable-external-runtime-supervisor.md` — immutable external lifecycle ownership, recovery MCP, fencing, and slot cutover.
 
 
 ## Architecture Layers

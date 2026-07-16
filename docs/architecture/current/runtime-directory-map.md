@@ -4,6 +4,7 @@
 
 ```text
 src/runtime/
+  supervisor/                  Immutable-release lifecycle owner, fencing, recovery MCP, and restart policy
   gateway/mcp/                 Thin command admission, policy and runtime tools
   control-plane/
     global-scheduler/          Global fairness, quotas, process dispatch and reconciliation

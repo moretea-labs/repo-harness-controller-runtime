@@ -61,6 +61,8 @@ Recommended policy:
 
 ## Restart coordination and reconnect contract
 
+For a Controller Home with `supervisor/current`, the Stable External Runtime Supervisor is the primary lifecycle owner. Use its typed `supervisor` CLI or the normal `rh_status`/`rh_work` runtime operations; use loopback Rescue MCP only when the primary Gateway is unavailable. Do not start a second KeepAlive or Daemon manually. The legacy coordinator remains the fallback for Homes without an installed stable release and remains readable for compatibility verification.
+
 Use `scripts/controller-runtime.sh restart` or an authorized recovery action. All MCP, Local Bridge, GUI, and Worker-owned restart requests must be accepted before the old process tree is stopped.
 
 The restart coordinator provides these guarantees:

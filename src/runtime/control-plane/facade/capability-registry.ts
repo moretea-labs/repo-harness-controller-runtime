@@ -43,6 +43,16 @@ const CORE_CAPABILITIES: CapabilityDescriptor[] = [
     summary: 'Read bounded controller, queue, worker, projection, plugin, and readiness status.',
   },
   {
+    capabilityId: 'controller.stable_supervisor',
+    domain: 'controller',
+    group: 'controller',
+    operationClass: 'execute',
+    risk: 'workspace_write',
+    exposedVia: 'rh_work',
+    schemaExposure: 'stable_static',
+    summary: 'Inspect and request bounded Supervisor-owned runtime restart, rollout, rollback, and recovery operations with durable reconnect-safe identifiers.',
+  },
+  {
     capabilityId: 'repository.context',
     domain: 'repository',
     group: 'repository-core',

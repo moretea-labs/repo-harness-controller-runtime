@@ -15,6 +15,9 @@ import { dirname, join, resolve } from "path";
 import { runProcess } from "../../effects/process-runner";
 import { readControllerDaemonStatus } from "../../runtime/control-plane/daemon-client";
 import { isProcessAlive } from "../../runtime/shared/process-tree";
+import { readSupervisorOperation } from "../../runtime/supervisor/operation-store";
+import { scheduleStableSupervisorOperation } from "../../runtime/supervisor/bridge";
+import { supervisorLogPath } from "../../runtime/supervisor/paths";
 import { loadMcpServiceRuntimeState } from "../mcp/auth";
 import { resolveMcpRepoRoot } from "../mcp/repo";
 import { resolveRepoPreferredControllerHome } from "../repositories/controller-home";
@@ -74,6 +77,8 @@ export interface ControllerRestartState {
   completedAt?: string;
   verification?: ControllerRestartVerification;
   error?: string;
+  /** Compatibility pointer when the Stable Supervisor owns execution. */
+  supervisorOperationId?: string;
 }
 
 export interface ControllerRestartScheduledResult {
@@ -183,7 +188,29 @@ function readStateFile(path: string): ControllerRestartState | null {
 }
 
 export function readControllerRestartState(controllerHome: string, requestId?: string): ControllerRestartState | null {
-  return readStateFile(controllerRestartStatePath(controllerHome, requestId));
+  const state = readStateFile(controllerRestartStatePath(controllerHome, requestId));
+  if (!state?.supervisorOperationId) return state;
+  const operation = readSupervisorOperation(controllerHome, state.supervisorOperationId);
+  if (!operation) return state;
+  const phase: ControllerRestartPhase = operation.phase === 'succeeded'
+    ? 'succeeded'
+    : operation.phase === 'failed' || operation.phase === 'locked_out'
+      ? 'failed'
+      : operation.phase === 'stopping'
+        ? 'stopping'
+        : operation.phase === 'starting'
+          ? 'starting'
+          : operation.phase === 'verifying'
+            ? 'verifying'
+            : 'scheduled';
+  return {
+    ...state,
+    phase,
+    updatedAt: operation.updatedAt,
+    ...(operation.completedAt ? { completedAt: operation.completedAt } : {}),
+    ...(operation.error ? { error: operation.error } : {}),
+    ...(typeof operation.result?.runtimeGeneration === 'string' ? { runtimeGeneration: operation.result.runtimeGeneration } : {}),
+  };
 }
 
 function writeState(state: ControllerRestartState): ControllerRestartState {
@@ -366,6 +393,43 @@ export function scheduleControllerServiceRestart(
       logPath,
       reconnectContract: "stable_domain_retry",
       state: previousRequest,
+    };
+  }
+
+  const stable = scheduleStableSupervisorOperation({
+    controllerHome,
+    repoRoot,
+    requestId,
+    kind: 'restart_full',
+    actor: opts.requestedBy?.trim() || 'controller-service',
+    reason: opts.reason?.trim().slice(0, 500),
+  });
+  if (stable) {
+    const timestamp = nowIso(deps);
+    const runtime = loadMcpServiceRuntimeState(controllerHome, repoRoot);
+    const state = writeState({
+      schemaVersion: 1,
+      requestId,
+      repoRoot,
+      controllerHome,
+      phase: 'scheduled',
+      requestedAt: timestamp,
+      updatedAt: timestamp,
+      requestedBy: opts.requestedBy?.trim() || 'controller-service',
+      reason: opts.reason?.trim().slice(0, 500) || undefined,
+      delayMs: 0,
+      previousGeneration: runtime?.generation,
+      supervisorOperationId: stable.operation.operationId,
+    });
+    return {
+      action: 'restart_scheduled',
+      accepted: true,
+      deduplicated: stable.deduplicated,
+      requestId,
+      statePath,
+      logPath: supervisorLogPath(controllerHome),
+      reconnectContract: 'stable_domain_retry',
+      state,
     };
   }
 

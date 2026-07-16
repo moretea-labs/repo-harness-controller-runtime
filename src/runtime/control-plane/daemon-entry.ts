@@ -25,6 +25,15 @@ function optionOrEnv(name: string, envName: string): string | undefined {
   return option(name) ?? process.env[envName];
 }
 
+function childOwnershipMetadata(): { instanceId?: string; ownerEpoch?: number; slot?: 'blue' | 'green' } {
+  const ownerEpochValue = optionOrEnv('--owner-epoch', 'REPO_HARNESS_SUPERVISOR_EPOCH');
+  const ownerEpoch = ownerEpochValue && /^\d+$/.test(ownerEpochValue) ? Number(ownerEpochValue) : undefined;
+  const slotValue = option('--slot') ?? process.env.REPO_HARNESS_RUNTIME_SLOT;
+  const slot = slotValue === 'blue' || slotValue === 'green' ? slotValue : undefined;
+  const instanceId = option('--instance-id') ?? process.env.REPO_HARNESS_DAEMON_INSTANCE_ID;
+  return { ...(instanceId ? { instanceId } : {}), ...(ownerEpoch !== undefined ? { ownerEpoch } : {}), ...(slot ? { slot } : {}) };
+}
+
 const DEFAULT_AUTOMATIC_CLEANUP_INITIAL_DELAY_MS = 60_000;
 const DEFAULT_AUTOMATIC_CLEANUP_INTERVAL_MS = 60 * 60_000;
 const DEFAULT_AUTOMATIC_CLEANUP_MIN_AGE_MINUTES = 24 * 60;
@@ -103,6 +112,7 @@ export function startControllerDaemon(controllerHome: string): void {
   const pidPath = join(controllerHome, 'daemon', 'controller.pid');
   const abort = new AbortController();
   const startedAt = new Date().toISOString();
+  const ownership = childOwnershipMetadata();
   for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => abort.abort());
   const configuredMaxLifetimeMs = Number(process.env.REPO_HARNESS_DAEMON_MAX_LIFETIME_MS);
   const maxLifetimeTimer = Number.isFinite(configuredMaxLifetimeMs) && configuredMaxLifetimeMs >= 1_000
@@ -130,6 +140,7 @@ export function startControllerDaemon(controllerHome: string): void {
           recovery: runtime,
           generation: runtime.generationRecord.generation,
           source: runtime.generationRecord.source,
+          ...ownership,
         });
       }
       process.exitCode = 1;
@@ -147,7 +158,8 @@ export function startControllerDaemon(controllerHome: string): void {
         degraded: runtime.degraded,
         recovery: runtime,
         generation: runtime.generationRecord.generation,
-        source: runtime.generationRecord.source,
+          source: runtime.generationRecord.source,
+          ...ownership,
       });
     });
 }
@@ -161,6 +173,7 @@ export function publishReadyAfterStartupRecovery(
 } {
   const statePath = join(controllerHome, 'daemon', 'state.json');
   const pidPath = join(controllerHome, 'daemon', 'controller.pid');
+  const ownership = childOwnershipMetadata();
   // Runtime Source is controller-scoped and package-derived. Never capture ambient
   // execution-repository cwd as the runtime identity (multi-repo false drift).
   const resolvedSource = resolveControllerRuntimeSourceRoot({
@@ -188,6 +201,7 @@ export function publishReadyAfterStartupRecovery(
     workerIsolation: true,
     generation: generation.generation,
     source: generation.source,
+    ...ownership,
   });
   writeFileSync(pidPath, `${process.pid}\n`, 'utf8');
 
@@ -215,6 +229,7 @@ export function publishReadyAfterStartupRecovery(
     recovery,
     generation: generation.generation,
     source: generation.source,
+    ...ownership,
   });
   return { ...recovery, generationRecord: generation };
 }
