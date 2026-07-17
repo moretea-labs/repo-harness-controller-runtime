@@ -217,6 +217,12 @@ export class SupervisorProcessManager {
     return processIdentityMatches(identity, identity.pid, this.probe).matches ? 'alive' : 'unknown';
   }
 
+  processCommandMatches(identity: ProcessIdentity | undefined, executablePaths: string[]): boolean {
+    if (!identity || !this.probe.isAlive(identity.pid)) return false;
+    const command = this.probe.command(identity.pid);
+    return Boolean(command && executablePaths.some((path) => command.includes(resolve(path))));
+  }
+
   async stop(identity: ProcessIdentity | undefined): Promise<{ stopped: boolean; observation: ProcessObservation }> {
     const observation = this.observe(identity);
     if (!identity || observation === 'dead') return { stopped: true, observation };

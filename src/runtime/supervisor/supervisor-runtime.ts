@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import { dirname } from 'path';
+import { dirname, resolve } from 'path';
 import { loadMcpServiceLocalConfig, loadMcpServiceRuntimeState, writeMcpServiceLocalConfig } from '../../cli/mcp/auth';
 import {
   ensureSlotHome,
@@ -130,6 +130,18 @@ export function reconcileActiveManagedGenerations(
   };
 }
 
+export function managedProcessNeedsReleaseRefresh(
+  managed: SupervisorManagedProcess,
+  expected: SupervisorReleaseDescriptor,
+  ownerEpoch: number,
+  processCommandMatches: boolean,
+): boolean {
+  return managed.ownerEpoch !== ownerEpoch
+    || resolve(managed.releasePath ?? '') !== expected.releasePath
+    || managed.releaseRevision !== expected.releaseRevision
+    || !processCommandMatches;
+}
+
 export function reconcileSupervisorStateWithAuthority(
   state: SupervisorState,
   authority: ActiveSlotAuthority,
@@ -225,8 +237,17 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
 
   constructor(options: StableSupervisorRuntimeOptions) {
     const serviceConfig = loadMcpServiceLocalConfig(options.controllerHome, options.repoRoot);
+    const installedRelease = readSupervisorRelease(options.releasePath)
+      ?? readCurrentSupervisorRelease(options.controllerHome);
     this.options = {
       ...options,
+      ...(installedRelease ? {
+        runtimeExecutable: options.runtimeExecutable ?? installedRelease.runtimeExecutable,
+        daemonExecutable: options.daemonExecutable ?? installedRelease.daemonExecutable,
+        runtimeSourceRoot: options.runtimeSourceRoot ?? installedRelease.sourceRoot ?? options.runtimeSourceRoot,
+        releasePath: options.releasePath ?? installedRelease.releasePath,
+        releaseRevision: options.releaseRevision ?? installedRelease.releaseRevision,
+      } : {}),
       stableIngressHost: options.stableIngressHost ?? serviceConfig?.server?.host ?? '127.0.0.1',
       stableIngressPort: options.stableIngressPort ?? serviceConfig?.server?.port ?? 8765,
     };
@@ -247,9 +268,14 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
   }
 
   adoptSupervisorIdentity(identity: SupervisorState['supervisor'], releaseRevision?: string): void {
+    const release = this.expectedManagedRelease();
     this.state = {
       ...this.state,
-      supervisor: { ...identity, ...(releaseRevision ? { releaseRevision } : {}) },
+      supervisor: {
+        ...identity,
+        ...(release?.releasePath ? { releasePath: release.releasePath } : {}),
+        ...(releaseRevision ?? release?.releaseRevision ? { releaseRevision: releaseRevision ?? release?.releaseRevision } : {}),
+      },
       desiredState: 'running',
       observedState: 'starting',
       updatedAt: new Date().toISOString(),
@@ -417,6 +443,57 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
   private managerForManaged(managed: SupervisorManagedProcess | undefined, fallbackSlot = this.state.activeSlot): SupervisorProcessManager {
     const release = readSupervisorRelease(managed?.releasePath);
     return this.managerForSlot(managed?.slot ?? fallbackSlot, release);
+  }
+
+  private expectedManagedRelease(): SupervisorReleaseDescriptor | undefined {
+    return readSupervisorRelease(this.options.releasePath)
+      ?? readCurrentSupervisorRelease(this.options.controllerHome);
+  }
+
+  private async reconcileManagedRelease(): Promise<void> {
+    const expected = this.expectedManagedRelease();
+    if (!expected) return;
+    const daemon = this.state.controllerDaemon;
+    const gateway = this.state.gatewayHost;
+    const daemonNeedsRefresh = daemon
+      ? managedProcessNeedsReleaseRefresh(
+          daemon,
+          expected,
+          this.options.ownerEpoch,
+          this.managerForManaged(daemon).processCommandMatches(daemon, [expected.daemonExecutable]),
+        )
+      : false;
+    const gatewayNeedsRefresh = gateway
+      ? managedProcessNeedsReleaseRefresh(
+          gateway,
+          expected,
+          this.options.ownerEpoch,
+          this.managerForManaged(gateway).processCommandMatches(gateway, [expected.runtimeExecutable]),
+        )
+      : false;
+    if (!daemonNeedsRefresh && !gatewayNeedsRefresh) return;
+
+    // Stop the dependent Gateway first. Each stop is identity-checked by the
+    // persisted PID/start-time/fingerprint tuple; an unproven PID is never
+    // terminated during release handoff.
+    if (gateway) {
+      const result = await this.managerForManaged(gateway).stop(gateway);
+      if (!result.stopped) throw new Error('SUPERVISOR_GATEWAYHOST_RELEASE_HANDOFF_STOP_INCOMPLETE');
+    }
+    if (daemon) {
+      const result = await this.managerForManaged(daemon).stop(daemon);
+      if (!result.stopped) throw new Error('SUPERVISOR_CONTROLLERDAEMON_RELEASE_HANDOFF_STOP_INCOMPLETE');
+    }
+    this.persist({
+      controllerDaemon: undefined,
+      gatewayHost: undefined,
+      activeGeneration: undefined,
+      observedState: 'degraded',
+      lastIncident: {
+        at: new Date().toISOString(),
+        reason: `Managed runtime release handoff to ${expected.releaseRevision ?? expected.releasePath}.`,
+      },
+    });
   }
 
   private prepareSlotConfig(slot: RuntimeSlotId, release?: SupervisorReleaseDescriptor): { home: string; localControllerPort: number; manager: SupervisorProcessManager } {
@@ -756,9 +833,17 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
 
   private async ensureRuntime(): Promise<void> {
     if (this.stopping || this.state.desiredState !== 'running') return;
+    await this.reconcileManagedRelease();
+    const expectedRelease = this.expectedManagedRelease();
+    const activeSlot = this.state.controllerDaemon?.slot
+      ?? this.state.gatewayHost?.slot
+      ?? this.state.activeSlot;
+    const currentReleaseManager = expectedRelease
+      ? this.managerForSlot(activeSlot, expectedRelease)
+      : undefined;
     if (!this.state.controllerDaemon || this.manager.observe(this.state.controllerDaemon) !== 'alive') {
       const previous = this.state.controllerDaemon;
-      const started = await this.managerForManaged(previous).startDaemon();
+      const started = await (currentReleaseManager ?? this.managerForManaged(previous, activeSlot)).startDaemon();
       this.setComponent('controllerDaemon', processState(started, previous));
     }
     await this.waitForReady('controllerDaemon');
@@ -778,7 +863,7 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
     }
     if (!this.state.gatewayHost || this.manager.observe(this.state.gatewayHost) !== 'alive') {
       const previous = this.state.gatewayHost;
-      const started = await this.managerForManaged(previous).startGateway();
+      const started = await (currentReleaseManager ?? this.managerForManaged(previous, activeSlot)).startGateway();
       this.setComponent('gatewayHost', processState(started, previous));
     }
     await this.waitForReady('gatewayHost');

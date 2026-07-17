@@ -3,11 +3,13 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { bootstrapLaunchAgentWithRetry } from '../../src/cli/controller/launch-agents';
+import { supervisorActivationMatchesRelease } from '../../src/cli/commands/supervisor';
 import { renderLaunchdSupervisorPlist, renderSystemdSupervisorUnit, supervisorServiceLabel, supervisorSystemdUnitName } from '../../src/runtime/supervisor/installer';
 import { createStableIngressRouter } from '../../src/runtime/supervisor/ingress-router';
 import { controllerDaemonMaxLifetimeMs } from '../../src/runtime/control-plane/daemon-entry';
 import { createSupervisorOperation, readSupervisorOperation, updateSupervisorOperation } from '../../src/runtime/supervisor/operation-store';
-import { automaticRecoveryRequestId, reconcileActiveManagedGenerations, reconcileSupervisorStateWithAuthority, terminalizeInterruptedSupervisorOperations } from '../../src/runtime/supervisor/supervisor-runtime';
+import { automaticRecoveryRequestId, managedProcessNeedsReleaseRefresh, reconcileActiveManagedGenerations, reconcileSupervisorStateWithAuthority, terminalizeInterruptedSupervisorOperations } from '../../src/runtime/supervisor/supervisor-runtime';
 import { decideRestart, newRestartBudgetRecord, recordFailure, recordRestart, recordStable } from '../../src/runtime/supervisor/restart-policy';
 import { SupervisorProcessManager } from '../../src/runtime/supervisor/process-manager';
 import { writeMcpServiceLocalConfig } from '../../src/cli/mcp/auth';
@@ -59,9 +61,12 @@ describe('Stable Supervisor production hardening', () => {
       repoRoot: '/tmp/repo',
       controllerHome: '/tmp/home',
       runtimeSourceRoot: '/tmp/repo',
+      releaseRevision: 'revision-a',
       logPath: '/tmp/supervisor.log',
     });
     expect(plist).toContain('<key>SuccessfulExit</key><false/>');
+    expect(plist).toContain('--release-revision');
+    expect(plist).toContain('revision-a');
     expect(plist).not.toContain('<key>KeepAlive</key><true/>');
     const unit = renderSystemdSupervisorUnit({
       bunPath: '/usr/local/bin/bun',
@@ -209,6 +214,71 @@ describe('Stable Supervisor production hardening', () => {
     } finally {
       await manager.stop(spawned.identity);
     }
+  });
+
+  test('new Supervisor release handoff replaces healthy persisted children from an older release', () => {
+    const oldDaemon = {
+      ...managedProcess('blue', 301, 'generation-old'),
+      releasePath: '/tmp/releases/old',
+      releaseRevision: 'old-revision',
+      ownerEpoch: 7,
+    };
+    const expected = {
+      releasePath: '/tmp/releases/current',
+      releaseRevision: 'new-revision',
+      supervisorExecutable: '/tmp/releases/current/supervisor.js',
+      runtimeExecutable: '/tmp/releases/current/repo-harness.js',
+      daemonExecutable: '/tmp/releases/current/daemon.js',
+    };
+    expect(managedProcessNeedsReleaseRefresh(oldDaemon, expected, 8, true)).toBe(true);
+    expect(managedProcessNeedsReleaseRefresh({ ...oldDaemon, releasePath: expected.releasePath, releaseRevision: expected.releaseRevision, ownerEpoch: 8 }, expected, 8, true)).toBe(false);
+  });
+
+  test('healthy Supervisor status from an older release cannot satisfy activation', () => {
+    const control = {
+      ok: true,
+      state: {
+        observedState: 'healthy',
+        supervisor: { releaseRevision: 'old-revision' },
+        controllerDaemon: { releaseRevision: 'old-revision' },
+        gatewayHost: { releaseRevision: 'old-revision' },
+      },
+    };
+    expect(supervisorActivationMatchesRelease(control, 'new-revision')).toBe(false);
+    expect(supervisorActivationMatchesRelease({
+      ...control,
+      state: {
+        ...control.state,
+        supervisor: { releaseRevision: 'new-revision' },
+        controllerDaemon: { releaseRevision: 'new-revision' },
+        gatewayHost: { releaseRevision: 'new-revision' },
+      },
+    }, 'new-revision')).toBe(true);
+  });
+
+  test('launchd bootstrap retries bounded macOS error 5', async () => {
+    const calls: string[][] = [];
+    let bootstrapAttempts = 0;
+    const attempts = await bootstrapLaunchAgentWithRetry({
+      label: 'com.example.supervisor',
+      plistPath: '/Users/example/Library/LaunchAgents/com.example.supervisor.plist',
+      domain: 'gui/501',
+      retryDelayMs: 0,
+    }, {
+      run: (args) => {
+        calls.push(args);
+        if (args[0] === 'enable') return { ok: true, stdout: '', stderr: '' };
+        if (args[0] === 'bootstrap') {
+          bootstrapAttempts += 1;
+          if (bootstrapAttempts < 3) return { ok: false, stdout: '', stderr: 'Bootstrap failed: 5: Input/output error' };
+        }
+        return { ok: true, stdout: '', stderr: '' };
+      },
+      wait: async () => undefined,
+    });
+    expect(attempts).toBe(3);
+    expect(calls.filter((args) => args[0] === 'bootstrap')).toHaveLength(3);
+    expect(calls[0]).toEqual(['enable', 'gui/501/com.example.supervisor']);
   });
 
   test('Gateway hosts bind private slot backends and never own the public tunnel', () => {

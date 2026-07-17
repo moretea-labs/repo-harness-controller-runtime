@@ -3,10 +3,11 @@ import { spawn } from 'child_process';
 import { dirname, join, resolve } from 'path';
 import { Command } from 'commander';
 import { ensureControllerHome, resolveRepoPreferredControllerHome } from '../repositories/controller-home';
+import { bootstrapLaunchAgentWithRetry, installLaunchAgent, launchAgentPath, restoreLaunchAgent, snapshotLaunchAgent, type LaunchAgentFileSnapshot } from '../controller/launch-agents';
 import { launchStableSupervisor } from '../../runtime/supervisor/bridge';
 import { sendSupervisorCommand } from '../../runtime/supervisor/control-server';
 import { installSupervisorRelease, startRegisteredSupervisorService, supervisorServiceLabel, supervisorSystemdUnitName } from '../../runtime/supervisor/installer';
-import { isStableSupervisorInstalled, readCurrentRelease, supervisorLogPath, supervisorRoot } from '../../runtime/supervisor/paths';
+import { isStableSupervisorInstalled, publishCurrentRelease, readCurrentRelease, readCurrentSupervisorRelease, readPreviousRelease, supervisorLogPath, supervisorRoot } from '../../runtime/supervisor/paths';
 import { readSupervisorState } from '../../runtime/supervisor/state-store';
 import { processIdentityMatches } from '../../runtime/supervisor/identity';
 import { isProcessAlive, terminateProcessTree } from '../../runtime/shared/process-tree';
@@ -44,6 +45,22 @@ function writeActivationState(home: string, value: Record<string, unknown>): voi
   writeJsonAtomic(activationStatePath(home), { schemaVersion: 1, ...value, updatedAt: new Date().toISOString() });
 }
 
+export function supervisorActivationMatchesRelease(control: unknown, expectedReleaseRevision: string): boolean {
+  if (!control || typeof control !== 'object') return false;
+  const response = control as { ok?: unknown; state?: unknown };
+  if (response.ok !== true || !response.state || typeof response.state !== 'object') return false;
+  const state = response.state as {
+    observedState?: unknown;
+    supervisor?: { releaseRevision?: unknown };
+    controllerDaemon?: { releaseRevision?: unknown };
+    gatewayHost?: { releaseRevision?: unknown };
+  };
+  return state.observedState === 'healthy'
+    && state.supervisor?.releaseRevision === expectedReleaseRevision
+    && state.controllerDaemon?.releaseRevision === expectedReleaseRevision
+    && state.gatewayHost?.releaseRevision === expectedReleaseRevision;
+}
+
 function scheduleServiceActivation(repo: string, home: string): { activationId: string; pid: number; statePath: string; logPath: string } {
   const activationId = `sup-activate-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   const cliEntry = process.argv[1] ? resolve(process.argv[1]) : undefined;
@@ -70,7 +87,15 @@ function scheduleServiceActivation(repo: string, home: string): { activationId: 
 
 async function activateInstalledService(repo: string, home: string, activationId: string): Promise<Record<string, unknown>> {
   const update = (phase: string, extra: Record<string, unknown> = {}) => writeActivationState(home, { activationId, phase, repoRoot: repo, ...extra });
+  const label = supervisorServiceLabel(home);
+  const rollback: { previousReleasePath?: string; launchAgent: LaunchAgentFileSnapshot } = {
+    previousReleasePath: readPreviousRelease(home),
+    launchAgent: snapshotLaunchAgent(launchAgentPath(label)),
+  };
+  const expectedRelease = readCurrentSupervisorRelease(home);
+  const expectedReleaseRevision = expectedRelease?.releaseRevision;
   try {
+    if (!expectedRelease || !expectedReleaseRevision) throw new Error('SUPERVISOR_ACTIVATION_EXPECTED_RELEASE_UNAVAILABLE');
     update('waiting_for_handoff');
     await new Promise((resolveWait) => setTimeout(resolveWait, 750));
     update('stopping_legacy');
@@ -83,26 +108,75 @@ async function activateInstalledService(repo: string, home: string, activationId
     });
     update('registering_service', { stoppedAction: stopped.action, cleanedPids: stopped.cleanedPids });
     unregisterService(home);
-    const service = registerService(home);
+    const service = await registerService(home);
     const deadline = Date.now() + 90_000;
     let control: unknown;
     while (Date.now() < deadline) {
       try {
         control = await sendSupervisorCommand(home, { command: 'status' });
-        if ((control as { ok?: boolean }).ok) break;
+        if (supervisorActivationMatchesRelease(control, expectedReleaseRevision)) break;
       } catch {
         // OS service startup is asynchronous.
       }
       await new Promise((resolveWait) => setTimeout(resolveWait, 500));
     }
-    if (!(control as { ok?: boolean } | undefined)?.ok) throw new Error('SUPERVISOR_ACTIVATION_VERIFY_TIMEOUT');
+    if (!supervisorActivationMatchesRelease(control, expectedReleaseRevision)) {
+      throw new Error(`SUPERVISOR_ACTIVATION_VERIFY_TIMEOUT: expected releaseRevision=${expectedReleaseRevision}`);
+    }
     update('succeeded', { completedAt: new Date().toISOString(), service });
     return { ok: true, activationId, stopped, service, control };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    update('failed', { completedAt: new Date().toISOString(), error: message.slice(0, 2_000) });
+    let recovery: Record<string, unknown> | undefined;
+    try {
+      recovery = await restorePreviousActivation(repo, home, rollback);
+    } catch (recoveryError) {
+      recovery = { ok: false, error: recoveryError instanceof Error ? recoveryError.message : String(recoveryError) };
+    }
+    update('failed', { completedAt: new Date().toISOString(), error: message.slice(0, 2_000), recovery });
     throw error;
   }
+}
+
+async function restorePreviousActivation(
+  repo: string,
+  home: string,
+  rollback: { previousReleasePath?: string; launchAgent: LaunchAgentFileSnapshot },
+): Promise<Record<string, unknown>> {
+  try { unregisterService(home); } catch { /* recovery below may still use a detached Supervisor */ }
+  const current = readCurrentRelease(home);
+  const previous = rollback.previousReleasePath ?? readPreviousRelease(home);
+  if (previous) publishCurrentRelease(home, previous, current);
+  restoreLaunchAgent(rollback.launchAgent);
+
+  if (process.platform === 'darwin' && rollback.launchAgent.content !== undefined) {
+    const uid = typeof process.getuid === 'function'
+      ? process.getuid()
+      : Number(runProcess('id', ['-u'], { timeoutMs: 2_000, maxOutputBytes: 1_024 }).stdout.trim());
+    try {
+      const attempts = await bootstrapLaunchAgentWithRetry({
+        label: supervisorServiceLabel(home),
+        plistPath: rollback.launchAgent.path,
+        domain: `gui/${uid}`,
+      });
+      return { ok: true, mode: 'previous_launch_agent', plistPath: rollback.launchAgent.path, bootstrapAttempts: attempts };
+    } catch (error) {
+      if (!previous) throw error;
+      const launched = launchStableSupervisor({ repoRoot: repo, controllerHome: home, logPath: supervisorLogPath(home) });
+      return {
+        ok: true,
+        mode: 'detached_previous_release_after_launch_agent_failure',
+        pid: launched.pid,
+        releasePath: previous,
+        launchAgentError: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+  if (previous) {
+    const launched = launchStableSupervisor({ repoRoot: repo, controllerHome: home, logPath: supervisorLogPath(home) });
+    return { ok: true, mode: 'detached_previous_release', pid: launched.pid, releasePath: previous };
+  }
+  return { ok: false, reason: 'previous_release_and_launch_agent_unavailable' };
 }
 
 async function stopSupervisor(home: string): Promise<Record<string, unknown>> {
@@ -119,18 +193,17 @@ async function stopSupervisor(home: string): Promise<Record<string, unknown>> {
   }
 }
 
-function registerService(home: string): Record<string, unknown> {
+async function registerService(home: string): Promise<Record<string, unknown>> {
   const root = supervisorRoot(home);
   const launchd = join(root, 'launchd', `${supervisorServiceLabel(home)}.plist`);
   const systemdUnit = supervisorSystemdUnitName(home);
   const systemd = join(root, 'systemd', systemdUnit);
   if (process.platform === 'darwin') {
     const uid = typeof process.getuid === 'function' ? process.getuid() : Number(runProcess('id', ['-u'], { timeoutMs: 2_000, maxOutputBytes: 1_024 }).stdout.trim());
-    const bootstrap = runProcess('launchctl', ['bootstrap', `gui/${uid}`, launchd], { timeoutMs: 15_000, maxOutputBytes: 20_000 });
-    if (!bootstrap.ok && !/already|exists|in progress/i.test(`${bootstrap.stderr}\n${bootstrap.stdout}`)) throw new Error(`SUPERVISOR_LAUNCHD_REGISTER_FAILED: ${bootstrap.stderr || bootstrap.stdout}`);
-    const kickstart = runProcess('launchctl', ['kickstart', `gui/${uid}/${supervisorServiceLabel(home)}`], { timeoutMs: 15_000, maxOutputBytes: 20_000 });
-    if (!kickstart.ok && !/not found|in progress|already/i.test(`${kickstart.stderr}\n${kickstart.stdout}`)) throw new Error(`SUPERVISOR_LAUNCHD_START_FAILED: ${kickstart.stderr || kickstart.stdout}`);
-    return { platform: 'launchd', registered: true, plistPath: launchd };
+    const label = supervisorServiceLabel(home);
+    const installed = installLaunchAgent(launchd, label);
+    const attempts = await bootstrapLaunchAgentWithRetry({ label, plistPath: installed.path, domain: `gui/${uid}` });
+    return { platform: 'launchd', registered: true, plistPath: installed.path, bootstrapAttempts: attempts };
   }
   if (process.platform === 'linux') {
     const enabled = runProcess('systemctl', ['--user', 'enable', '--now', systemd], { timeoutMs: 15_000, maxOutputBytes: 20_000 });

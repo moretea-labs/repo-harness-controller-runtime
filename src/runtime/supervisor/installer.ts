@@ -63,9 +63,11 @@ export function renderLaunchdSupervisorPlist(input: {
   repoRoot: string;
   controllerHome: string;
   runtimeSourceRoot: string;
+  releaseRevision?: string;
   logPath: string;
 }): string {
   const args = [input.bunPath, input.supervisorPath, '--repo', input.repoRoot, '--controller-home', input.controllerHome, '--runtime-source-root', input.runtimeSourceRoot];
+  if (input.releaseRevision) args.push('--release-revision', input.releaseRevision);
   const xml = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n  <key>Label</key><string>${xml(input.label)}</string>\n  <key>ProgramArguments</key><array>${args.map((arg) => `<string>${xml(arg)}</string>`).join('')}</array>\n  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n  <key>ThrottleInterval</key><integer>2</integer>\n  <key>ProcessType</key><string>Interactive</string>\n  <key>StandardOutPath</key><string>${xml(input.logPath)}</string>\n  <key>StandardErrorPath</key><string>${xml(input.logPath)}</string>\n</dict></plist>\n`;
 }
@@ -105,7 +107,7 @@ export function installSupervisorRelease(input: { controllerHome: string; repoRo
   mkdirSync(systemdDir, { recursive: true, mode: 0o700 });
   const launchdPlistPath = join(launchdDir, `${label}.plist`);
   const systemdUnitPath = join(systemdDir, supervisorSystemdUnitName(controllerHome));
-  writeFileSync(launchdPlistPath, renderLaunchdSupervisorPlist({ label, bunPath, supervisorPath, repoRoot: resolve(input.repoRoot), controllerHome, runtimeSourceRoot: sourceRoot, logPath: join(supervisorLogsRoot(controllerHome), 'launchd.log') }), { encoding: 'utf8', mode: 0o600 });
+  writeFileSync(launchdPlistPath, renderLaunchdSupervisorPlist({ label, bunPath, supervisorPath, repoRoot: resolve(input.repoRoot), controllerHome, runtimeSourceRoot: sourceRoot, releaseRevision: revision, logPath: join(supervisorLogsRoot(controllerHome), 'launchd.log') }), { encoding: 'utf8', mode: 0o600 });
   writeFileSync(systemdUnitPath, renderSystemdSupervisorUnit({ bunPath, supervisorPath, repoRoot: resolve(input.repoRoot), controllerHome, runtimeSourceRoot: sourceRoot }), { encoding: 'utf8', mode: 0o600 });
   return {
     controllerHome,
