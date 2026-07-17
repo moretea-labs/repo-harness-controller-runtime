@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
-import { writeFileSync, rmSync } from 'fs';
-import { join, resolve, sep } from 'path';
+import { existsSync, writeFileSync, rmSync } from 'fs';
+import { dirname, join, resolve, sep } from 'path';
 import { tmpdir } from 'os';
 import { ensureControllerHome } from '../../cli/repositories/controller-home';
 import { writeJsonAtomic } from '../shared/json-files';
@@ -132,10 +132,16 @@ export function startControllerDaemon(controllerHome: string): void {
 
   const runtime = publishReadyAfterStartupRecovery(controllerHome, startedAt);
   void runAutomaticRuntimeCleanupLoop(runtime.generationRecord.source.repoRoot, abort.signal);
+  const bundledWorkerPath = process.argv[1]
+    ? join(dirname(resolve(process.argv[1])), 'worker.js')
+    : undefined;
 
   const scheduler = new GlobalScheduler(controllerHome, {}, {
     controllerPid: process.pid,
     controllerStartedAt: startedAt,
+    runtimeSourceRoot: runtime.generationRecord.source.repoRoot,
+    ...(bundledWorkerPath && existsSync(bundledWorkerPath) ? { workerEntrypoint: bundledWorkerPath } : {}),
+    ...(ownership.ownerEpoch !== undefined ? { ownerEpoch: String(ownership.ownerEpoch) } : {}),
   });
   scheduler.run(abort.signal)
     .catch((error) => {

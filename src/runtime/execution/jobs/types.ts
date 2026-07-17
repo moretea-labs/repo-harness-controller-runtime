@@ -72,6 +72,28 @@ export interface ExecutionJobTimings {
   workerRunningAt?: string;
 }
 
+export interface ExecutionWorkerLifecycle {
+  executable: string;
+  args: string[];
+  cwd: string;
+  environment: Record<string, string | undefined>;
+  ownerPid: number;
+  ownerEpoch?: string;
+  processGroupId?: number;
+  workerPid?: number;
+  attempt: number;
+  maxAttempts: number;
+  spawnedAt: string;
+  attachedAt?: string;
+  exitedAt?: string;
+  exitCode?: number | null;
+  signal?: string | null;
+  stderrPath?: string;
+  stderr?: string;
+  stderrTruncated?: boolean;
+  startupState: 'spawned' | 'registered' | 'exited' | 'spawn_failed';
+}
+
 export type ExecutionOperationMode = 'readonly' | 'mutating' | 'remote_write' | 'destructive';
 
 export interface ExecutionOperationMetadata {
@@ -118,6 +140,7 @@ export interface ExecutionJob {
   heartbeatAt?: string;
   deadlineAt?: string;
   workerPid?: number;
+  workerLifecycle?: ExecutionWorkerLifecycle;
   attempt: number;
   maxAttempts: number;
   timings?: ExecutionJobTimings;

@@ -1,11 +1,20 @@
 import { execFile, spawn, type ChildProcess } from 'child_process';
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'fs';
 import { fileURLToPath } from 'url';
-import { join } from 'path';
+import { dirname, join, resolve } from 'path';
 import { cpus, freemem, loadavg } from 'os';
 import { listRepositories } from '../../../cli/repositories/registry';
 import { ensureControllerHome } from '../../../cli/repositories/controller-home';
 import { withControllerLock } from '../../../cli/repositories/locks';
-import { attachExecutionWorker, getExecutionJob, listActiveExecutionJobs, transitionExecutionJob } from '../../execution/jobs/store';
+import {
+  attachExecutionWorker,
+  executionJobRoot,
+  getExecutionJob,
+  listActiveExecutionJobs,
+  transitionExecutionJob,
+  updateExecutionJob,
+} from '../../execution/jobs/store';
+import type { ExecutionWorkerLifecycle } from '../../execution/jobs/types';
 import { releaseExecutionLeases } from '../../resources/leases/store';
 import { RepoActorRegistry } from '../repo-actor/registry';
 import { reconcileExecutionJobsAsync } from './reconciliation';
@@ -19,6 +28,17 @@ import { readSchedulerWakeSignal, waitForSchedulerWakeSignal } from './wake-sign
 import { cleanupControllerRuntimeState } from '../runtime-cleanup';
 
 const DARWIN_MEMORY_SAMPLE_TTL_MS = 5_000;
+const MAX_WORKER_STDERR_BYTES = 16 * 1024;
+const WORKER_ENVIRONMENT_KEYS = [
+  'PATH',
+  'HOME',
+  'BUN_INSTALL',
+  'NODE_OPTIONS',
+  'REPO_HARNESS_CONTROLLER_HOME',
+  'REPO_HARNESS_CONTROLLER_RUNTIME_SOURCE_ROOT',
+  'REPO_HARNESS_EXECUTION_WORKER',
+  'REPO_HARNESS_SUPERVISOR_EPOCH',
+] as const;
 const RUNTIME_CLEANUP_INTERVAL_MS = Math.max(30_000, Number(process.env.REPO_HARNESS_RUNTIME_CLEANUP_INTERVAL_MS ?? 60_000));
 const DARWIN_RECLAIMABLE_PAGE_LABELS = new Set([
   'Pages free',
@@ -129,6 +149,9 @@ export interface SchedulerConfig {
 export interface SchedulerRuntimeBinding {
   controllerPid?: number;
   controllerStartedAt?: string;
+  runtimeSourceRoot?: string;
+  workerEntrypoint?: string;
+  ownerEpoch?: string;
 }
 
 export class GlobalScheduler {
@@ -138,6 +161,9 @@ export class GlobalScheduler {
   private readonly config: SchedulerConfig;
   private readonly controllerPid: number;
   private readonly controllerStartedAt?: string;
+  private readonly runtimeSourceRoot?: string;
+  private readonly workerEntrypoint?: string;
+  private readonly ownerEpoch?: string;
   private lastScheduleTick = 0;
   private lastPortfolioTick = 0;
   private lastCampaignTick = 0;
@@ -177,6 +203,9 @@ export class GlobalScheduler {
     };
     this.controllerPid = runtime.controllerPid ?? process.pid;
     this.controllerStartedAt = runtime.controllerStartedAt;
+    this.runtimeSourceRoot = runtime.runtimeSourceRoot ? resolve(runtime.runtimeSourceRoot) : undefined;
+    this.workerEntrypoint = runtime.workerEntrypoint ? resolve(runtime.workerEntrypoint) : undefined;
+    this.ownerEpoch = runtime.ownerEpoch;
     const state = readJsonFile<SchedulerState>(schedulerStatePath(controllerHome), { schemaVersion: 1, updatedAt: new Date().toISOString(), lastRepoDispatch: {} });
     for (const [repoId, timestamp] of Object.entries(state.lastRepoDispatch)) {
       if (Number.isFinite(timestamp)) this.lastRepoDispatch.set(repoId, timestamp);
@@ -208,15 +237,126 @@ export class GlobalScheduler {
     await Promise.all(workers.map((child) => terminateProcessTree(child.pid)));
   }
 
+  private workerCommand(): { entry: string; loader: string; cwd: string } {
+    const sourceEntry = this.runtimeSourceRoot
+      ? join(this.runtimeSourceRoot, 'src', 'runtime', 'execution', 'workers', 'worker-entry.ts')
+      : fileURLToPath(new URL('../../execution/workers/worker-entry.ts', import.meta.url));
+    const loader = this.runtimeSourceRoot
+      ? join(this.runtimeSourceRoot, 'src', 'runtime', 'shared', 'node-ts-loader.mjs')
+      : fileURLToPath(new URL('../../shared/node-ts-loader.mjs', import.meta.url));
+    const entry = this.workerEntrypoint ?? sourceEntry;
+    const cwd = this.runtimeSourceRoot ?? process.cwd();
+    if (!existsSync(entry)) throw new Error(`WORKER_ENTRYPOINT_MISSING: ${entry}`);
+    if (!process.versions.bun && !existsSync(loader)) throw new Error(`WORKER_LOADER_MISSING: ${loader}`);
+    return { entry, loader, cwd };
+  }
+
+  private workerEnvironment(): Record<string, string | undefined> {
+    return Object.fromEntries(WORKER_ENVIRONMENT_KEYS.map((key) => [key, process.env[key]]));
+  }
+
+  private persistSpawnedWorker(repoId: string, jobId: string, lifecycle: ExecutionWorkerLifecycle): void {
+    try {
+      updateExecutionJob(this.controllerHome, repoId, jobId, (current) => {
+        if (!['dispatched', 'running'].includes(current.status) || current.workerPid !== undefined) return current;
+        return { ...current, workerLifecycle: lifecycle };
+      });
+    } catch { /* the Job may have been superseded or made terminal */ }
+  }
+
+  private recordWorkerExit(
+    repoId: string,
+    jobId: string,
+    attempt: number,
+    child: ChildProcess | undefined,
+    lifecycle: ExecutionWorkerLifecycle,
+    exitCode: number | null,
+    signal: string | null,
+    stderr: string,
+    stderrTruncated: boolean,
+    startupError?: string,
+  ): void {
+    const diagnosticLifecycle: ExecutionWorkerLifecycle = {
+      ...lifecycle,
+      exitedAt: new Date().toISOString(),
+      exitCode,
+      signal,
+      workerPid: child?.pid ?? lifecycle.workerPid,
+      processGroupId: lifecycle.processGroupId ?? (process.platform !== 'win32' ? child?.pid : undefined),
+      stderr,
+      stderrTruncated,
+      startupState: startupError ? 'spawn_failed' : 'exited',
+    };
+    try {
+      const current = getExecutionJob(this.controllerHome, repoId, jobId);
+      if (current.attempt !== attempt) return;
+      if (child?.pid && current.workerPid !== undefined && current.workerPid !== child.pid) return;
+      const currentLifecycle = current.workerLifecycle ?? lifecycle;
+      const mergedLifecycle = { ...currentLifecycle, ...diagnosticLifecycle };
+      if (['succeeded', 'failed', 'timed_out', 'cancelled', 'orphaned', 'stale', 'human_attention_required'].includes(current.status)) {
+        updateExecutionJob(this.controllerHome, repoId, jobId, (latest) => ({ ...latest, workerLifecycle: mergedLifecycle }));
+        return;
+      }
+
+      const details: Record<string, unknown> = {
+        workerLostReason: startupError ? 'spawn_failed' : 'process_exit',
+        executable: mergedLifecycle.executable,
+        cwd: mergedLifecycle.cwd,
+        exitCode,
+        signal,
+        stderr,
+        stderrTruncated,
+        stderrPath: mergedLifecycle.stderrPath,
+        processGroupId: mergedLifecycle.processGroupId,
+        ownerPid: mergedLifecycle.ownerPid,
+        ownerEpoch: mergedLifecycle.ownerEpoch,
+        attempt: current.attempt,
+        maxAttempts: current.maxAttempts,
+        ...(startupError ? { startupError } : {}),
+      };
+      const stderrSummary = stderr.trim() ? ` Worker stderr: ${stderr.trim()}` : '';
+      const startupSummary = startupError ? ` Startup error: ${startupError}.` : '';
+      const message = `Execution Worker ${mergedLifecycle.executable} exited before completion (cwd ${mergedLifecycle.cwd}, exit code ${exitCode ?? 'unknown'}${signal ? `, signal ${signal}` : ''}).${startupSummary}${stderrSummary}`;
+      releaseExecutionLeases(this.controllerHome, repoId, jobId, current.leaseRefs);
+      const retryable = current.attempt < current.maxAttempts;
+      transitionExecutionJob(this.controllerHome, repoId, jobId, retryable ? 'queued' : 'failed', {
+        workerPid: undefined,
+        heartbeatAt: undefined,
+        leaseRefs: [],
+        workerLifecycle: mergedLifecycle,
+        error: { code: startupError ? 'WORKER_START_FAILED' : 'WORKER_EXITED', message, retryable, details },
+      });
+    } catch { /* the Job may have been finalized by the Worker or reconciliation */ }
+  }
+
   private spawnWorker(repoId: string, jobId: string): boolean {
     const tracked = this.children.get(jobId);
     if (tracked?.pid && this.pidAlive(tracked.pid)) return false;
     const current = getExecutionJob(this.controllerHome, repoId, jobId);
     if (!['dispatched', 'running'].includes(current.status)) return false;
     if (current.workerPid && this.pidAlive(current.workerPid)) return false;
-    const entry = fileURLToPath(new URL('../../execution/workers/worker-entry.ts', import.meta.url));
+    const command = (() => {
+      try { return this.workerCommand(); } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const lifecycle: ExecutionWorkerLifecycle = {
+          executable: process.execPath,
+          args: [],
+          cwd: this.runtimeSourceRoot ?? process.cwd(),
+          environment: this.workerEnvironment(),
+          ownerPid: this.controllerPid,
+          ...(this.ownerEpoch ? { ownerEpoch: this.ownerEpoch } : {}),
+          attempt: current.attempt,
+          maxAttempts: current.maxAttempts,
+          spawnedAt: new Date().toISOString(),
+          startupState: 'spawn_failed',
+        };
+        this.persistSpawnedWorker(repoId, jobId, lifecycle);
+        this.recordWorkerExit(repoId, jobId, current.attempt, undefined, lifecycle, null, null, '', false, message);
+        return undefined;
+      }
+    })();
+    if (!command) return false;
     const bun = Boolean(process.versions.bun);
-    const loader = fileURLToPath(new URL('../../shared/node-ts-loader.mjs', import.meta.url));
     const workerArgs = [
       '--controller-home', this.controllerHome,
       '--repo-id', repoId,
@@ -225,42 +365,89 @@ export class GlobalScheduler {
     ];
     if (this.controllerStartedAt) workerArgs.push('--controller-started-at', this.controllerStartedAt);
     const args = bun
-      ? [entry, ...workerArgs]
-      : ['--loader', loader, entry, ...workerArgs];
-    const child = spawn(process.execPath, args, {
-      stdio: ['ignore', 'ignore', 'ignore'],
-      detached: process.platform !== 'win32',
-      env: { ...process.env, REPO_HARNESS_EXECUTION_WORKER: '1' },
+      ? [command.entry, ...workerArgs]
+      : ['--loader', command.loader, command.entry, ...workerArgs];
+    const environment: Record<string, string | undefined> = {
+      ...process.env,
+      REPO_HARNESS_EXECUTION_WORKER: '1',
+      REPO_HARNESS_CONTROLLER_HOME: this.controllerHome,
+      ...(this.runtimeSourceRoot ? { REPO_HARNESS_CONTROLLER_RUNTIME_SOURCE_ROOT: this.runtimeSourceRoot } : {}),
+      ...(this.ownerEpoch ? { REPO_HARNESS_SUPERVISOR_EPOCH: this.ownerEpoch } : {}),
+    };
+    const stderrPath = join(executionJobRoot(this.controllerHome, repoId), 'worker-stderr', `${jobId}-attempt-${current.attempt}.log`);
+    mkdirSync(dirname(stderrPath), { recursive: true });
+    writeFileSync(stderrPath, '', 'utf8');
+    const lifecycle: ExecutionWorkerLifecycle = {
+      executable: process.execPath,
+      args,
+      cwd: command.cwd,
+      environment: Object.fromEntries(WORKER_ENVIRONMENT_KEYS.map((key) => [key, environment[key]])),
+      ownerPid: this.controllerPid,
+      ...(this.ownerEpoch ? { ownerEpoch: this.ownerEpoch } : {}),
+      attempt: current.attempt,
+      maxAttempts: current.maxAttempts,
+      spawnedAt: new Date().toISOString(),
+      stderrPath,
+      startupState: 'spawned',
+    };
+    this.persistSpawnedWorker(repoId, jobId, lifecycle);
+    let child: ChildProcess;
+    try {
+      child = spawn(process.execPath, args, {
+        cwd: command.cwd,
+        stdio: ['ignore', 'ignore', 'pipe'],
+        detached: process.platform !== 'win32',
+        env: environment,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.recordWorkerExit(repoId, jobId, current.attempt, undefined, lifecycle, null, null, '', false, message);
+      return false;
+    }
+    let stderr = '';
+    let stderrBytes = 0;
+    let stderrTruncated = false;
+    child.stderr?.on('data', (chunk: Buffer | string) => {
+      const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+      const bytes = Buffer.byteLength(text);
+      const remaining = MAX_WORKER_STDERR_BYTES - stderrBytes;
+      const accepted = remaining > 0 ? Buffer.from(text).subarray(0, remaining).toString('utf8') : '';
+      if (accepted) {
+        stderr += accepted;
+        stderrBytes += Buffer.byteLength(accepted);
+        try { appendFileSync(stderrPath, accepted, 'utf8'); } catch { stderrTruncated = true; }
+      }
+      if (bytes > Math.max(0, remaining)) stderrTruncated = true;
     });
-    let activated = false;
-    child.once('error', (error) => {
-      this.children.delete(jobId);
-      if (!activated || !child.pid) return;
-      try {
-        const current = getExecutionJob(this.controllerHome, repoId, jobId);
-        if (current.status !== 'running' || current.workerPid !== child.pid) return;
-        releaseExecutionLeases(this.controllerHome, repoId, jobId, current.leaseRefs);
-      } catch { /* job may already be terminal or replaced */ }
-      try {
-        transitionExecutionJob(this.controllerHome, repoId, jobId, 'failed', {
-          error: { code: 'WORKER_SPAWN_FAILED', message: error.message, retryable: true },
-          leaseRefs: [],
-        });
-      } catch { /* job may already be terminal */ }
-    });
-    child.once('exit', () => this.children.delete(jobId));
+    let finalized = false;
+    const finalize = (exitCode: number | null, signal: string | null, startupError?: string) => {
+      if (finalized) return;
+      finalized = true;
+      if (this.children.get(jobId) === child) this.children.delete(jobId);
+      this.recordWorkerExit(repoId, jobId, current.attempt, child, lifecycle, exitCode, signal, stderr, stderrTruncated, startupError);
+    };
+    child.once('error', (error) => finalize(null, null, error.message));
+    child.once('close', (code, signal) => finalize(code, signal));
     if (!child.pid) {
       child.unref();
       return false;
     }
+    this.children.set(jobId, child);
     const attached = attachExecutionWorker(this.controllerHome, repoId, jobId, child.pid);
     if (!attached) {
+      this.children.delete(jobId);
       void terminateProcessTree(child.pid);
       child.unref();
       return false;
     }
-    activated = true;
-    this.children.set(jobId, child);
+    try {
+      updateExecutionJob(this.controllerHome, repoId, jobId, (latest) => ({
+        ...latest,
+        workerLifecycle: latest.workerLifecycle
+          ? { ...latest.workerLifecycle, attachedAt: new Date().toISOString(), processGroupId: process.platform !== 'win32' ? child.pid : undefined, workerPid: child.pid, startupState: 'registered' }
+          : { ...lifecycle, attachedAt: new Date().toISOString(), processGroupId: process.platform !== 'win32' ? child.pid : undefined, workerPid: child.pid, startupState: 'registered' },
+      }));
+    } catch { /* close/reconciliation may have finalized the Job */ }
     child.unref();
     return true;
   }

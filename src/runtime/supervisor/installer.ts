@@ -93,7 +93,8 @@ export function installSupervisorRelease(input: { controllerHome: string; repoRo
   buildEntry(sourceRoot, 'src/runtime/supervisor/entry.ts', join(releasePath, 'supervisor.js'));
   buildEntry(sourceRoot, 'src/cli/index.ts', join(releasePath, 'repo-harness.js'));
   buildEntry(sourceRoot, 'src/runtime/control-plane/daemon-entry.ts', join(releasePath, 'daemon.js'));
-  writeFileSync(join(releasePath, 'manifest.json'), `${JSON.stringify({ schemaVersion: 1, releaseRevision: revision, sourceRoot, builtAt: new Date().toISOString(), entrypoint: 'supervisor.js', runtimeEntrypoint: 'repo-harness.js', daemonEntrypoint: 'daemon.js' }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  buildEntry(sourceRoot, 'src/runtime/execution/workers/worker-entry.ts', join(releasePath, 'worker.js'));
+  writeFileSync(join(releasePath, 'manifest.json'), `${JSON.stringify({ schemaVersion: 1, releaseRevision: revision, sourceRoot, builtAt: new Date().toISOString(), entrypoint: 'supervisor.js', runtimeEntrypoint: 'repo-harness.js', daemonEntrypoint: 'daemon.js', workerEntrypoint: 'worker.js' }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
   try { chmodSync(join(releasePath, 'supervisor.js'), 0o700); } catch { /* best effort */ }
 
   const previous = readCurrentRelease(controllerHome);

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -169,6 +170,17 @@ describe("Local Execution Bridge", () => {
     } finally {
       codex.restore();
     }
+  });
+
+  test("starts successfully when Local Job runtime storage is already linked", async () => {
+    const root = repo();
+    const first = await startLocalBridgeServer({ repoRoot: root, port: 0, openBrowser: false });
+    await first.close();
+    expect(lstatSync(join(root, ".ai/harness/local-jobs")).isSymbolicLink()).toBe(true);
+
+    const second = await startLocalBridgeServer({ repoRoot: root, port: 0, openBrowser: false });
+    servers.push(second);
+    expect((await fetch(new URL("/health", second.url))).status).toBe(200);
   });
 
   test("keeps a healthy local Run alive while its controller owner is still active", async () => {

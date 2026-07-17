@@ -146,7 +146,8 @@ import type { MultiRepositoryMcpToolContext } from "../mcp/multi-repository";
 import { createMcpToolContext as createControllerMcpToolContext } from "../mcp/server";
 import { loadMcpLocalConfig, loadMcpServiceLocalConfig, loadMcpServiceRuntimeState } from "../mcp/auth";
 import { loadRepositoryRegistry, registerRepository, removeRepository, resolveRepositorySelection } from "../repositories/registry";
-import { resolveControllerHome } from "../repositories/controller-home";
+import { resolveControllerHome, resolveRepoPreferredControllerHome } from "../repositories/controller-home";
+import { ensureRepositoryRuntimeStorage } from "../repositories/runtime-storage";
 import { ensureControllerDaemon, readControllerDaemonStatus } from "../../runtime/control-plane/daemon-client";
 import { readRuntimeGeneration } from "../../runtime/control-plane/runtime-generation";
 import { findExecutionJob, listExecutionJobs } from "../../runtime/execution/jobs/store";
@@ -862,17 +863,21 @@ function buildUserControllerExperienceSnapshot(repoRoot: string, controllerHome 
 export async function startLocalBridgeServer(
   options: LocalBridgeServerOptions,
 ): Promise<LocalBridgeServerHandle> {
+  const repositoryControllerHome = resolveRepoPreferredControllerHome(options.repoRoot, options.controllerHome);
+  const repository = registerRepository({ path: options.repoRoot, controllerHome: repositoryControllerHome });
+  ensureRepositoryRuntimeStorage(repository, repositoryControllerHome);
+  const repoRoot = repository.canonicalRoot;
   const host = options.host ?? "127.0.0.1";
   const requestedPort = options.port ?? 8766;
-  const controllerHome = resolveControllerHome(options.controllerHome);
+  const controllerHome = repositoryControllerHome;
   const mcpExposureContext = createControllerMcpToolContext({
-    repo: options.repoRoot,
+    repo: repoRoot,
     controllerHome,
     profile: "controller",
   }) as MultiRepositoryMcpToolContext;
   assertAllowedBindHost(host, options.allowLanMobileIntents === true);
-  reconcileAgentJobs(options.repoRoot);
-  reconcileLocalBridgeJobs(options.repoRoot);
+  reconcileAgentJobs(repoRoot);
+  reconcileLocalBridgeJobs(repoRoot);
   const token = options.token ?? randomBytes(32).toString("base64url");
   const app = express();
   const streamClients = new Map<Response, { repoRoot: string; signature: string }>();
@@ -994,12 +999,12 @@ export async function startLocalBridgeServer(
 
   app.post("/mobile/intent", (request, response) => {
     try {
-      const verified = verifyMobileIntentRequest(options.repoRoot, request);
+      const verified = verifyMobileIntentRequest(repoRoot, request);
       const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
         ? request.body as Record<string, unknown>
         : {};
       const intent = queryString(body.intent) ?? "plugin_action";
-      const repository = registerRepository({ path: options.repoRoot, controllerHome });
+      const repository = registerRepository({ path: repoRoot, controllerHome });
       if (intent === "list_plugins") {
         if (!mobileIntentHasScope(verified.principal.scopes, "plugins:read")) throw new Error("MOBILE_INTENT_SCOPE_DENIED: plugins:read is required");
         response.json({
@@ -1779,7 +1784,7 @@ export async function startLocalBridgeServer(
   app.get("/api/repositories", (request, response) => {
     try {
       const selectedRepoId = queryString(request.query.repoId) ?? options.defaultRepoId;
-      response.json({ repositories: userFacingRepositories(options.repoRoot, controllerHome, selectedRepoId) });
+      response.json({ repositories: userFacingRepositories(repoRoot, controllerHome, selectedRepoId) });
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
@@ -1829,7 +1834,7 @@ export async function startLocalBridgeServer(
       for (const checkout of repository.checkouts ?? []) {
         if (checkout.canonicalRoot) localSnapshotCache.delete(checkout.canonicalRoot);
       }
-      const remaining = userFacingRepositories(options.repoRoot, controllerHome);
+      const remaining = userFacingRepositories(repoRoot, controllerHome);
       response.json({
         repository,
         repositories: remaining,
@@ -3051,7 +3056,7 @@ export async function startLocalBridgeServer(
     clearInterval(streamInterval);
     for (const client of streamClients.keys()) client.end();
     streamClients.clear();
-    localSnapshotCache.delete(options.repoRoot);
+    localSnapshotCache.delete(repoRoot);
   });
   const address = server.address();
   const port =
