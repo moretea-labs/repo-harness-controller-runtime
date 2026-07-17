@@ -4,7 +4,7 @@ import { join } from 'path';
 import type { AgentJobMeta } from '../agent-jobs/types';
 import { runControllerCheck } from './check-runner';
 import { taskExecutionPolicy } from './execution-policy';
-import { getIssue, recordTaskVerification, updateTask } from './issue-store';
+import { acceptVerifiedTask, getIssue, recordTaskVerification, updateTask } from './issue-store';
 import type { TaskCommandEvidence, TaskVerification } from './types';
 
 export interface CompletionContinuationResult {
@@ -89,6 +89,25 @@ export function continueTaskAfterSuccessfulRun(
     updateTask(repoRoot, issue.id, task.id, {
       note: `Automatic continuation stopped because required completion evidence failed for ${run.runId}.`,
     });
+    return { continued: true, status, checkCount: checkResults.length };
+  }
+  if (status === 'verified' && policy.autoCompleteAfterSuccessfulRun && !policy.requiresHumanAcceptance) {
+    const closureComplete = run.executionMode !== 'worktree' || run.closureState === 'completed';
+    if (!closureComplete) {
+      return {
+        continued: true,
+        status,
+        reason: `Verification passed, but Run closure is ${run.closureState ?? 'none'}; integration and cleanup evidence are still required.`,
+        checkCount: checkResults.length,
+      };
+    }
+    const accepted = acceptVerifiedTask(
+      repoRoot,
+      issue.id,
+      task.id,
+      `Verification, integration, and cleanup evidence passed for ${run.runId}.`,
+    );
+    return { continued: true, status: accepted.tasks.find((entry) => entry.id === task.id)?.status ?? 'done', checkCount: checkResults.length };
   }
   return { continued: true, status, checkCount: checkResults.length };
 }

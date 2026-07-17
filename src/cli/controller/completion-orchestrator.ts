@@ -164,6 +164,7 @@ function verifyAndMaybeAccept(input: {
   decision: TaskReviewDecision;
   reviewer: string;
   note?: string;
+  allowCompletion?: boolean;
 }): { issue: ControllerIssue; taskStatus: string } {
   const { repoRoot, run, task, decision, reviewer } = input;
   const policy = taskExecutionPolicy(task);
@@ -184,7 +185,7 @@ function verifyAndMaybeAccept(input: {
     : recordTaskVerification(repoRoot, run.issueId, run.taskId, verificationForRun(repoRoot, run, currentTask, reviewer));
   const verifiedTask = taskForRun(verified, run.taskId);
   if (verifiedTask.status === 'done') return { issue: verified, taskStatus: 'done' };
-  if (verifiedTask.status === 'verified' && (allowHumanAcceptance || canAutoFinish(verifiedTask))) {
+  if (input.allowCompletion !== false && verifiedTask.status === 'verified' && (allowHumanAcceptance || canAutoFinish(verifiedTask))) {
     const accepted = acceptVerifiedTask(repoRoot, run.issueId, run.taskId, input.note ?? `Accepted by ${reviewer} through completion orchestrator.`);
     return { issue: accepted, taskStatus: taskForRun(accepted, run.taskId).status };
   }
@@ -280,6 +281,11 @@ export function finishTaskRun(repoRoot: string, options: FinishTaskRunOptions): 
     if (!hasChanges) {
       const cleanupResult = cleanup ? cleanupNoChangeWorktree(repoRoot, run.runId) : { removed: false, branchDeleted: false };
       if (cleanupResult.preserved) {
+        markAgentJobClosure(repoRoot, run.runId, {
+          state: 'cleanup_blocked',
+          preservationReason: cleanupResult.preservationReason ?? 'cleanup_failed',
+          details: cleanupResult.message,
+        });
         return result(repoRoot, {
           action: 'blocked',
           runId: run.runId,
@@ -304,7 +310,10 @@ export function finishTaskRun(repoRoot: string, options: FinishTaskRunOptions): 
       changeOutcome = 'no_change';
       cleaned = cleanupResult.removed;
       branchDeleted = cleanupResult.branchDeleted;
-      const final = verifyAndMaybeAccept({ repoRoot, run: currentRun, task, decision, reviewer, note: options.note });
+      const verified = verifyAndMaybeAccept({ repoRoot, run: currentRun, task, decision, reviewer, note: options.note, allowCompletion: false });
+      const final = cleaned || run.worktree === repoRoot
+        ? verifyAndMaybeAccept({ repoRoot, run: currentRun, task: taskForRun(verified.issue, task.id), decision, reviewer, note: options.note })
+        : verified;
       return result(repoRoot, {
         action: final.taskStatus === 'done' ? 'no_change' : 'needs_decision',
         runId: run.runId,
@@ -355,8 +364,9 @@ export function finishTaskRun(repoRoot: string, options: FinishTaskRunOptions): 
   if (task.status === 'integrated' || task.status === 'review' || task.status === 'verified' || currentRun.status === 'succeeded') {
     const latestIssue = getIssue(repoRoot, issue.id);
     const latestTask = taskForRun(latestIssue, task.id);
-    const final = verifyAndMaybeAccept({ repoRoot, run: currentRun, task: latestTask, decision, reviewer, note: options.note });
-    if (shouldCommit && final.taskStatus === 'done' && changedPaths && changedPaths.length > 0) {
+    const verified = verifyAndMaybeAccept({ repoRoot, run: currentRun, task: latestTask, decision, reviewer, note: options.note, allowCompletion: false });
+    let final = verified;
+    if (shouldCommit && ['verified', 'done'].includes(final.taskStatus) && changedPaths && changedPaths.length > 0) {
       const committed = safeCommitChangedPaths(repoRoot, {
         issueId: issue.id,
         taskId: task.id,
@@ -414,6 +424,18 @@ export function finishTaskRun(repoRoot: string, options: FinishTaskRunOptions): 
       }
       cleaned = cleanupResult.removed;
       branchDeleted = cleanupResult.branchDeleted;
+    }
+    const completionEligible = run.provider !== 'local' || run.executionMode !== 'worktree' || integrated && cleaned;
+    if (completionEligible) {
+      const latest = getIssue(repoRoot, issue.id);
+      final = verifyAndMaybeAccept({
+        repoRoot,
+        run: currentRun,
+        task: taskForRun(latest, task.id),
+        decision,
+        reviewer,
+        note: options.note,
+      });
     }
     currentRun = markAgentJobReviewedCompletion(repoRoot, run.runId, {
       changeOutcome,

@@ -39,13 +39,14 @@ export function invalidateExecutionWorker(
   },
 ): ExecutionWorkerInvalidation | undefined {
   const currentParentPid = options.currentParentPid ?? process.ppid;
-  if (options.controllerPid && currentParentPid !== options.controllerPid) {
+  // Execution Workers are intentionally spawned detached. On macOS/Linux an
+  // unref'd detached child may be re-parented to PID 1 while the owning
+  // Controller is still alive. PID 1 is therefore valid here; ownership is
+  // still fenced by Controller PID/start epoch, Job attempt, and leases below.
+  if (options.controllerPid && currentParentPid !== options.controllerPid && currentParentPid !== 1) {
     return {
       code: "PARENT_DISCONNECTED",
-      message:
-        currentParentPid === 1
-          ? `execution worker parent ${options.controllerPid} disconnected and PPID became 1`
-          : `execution worker parent changed from ${options.controllerPid} to ${currentParentPid}`,
+      message: `execution worker parent changed from ${options.controllerPid} to ${currentParentPid}`,
     };
   }
   if (options.controllerPid && !pidAlive(options.controllerPid)) {

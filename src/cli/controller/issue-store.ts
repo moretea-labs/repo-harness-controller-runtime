@@ -918,7 +918,12 @@ export function recordTaskVerification(repoRoot: string, issueIdValue: string, t
   const verificationTask = { ...task, checks: normalizedDeclaredChecks.validCheckIds };
   const outcome = verificationEvidencePassed(verificationTask, verification, policy);
   const successful = outcome.ok;
-  const autoComplete = successful && policy.autoCompleteAfterSuccessfulRun && !policy.requiresHumanAcceptance;
+  // Run-backed verification must stop at verified. Integration and cleanup
+  // evidence are finalized by the completion orchestrator before Task done.
+  const autoComplete = successful
+    && !verification.runId
+    && policy.autoCompleteAfterSuccessfulRun
+    && !policy.requiresHumanAcceptance;
   const invalidCheckNote = normalizedDeclaredChecks.invalidCheckIds.length > 0
     ? ` Ignored unregistered check id(s): ${normalizedDeclaredChecks.invalidCheckIds.join(', ')}. Invalid check ids are verification infrastructure metadata, not actual check failures.`
     : '';
@@ -956,11 +961,14 @@ export function projectBoard(repoRoot: string): {
   const readyTasks: Array<Record<string, string>> = [];
   const queueableTasks: Array<Record<string, string>> = [];
   const statesByIssue = new Map<string, Map<string, ReturnType<typeof resolveEffectiveTaskState>>>();
+  const runsByIssue = new Map<string, Map<string, ReturnType<typeof readTaskRunEvidence>>>();
   const readinessByTask = new Map<string, TaskReadiness>();
   const activeRuns = readActiveRunEvidence(repoRoot);
   for (const issue of issues) {
-    const states = resolveIssueTaskStates(issue, readIssueRunEvidence(repoRoot, issue));
+    const runEvidence = readIssueRunEvidence(repoRoot, issue);
+    const states = resolveIssueTaskStates(issue, runEvidence);
     statesByIssue.set(issue.id, states);
+    runsByIssue.set(issue.id, runEvidence);
     const targetCounts = issue.archivedAt ? archivedCounts : counts;
     for (const task of issue.tasks) {
       const state = states.get(task.id)!;
@@ -984,6 +992,7 @@ export function projectBoard(repoRoot: string): {
   return {
     issues: issues.map((issue) => {
       const states = statesByIssue.get(issue.id)!;
+      const runEvidence = runsByIssue.get(issue.id)!;
       return {
         id: issue.id,
         title: issue.title,
@@ -997,6 +1006,7 @@ export function projectBoard(repoRoot: string): {
         tasks: issue.tasks.map((task) => {
           const state = states.get(task.id)!;
           const readiness = readinessByTask.get(`${issue.id}/${task.id}`)!;
+          const latestRun = (runEvidence.get(task.id) ?? []).at(-1);
           return {
             id: task.id,
             title: task.title,
@@ -1011,6 +1021,7 @@ export function projectBoard(repoRoot: string): {
             effectiveStatus: state.effectiveStatus,
             statusReason: state.reason,
             latestRunStatus: state.latestRunStatus,
+            latestRunClosureState: latestRun?.closureState ?? 'none',
             activeRunId: state.activeRunId,
             activeRunStatus: state.activeRunStatus,
             activeRunIds: state.activeRunIds,

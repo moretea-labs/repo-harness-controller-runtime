@@ -17,6 +17,7 @@ export interface TaskLedgerTaskProjection {
   statusReason?: string;
   verificationStatus?: string;
   latestRunStatus?: string;
+  latestRunClosureState?: string;
   activeRunId?: string;
   activeRunStatus?: string;
   retryable: boolean;
@@ -139,6 +140,7 @@ function taskProjection(issueId: string, value: Record<string, unknown>): TaskLe
     statusReason: asString(value.statusReason),
     verificationStatus: asString(value.verificationStatus),
     latestRunStatus: asString(value.latestRunStatus),
+    latestRunClosureState: asString(value.latestRunClosureState),
     activeRunId: asString(value.activeRunId),
     activeRunStatus: asString(value.activeRunStatus),
     retryable: asBoolean(value.retryable),
@@ -174,7 +176,9 @@ function compactIssue(value: Record<string, unknown>): TaskLedgerIssueProjection
 
 function attentionScore(task: TaskLedgerTaskProjection): number {
   if (task.multipleActiveRuns) return 100;
+  if (task.latestRunClosureState === 'cleanup_blocked') return 95;
   if (task.requiresExplicitRetry || task.retryable) return 90;
+  if (['ready_to_integrate', 'integrated', 'cleanup_pending'].includes(task.latestRunClosureState ?? '')) return 85;
   if (["changes_requested", "blocked"].includes(task.effectiveStatus ?? "")) return 80;
   if (["review", "integrated", "verifying"].includes(task.effectiveStatus ?? "")) return 70;
   if (["queued", "running"].includes(task.effectiveStatus ?? "") || task.activeRunId) return 60;
@@ -231,7 +235,11 @@ function statusProjection(input: {
     ? input.issues.find((issue) => issue.id === input.currentIssueId)
     : undefined;
   const running = input.attention.find((task) => task.multipleActiveRuns || ["queued", "running"].includes(task.effectiveStatus ?? "") || task.activeRunId);
-  const review = input.attention.find((task) => ["review", "integrated", "verifying"].includes(task.effectiveStatus ?? ""));
+  const cleanupBlocked = input.attention.find((task) => task.latestRunClosureState === 'cleanup_blocked');
+  const review = input.attention.find((task) =>
+    ["review", "integrated", "verifying"].includes(task.effectiveStatus ?? "")
+    || ['ready_to_integrate', 'integrated', 'cleanup_pending'].includes(task.latestRunClosureState ?? ''),
+  );
   const retry = input.attention.find((task) => task.retryable || task.requiresExplicitRetry);
   const blocked = input.attention.find((task) => ["blocked", "changes_requested"].includes(task.effectiveStatus ?? ""));
   const ready = input.readyTasks[0];
@@ -271,12 +279,23 @@ function statusProjection(input: {
     };
   }
 
+  if (cleanupBlocked) {
+    return {
+      kind: "blocked",
+      severity: "blocked",
+      label: "Cleanup blocked",
+      reason: "Integration completed or was attempted, but owned resources are dirty, unmerged, occupied, or could not be safely removed.",
+      ...taskReference(cleanupBlocked),
+      nextAction: `Resolve cleanup blocker for Task ${cleanupBlocked.issueId}/${cleanupBlocked.taskId}; it cannot be completed until cleanup evidence is recorded.`,
+    };
+  }
+
   if (review) {
     return {
       kind: "needs_review",
       severity: "action",
       label: "Review required",
-      reason: "A Task is in review, integrated, or verifying state.",
+      reason: `A Task is awaiting lifecycle finalization (${review.latestRunClosureState ?? review.effectiveStatus ?? 'review'}).`,
       ...taskReference(review),
       nextAction: `Review Task ${review.issueId}/${review.taskId}; inspect raw diff and evidence before accepting or requesting changes.`,
     };
