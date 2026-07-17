@@ -1,8 +1,8 @@
 ---
 id: "ISS-20260714-AF7CBF"
 kind: "investigation"
-status: "done"
-updated_at: "2026-07-15T07:44:48.941Z"
+status: "launch_blocked"
+updated_at: "2026-07-17T09:47:16.706Z"
 source: "repo-harness-controller-v8"
 ---
 
