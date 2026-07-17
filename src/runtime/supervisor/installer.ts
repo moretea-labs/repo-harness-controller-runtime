@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { chmodSync, mkdirSync, writeFileSync } from 'fs';
 import { join, resolve } from 'path';
 import { runProcess } from '../../effects/process-runner';
@@ -37,11 +38,24 @@ function buildEntry(sourceRoot: string, entry: string, output: string): void {
   if (!result.ok) throw new Error(`SUPERVISOR_RELEASE_BUILD_FAILED: ${result.stderr || result.stdout}`.slice(0, 2_000));
 }
 
-function serviceLabel(controllerHome: string): string {
-  const safe = controllerHome.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(-48) || 'default';
-  return `com.repo-harness.supervisor.${safe}`;
+function serviceSuffix(controllerHome: string): string {
+  const normalized = resolve(controllerHome);
+  const readable = normalized.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(-28) || 'default';
+  const digest = createHash('sha256').update(normalized).digest('hex').slice(0, 12);
+  return `${readable}-${digest}`;
 }
 
+function serviceLabel(controllerHome: string): string {
+  return `com.repo-harness.supervisor.${serviceSuffix(controllerHome)}`;
+}
+
+export function supervisorSystemdUnitName(controllerHome: string): string {
+  return `repo-harness-supervisor-${serviceSuffix(controllerHome)}.service`;
+}
+
+function systemdQuote(value: string): string {
+  return JSON.stringify(value);
+}
 export function renderLaunchdSupervisorPlist(input: {
   label: string;
   bunPath: string;
@@ -53,7 +67,7 @@ export function renderLaunchdSupervisorPlist(input: {
 }): string {
   const args = [input.bunPath, input.supervisorPath, '--repo', input.repoRoot, '--controller-home', input.controllerHome, '--runtime-source-root', input.runtimeSourceRoot];
   const xml = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n  <key>Label</key><string>${xml(input.label)}</string>\n  <key>ProgramArguments</key><array>${args.map((arg) => `<string>${xml(arg)}</string>`).join('')}</array>\n  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n  <key>ProcessType</key><string>Interactive</string>\n  <key>StandardOutPath</key><string>${xml(input.logPath)}</string>\n  <key>StandardErrorPath</key><string>${xml(input.logPath)}</string>\n</dict></plist>\n`;
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n  <key>Label</key><string>${xml(input.label)}</string>\n  <key>ProgramArguments</key><array>${args.map((arg) => `<string>${xml(arg)}</string>`).join('')}</array>\n  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n  <key>ThrottleInterval</key><integer>2</integer>\n  <key>ProcessType</key><string>Interactive</string>\n  <key>StandardOutPath</key><string>${xml(input.logPath)}</string>\n  <key>StandardErrorPath</key><string>${xml(input.logPath)}</string>\n</dict></plist>\n`;
 }
 
 export function renderSystemdSupervisorUnit(input: {
@@ -63,7 +77,8 @@ export function renderSystemdSupervisorUnit(input: {
   controllerHome: string;
   runtimeSourceRoot: string;
 }): string {
-  return `[Unit]\nDescription=repo-harness Stable External Runtime Supervisor\nAfter=default.target\n\n[Service]\nType=simple\nExecStart=${input.bunPath} ${input.supervisorPath} --repo ${input.repoRoot} --controller-home ${input.controllerHome} --runtime-source-root ${input.runtimeSourceRoot}\nRestart=always\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n`;
+  const args = [input.bunPath, input.supervisorPath, '--repo', input.repoRoot, '--controller-home', input.controllerHome, '--runtime-source-root', input.runtimeSourceRoot];
+  return `[Unit]\nDescription=repo-harness Stable External Runtime Supervisor\nAfter=default.target\n\n[Service]\nType=simple\nExecStart=${args.map(systemdQuote).join(' ')}\nRestart=on-failure\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n`;
 }
 
 export function installSupervisorRelease(input: { controllerHome: string; repoRoot: string; sourceRoot?: string }): SupervisorInstallResult {
@@ -89,7 +104,7 @@ export function installSupervisorRelease(input: { controllerHome: string; repoRo
   mkdirSync(launchdDir, { recursive: true, mode: 0o700 });
   mkdirSync(systemdDir, { recursive: true, mode: 0o700 });
   const launchdPlistPath = join(launchdDir, `${label}.plist`);
-  const systemdUnitPath = join(systemdDir, 'repo-harness-supervisor.service');
+  const systemdUnitPath = join(systemdDir, supervisorSystemdUnitName(controllerHome));
   writeFileSync(launchdPlistPath, renderLaunchdSupervisorPlist({ label, bunPath, supervisorPath, repoRoot: resolve(input.repoRoot), controllerHome, runtimeSourceRoot: sourceRoot, logPath: join(supervisorLogsRoot(controllerHome), 'launchd.log') }), { encoding: 'utf8', mode: 0o600 });
   writeFileSync(systemdUnitPath, renderSystemdSupervisorUnit({ bunPath, supervisorPath, repoRoot: resolve(input.repoRoot), controllerHome, runtimeSourceRoot: sourceRoot }), { encoding: 'utf8', mode: 0o600 });
   return {
@@ -105,4 +120,44 @@ export function installSupervisorRelease(input: { controllerHome: string; repoRo
 
 export function supervisorServiceLabel(controllerHome: string): string {
   return serviceLabel(controllerHome);
+}
+
+
+export interface SupervisorRegisteredServiceStartResult {
+  managed: boolean;
+  platform: string;
+  target?: string;
+  reason?: string;
+}
+
+function currentUserId(): number | undefined {
+  if (typeof process.getuid === 'function') return process.getuid();
+  const result = runProcess('id', ['-u'], { timeoutMs: 2_000, maxOutputBytes: 1_024 });
+  const value = Number(result.stdout.trim());
+  return result.ok && Number.isInteger(value) ? value : undefined;
+}
+
+/** Start an already-loaded OS service without creating a second detached owner. */
+export function startRegisteredSupervisorService(controllerHome: string): SupervisorRegisteredServiceStartResult {
+  if (process.platform === 'darwin') {
+    const uid = currentUserId();
+    if (uid === undefined) return { managed: false, platform: 'launchd', reason: 'uid_unavailable' };
+    const target = `gui/${uid}/${serviceLabel(controllerHome)}`;
+    const loaded = runProcess('launchctl', ['print', target], { timeoutMs: 5_000, maxOutputBytes: 8_192 });
+    if (!loaded.ok) return { managed: false, platform: 'launchd', target, reason: 'not_loaded' };
+    const started = runProcess('launchctl', ['kickstart', target], { timeoutMs: 15_000, maxOutputBytes: 20_000 });
+    if (!started.ok && !/already|in progress/i.test(`${started.stderr}\n${started.stdout}`)) {
+      throw new Error(`SUPERVISOR_LAUNCHD_START_FAILED: ${started.stderr || started.stdout}`);
+    }
+    return { managed: true, platform: 'launchd', target };
+  }
+  if (process.platform === 'linux') {
+    const unit = supervisorSystemdUnitName(controllerHome);
+    const loaded = runProcess('systemctl', ['--user', 'is-enabled', unit], { timeoutMs: 5_000, maxOutputBytes: 8_192 });
+    if (!loaded.ok) return { managed: false, platform: 'systemd', target: unit, reason: 'not_enabled' };
+    const started = runProcess('systemctl', ['--user', 'start', unit], { timeoutMs: 15_000, maxOutputBytes: 20_000 });
+    if (!started.ok) throw new Error(`SUPERVISOR_SYSTEMD_START_FAILED: ${started.stderr || started.stdout}`);
+    return { managed: true, platform: 'systemd', target: unit };
+  }
+  return { managed: false, platform: process.platform, reason: 'unsupported_platform' };
 }

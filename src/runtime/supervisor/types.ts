@@ -42,6 +42,8 @@ export interface ProcessIdentity {
   controllerHome: string;
   slot?: RuntimeSlotId;
   generation?: string;
+  releasePath?: string;
+  releaseRevision?: string;
   ownerEpoch: number;
 }
 
@@ -83,6 +85,13 @@ export interface SupervisorState {
   activeGeneration?: string;
   controllerDaemon?: SupervisorManagedProcess;
   gatewayHost?: SupervisorManagedProcess;
+  standby?: {
+    slot: RuntimeSlotId;
+    generation?: string;
+    controllerDaemon: SupervisorManagedProcess;
+    gatewayHost: SupervisorManagedProcess;
+    retainedUntil?: string;
+  };
   ingress: {
     state: 'running' | 'degraded' | 'stopped';
     activeUpstreamSlot: RuntimeSlotId;

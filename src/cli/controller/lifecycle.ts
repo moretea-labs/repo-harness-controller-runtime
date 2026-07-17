@@ -42,6 +42,7 @@ import { evaluateRuntimeHealth, type RuntimeHealthEvaluation } from "../../runti
 import { isProcessAlive, terminateProcessTree } from "../../runtime/shared/process-tree";
 import { launchStableSupervisor, readStableSupervisorState, stableSupervisorIsAlive, stopStableSupervisor } from "../../runtime/supervisor/bridge";
 import { isStableSupervisorInstalled, supervisorLogPath } from "../../runtime/supervisor/paths";
+import { startRegisteredSupervisorService } from "../../runtime/supervisor/installer";
 
 const DEFAULT_START_TIMEOUT_MS = 60_000;
 const DEFAULT_STOP_TIMEOUT_MS = 8_000;
@@ -965,7 +966,8 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
     ensureStartableStatus(status);
     const launchAgents = findRepoLaunchAgents(repoRoot);
     if (launchAgents.length > 0) bootoutRepoLaunchAgents(launchAgents);
-    const launched = launchStableSupervisor({
+    const service = startRegisteredSupervisorService(config.controllerHome);
+    const launched = service.managed ? undefined : launchStableSupervisor({
       repoRoot,
       controllerHome: config.controllerHome,
       logPath: supervisorLogPath(config.controllerHome),
@@ -979,7 +981,7 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
       createdAt: nowIso(),
       updatedAt: nowIso(),
       status: "running",
-      supervisor: { pid: launched.pid, logPath: supervisorLogPath(config.controllerHome), startedAt: nowIso() },
+      supervisor: { ...(launched?.pid ? { pid: launched.pid } : {}), logPath: supervisorLogPath(config.controllerHome), startedAt: nowIso() },
       config: {
         mcpHost: config.mcpHost,
         mcpPort: config.mcpPort,
@@ -1125,7 +1127,8 @@ export async function stopControllerService(opts: ControllerServiceOptions = {})
   const status = await controllerServiceStatus({ repo: repoRoot, logFile: config.logPath, controllerHome: config.controllerHome });
   if (isStableSupervisorInstalled(config.controllerHome)) {
     const stableState = readStableSupervisorState(config.controllerHome);
-    if (status.supervisor.alive || stableState?.desiredState === 'running') {
+    const stableAlive = stableSupervisorIsAlive(config.controllerHome, stableState);
+    if (stableAlive || stableState?.desiredState === 'running') {
       const launchAgents = findRepoLaunchAgents(repoRoot);
       if (launchAgents.length > 0) bootoutRepoLaunchAgents(launchAgents);
       const stopTimeoutMs = opts.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS;
@@ -1152,16 +1155,10 @@ export async function stopControllerService(opts: ControllerServiceOptions = {})
         status: await controllerServiceStatus({ repo: repoRoot, logFile: config.logPath, controllerHome: config.controllerHome }),
       };
     }
-    if (state) {
-      writeControllerServiceState(repoRoot, {
-        ...state,
-        updatedAt: nowIso(),
-        status: "stopped",
-        supervisor: { ...state.supervisor, pid: undefined, stoppedAt: nowIso() },
-        localController: { ...state.localController, pid: undefined, stoppedAt: nowIso() },
-      }, config.controllerHome);
-    }
-    return { action: "already_stopped", cleanedPids: [], status };
+    // A release may have just been installed while the legacy KeepAlive/Daemon
+    // still owns this controllerHome. Fall through to the identity-scoped legacy
+    // collector so installation performs one real handoff instead of starting a
+    // second owner on the same ports.
   }
   const launchAgents = findRepoLaunchAgents(repoRoot);
   if (launchAgents.length > 0) bootoutRepoLaunchAgents(launchAgents);

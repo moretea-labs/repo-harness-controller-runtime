@@ -89,6 +89,7 @@ export function recordFailure(record: RestartBudgetRecord, reason: string, now =
     ...record,
     consecutiveFailures: record.consecutiveFailures + 1,
     lastFailureAt: now.toISOString(),
+    stableSinceAt: undefined,
     reason: reason.replace(/\s+/g, ' ').slice(0, 500),
   };
 }

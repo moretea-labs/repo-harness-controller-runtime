@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readlinkSync, renameSync, symlinkSync, unlinkSync } from 'fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readlinkSync, renameSync, symlinkSync, unlinkSync } from 'fs';
 import { dirname, join, resolve } from 'path';
 import { ensureControllerHome } from '../../cli/repositories/controller-home';
 import { sanitizeFileComponent } from '../shared/json-files';
@@ -69,19 +69,61 @@ export function ensureStableSupervisorLayout(controllerHome: string): string {
   return root;
 }
 
-export function readCurrentRelease(controllerHome: string): string | undefined {
-  const current = supervisorCurrentReleasePath(controllerHome);
+function readReleaseLink(path: string): string | undefined {
   try {
-    if (!existsSync(current)) return undefined;
-    return resolve(dirname(current), readlinkSync(current));
+    if (!existsSync(path)) return undefined;
+    return resolve(dirname(path), readlinkSync(path));
   } catch {
     return undefined;
   }
 }
 
+export interface SupervisorReleaseDescriptor {
+  releasePath: string;
+  sourceRoot?: string;
+  releaseRevision?: string;
+  supervisorExecutable: string;
+  runtimeExecutable: string;
+  daemonExecutable: string;
+}
+
+export function readSupervisorRelease(releasePath: string | undefined): SupervisorReleaseDescriptor | undefined {
+  if (!releasePath) return undefined;
+  const resolved = resolve(releasePath);
+  const supervisorExecutable = join(resolved, 'supervisor.js');
+  const runtimeExecutable = join(resolved, 'repo-harness.js');
+  const daemonExecutable = join(resolved, 'daemon.js');
+  if (![supervisorExecutable, runtimeExecutable, daemonExecutable].every((path) => existsSync(path))) return undefined;
+  let manifest: Record<string, unknown> = {};
+  try { manifest = JSON.parse(readFileSync(join(resolved, 'manifest.json'), 'utf8')) as Record<string, unknown>; } catch { /* optional compatibility manifest */ }
+  return {
+    releasePath: resolved,
+    supervisorExecutable,
+    runtimeExecutable,
+    daemonExecutable,
+    ...(typeof manifest.sourceRoot === 'string' ? { sourceRoot: resolve(manifest.sourceRoot) } : {}),
+    ...(typeof manifest.releaseRevision === 'string' ? { releaseRevision: manifest.releaseRevision } : {}),
+  };
+}
+
+export function readCurrentRelease(controllerHome: string): string | undefined {
+  return readReleaseLink(supervisorCurrentReleasePath(controllerHome));
+}
+
+export function readPreviousRelease(controllerHome: string): string | undefined {
+  return readReleaseLink(supervisorPreviousReleasePath(controllerHome));
+}
+
+export function readCurrentSupervisorRelease(controllerHome: string): SupervisorReleaseDescriptor | undefined {
+  return readSupervisorRelease(readCurrentRelease(controllerHome));
+}
+
+export function readPreviousSupervisorRelease(controllerHome: string): SupervisorReleaseDescriptor | undefined {
+  return readSupervisorRelease(readPreviousRelease(controllerHome));
+}
+
 export function isStableSupervisorInstalled(controllerHome: string): boolean {
-  const release = readCurrentRelease(controllerHome);
-  return Boolean(release && existsSync(join(release, 'supervisor.js')) && existsSync(join(release, 'repo-harness.js')) && existsSync(join(release, 'daemon.js')));
+  return Boolean(readCurrentSupervisorRelease(controllerHome));
 }
 
 export function publishCurrentRelease(controllerHome: string, releasePath: string, previous?: string): void {

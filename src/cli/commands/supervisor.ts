@@ -1,15 +1,18 @@
-import { readFileSync, rmSync } from 'fs';
-import { join, resolve } from 'path';
+import { closeSync, mkdirSync, openSync, readFileSync, rmSync } from 'fs';
+import { spawn } from 'child_process';
+import { dirname, join, resolve } from 'path';
 import { Command } from 'commander';
 import { ensureControllerHome, resolveRepoPreferredControllerHome } from '../repositories/controller-home';
 import { launchStableSupervisor } from '../../runtime/supervisor/bridge';
 import { sendSupervisorCommand } from '../../runtime/supervisor/control-server';
-import { installSupervisorRelease, supervisorServiceLabel } from '../../runtime/supervisor/installer';
+import { installSupervisorRelease, startRegisteredSupervisorService, supervisorServiceLabel, supervisorSystemdUnitName } from '../../runtime/supervisor/installer';
 import { isStableSupervisorInstalled, readCurrentRelease, supervisorLogPath, supervisorRoot } from '../../runtime/supervisor/paths';
 import { readSupervisorState } from '../../runtime/supervisor/state-store';
 import { processIdentityMatches } from '../../runtime/supervisor/identity';
 import { isProcessAlive, terminateProcessTree } from '../../runtime/shared/process-tree';
 import { runProcess } from '../../effects/process-runner';
+import { stopControllerService } from '../controller/lifecycle';
+import { writeJsonAtomic } from '../../runtime/shared/json-files';
 
 function output(value: unknown, json = true): void {
   console.log(json ? JSON.stringify(value, null, 2) : String(value));
@@ -27,8 +30,79 @@ function requestId(value?: string): string {
   return value?.trim() || `supervisor-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function launchSupervisor(repo: string, home: string): number {
-  return launchStableSupervisor({ repoRoot: repo, controllerHome: home, logPath: supervisorLogPath(home) }).pid;
+function launchSupervisor(repo: string, home: string): { pid?: number; service?: Record<string, unknown> } {
+  const service = startRegisteredSupervisorService(home);
+  if (service.managed) return { service: service as unknown as Record<string, unknown> };
+  return { pid: launchStableSupervisor({ repoRoot: repo, controllerHome: home, logPath: supervisorLogPath(home) }).pid, service: service as unknown as Record<string, unknown> };
+}
+
+function activationStatePath(home: string): string {
+  return join(supervisorRoot(home), 'activation.json');
+}
+
+function writeActivationState(home: string, value: Record<string, unknown>): void {
+  writeJsonAtomic(activationStatePath(home), { schemaVersion: 1, ...value, updatedAt: new Date().toISOString() });
+}
+
+function scheduleServiceActivation(repo: string, home: string): { activationId: string; pid: number; statePath: string; logPath: string } {
+  const activationId = `sup-activate-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const cliEntry = process.argv[1] ? resolve(process.argv[1]) : undefined;
+  if (!cliEntry) throw new Error('SUPERVISOR_ACTIVATION_ENTRY_UNAVAILABLE');
+  const logPath = join(supervisorRoot(home), 'logs', 'activation.log');
+  mkdirSync(dirname(logPath), { recursive: true, mode: 0o700 });
+  const logFd = openSync(logPath, 'a');
+  let child;
+  try {
+    child = spawn(process.execPath, [cliEntry, 'supervisor', '__activate', '--repo', repo, '--controller-home', home, '--activation-id', activationId], {
+      cwd: repo,
+      detached: true,
+      stdio: ['ignore', logFd, logFd],
+      env: { ...process.env, REPO_HARNESS_CONTROLLER_HOME: home },
+    });
+    child.unref();
+  } finally {
+    closeSync(logFd);
+  }
+  if (!child.pid) throw new Error('SUPERVISOR_ACTIVATION_SPAWN_FAILED');
+  writeActivationState(home, { activationId, phase: 'scheduled', pid: child.pid, repoRoot: repo, startedAt: new Date().toISOString() });
+  return { activationId, pid: child.pid, statePath: activationStatePath(home), logPath };
+}
+
+async function activateInstalledService(repo: string, home: string, activationId: string): Promise<Record<string, unknown>> {
+  const update = (phase: string, extra: Record<string, unknown> = {}) => writeActivationState(home, { activationId, phase, repoRoot: repo, ...extra });
+  try {
+    update('waiting_for_handoff');
+    await new Promise((resolveWait) => setTimeout(resolveWait, 750));
+    update('stopping_legacy');
+    const stopped = await stopControllerService({
+      repo,
+      controllerHome: home,
+      protectCallerAncestry: false,
+      requireFullStop: true,
+      stopTimeoutMs: 15_000,
+    });
+    update('registering_service', { stoppedAction: stopped.action, cleanedPids: stopped.cleanedPids });
+    unregisterService(home);
+    const service = registerService(home);
+    const deadline = Date.now() + 90_000;
+    let control: unknown;
+    while (Date.now() < deadline) {
+      try {
+        control = await sendSupervisorCommand(home, { command: 'status' });
+        if ((control as { ok?: boolean }).ok) break;
+      } catch {
+        // OS service startup is asynchronous.
+      }
+      await new Promise((resolveWait) => setTimeout(resolveWait, 500));
+    }
+    if (!(control as { ok?: boolean } | undefined)?.ok) throw new Error('SUPERVISOR_ACTIVATION_VERIFY_TIMEOUT');
+    update('succeeded', { completedAt: new Date().toISOString(), service });
+    return { ok: true, activationId, stopped, service, control };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    update('failed', { completedAt: new Date().toISOString(), error: message.slice(0, 2_000) });
+    throw error;
+  }
 }
 
 async function stopSupervisor(home: string): Promise<Record<string, unknown>> {
@@ -48,12 +122,13 @@ async function stopSupervisor(home: string): Promise<Record<string, unknown>> {
 function registerService(home: string): Record<string, unknown> {
   const root = supervisorRoot(home);
   const launchd = join(root, 'launchd', `${supervisorServiceLabel(home)}.plist`);
-  const systemd = join(root, 'systemd', 'repo-harness-supervisor.service');
+  const systemdUnit = supervisorSystemdUnitName(home);
+  const systemd = join(root, 'systemd', systemdUnit);
   if (process.platform === 'darwin') {
     const uid = typeof process.getuid === 'function' ? process.getuid() : Number(runProcess('id', ['-u'], { timeoutMs: 2_000, maxOutputBytes: 1_024 }).stdout.trim());
     const bootstrap = runProcess('launchctl', ['bootstrap', `gui/${uid}`, launchd], { timeoutMs: 15_000, maxOutputBytes: 20_000 });
     if (!bootstrap.ok && !/already|exists|in progress/i.test(`${bootstrap.stderr}\n${bootstrap.stdout}`)) throw new Error(`SUPERVISOR_LAUNCHD_REGISTER_FAILED: ${bootstrap.stderr || bootstrap.stdout}`);
-    const kickstart = runProcess('launchctl', ['kickstart', '-k', `gui/${uid}/${supervisorServiceLabel(home)}`], { timeoutMs: 15_000, maxOutputBytes: 20_000 });
+    const kickstart = runProcess('launchctl', ['kickstart', `gui/${uid}/${supervisorServiceLabel(home)}`], { timeoutMs: 15_000, maxOutputBytes: 20_000 });
     if (!kickstart.ok && !/not found|in progress|already/i.test(`${kickstart.stderr}\n${kickstart.stdout}`)) throw new Error(`SUPERVISOR_LAUNCHD_START_FAILED: ${kickstart.stderr || kickstart.stdout}`);
     return { platform: 'launchd', registered: true, plistPath: launchd };
   }
@@ -73,7 +148,7 @@ function unregisterService(home: string): Record<string, unknown> {
     return { platform: 'launchd', registered: false };
   }
   if (process.platform === 'linux') {
-    const result = runProcess('systemctl', ['--user', 'disable', '--now', 'repo-harness-supervisor.service'], { timeoutMs: 15_000, maxOutputBytes: 20_000 });
+    const result = runProcess('systemctl', ['--user', 'disable', '--now', supervisorSystemdUnitName(home)], { timeoutMs: 15_000, maxOutputBytes: 20_000 });
     if (!result.ok && !/not found|disabled|not loaded/i.test(`${result.stderr}\n${result.stdout}`)) throw new Error(`SUPERVISOR_SYSTEMD_UNREGISTER_FAILED: ${result.stderr || result.stdout}`);
     return { platform: 'systemd', registered: false };
   }
@@ -82,6 +157,17 @@ function unregisterService(home: string): Record<string, unknown> {
 
 export function buildSupervisorCommand(): Command {
   const command = new Command('supervisor').description('Manage the stable controller-scoped external runtime Supervisor');
+
+  command.command('__activate')
+    .description('Internal detached handoff from the legacy lifecycle to the registered stable Supervisor')
+    .requiredOption('--repo <path>')
+    .requiredOption('--controller-home <path>')
+    .requiredOption('--activation-id <id>')
+    .action(async (opts: { repo: string; controllerHome: string; activationId: string }) => {
+      const repo = repoRoot(opts.repo);
+      const home = homeFor(repo, opts.controllerHome);
+      output(await activateInstalledService(repo, home, opts.activationId));
+    });
 
   command.command('install')
     .description('Build and atomically install a stable Supervisor release')
@@ -94,8 +180,8 @@ export function buildSupervisorCommand(): Command {
       const repo = repoRoot(opts.repo);
       const home = homeFor(repo, opts.controllerHome);
       const result = installSupervisorRelease({ controllerHome: home, repoRoot: repo, sourceRoot: opts.sourceRoot });
-      const service = opts.registerService ? registerService(home) : undefined;
-      output({ ...result, ...(service ? { service } : {}) }, opts.json !== false);
+      const activation = opts.registerService ? scheduleServiceActivation(repo, home) : undefined;
+      output({ ...result, ...(activation ? { activation, service: { registrationScheduled: true } } : {}) }, opts.json !== false);
     });
 
   command.command('uninstall')
@@ -120,8 +206,8 @@ export function buildSupervisorCommand(): Command {
       const repo = repoRoot(opts.repo);
       const home = homeFor(repo, opts.controllerHome);
       if (!isStableSupervisorInstalled(home)) throw new Error('SUPERVISOR_NOT_INSTALLED: run repo-harness supervisor install first');
-      const pid = launchSupervisor(repo, home);
-      output({ accepted: true, pid, controllerHome: home, release: readCurrentRelease(home) }, opts.json !== false);
+      const started = launchSupervisor(repo, home);
+      output({ accepted: true, ...started, controllerHome: home, release: readCurrentRelease(home) }, opts.json !== false);
     });
 
   command.command('stop')

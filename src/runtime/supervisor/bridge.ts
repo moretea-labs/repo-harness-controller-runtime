@@ -1,10 +1,10 @@
 import { spawn } from 'child_process';
-import { closeSync, existsSync, openSync, readFileSync } from 'fs';
-import { join, resolve } from 'path';
+import { closeSync, openSync } from 'fs';
+import { resolve } from 'path';
 import { createSupervisorOperation } from './operation-store';
 import { defaultProcessIdentityProbe, processIdentityMatches } from './identity';
 import { sendSupervisorCommand } from './control-server';
-import { isStableSupervisorInstalled, readCurrentRelease, supervisorLogPath } from './paths';
+import { isStableSupervisorInstalled, readCurrentSupervisorRelease, supervisorLogPath } from './paths';
 import { readSupervisorState } from './state-store';
 import type { SupervisorOperation, SupervisorOperationKind, SupervisorState } from './types';
 import { isProcessAlive, terminateProcessTree } from '../shared/process-tree';
@@ -22,18 +22,6 @@ export interface StableSupervisorLaunchResult {
   releasePath: string;
 }
 
-function readManifest(releasePath: string): { sourceRoot?: string; releaseRevision?: string } {
-  try {
-    const value = JSON.parse(readFileSync(join(releasePath, 'manifest.json'), 'utf8')) as Record<string, unknown>;
-    return {
-      ...(typeof value.sourceRoot === 'string' ? { sourceRoot: value.sourceRoot } : {}),
-      ...(typeof value.releaseRevision === 'string' ? { releaseRevision: value.releaseRevision } : {}),
-    };
-  } catch {
-    return {};
-  }
-}
-
 export function readStableSupervisorState(controllerHome: string): SupervisorState | null {
   return readSupervisorState(controllerHome);
 }
@@ -45,20 +33,18 @@ export function stableSupervisorIsAlive(controllerHome: string, state = readStab
 }
 
 export function launchStableSupervisor(options: StableSupervisorLaunchOptions): StableSupervisorLaunchResult {
-  const releasePath = readCurrentRelease(options.controllerHome);
-  if (!releasePath || !existsSync(join(releasePath, 'supervisor.js'))) {
-    throw new Error('SUPERVISOR_RELEASE_NOT_INSTALLED');
-  }
-  const manifest = readManifest(releasePath);
+  const release = readCurrentSupervisorRelease(options.controllerHome);
+  if (!release) throw new Error('SUPERVISOR_RELEASE_NOT_INSTALLED');
+  const releasePath = release.releasePath;
   const logPath = options.logPath ?? supervisorLogPath(options.controllerHome);
   const fd = openSync(logPath, 'a');
   try {
     const args = [
-      join(releasePath, 'supervisor.js'),
+      release.supervisorExecutable,
       '--repo', resolve(options.repoRoot),
       '--controller-home', resolve(options.controllerHome),
-      '--runtime-source-root', resolve(manifest.sourceRoot ?? options.repoRoot),
-      ...(manifest.releaseRevision ? ['--release-revision', manifest.releaseRevision] : []),
+      '--runtime-source-root', resolve(release.sourceRoot ?? options.repoRoot),
+      ...(release.releaseRevision ? ['--release-revision', release.releaseRevision] : []),
       ...(options.controlHost ? ['--control-host', options.controlHost] : []),
       ...(options.controlPort !== undefined ? ['--control-port', String(options.controlPort)] : []),
     ];

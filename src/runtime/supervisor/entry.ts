@@ -25,6 +25,13 @@ export async function runStableSupervisor(): Promise<void> {
   const runtimeRoot = resolve(option('--runtime-source-root') ?? resolveControllerRuntimeSourceRoot().root ?? repoRoot);
   const previous = readSupervisorState(controllerHome);
   const lock = acquireSupervisorLock(controllerHome, previous);
+  let exitScheduled = false;
+  const completeExit = (code: number): void => {
+    if (exitScheduled) return;
+    exitScheduled = true;
+    lock.release();
+    setTimeout(() => process.exit(code), 25);
+  };
   const releaseRoot = process.argv[1] ? dirname(resolve(process.argv[1])) : undefined;
   const runtimeExecutable = releaseRoot && existsSync(join(releaseRoot, 'repo-harness.js'))
     ? join(releaseRoot, 'repo-harness.js')
@@ -39,10 +46,12 @@ export async function runStableSupervisor(): Promise<void> {
     runtimeSourceRoot: runtimeRoot,
     runtimeExecutable,
     daemonExecutable,
+    ...(releaseRoot ? { releasePath: releaseRoot } : {}),
     logPath: supervisorLogPath(controllerHome),
     controlHost: option('--control-host') ?? '127.0.0.1',
     controlPort: numberOption('--control-port', 8770),
     releaseRevision: option('--release-revision'),
+    onStopped: () => completeExit(0),
   });
   runtime.adoptSupervisorIdentity({
     ...lock.metadata,
@@ -56,9 +65,11 @@ export async function runStableSupervisor(): Promise<void> {
     if (stopping) return;
     stopping = true;
     console.error(`[repo-harness supervisor] ${signal}: stopping managed runtime`);
-    try { await runtime.stop(); } finally {
-      lock.release();
-      process.exit(0);
+    try {
+      await runtime.stop();
+      completeExit(0);
+    } catch {
+      completeExit(1);
     }
   };
   process.once('SIGINT', () => { void shutdown('SIGINT'); });
@@ -69,7 +80,7 @@ export async function runStableSupervisor(): Promise<void> {
     console.error(`[repo-harness supervisor] running controllerHome=${controllerHome} epoch=${lock.metadata.ownerEpoch}`);
     await new Promise<void>(() => { /* control server and monitor own the event loop */ });
   } catch (error) {
-    lock.release();
+    if (!exitScheduled) lock.release();
     throw error;
   }
 }

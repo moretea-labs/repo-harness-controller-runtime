@@ -4,8 +4,7 @@ import { dirname, join, resolve } from 'path';
 import { randomUUID } from 'crypto';
 import { loadLocalBridgeConfig } from '../../cli/local-bridge/job-store';
 import { loadMcpServiceLocalConfig } from '../../cli/mcp/auth';
-import { inferMcpTunnelMode } from '../../cli/mcp/keepalive';
-import { readActiveSlotAuthority, readSlotIdentity, type RuntimeSlotId } from '../../cli/controller/runtime-slots';
+import { ensureSlotHome, readActiveSlotAuthority, readSlotIdentity, type RuntimeSlotId } from '../../cli/controller/runtime-slots';
 import { terminateProcessTree } from '../shared/process-tree';
 import { captureProcessIdentity, defaultProcessIdentityProbe, executableFingerprint, newProcessInstanceId, processIdentityMatches, type ProcessIdentityProbe } from './identity';
 import type { ProcessIdentity, SupervisorComponentName } from './types';
@@ -17,7 +16,12 @@ export interface SupervisorProcessManagerOptions {
   runtimeSourceRoot: string;
   runtimeExecutable?: string;
   daemonExecutable?: string;
+  releasePath?: string;
+  releaseRevision?: string;
   logPath: string;
+  stableIngressHost?: string;
+  stableIngressPort?: number;
+  gatewayPortOffset?: number;
   slot?: RuntimeSlotId;
   identityProbe?: ProcessIdentityProbe;
 }
@@ -41,10 +45,11 @@ function configuredRuntimeSourceRoot(input: string): string {
   return resolve(input);
 }
 
-function componentHome(baseHome: string, slot: RuntimeSlotId | undefined): string {
+function componentHome(baseHome: string, slot: RuntimeSlotId | undefined, explicitSlot = false): string {
   if (!slot) return resolve(baseHome);
   const identity = readSlotIdentity(baseHome, slot);
-  return identity?.slotHome ? resolve(identity.slotHome) : resolve(baseHome);
+  if (identity?.slotHome) return resolve(identity.slotHome);
+  return explicitSlot ? ensureSlotHome(baseHome, slot) : resolve(baseHome);
 }
 
 function processCommand(command: string, args: string[]): string {
@@ -68,7 +73,18 @@ export class SupervisorProcessManager {
     return this.options.daemonExecutable ?? join(configuredRuntimeSourceRoot(this.options.runtimeSourceRoot), 'src', 'runtime', 'control-plane', 'daemon-entry.ts');
   }
 
-  private spawnDetached(component: SupervisorComponentName, home: string, args: string[], instanceId: string): SpawnedSupervisorProcess {
+  gatewayBinding(slot = this.options.slot ?? readActiveSlotAuthority(this.options.controllerHome).activeSlot): { host: string; port: number } {
+    const stablePort = this.options.stableIngressPort ?? 8765;
+    const offset = this.options.gatewayPortOffset ?? 20;
+    return {
+      // Slot backends are never public listeners. Stable ingress is the only
+      // binding that may follow the configured LAN/public host.
+      host: '127.0.0.1',
+      port: stablePort + offset + (slot === 'green' ? 10 : 0),
+    };
+  }
+
+  private spawnDetached(component: SupervisorComponentName, home: string, args: string[], instanceId: string, slot: RuntimeSlotId): SpawnedSupervisorProcess {
     const command = process.execPath;
     mkdirSync(dirname(this.options.logPath), { recursive: true });
     const fd = openSync(this.options.logPath, 'a');
@@ -86,7 +102,7 @@ export class SupervisorProcessManager {
           REPO_HARNESS_SUPERVISOR_EPOCH: String(this.options.ownerEpoch),
           REPO_HARNESS_CONTROLLER_RUNTIME_SOURCE_ROOT: this.options.runtimeSourceRoot,
           REPO_HARNESS_DAEMON_INSTANCE_ID: instanceId,
-          ...(this.options.slot ? { REPO_HARNESS_RUNTIME_SLOT: this.options.slot } : {}),
+          REPO_HARNESS_RUNTIME_SLOT: slot,
         },
       });
       child.unref();
@@ -102,7 +118,9 @@ export class SupervisorProcessManager {
         processStartTime: new Date().toISOString(),
         executableFingerprint: executableFingerprint(commandText),
         controllerHome: home,
-        ...(this.options.slot ? { slot: this.options.slot } : {}),
+        slot,
+        ...(this.options.releasePath ? { releasePath: resolve(this.options.releasePath) } : {}),
+        ...(this.options.releaseRevision ? { releaseRevision: this.options.releaseRevision } : {}),
         ownerEpoch: this.options.ownerEpoch,
       },
       child,
@@ -119,6 +137,8 @@ export class SupervisorProcessManager {
         controllerHome: spawned.identity.controllerHome,
         instanceId: spawned.identity.instanceId,
         ...(spawned.identity.slot ? { slot: spawned.identity.slot } : {}),
+        ...(spawned.identity.releasePath ? { releasePath: spawned.identity.releasePath } : {}),
+        ...(spawned.identity.releaseRevision ? { releaseRevision: spawned.identity.releaseRevision } : {}),
         ownerEpoch: spawned.identity.ownerEpoch,
       }, this.probe);
       if (identity) return { ...spawned, identity };
@@ -130,7 +150,7 @@ export class SupervisorProcessManager {
 
   async startDaemon(): Promise<SpawnedSupervisorProcess> {
     const slot = this.options.slot ?? readActiveSlotAuthority(this.options.controllerHome).activeSlot;
-    const home = componentHome(this.options.controllerHome, slot);
+    const home = componentHome(this.options.controllerHome, slot, this.options.slot !== undefined);
     const instanceId = newProcessInstanceId('daemon');
     const args = [
       this.runtimeDaemon(),
@@ -140,21 +160,24 @@ export class SupervisorProcessManager {
       '--instance-id', instanceId,
       '--slot', slot,
     ];
-    return this.identify(this.spawnDetached('controllerDaemon', home, args, instanceId));
+    return this.identify(this.spawnDetached('controllerDaemon', home, args, instanceId, slot));
   }
 
-  gatewayArgs(home: string): string[] {
+  gatewayArgs(home: string, slot = this.options.slot ?? readActiveSlotAuthority(this.options.controllerHome).activeSlot): string[] {
     const localConfig = loadMcpServiceLocalConfig(home, this.options.repoRoot);
     const bridge = loadLocalBridgeConfig(this.options.repoRoot);
-    const host = localConfig?.server?.host ?? '127.0.0.1';
-    const port = localConfig?.server?.port ?? 8765;
+    const binding = this.gatewayBinding(slot);
+    const host = binding.host;
+    const port = binding.port;
     const profile = localConfig?.profile ?? 'controller';
     const auth = localConfig?.auth?.mode ?? 'oauth';
     const toolset = localConfig?.toolset ?? 'advanced';
     const localHost = localConfig?.localController?.host ?? bridge.host ?? '127.0.0.1';
     const localPort = localConfig?.localController?.port ?? bridge.port ?? 8766;
     const publicEndpoint = localConfig?.chatgpt?.endpoint;
-    const tunnelMode = publicEndpoint ? inferMcpTunnelMode(undefined, publicEndpoint, undefined) : 'none';
+    // The stable Supervisor owns the public ingress. Gateway hosts bind private
+    // backend ports and must never create a competing tunnel lifecycle owner.
+    const tunnelMode = 'none';
     const args = [
       this.runtimeCli(), 'mcp', 'keepalive',
       '--repo', this.options.repoRoot,
@@ -181,9 +204,9 @@ export class SupervisorProcessManager {
 
   async startGateway(): Promise<SpawnedSupervisorProcess> {
     const activeSlot = this.options.slot ?? readActiveSlotAuthority(this.options.controllerHome).activeSlot;
-    const home = componentHome(this.options.controllerHome, activeSlot);
+    const home = componentHome(this.options.controllerHome, activeSlot, this.options.slot !== undefined);
     const instanceId = newProcessInstanceId('gateway');
-    return this.identify(this.spawnDetached('gatewayHost', home, this.gatewayArgs(home), instanceId));
+    return this.identify(this.spawnDetached('gatewayHost', home, this.gatewayArgs(home, activeSlot), instanceId, activeSlot));
   }
 
   observe(identity: ProcessIdentity | undefined): ProcessObservation {

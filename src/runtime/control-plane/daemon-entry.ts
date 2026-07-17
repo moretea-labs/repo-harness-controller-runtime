@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { writeFileSync, rmSync } from 'fs';
-import { join } from 'path';
+import { join, resolve, sep } from 'path';
+import { tmpdir } from 'os';
 import { ensureControllerHome } from '../../cli/repositories/controller-home';
 import { writeJsonAtomic } from '../shared/json-files';
 import { bootstrapManagedRuntimeEnv } from '../shared/managed-env';
@@ -107,6 +108,15 @@ export async function runAutomaticRuntimeCleanupLoop(
   }
 }
 
+export function controllerDaemonMaxLifetimeMs(controllerHome: string, configuredValue = process.env.REPO_HARNESS_DAEMON_MAX_LIFETIME_MS): number | undefined {
+  const configuredMaxLifetimeMs = Number(configuredValue);
+  const resolvedHome = resolve(controllerHome);
+  const temporaryHarnessHome = resolvedHome.startsWith(`${resolve(tmpdir())}${sep}`)
+    && /(?:^|[\\/])repo-harness-(?:controller|supervisor|runtime)/.test(resolvedHome);
+  if (Number.isFinite(configuredMaxLifetimeMs) && configuredMaxLifetimeMs >= 1_000) return Math.trunc(configuredMaxLifetimeMs);
+  return temporaryHarnessHome ? 5 * 60_000 : undefined;
+}
+
 export function startControllerDaemon(controllerHome: string): void {
   const statePath = join(controllerHome, 'daemon', 'state.json');
   const pidPath = join(controllerHome, 'daemon', 'controller.pid');
@@ -114,9 +124,9 @@ export function startControllerDaemon(controllerHome: string): void {
   const startedAt = new Date().toISOString();
   const ownership = childOwnershipMetadata();
   for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => abort.abort());
-  const configuredMaxLifetimeMs = Number(process.env.REPO_HARNESS_DAEMON_MAX_LIFETIME_MS);
-  const maxLifetimeTimer = Number.isFinite(configuredMaxLifetimeMs) && configuredMaxLifetimeMs >= 1_000
-    ? setTimeout(() => abort.abort(), Math.trunc(configuredMaxLifetimeMs))
+  const effectiveMaxLifetimeMs = controllerDaemonMaxLifetimeMs(controllerHome);
+  const maxLifetimeTimer = effectiveMaxLifetimeMs
+    ? setTimeout(() => abort.abort(), effectiveMaxLifetimeMs)
     : undefined;
   maxLifetimeTimer?.unref?.();
 

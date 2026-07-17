@@ -26,6 +26,8 @@ export interface SlotIdentity {
   localControllerPort: number;
   generation?: string;
   sourceCommit?: string;
+  releasePath?: string;
+  releaseRevision?: string;
   startedAt?: string;
   updatedAt: string;
   processGroupLeader?: number;

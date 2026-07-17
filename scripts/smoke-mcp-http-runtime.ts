@@ -61,7 +61,12 @@ try {
     join(process.cwd(), 'src/cli/index.ts'), 'mcp', 'serve', '--repo', repoRoot,
     '--transport', 'http', '--enable-dev-runner', '--dev-runner-agents', 'codex,claude', '--host', '127.0.0.1', '--port', String(port), '--profile', 'controller', '--auth', 'oauth',
   ], {
-    env: { ...process.env, REPO_HARNESS_CONTROLLER_HOME: controllerHome },
+    env: {
+      ...process.env,
+      REPO_HARNESS_CONTROLLER_HOME: controllerHome,
+      REPO_HARNESS_CONTROLLER_LIFECYCLE_OWNER: '1',
+      REPO_HARNESS_DAEMON_MAX_LIFETIME_MS: '60000',
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   serverPid = child.pid;
@@ -109,8 +114,17 @@ try {
     repositoryHealth: repoHealth.body.status,
   }, null, 2));
 } finally {
+  if (!daemonPid) daemonPid = readControllerDaemonStatus(controllerHome).pid;
   if (serverPid) { try { process.kill(serverPid, 'SIGTERM'); } catch { /* stopped */ } }
   if (daemonPid) { try { process.kill(daemonPid, 'SIGTERM'); } catch { /* stopped */ } }
-  await sleep(250);
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    const serverAlive = serverPid ? (() => { try { process.kill(serverPid, 0); return true; } catch { return false; } })() : false;
+    const daemonAlive = daemonPid ? (() => { try { process.kill(daemonPid, 0); return true; } catch { return false; } })() : false;
+    if (!serverAlive && !daemonAlive) break;
+    await sleep(50);
+  }
+  if (serverPid) { try { process.kill(serverPid, 'SIGKILL'); } catch { /* stopped */ } }
+  if (daemonPid) { try { process.kill(daemonPid, 'SIGKILL'); } catch { /* stopped */ } }
   rmSync(root, { recursive: true, force: true });
 }

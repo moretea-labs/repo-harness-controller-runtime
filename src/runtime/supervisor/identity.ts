@@ -46,6 +46,8 @@ export function captureProcessIdentity(
     controllerHome: input.controllerHome,
     ...(input.slot ? { slot: input.slot } : {}),
     ...(input.generation ? { generation: input.generation } : {}),
+    ...(input.releasePath ? { releasePath: input.releasePath } : {}),
+    ...(input.releaseRevision ? { releaseRevision: input.releaseRevision } : {}),
     ownerEpoch: input.ownerEpoch,
   };
 }

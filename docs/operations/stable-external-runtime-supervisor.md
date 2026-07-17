@@ -2,77 +2,180 @@
 
 > Runtime operations guide for the immutable, externally launched Controller Supervisor.
 
-The Stable External Runtime Supervisor is the primary lifecycle owner after a release is installed. It owns one Controller Home's Daemon and Gateway Host, persists accepted operations before stopping a child, and retains the existing runtime generation, active-slot authority, restart coordinator compatibility state, KeepAlive health behavior, and blue/green authority.
+## Install and activate
 
-## Install and register
+Run installation from the canonical, verified source tree:
 
 ```bash
 bun src/cli/index.ts supervisor install \
   --repo /path/to/repo-harness-controller-runtime \
   --controller-home /path/to/controller-home \
-  --register-service
+  --register-service \
+  --json
 ```
 
-Installation creates an immutable bundle under `<controller-home>/supervisor/releases/<timestamp>-<revision>/` with `supervisor.js`, `repo-harness.js`, `daemon.js`, and `manifest.json`, then atomically advances `supervisor/current` and `supervisor/previous`.
+Installation builds an immutable release under:
 
-`launchd` and `systemd` definitions execute the immutable `supervisor/current/supervisor.js` bundle. They do not execute a checkout's TypeScript entrypoint. Reinstall publishes a new release; the running Supervisor keeps its existing release until the next restart.
+```text
+<controller-home>/supervisor/releases/<timestamp>-<revision>/
+```
+
+The release contains `supervisor.js`, `repo-harness.js`, `daemon.js`, and `manifest.json`. `current` and `previous` are updated atomically.
+
+When `--register-service` is used while the legacy stack is running, the command first persists and launches a detached activation handoff. The current request can return before shutdown. Activation then:
+
+1. stops the legacy Controller tree with full identity-scoped ownership checks;
+2. removes an obsolete service registration;
+3. registers launchd or systemd against the immutable `current` release;
+4. waits for the Supervisor control surface to become healthy;
+5. records the result in `<controller-home>/supervisor/activation.json`.
+
+Do not start a second KeepAlive manually during this handoff.
+
+Service definitions restart failures but preserve an intentional successful stop:
+
+- launchd: `KeepAlive.SuccessfulExit=false`
+- systemd: `Restart=on-failure`
+
+## Runtime topology and ports
+
+The configured MCP server port becomes the stable ingress port, normally `8765`.
+
+```text
+named tunnel / stable local client
+             |
+        stable ingress :8765
+             +-- ordinary MCP/health -> active Gateway backend
+             +-- /rescue/mcp         -> Supervisor control server
+             +-- /rescue/health      -> Supervisor health
+
+blue Gateway backend  :8785
+blue Local Controller :8766
+green Gateway backend :8795
+green Local Controller:8776
+Supervisor control    :8770
+```
+
+The offsets are defaults and are derived from the configured stable port. Gateway Hosts run with `--tunnel none`; the external named tunnel remains a separate stable ingress client and should continue to point at the stable port, not a slot backend.
+
+## Status and control
 
 ```bash
-bun src/cli/index.ts supervisor start --repo /path/to/repo --controller-home /path/to/controller-home
-bun src/cli/index.ts supervisor status --controller-home /path/to/controller-home --json
-bun src/cli/index.ts supervisor logs --controller-home /path/to/controller-home
+bun src/cli/index.ts supervisor status \
+  --controller-home /path/to/controller-home \
+  --json
+
+bun src/cli/index.ts supervisor logs \
+  --controller-home /path/to/controller-home
+
+bun src/cli/index.ts supervisor operation <operation-id> \
+  --controller-home /path/to/controller-home \
+  --json
 ```
 
-Without an installed release, the existing lifecycle and restart coordinator remain the compatibility fallback. Once `current` is installed, Gateway and Daemon startup paths refuse to create a competing Daemon; the Supervisor is the only creator and terminator.
-
-## Runtime state and ownership
+State and evidence are stored under:
 
 ```text
 <controller-home>/supervisor/state.json
 <controller-home>/supervisor/supervisor.lock
+<controller-home>/supervisor/activation.json
 <controller-home>/supervisor/operations/<operationId>.json
 <controller-home>/supervisor/control.sock
-<controller-home>/supervisor/rescue-auth.json  # mode 0600
-<controller-home>/supervisor/logs/supervisor.log
+<controller-home>/supervisor/rescue-auth.json
+<controller-home>/supervisor/logs/
 ```
 
-State records the Supervisor epoch, PID start time, executable fingerprint, child identities, desired/observed state, active slot/generation projections, ingress status, restart budget, incidents, and current operation. A PID is never enough to terminate a process: PID reuse, start-time changes, command-fingerprint changes, missing probes, and owner-epoch mismatches fail closed.
+The recovery token file is mode `0600` and must never enter Git or logs.
 
-The Supervisor reuses `active-slot.json` and `runtime-generation.json` as authorities. Its slot and generation fields are projections for recovery and status, not replacement authorities.
+## ChatGPT control paths
 
-## Connector and Rescue MCP surfaces
+### Primary Connector
 
-The primary Connector continues to use the configured MCP Gateway endpoint (`server.host`/`server.port`, and its configured public endpoint when present). A transient Gateway restart may close the current HTTP request. Retry the stable domain with the same durable request, Work, or operation identifier; do not recreate the Connector when auth and the MCP schema are unchanged.
+The existing Repo Harness Connector continues to use the stable `/mcp` endpoint. Normal `rh_status` and `rh_work` facade operations can read Supervisor status and submit restart, rollout, rollback, operation-query, and lockout-recovery requests.
 
-The recovery surface is loopback-only and is not a public REST restart API:
+Every mutation is persisted before child shutdown and returns an operation ID plus `reconnectContract=stable_domain_retry`. A Gateway restart can close the current socket; retry the same stable domain and query the original operation ID. Do not recreate the primary Connector unless authentication or its schema changed.
+
+### Recovery Connector
+
+Register a second ChatGPT Connector with the same stable public origin and the recovery path:
 
 ```text
-GET  http://127.0.0.1:<control-port>/health
-POST http://127.0.0.1:<control-port>/rescue/mcp
-Unix <controller-home>/supervisor/control.sock
+https://<stable-host>/rescue/mcp
 ```
 
-The bearer token is generated at `supervisor/rescue-auth.json`, stored with mode `0600`, and must not be committed. Rescue MCP exposes only these typed tools: `runtime_status`, `runtime_operation_get`, `runtime_restart_controller`, `runtime_restart_gateway`, `runtime_restart_full`, `runtime_rollout`, `runtime_rollback`, and `runtime_unlock_and_recover`.
+Its protected-resource metadata is available at:
 
-Mutation tools require a bounded `request_id` and return `accepted`, `operationId`, `reconnectContract=stable_domain_retry`, and `mayDisconnect=true` before child stop/start begins. No arbitrary shell, repository command, PID, path, secret, or generic HTTP restart input is accepted.
+```text
+https://<stable-host>/.well-known/oauth-protected-resource/rescue/mcp
+```
 
-The same recovery operations are available through the normal `rh_status`/`rh_work` facade as `runtime_status`, `runtime_operation_get`, and the `runtime_*` mutations. The legacy restart coordinator remains readable and is used when no stable release is installed.
+The Recovery Connector exposes only:
 
-## Recovery policy
+```text
+runtime_status
+runtime_operation_get
+runtime_restart_controller
+runtime_restart_gateway
+runtime_restart_full
+runtime_rollout
+runtime_rollback
+runtime_unlock_and_recover
+```
 
-The default policy probes every five seconds, treats continuous unhealthy readiness for 45 seconds as restartable, permits five attempts per ten-minute window, applies bounded backoff (`1s`, `2s`, `5s`, `15s`, `30s`) with jitter, and resets the failure budget after fifteen minutes of stability. Exhaustion persists `locked_out`; it does not loop indefinitely. `runtime_unlock_and_recover` clears the bounded lockout and accepts one explicit recovery operation.
+Authentication accepts the dedicated recovery bearer token, the configured main MCP bearer token, or an existing unexpired MCP OAuth access token. Requests must use `Content-Type: application/json`; bodies and mutation rates are bounded. There is no public generic restart REST API.
 
-An observed process with uncertain identity is never killed automatically. The Supervisor records the incident and waits for an explicit, identity-proven recovery path. Gateway failure does not imply Daemon failure, and Daemon recovery does not restart the Gateway unless a full operation is requested.
+The Recovery Connector remains usable while the main Gateway backend is dead because `/rescue/mcp` terminates in the stable Supervisor control server.
 
-## Blue/green and rollback
+## CLI mutations
 
-Blue/green continues to use `active-slot.json`, slot identities, runtime generations, and the existing cutover/rollback verification. Candidate slot homes receive the stable release before startup, so an installed stable Controller never falls back to a detached legacy KeepAlive for a candidate. Candidate health is verified before authority cutover; failed verification restores the previous active authority and stops the candidate through identity-checked lifecycle control.
+```bash
+bun src/cli/index.ts supervisor restart controller --controller-home /path/to/controller-home --request-id <id>
+bun src/cli/index.ts supervisor restart gateway    --controller-home /path/to/controller-home --request-id <id>
+bun src/cli/index.ts supervisor restart full       --controller-home /path/to/controller-home --request-id <id>
+bun src/cli/index.ts supervisor rollout            --controller-home /path/to/controller-home --request-id <id>
+bun src/cli/index.ts supervisor rollback           --controller-home /path/to/controller-home --request-id <id>
+bun src/cli/index.ts supervisor unlock-and-recover --controller-home /path/to/controller-home --request-id <id>
+```
+
+Request IDs are idempotency keys. Repeating one returns the original durable operation instead of repeating an uncertain mutation.
+
+## Recovery and lockout policy
+
+The Supervisor independently observes the two top-level units: Controller Daemon and Gateway Host. A proven process exit recovers only that component. MCP serve and Local Controller health recovery remain inside Gateway KeepAlive. Projection freshness, queue state, WorkContracts, plugins, and historical events do not trigger process restarts.
+
+Restart budgets are persisted per component and generation. The default budget permits five attempts per ten-minute window with bounded backoff and jitter, and resets after a stable interval. Exhaustion leaves the Supervisor and Rescue MCP running in `locked_out`; `runtime_unlock_and_recover` accepts one explicit bounded recovery attempt.
+
+A process whose identity cannot be proved is retained and reported rather than terminated.
+
+## Blue/green rollout and rollback
+
+A rollout starts the inactive slot's Daemon and private Gateway backend, verifies both, records candidate identity, then switches the existing `active-slot.json` authority. The stable ingress immediately follows that authority and verifies `/health` against the candidate generation. The previous active processes remain as standby during the rollback window.
+
+If candidate startup or verification fails, the active authority and public upstream stay unchanged. If post-cutover verification fails, authority and ingress return to the previous slot before the failed candidate is stopped. A healthy standby may also be selected automatically after an active top-level process failure within the rollback window.
 
 ## Stop and uninstall
 
 ```bash
 bun src/cli/index.ts supervisor stop --controller-home /path/to/controller-home
+bun src/cli/index.ts supervisor start --repo /path/to/repo --controller-home /path/to/controller-home
 bun src/cli/index.ts supervisor uninstall --controller-home /path/to/controller-home
 ```
 
-Stop sends a typed Unix-socket command and waits for the managed tree to exit. If the socket is unavailable, it may terminate only the Supervisor PID after identity verification. Uninstall removes service registration and the `current` pointer; release directories and durable evidence remain available unless an explicit bounded cleanup is requested.
+Stop sends the typed control command and waits for managed children, ingress, and control sockets to close. A successful exit is not restarted by launchd/systemd. `start` uses an already loaded OS service when available and only falls back to a detached process when no registered service exists.
+
+Uninstall removes service registration and the `current` pointer. Immutable releases and durable operation evidence remain until an explicit bounded cleanup removes them.
+
+## Verification checklist
+
+After installation, confirm:
+
+1. exactly one Stable Supervisor owns the Controller Home;
+2. the active Daemon and Gateway Host carry the same owner epoch;
+3. the main public endpoint reaches the stable ingress;
+4. the active Gateway listens only on its private backend port;
+5. `/rescue/mcp` answers even while the main Gateway is unavailable;
+6. killing the Daemon restarts only the Daemon;
+7. killing the Gateway Host restarts only the Gateway Host;
+8. a repeated request ID returns the same operation;
+9. rollout failure leaves the active slot unchanged;
+10. no temporary test Controller daemons remain after their bounded lifetime.
