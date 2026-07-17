@@ -3,7 +3,7 @@
 <!-- updated_at: 2026-07-17 -->
 <!-- stale_after: 24h -->
 
-> **Status**: Stable External Runtime Supervisor repair accepted; final main handoff in progress
+> **Status**: Stable External Runtime Supervisor repair accepted on main
 > **Updated At**: 2026-07-17
 > **Source**: plans/plan-20260716-stable-external-runtime-supervisor.md
 > **Target**: Make the immutable external Supervisor the primary lifecycle/recovery owner while preserving existing authorities and compatibility fallbacks
@@ -31,5 +31,5 @@ This snapshot is a read model, not an execution gate.
 
 ## Remaining Before Delivery
 
-- Merge this branch fast-forward-only to `main`, push `origin/main`, remove the repair branch, and reinstall from final `main`.
-- Confirm the final live release revision equals `main` short SHA and leave the working tree clean.
+- Final `main` is pushed, the repair branch/worktree is removed, and the live release was reinstalled from `main`.
+- Final live release revision equals `main` short SHA; working tree is clean.
