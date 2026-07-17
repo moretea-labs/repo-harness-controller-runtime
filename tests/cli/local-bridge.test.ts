@@ -8,6 +8,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "fs";
 import { tmpdir } from "os";
@@ -181,6 +182,21 @@ describe("Local Execution Bridge", () => {
     const second = await startLocalBridgeServer({ repoRoot: root, port: 0, openBrowser: false });
     servers.push(second);
     expect((await fetch(new URL("/health", second.url))).status).toBe(200);
+  });
+
+  test("repairs a dangling local-job storage link before startup reconciliation", async () => {
+    const root = repo();
+    const localJobsPath = join(root, ".ai/harness/local-jobs");
+    symlinkSync(join(root, ".missing-runtime-storage"), localJobsPath, "dir");
+
+    const handle = await startLocalBridgeServer({ repoRoot: root, port: 0, openBrowser: false });
+    servers.push(handle);
+
+    const repository = JSON.parse(readFileSync(join(root, ".ai/harness/repository.json"), "utf-8")) as { repoId: string };
+    const controllerHome = process.env.REPO_HARNESS_CONTROLLER_HOME!;
+    const controllerLocalJobs = join(controllerHome, "repositories", repository.repoId, "local-jobs");
+    expect(realpathSync(localJobsPath)).toBe(realpathSync(controllerLocalJobs));
+    expect((await fetch(new URL("/health", handle.url))).status).toBe(200);
   });
 
   test("keeps a healthy local Run alive while its controller owner is still active", async () => {

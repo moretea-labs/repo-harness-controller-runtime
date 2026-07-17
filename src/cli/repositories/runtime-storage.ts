@@ -9,6 +9,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'fs';
 import { dirname, join, resolve } from 'path';
@@ -139,6 +140,14 @@ function createDirectoryLink(target: string, source: string): void {
   symlinkSync(target, source, process.platform === 'win32' ? 'junction' : 'dir');
 }
 
+function isBrokenDirectoryLink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink() && !existsSync(path);
+  } catch (_error) {
+    return false;
+  }
+}
+
 function hasActiveRuns(path: string): boolean {
   if (!existsSync(path)) return false;
   for (const entry of readdirSync(path, { withFileTypes: true })) {
@@ -255,6 +264,7 @@ function bindRuntimeDirectory(
   writeOwnerMarker(controllerPath, repoId, spec.name);
 
   if (!existsSync(repositoryPath)) {
+    if (isBrokenDirectoryLink(repositoryPath)) unlinkSync(repositoryPath);
     createDirectoryLink(controllerPath, repositoryPath);
     return { name: spec.name, repositoryPath, controllerPath, status: 'linked' };
   }
