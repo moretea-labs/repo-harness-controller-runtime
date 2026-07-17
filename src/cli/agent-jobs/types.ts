@@ -14,10 +14,13 @@ export type AgentJobStatus =
   | "unknown";
 export type AgentJobClosureState =
   | "none"
+  | "ready_to_integrate"
   | "integration_pending"
   | "integrating"
+  | "integrated"
   | "cleanup_pending"
   | "cleaning"
+  | "cleanup_blocked"
   | "preserved"
   | "completed";
 export type AgentJobPreservationReason =

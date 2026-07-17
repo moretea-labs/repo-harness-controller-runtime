@@ -2010,16 +2010,18 @@ export function markAgentJobClosure(
       lastSeenAt: changedAt,
       ...(input.worktreeCleaned && resource.type === "worktree"
         ? { state: "removed" as const, cleanupAfter: undefined }
-        : input.state === "preserved"
+        : input.state === "preserved" || input.state === "cleanup_blocked"
           ? { state: "retained" as const, retentionReason: input.details }
           : {}),
     }));
   }
-  if (input.state === "preserved") {
+  if (input.state === "preserved" || input.state === "cleanup_blocked") {
     meta.status = "waiting_for_user";
     delete meta.finishedAt;
     meta.preservationReason = input.preservationReason ?? "unknown_worktree_state";
-    meta.preservationDetails = input.details ?? "Run closure was preserved because cleanup safety could not be proven.";
+    meta.preservationDetails = input.details ?? (input.state === "cleanup_blocked"
+      ? "Run cleanup is blocked because resource safety could not be proven."
+      : "Run closure was preserved because cleanup safety could not be proven.");
     meta.autoIntegrationError = meta.preservationDetails;
   } else if (input.state === "completed") {
     delete meta.preservationReason;
@@ -2032,7 +2034,7 @@ export function markAgentJobClosure(
   }
   writeAgentMeta(repoRoot, metaPath(repoRoot, runId), meta);
   appendAgentJobEvent(repoRoot, runId, {
-    type: input.state === "preserved" ? "run_waiting" : "run_activity",
+    type: input.state === "preserved" || input.state === "cleanup_blocked" ? "run_waiting" : "run_activity",
     message: input.details ?? `Run closure moved to ${input.state}.`,
     data: {
       closureState: input.state,
@@ -2058,6 +2060,20 @@ export function markAgentJobReviewedCompletion(
   if (current.provider !== "local") return current;
   const { stdoutTail: _stdout, stderrTail: _stderr, ...meta } = current;
   const completedAt = new Date().toISOString();
+  const isolatedLocalRun = meta.executionMode === "worktree" && meta.worktree !== repoRoot;
+  const integrationProven = !isolatedLocalRun || Boolean(meta.integratedSessionId);
+  const cleanupProven = !isolatedLocalRun || Boolean(options.worktreeCleaned || meta.worktreeCleanedAt);
+  if (!integrationProven || !cleanupProven) {
+    return markAgentJobClosure(repoRoot, runId, {
+      state: !integrationProven ? "ready_to_integrate" : "cleanup_blocked",
+      preservationReason: !integrationProven ? "unmerged_branch" : "cleanup_failed",
+      details: !integrationProven
+        ? "Run cannot complete before isolated changes are integrated."
+        : "Run cannot complete before isolated worktree cleanup is proven.",
+      worktreeCleaned: options.worktreeCleaned,
+      branchDeleted: options.branchDeleted,
+    });
+  }
   meta.status = "succeeded";
   meta.finishedAt = meta.finishedAt ?? completedAt;
   meta.lastHeartbeatAt = completedAt;
@@ -2115,7 +2131,7 @@ export function markAgentJobIntegrated(
   meta.integratedAt = new Date().toISOString();
   if (options.changedFiles) meta.changedFiles = [...options.changedFiles];
   if (options.changeOutcome) meta.changeOutcome = options.changeOutcome;
-  meta.closureState = "cleanup_pending";
+  meta.closureState = "integrated";
   meta.closureUpdatedAt = meta.integratedAt;
   delete meta.preservationReason;
   delete meta.preservationDetails;
@@ -2125,7 +2141,10 @@ export function markAgentJobIntegrated(
     type: "run_integrated",
     message: `Integrated through edit session ${sessionId}.`,
   });
-  return meta;
+  return markAgentJobClosure(repoRoot, runId, {
+    state: "cleanup_pending",
+    details: `Integration ${sessionId} completed; cleanup finalizer is pending.`,
+  });
 }
 
 export function markAgentJobIntegrationReview(

@@ -855,7 +855,7 @@ if (ok && config.autoIntegrate && finalMeta.executionMode === "worktree") {
       integrationError instanceof Error
         ? integrationError.message
         : String(integrationError);
-    failedMeta.closureState = "preserved";
+    failedMeta.closureState = "cleanup_blocked";
     failedMeta.closureUpdatedAt = completedAt;
     failedMeta.preservationReason = failedMeta.preservationReason ?? (
       failedMeta.integratedSessionId
@@ -875,7 +875,7 @@ if (ok && config.autoIntegrate && finalMeta.executionMode === "worktree") {
     persistMeta(failedMeta);
     event(
       "run_waiting",
-      "Automatic worktree integration failed; the worktree was preserved for review.",
+      "Automatic integration or cleanup is blocked; owned resources were preserved for safe resolution.",
       { error: failedMeta.autoIntegrationError },
     );
     try {

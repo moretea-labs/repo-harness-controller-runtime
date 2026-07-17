@@ -2,11 +2,12 @@ import { describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
-import { createIssue, getIssue, updateTask } from '../../src/cli/controller/issue-store';
+import { createIssue, getIssue, projectBoard, recordTaskVerification, updateTask } from '../../src/cli/controller/issue-store';
 import { finishTaskRun } from '../../src/cli/controller/completion-orchestrator';
 import { applyCompletionDecision, completionDecisionQueues, finishCompletionBacklog, inspectCompletionBacklog } from '../../src/cli/controller/completion-backlog';
 import { prepareCodexContinuation } from '../../src/cli/controller/codex-continuation';
 import { applyStuckStateMigration, inspectStuckControllerStates } from '../../src/cli/controller/stuck-state-migration';
+import { getAgentJob, markAgentJobReviewedCompletion } from '../../src/cli/agent-jobs/job-manager';
 import type { AgentJobMeta } from '../../src/cli/agent-jobs/types';
 
 function withRepo<T>(fn: (repoRoot: string) => T): T {
@@ -80,6 +81,39 @@ describe('completion orchestrator', () => {
     expect(result.action).toBe('finished');
     expect(result.taskStatus).toBe('done');
     expect(result.issue.tasks[0].status).toBe('done');
+  }));
+
+  test('keeps Run-backed verification out of done until integration and cleanup evidence exist', () => withRepo((repoRoot) => {
+    const issue = createIssue(repoRoot, {
+      title: 'Evidence gated completion',
+      tasks: [{ title: 'Change code', objective: 'Update source.', allowedPaths: ['src/**'], risk: 'medium' }],
+      allowDuplicate: true,
+    });
+    updateTask(repoRoot, issue.id, 'T1', { status: 'review', runId: 'RUN-evidence-gate' });
+    seedRun(repoRoot, {
+      runId: 'RUN-evidence-gate',
+      issueId: issue.id,
+      taskId: 'T1',
+      executionMode: 'worktree',
+      worktree: join(repoRoot, '.ai/harness/worktrees/RUN-evidence-gate'),
+      branch: 'agent/RUN-evidence-gate',
+    });
+
+    const verified = recordTaskVerification(repoRoot, issue.id, 'T1', {
+      runId: 'RUN-evidence-gate',
+      reviewer: 'test',
+      checkResults: [],
+      commandEvidence: [{ command: ['true'], ok: true, reportedBy: 'test', source: 'controller' }],
+      acceptanceResults: [],
+      verifiedAt: new Date().toISOString(),
+    });
+    expect(verified.tasks[0].status).toBe('verified');
+
+    const closure = markAgentJobReviewedCompletion(repoRoot, 'RUN-evidence-gate');
+    expect(closure.closureState).toBe('ready_to_integrate');
+    expect(getAgentJob(repoRoot, 'RUN-evidence-gate').status).toBe('waiting_for_user');
+    const boardTask = (projectBoard(repoRoot).issues[0].tasks as Array<Record<string, unknown>>)[0];
+    expect(boardTask.latestRunClosureState).toBe('ready_to_integrate');
   }));
 
   test('keeps high-risk runs behind an explicit approve_and_finish decision', () => withRepo((repoRoot) => {
