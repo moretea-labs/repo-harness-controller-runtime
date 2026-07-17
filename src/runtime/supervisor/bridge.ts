@@ -74,7 +74,10 @@ export function scheduleStableSupervisorOperation(input: {
   actor: string;
   reason?: string;
 }): { operation: SupervisorOperation; deduplicated: boolean } | undefined {
-  if (!isStableSupervisorInstalled(input.controllerHome)) return undefined;
+  // A published release is not an execution owner. During first installation
+  // the legacy stack must keep using the detached coordinator until an
+  // identity-proven Supervisor is actually alive to consume durable operations.
+  if (!stableSupervisorIsAlive(input.controllerHome)) return undefined;
   return createSupervisorOperation({
     controllerHome: input.controllerHome,
     repoRoot: input.repoRoot,
