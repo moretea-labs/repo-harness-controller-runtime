@@ -44,12 +44,24 @@ const INTERACTIVE_SYNC_WRITE_TOOLS = new Set([
   'create_edit_savepoint',
   'git_stage_paths',
   'git_commit_paths',
+  // Recovery writes against an existing Run must remain available while legacy
+  // Runs are the very thing preventing runtime-storage relocation. These tools
+  // do not create new execution ownership or dispatch new work.
+  'finish_task_run',
+  'cancel_task_run',
 ]);
 const P0_TOOLS = new Set(['run_check', 'verify_edit_session', 'repository_command_execute']);
 const P2_TOOLS = new Set(['write_prd', 'write_sprint', 'write_plan', 'publish_issue_to_github']);
 
 function wantsAsyncExecution(args: Record<string, unknown>): boolean {
   return args.apply_mode === 'async' || args.mode === 'async' || args.async === true;
+}
+
+export function runsAsInteractiveSyncWrite(
+  name: string,
+  args: Record<string, unknown> = {},
+): boolean {
+  return INTERACTIVE_SYNC_WRITE_TOOLS.has(name) && !wantsAsyncExecution(args);
 }
 
 export function wantsWaitForResult(args: Record<string, unknown>): boolean {
@@ -89,7 +101,7 @@ function shouldCreateDurableJob(
   if (definition.annotations?.readOnlyHint === true && opts.allowReadOnly !== true) return false;
   if (isDirectHotReadTool(name)) return false;
   // Interactive development path: sync by default unless caller opts into async queueing.
-  if (INTERACTIVE_SYNC_WRITE_TOOLS.has(name) && !wantsAsyncExecution(args)) return false;
+  if (runsAsInteractiveSyncWrite(name, args)) return false;
   return true;
 }
 

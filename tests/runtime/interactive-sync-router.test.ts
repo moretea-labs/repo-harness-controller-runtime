@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { STABLE_CONTROLLER_TOOL_NAMES } from '../../src/cli/mcp/toolset-names';
+import { runsAsInteractiveSyncWrite } from '../../src/runtime/gateway/mcp/router';
 
 describe('interactive sync routing policy', () => {
   test('router marks interactive write tools as sync-by-default and supports wait', () => {
@@ -14,6 +15,13 @@ describe('interactive sync routing policy', () => {
     expect(source).toContain('waitForExecutionJob');
     expect(source).toContain('buildJobOperationDigest');
     expect(source).toContain('buildAcceptedQueuedDigest');
+  });
+
+  test('legacy Run terminalization remains synchronous while relocation is blocked', () => {
+    expect(runsAsInteractiveSyncWrite('finish_task_run')).toBe(true);
+    expect(runsAsInteractiveSyncWrite('cancel_task_run')).toBe(true);
+    expect(runsAsInteractiveSyncWrite('finish_task_run', { apply_mode: 'async' })).toBe(false);
+    expect(runsAsInteractiveSyncWrite('dispatch_task')).toBe(false);
   });
 
   test('stable controller surface exposes interactive development tools', () => {

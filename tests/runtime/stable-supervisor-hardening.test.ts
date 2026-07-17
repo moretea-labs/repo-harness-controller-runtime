@@ -7,7 +7,7 @@ import { renderLaunchdSupervisorPlist, renderSystemdSupervisorUnit, supervisorSe
 import { createStableIngressRouter } from '../../src/runtime/supervisor/ingress-router';
 import { controllerDaemonMaxLifetimeMs } from '../../src/runtime/control-plane/daemon-entry';
 import { createSupervisorOperation, readSupervisorOperation, updateSupervisorOperation } from '../../src/runtime/supervisor/operation-store';
-import { automaticRecoveryRequestId, reconcileSupervisorStateWithAuthority, terminalizeInterruptedSupervisorOperations } from '../../src/runtime/supervisor/supervisor-runtime';
+import { automaticRecoveryRequestId, reconcileActiveManagedGenerations, reconcileSupervisorStateWithAuthority, terminalizeInterruptedSupervisorOperations } from '../../src/runtime/supervisor/supervisor-runtime';
 import { decideRestart, newRestartBudgetRecord, recordFailure, recordRestart, recordStable } from '../../src/runtime/supervisor/restart-policy';
 import { SupervisorProcessManager } from '../../src/runtime/supervisor/process-manager';
 import { writeMcpServiceLocalConfig } from '../../src/cli/mcp/auth';
@@ -295,6 +295,53 @@ describe('Stable Supervisor production hardening', () => {
     expect(reconciled.gatewayHost?.pid).toBe(102);
     expect(reconciled.standby?.slot).toBe('green');
     expect(reconciled.ingress.activeUpstreamSlot).toBe('blue');
+  });
+
+  test('active generation advances only when daemon and Gateway observations agree', () => {
+    const daemon = managedProcess('blue', 201, 'generation-old');
+    const gateway = managedProcess('blue', 202, 'generation-old');
+    const state: SupervisorState = {
+      schemaVersion: 1,
+      supervisor: {
+        pid: 200,
+        instanceId: 'supervisor-generation',
+        processStartTime: 'start',
+        executableFingerprint: 'fingerprint',
+        controllerHome: '/tmp/controller-home',
+        ownerEpoch: 1,
+        epoch: 1,
+        startedAt: '2026-07-17T00:00:00.000Z',
+      },
+      desiredState: 'running',
+      observedState: 'healthy',
+      activeSlot: 'blue',
+      activeGeneration: 'generation-old',
+      controllerDaemon: daemon,
+      gatewayHost: gateway,
+      ingress: { state: 'running', activeUpstreamSlot: 'blue', activeUpstreamPort: 8785 },
+      restartBudget: {},
+      currentOperationId: null,
+      lastIncident: null,
+      updatedAt: '2026-07-17T00:00:00.000Z',
+    };
+    const split = reconcileActiveManagedGenerations(state, {
+      controllerDaemon: 'generation-new',
+      gatewayHost: 'generation-old',
+    });
+    expect(split.coherent).toBe(false);
+    expect(split.state.controllerDaemon?.generation).toBe('generation-new');
+    expect(split.state.gatewayHost?.generation).toBe('generation-old');
+    expect(split.state.activeGeneration).toBe('generation-old');
+
+    const synchronized = reconcileActiveManagedGenerations(split.state, {
+      controllerDaemon: 'generation-new',
+      gatewayHost: 'generation-new',
+    });
+    expect(synchronized.coherent).toBe(true);
+    expect(synchronized.generation).toBe('generation-new');
+    expect(synchronized.state.controllerDaemon?.generation).toBe('generation-new');
+    expect(synchronized.state.gatewayHost?.generation).toBe('generation-new');
+    expect(synchronized.state.activeGeneration).toBe('generation-new');
   });
 
   test('interrupted mutations become explicit failures instead of blind replay', () => {

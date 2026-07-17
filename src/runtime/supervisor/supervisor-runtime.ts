@@ -9,6 +9,7 @@ import {
   oppositeSlot,
   readActiveSlotAuthority,
   readSlotIdentity,
+  writeActiveSlotAuthority,
   writeSlotIdentity,
   type ActiveSlotAuthority,
   type RuntimeSlotId,
@@ -84,6 +85,49 @@ function currentManagedPairSlot(state: SupervisorState): RuntimeSlotId | undefin
   const daemonSlot = state.controllerDaemon.slot ?? state.activeSlot;
   const gatewaySlot = state.gatewayHost.slot ?? state.activeSlot;
   return daemonSlot === gatewaySlot ? daemonSlot : undefined;
+}
+
+export function reconcileActiveManagedGenerations(
+  state: SupervisorState,
+  observed: { controllerDaemon?: string; gatewayHost?: string },
+): { state: SupervisorState; coherent: boolean; generation?: string } {
+  const daemon = state.controllerDaemon;
+  const gateway = state.gatewayHost;
+  const daemonSlot = daemon?.slot ?? state.activeSlot;
+  const gatewaySlot = gateway?.slot ?? state.activeSlot;
+  const activePair = Boolean(
+    daemon
+    && gateway
+    && daemonSlot === state.activeSlot
+    && gatewaySlot === state.activeSlot,
+  );
+  const coherentGeneration = activePair
+    && observed.controllerDaemon
+    && observed.gatewayHost
+    && observed.controllerDaemon === observed.gatewayHost
+    ? observed.controllerDaemon
+    : undefined;
+  const daemonChanged = Boolean(daemon && observed.controllerDaemon && daemon.generation !== observed.controllerDaemon);
+  const gatewayChanged = Boolean(gateway && observed.gatewayHost && gateway.generation !== observed.gatewayHost);
+  const activeChanged = Boolean(coherentGeneration && state.activeGeneration !== coherentGeneration);
+  if (!daemonChanged && !gatewayChanged && !activeChanged) {
+    return { state, coherent: Boolean(coherentGeneration), ...(coherentGeneration ? { generation: coherentGeneration } : {}) };
+  }
+  return {
+    state: {
+      ...state,
+      ...(daemon && observed.controllerDaemon
+        ? { controllerDaemon: { ...daemon, generation: observed.controllerDaemon } }
+        : {}),
+      ...(gateway && observed.gatewayHost
+        ? { gatewayHost: { ...gateway, generation: observed.gatewayHost } }
+        : {}),
+      ...(coherentGeneration ? { activeGeneration: coherentGeneration } : {}),
+      updatedAt: new Date().toISOString(),
+    },
+    coherent: Boolean(coherentGeneration),
+    ...(coherentGeneration ? { generation: coherentGeneration } : {}),
+  };
 }
 
 export function reconcileSupervisorStateWithAuthority(
@@ -292,6 +336,56 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
     this.state = { ...this.state, ...patch, updatedAt: new Date().toISOString() };
     writeSupervisorState(this.options.controllerHome, this.state);
     return this.state;
+  }
+
+  private observedGatewayGeneration(gateway = this.state.gatewayHost): string | undefined {
+    if (!gateway) return undefined;
+    const runtime = loadMcpServiceRuntimeState(gateway.controllerHome, this.options.repoRoot);
+    const topLevelGeneration = runtime?.generation;
+    const serverGeneration = runtime?.server.generation;
+    if (topLevelGeneration && serverGeneration && topLevelGeneration !== serverGeneration) return undefined;
+    return serverGeneration ?? topLevelGeneration;
+  }
+
+  private synchronizeActiveRuntimeGeneration(requireAgreement = false): string | undefined {
+    const daemon = this.state.controllerDaemon;
+    const gateway = this.state.gatewayHost;
+    const daemonRuntime = daemon ? readRuntimeGeneration(daemon.controllerHome) : undefined;
+    const gatewayGeneration = this.observedGatewayGeneration(gateway);
+    const reconciled = reconcileActiveManagedGenerations(this.state, {
+      ...(daemonRuntime?.generation ? { controllerDaemon: daemonRuntime.generation } : {}),
+      ...(gatewayGeneration ? { gatewayHost: gatewayGeneration } : {}),
+    });
+    if (reconciled.state !== this.state) {
+      this.state = reconciled.state;
+      writeSupervisorState(this.options.controllerHome, this.state);
+    }
+    if (reconciled.generation) {
+      const authority = readActiveSlotAuthority(this.options.controllerHome);
+      if (authority.activeSlot === this.state.activeSlot && authority.generation !== reconciled.generation) {
+        writeActiveSlotAuthority(this.options.controllerHome, {
+          activeSlot: authority.activeSlot,
+          ...(authority.previousSlot ? { previousSlot: authority.previousSlot } : {}),
+          generation: reconciled.generation,
+          reason: 'runtime-generation-sync',
+          ...(authority.rollbackUntil ? { rollbackUntil: authority.rollbackUntil } : {}),
+        });
+      }
+      const identity = readSlotIdentity(this.options.controllerHome, this.state.activeSlot);
+      if (identity && (identity.generation !== reconciled.generation || identity.sourceCommit !== daemonRuntime?.source.commit)) {
+        writeSlotIdentity(this.options.controllerHome, {
+          ...identity,
+          generation: reconciled.generation,
+          ...(daemonRuntime?.source.commit ? { sourceCommit: daemonRuntime.source.commit } : {}),
+        });
+      }
+    }
+    if (requireAgreement && !reconciled.coherent) {
+      throw new Error(
+        `SUPERVISOR_ACTIVE_GENERATION_MISMATCH: daemon=${daemonRuntime?.generation ?? 'missing'} gateway=${gatewayGeneration ?? 'missing'}`,
+      );
+    }
+    return reconciled.generation;
   }
 
   private componentState(component: SupervisorComponentName): SupervisorManagedProcess | undefined {
@@ -667,15 +761,31 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
       const started = await this.managerForManaged(previous).startDaemon();
       this.setComponent('controllerDaemon', processState(started, previous));
     }
+    await this.waitForReady('controllerDaemon');
+    const daemonGeneration = this.state.controllerDaemon
+      ? readRuntimeGeneration(this.state.controllerDaemon.controllerHome)?.generation
+      : undefined;
+    const currentGateway = this.state.gatewayHost;
+    if (
+      currentGateway
+      && this.manager.observe(currentGateway) === 'alive'
+      && daemonGeneration
+      && this.observedGatewayGeneration(currentGateway) !== daemonGeneration
+    ) {
+      const stopped = await this.managerForManaged(currentGateway).stop(currentGateway);
+      if (!stopped.stopped) throw new Error('SUPERVISOR_GATEWAYHOST_GENERATION_REFRESH_STOP_INCOMPLETE');
+      this.setComponent('gatewayHost', { ...currentGateway, state: 'stopped', lastLivenessAt: new Date().toISOString() });
+    }
     if (!this.state.gatewayHost || this.manager.observe(this.state.gatewayHost) !== 'alive') {
       const previous = this.state.gatewayHost;
       const started = await this.managerForManaged(previous).startGateway();
       this.setComponent('gatewayHost', processState(started, previous));
     }
-    const authorityGeneration = readRuntimeGeneration(this.state.controllerDaemon?.controllerHome ?? this.options.controllerHome)?.generation;
+    await this.waitForReady('gatewayHost');
+    const activeGeneration = this.synchronizeActiveRuntimeGeneration(true);
     this.persist({
       activeSlot: this.state.controllerDaemon?.slot ?? this.state.activeSlot,
-      activeGeneration: authorityGeneration ?? this.state.controllerDaemon?.generation ?? this.state.activeGeneration,
+      ...(activeGeneration ? { activeGeneration } : {}),
       ingress: {
         ...this.state.ingress,
         activeUpstreamSlot: this.state.gatewayHost?.slot ?? this.state.activeSlot,
@@ -728,6 +838,9 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
     try {
       if (current.kind === 'restart_controller') {
         await this.restartComponent('controllerDaemon', current.operationId);
+        // Daemon startup rotates the slot generation. Refresh the dependent
+        // Gateway so Connector and daemon generation identities cannot diverge.
+        await this.restartComponent('gatewayHost', current.operationId);
       } else if (current.kind === 'restart_gateway') {
         await this.restartComponent('gatewayHost', current.operationId);
       } else if (current.kind === 'restart_full') {
@@ -752,6 +865,7 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
       } else {
         await this.rollback(current.operationId);
       }
+      this.synchronizeActiveRuntimeGeneration(true);
       current = updateSupervisorOperation(this.options.controllerHome, current.operationId, {
         phase: 'succeeded',
         completedAt: new Date().toISOString(),
@@ -854,7 +968,7 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
 
   private async monitorTick(): Promise<void> {
     if (this.stopping || this.state.desiredState !== 'running') return;
-    let degraded = false;
+    let degraded = !this.synchronizeActiveRuntimeGeneration(false);
     for (const component of ['controllerDaemon', 'gatewayHost'] as const) {
       const managed = this.componentState(component);
       const observation = this.manager.observe(managed);
