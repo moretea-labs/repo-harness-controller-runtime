@@ -26,6 +26,7 @@ import { readJsonFile, writeJsonAtomic } from '../../shared/json-files';
 import { isProcessAlive, terminateProcessTree } from '../../shared/process-tree';
 import { readSchedulerWakeSignal, waitForSchedulerWakeSignal } from './wake-signal';
 import { cleanupControllerRuntimeState } from '../runtime-cleanup';
+import { rebuildRepositoryProjection } from '../../projections/materialized-view';
 
 const DARWIN_MEMORY_SAMPLE_TTL_MS = 5_000;
 const MAX_WORKER_STDERR_BYTES = 16 * 1024;
@@ -295,6 +296,7 @@ export class GlobalScheduler {
       const mergedLifecycle = { ...currentLifecycle, ...diagnosticLifecycle };
       if (['succeeded', 'failed', 'timed_out', 'cancelled', 'orphaned', 'stale', 'human_attention_required'].includes(current.status)) {
         updateExecutionJob(this.controllerHome, repoId, jobId, (latest) => ({ ...latest, workerLifecycle: mergedLifecycle }));
+        try { rebuildRepositoryProjection(this.controllerHome, repoId); } catch { /* the next scheduler/status read can retry */ }
         return;
       }
 
@@ -326,6 +328,7 @@ export class GlobalScheduler {
         workerLifecycle: mergedLifecycle,
         error: { code: startupError ? 'WORKER_START_FAILED' : 'WORKER_EXITED', message, retryable, details },
       });
+      try { rebuildRepositoryProjection(this.controllerHome, repoId); } catch { /* the next scheduler/status read can retry */ }
     } catch { /* the Job may have been finalized by the Worker or reconciliation */ }
   }
 

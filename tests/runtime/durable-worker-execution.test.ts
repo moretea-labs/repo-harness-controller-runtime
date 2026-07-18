@@ -4,6 +4,8 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { createExecutionJob, getExecutionJob } from '../../src/runtime/execution/jobs/store';
 import { GlobalScheduler } from '../../src/runtime/control-plane/global-scheduler/scheduler';
+import { readRepositoryProjectionSnapshot } from '../../src/runtime/projections/materialized-view';
+import { readRepositoryProjectionDirty } from '../../src/runtime/projections/invalidation';
 
 const homes: string[] = [];
 
@@ -65,6 +67,8 @@ describe('durable Execution Worker lifecycle', () => {
       expect(finished.workerLifecycle?.maxAttempts).toBe(finished.maxAttempts);
       await Bun.sleep(50);
       expect(getExecutionJob(controllerHome, '__controller__', job.jobId).workerLifecycle?.startupState).toBe('exited');
+      expect(readRepositoryProjectionDirty(controllerHome, '__controller__')).toBeUndefined();
+      expect(readRepositoryProjectionSnapshot(controllerHome, '__controller__').stale).toBe(false);
     } finally {
       if (previousPath === undefined) delete process.env.PATH;
       else process.env.PATH = previousPath;
