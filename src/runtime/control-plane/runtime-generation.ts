@@ -341,9 +341,12 @@ export function evaluateRuntimeSourceDrift(
   if ((active.branch ?? '') !== (current.branch ?? '')) {
     reasons.push(`runtime branch changed from ${active.branch ?? 'detached'} to ${current.branch ?? 'detached'}`);
   }
-  if (current.defaultBranchCommit && active.commit && active.commit !== current.defaultBranchCommit) {
-    reasons.push(`runtime commit ${active.commit} is not at ${current.defaultBranch} ${current.defaultBranchCommit}`);
-  } else if (active.commit && current.commit && active.commit !== current.commit) {
+  // The resolved runtime source checkout is the authority for the running
+  // controller. A clean, explicitly selected stable branch is valid even
+  // when the local default branch points at a different (possibly unrelated)
+  // development line. Comparing against defaultBranchCommit here made every
+  // clean feature/stable branch look stale until it was merged into main.
+  if (active.commit && current.commit && active.commit !== current.commit) {
     reasons.push(`runtime commit changed from ${active.commit} to ${current.commit}`);
   }
   if (active.dirty) {
