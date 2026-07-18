@@ -2,7 +2,8 @@ import { bindRepositoryEntities } from '../../../cli/repositories/entity-migrati
 import { getRepository, repositorySummary, selectRepositoryCheckout } from '../../../cli/repositories/registry';
 import { callRepositoryTool } from '../../../cli/mcp/repository-tools';
 import { callMcpTool, type CallToolResult, type McpToolContext } from '../../../cli/mcp/tools';
-import { runtimePolicy } from '../../../cli/mcp/multi-repository';
+import { runtimePolicy, type MultiRepositoryMcpToolContext } from '../../../cli/mcp/multi-repository';
+import { callRuntimeTool } from '../../gateway/mcp/runtime-tools';
 import { ensureRepositoryRuntimeStorage } from '../../../cli/repositories/runtime-storage';
 import { evaluateReleaseGate } from '../../release/release-gate';
 import { executeLocalBridgeJobInline, getLocalBridgeJob } from '../../../cli/local-bridge/job-store';
@@ -510,19 +511,27 @@ export async function executeExecutionJob(controllerHome: string, job: Execution
     const allowedAgents = Array.isArray(job.payload.allowedAgents)
       ? job.payload.allowedAgents.filter((value): value is string => typeof value === 'string')
       : [];
-    const context: McpToolContext = {
-      repoRoot,
-      policy: runtimePolicy(repoRoot, {
-        profile: job.payload.profile ?? 'controller',
-        enableChatgptBrowser: job.payload.enableChatgptBrowser === true,
-        enableDevRunner: job.payload.enableDevRunner === true,
-        devRunnerAgents: allowedAgents.join(','),
-        devRunnerTimeoutMs: typeof job.payload.runnerTimeoutMs === 'number' ? job.payload.runnerTimeoutMs : undefined,
-        devRunnerMaxTimeoutMs: typeof job.payload.runnerMaxTimeoutMs === 'number' ? job.payload.runnerMaxTimeoutMs : undefined,
-      }),
+    const policy = runtimePolicy(repoRoot, {
+      controllerHome,
+      profile: job.payload.profile ?? 'controller',
       enableChatgptBrowser: job.payload.enableChatgptBrowser === true,
+      enableDevRunner: job.payload.enableDevRunner === true,
+      devRunnerAgents: allowedAgents.join(','),
+      devRunnerTimeoutMs: typeof job.payload.runnerTimeoutMs === 'number' ? job.payload.runnerTimeoutMs : undefined,
+      devRunnerMaxTimeoutMs: typeof job.payload.runnerMaxTimeoutMs === 'number' ? job.payload.runnerMaxTimeoutMs : undefined,
+    });
+    const context: McpToolContext = { repoRoot, policy, enableChatgptBrowser: job.payload.enableChatgptBrowser === true };
+    const runtimeContext: MultiRepositoryMcpToolContext = {
+      ...context,
+      controllerHome,
+      explicitRepository: repository,
+      toolset: job.payload.toolset === 'core' || job.payload.toolset === 'full' ? job.payload.toolset : 'advanced',
+      toolsetLocked: true,
     };
-    const result = await callMcpTool(context, job.payload.operation, job.payload.arguments ?? {});
+    const runtimeResult = policy.profile === 'controller'
+      ? await callRuntimeTool(runtimeContext, job.payload.operation, job.payload.arguments ?? {})
+      : undefined;
+    const result = runtimeResult ?? await callMcpTool(context, job.payload.operation, job.payload.arguments ?? {});
     let record: Record<string, unknown> = {
       ...toolResultRecord(result),
       repoId: repository.repoId,

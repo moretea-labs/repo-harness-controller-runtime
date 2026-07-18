@@ -6,6 +6,8 @@ import {
   type MultiRepositoryMcpToolContext,
 } from '../../../cli/mcp/multi-repository';
 import { repositoryToolDefinitions } from '../../../cli/mcp/repository-tools';
+import { runtimeToolDefinitions } from './runtime-tools';
+import { executionToolDefinitions } from './execution-tools';
 import { resolveRepositorySelection } from '../../../cli/repositories/registry';
 import { ensureRepositoryRuntimeStorage } from '../../../cli/repositories/runtime-storage';
 import { createExecutionJob, getExecutionJob } from '../../execution/jobs/store';
@@ -18,6 +20,17 @@ import { commandValue, normalizeRepositoryCommand } from '../../../cli/repositor
 import { classifyRepositoryCommand, classifyRepositoryCommandReplay } from '../../../cli/repositories/command-classifier';
 
 const DIRECT_REPOSITORY_TOOLS = new Set(['repository_list', 'repository_get', 'repository_workbench', 'repository_command_preview']);
+
+/** Blocking native host tools must never execute on the public MCP event loop. */
+const GATEWAY_ISOLATED_TOOLS = new Set([
+  'ios_review_packet', 'ios_xcode_status', 'ios_simulators_list', 'ios_project_discover',
+  'ios_schemes_list', 'ios_simulator_boot', 'ios_app_build', 'ios_app_install',
+  'ios_app_launch', 'ios_simulator_screenshot', 'ios_simulator_log_tail', 'ios_ui_smoke_test',
+]);
+
+export function isGatewayIsolatedTool(name: string): boolean {
+  return GATEWAY_ISOLATED_TOOLS.has(name);
+}
 /** High-frequency bounded reads execute in the current MCP request. */
 const DIRECT_HOT_READ_TOOLS = new Set([
   'get_task_run', 'get_task_run_events', 'get_task_run_log',
@@ -85,7 +98,8 @@ function result(value: Record<string, unknown>): CallToolResult {
 }
 
 function toolDefinition(ctx: MultiRepositoryMcpToolContext, name: string): McpToolDefinition | undefined {
-  return [...repositoryToolDefinitions, ...buildMultiRepositoryToolDefinitions(ctx)].find((tool) => tool.name === name);
+  return [...runtimeToolDefinitions, ...executionToolDefinitions, ...repositoryToolDefinitions, ...buildMultiRepositoryToolDefinitions(ctx)]
+    .find((tool) => tool.name === name);
 }
 
 function shouldCreateDurableJob(
@@ -96,7 +110,7 @@ function shouldCreateDurableJob(
 ): boolean {
   const definition = toolDefinition(ctx, name);
   if (!definition) return false;
-  if (opts.forceDurable === true) return true;
+  if (opts.forceDurable === true || isGatewayIsolatedTool(name)) return true;
   if (name.startsWith('repository_') && DIRECT_REPOSITORY_TOOLS.has(name)) return false;
   if (definition.annotations?.readOnlyHint === true && opts.allowReadOnly !== true) return false;
   if (isDirectHotReadTool(name)) return false;
@@ -321,6 +335,7 @@ export async function routeDurableMcpCall(
       arguments: workerArgs,
       target: isRepositoryTool ? 'repository-tool' : 'mcp-tool',
       profile: ctx.policy.profile,
+      toolset: ctx.toolset,
       enableChatgptBrowser: ctx.enableChatgptBrowser === true,
       enableDevRunner: ctx.policy.execution.agentRunner,
       allowedAgents: [...ctx.policy.execution.allowedAgents],

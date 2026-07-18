@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { isDirectHotReadTool, waitTimeoutMs, wantsWaitForResult } from '../../src/runtime/gateway/mcp/router';
+import { isDirectHotReadTool, isGatewayIsolatedTool, waitTimeoutMs, wantsWaitForResult } from '../../src/runtime/gateway/mcp/router';
 
 describe('MCP durable routing hot path', () => {
   test('wait_ms configures but never enables waiting', () => {
@@ -20,6 +20,13 @@ describe('MCP durable routing hot path', () => {
     }
     expect(isDirectHotReadTool('run_check')).toBe(false);
     expect(isDirectHotReadTool('repository_command_execute')).toBe(false);
-    // Explicit work_submit uses forceDurable and is tested in work-submit-hardening.
+  });
+
+  test('blocking iOS host tools are isolated from the Gateway event loop', () => {
+    for (const name of ['ios_xcode_status', 'ios_simulators_list', 'ios_app_build', 'ios_simulator_screenshot', 'ios_simulator_log_tail', 'ios_ui_smoke_test']) {
+      expect(isGatewayIsolatedTool(name)).toBe(true);
+    }
+    expect(isGatewayIsolatedTool('rh_status')).toBe(false);
+    expect(isGatewayIsolatedTool('repository_git_status')).toBe(false);
   });
 });
