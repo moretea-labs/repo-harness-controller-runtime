@@ -176,9 +176,11 @@ function compactIssue(value: Record<string, unknown>): TaskLedgerIssueProjection
 
 function attentionScore(task: TaskLedgerTaskProjection): number {
   if (task.multipleActiveRuns) return 100;
-  if (task.latestRunClosureState === 'cleanup_blocked') return 95;
+  if (task.effectiveStatus === 'integration_blocked' || task.latestRunClosureState === 'integration_blocked') return 99;
+  if (task.effectiveStatus === 'ready_to_integrate' || task.latestRunClosureState === 'ready_to_integrate') return 98;
+  if (task.effectiveStatus === 'cleanup_blocked' || task.latestRunClosureState === 'cleanup_blocked') return 97;
+  if (task.effectiveStatus === 'cleanup_pending' || ['integrated', 'cleanup_pending', 'cleaning'].includes(task.latestRunClosureState ?? '')) return 96;
   if (task.requiresExplicitRetry || task.retryable) return 90;
-  if (['ready_to_integrate', 'integrated', 'cleanup_pending'].includes(task.latestRunClosureState ?? '')) return 85;
   if (["changes_requested", "blocked"].includes(task.effectiveStatus ?? "")) return 80;
   if (["review", "integrated", "verifying"].includes(task.effectiveStatus ?? "")) return 70;
   if (["queued", "running"].includes(task.effectiveStatus ?? "") || task.activeRunId) return 60;
@@ -235,10 +237,10 @@ function statusProjection(input: {
     ? input.issues.find((issue) => issue.id === input.currentIssueId)
     : undefined;
   const running = input.attention.find((task) => task.multipleActiveRuns || ["queued", "running"].includes(task.effectiveStatus ?? "") || task.activeRunId);
-  const cleanupBlocked = input.attention.find((task) => task.latestRunClosureState === 'cleanup_blocked');
+  const cleanupBlocked = input.attention.find((task) => task.effectiveStatus === 'cleanup_blocked' || task.latestRunClosureState === 'cleanup_blocked');
   const review = input.attention.find((task) =>
-    ["review", "integrated", "verifying"].includes(task.effectiveStatus ?? "")
-    || ['ready_to_integrate', 'integrated', 'cleanup_pending'].includes(task.latestRunClosureState ?? ''),
+    ["review", "verifying", "ready_to_integrate", "integrating", "integration_blocked", "integrated", "cleanup_pending"].includes(task.effectiveStatus ?? "")
+    || ['ready_to_integrate', 'integrating', 'integration_blocked', 'integrated', 'cleanup_pending'].includes(task.latestRunClosureState ?? ''),
   );
   const retry = input.attention.find((task) => task.retryable || task.requiresExplicitRetry);
   const blocked = input.attention.find((task) => ["blocked", "changes_requested"].includes(task.effectiveStatus ?? ""));

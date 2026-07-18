@@ -18,6 +18,7 @@ export type EffectiveTaskStateReason =
   | "declared_done"
   | "declared_cancelled"
   | "declared_superseded"
+  | "completion_evidence_missing"
   | "superseded_by_relation"
   | "active_run_queued"
   | "active_run_running"
@@ -140,9 +141,23 @@ export function resolveIssueLifecycleStatus(issue: ControllerIssue): IssueLifecy
 
 function resolveVerificationStatus(task: ControllerTask): VerificationStatus {
   if (task.status === "changes_requested") return "changes_requested";
+  if (task.verification && task.status === "done" && !completionEvidenceComplete(task)) return "pending";
   if (task.verification && ["verified", "done"].includes(task.status)) return "passed";
   if (["review", "integrated", "verifying", "verified"].includes(task.status)) return "pending";
   return "not_started";
+}
+
+function completionEvidenceComplete(task: ControllerTask): boolean {
+  const integration = task.verification?.integrationEvidence;
+  const cleanup = task.verification?.cleanupEvidence;
+  return Boolean(integration?.reachable && integration.targetRevision && cleanup
+    && cleanup.worktreeRemovedOrNotCreated
+    && cleanup.branchDeletedOrRetained
+    && cleanup.leasesReleased
+    && cleanup.runTerminal
+    && cleanup.editSessionClosedOrNotCreated
+    && cleanup.noActiveProcess
+    && cleanup.noDirtyDiff);
 }
 
 function baseState(
@@ -228,7 +243,16 @@ export function resolveEffectiveTaskState(input: {
   }
 
   // Explicit Task terminal state always wins over Run evidence.
-  if (task.status === "done") return finalizeState(base, "done", "declared_done", true, false);
+  if (task.status === "done" && completionEvidenceComplete(task)) return finalizeState(base, "done", "declared_done", true, false);
+  if (task.status === "done") {
+    const closure = evidence.latestRun?.closureState;
+    const effective = closure === "cleanup_blocked" ? "cleanup_blocked"
+      : closure === "cleanup_pending" || closure === "cleaning" || closure === "integrated" ? "cleanup_pending"
+        : closure === "ready_to_integrate" || closure === "integration_pending" ? "ready_to_integrate"
+          : closure === "integrating" ? "integrating"
+            : "integration_blocked";
+    return finalizeState(base, effective, "completion_evidence_missing", false, false);
+  }
   if (task.status === "cancelled") return finalizeState(base, "cancelled", "declared_cancelled", true, false);
   if (task.status === "superseded") return finalizeState(base, "superseded", "declared_superseded", true, false);
 

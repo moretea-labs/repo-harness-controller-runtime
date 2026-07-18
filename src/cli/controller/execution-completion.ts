@@ -73,13 +73,15 @@ export function continueTaskAfterSuccessfulRun(
   }));
   const verification: TaskVerification = {
     runId: run.runId,
-    integratedRevision: run.integratedSessionId,
+    integratedRevision: run.integrationEvidence?.targetRevision,
     reviewedDiffHash: diffHash(repoRoot, run),
     reviewer: 'repo-harness-controller',
     checkResults,
     commandEvidence,
     acceptanceResults,
     verifiedAt: new Date().toISOString(),
+    integrationEvidence: run.integrationEvidence,
+    cleanupEvidence: run.cleanupEvidence,
   };
 
   // A failed real check is authoritative and moves the Task to changes_requested.
@@ -92,7 +94,15 @@ export function continueTaskAfterSuccessfulRun(
     return { continued: true, status, checkCount: checkResults.length };
   }
   if (status === 'verified' && policy.autoCompleteAfterSuccessfulRun && !policy.requiresHumanAcceptance) {
-    const closureComplete = run.executionMode !== 'worktree' || run.closureState === 'completed';
+    const closureComplete = run.closureState === 'completed'
+      && Boolean(run.integrationEvidence?.reachable)
+      && Boolean(run.cleanupEvidence?.worktreeRemovedOrNotCreated
+        && run.cleanupEvidence.branchDeletedOrRetained
+        && run.cleanupEvidence.leasesReleased
+        && run.cleanupEvidence.runTerminal
+        && run.cleanupEvidence.editSessionClosedOrNotCreated
+        && run.cleanupEvidence.noActiveProcess
+        && run.cleanupEvidence.noDirtyDiff);
     if (!closureComplete) {
       return {
         continued: true,

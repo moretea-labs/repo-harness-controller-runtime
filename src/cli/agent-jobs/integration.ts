@@ -543,8 +543,8 @@ export function integrateAgentJob(
   if (!task) throw new Error(`task not found: ${run.issueId}/${run.taskId}`);
   const state = resolveEffectiveTaskState({ issue, task, runs: readTaskRunEvidence(repoRoot, task) });
   const taskReady = autoFinalizing || userResolvableIntegration
-    ? !state.terminal && !state.inactive && ["review", "integrated", "verified"].includes(task.status)
-    : !state.terminal && !state.inactive && ["review", "verified"].includes(state.effectiveStatus);
+    ? !state.terminal && !state.inactive && ["review", "ready_to_integrate", "integrating", "integration_blocked", "integrated", "verified"].includes(task.status)
+    : !state.terminal && !state.inactive && ["review", "ready_to_integrate", "integrating", "integration_blocked", "verified"].includes(state.effectiveStatus);
   if (!taskReady)
     throw new Error(
       `task must be active and in review before integration (declared: ${task.status}, effective: ${state.effectiveStatus})`,

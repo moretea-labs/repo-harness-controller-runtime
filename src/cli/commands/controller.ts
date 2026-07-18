@@ -268,7 +268,7 @@ export function buildControllerCommand(): Command {
     .option('--reviewer <name>', 'Reviewer identity')
     .option('--note <text>', 'Review note')
     .option('--keep-worktree', 'Do not remove the isolated worktree after integration')
-    .option('--commit', 'Create a selected-path Git commit after successful finish')
+    .option('--no-commit', 'Do not create the required selected-path Git commit after successful finish')
     .option('--json', 'Output JSON')
     .action((runId: string, opts: { repo?: string; decision?: string; reviewer?: string; note?: string; keepWorktree?: boolean; commit?: boolean; json?: boolean }) => {
       const decision = String(opts.decision ?? 'auto').replace(/-/g, '_') as TaskReviewDecision;
@@ -281,7 +281,7 @@ export function buildControllerCommand(): Command {
         reviewer: opts.reviewer,
         note: opts.note,
         cleanup: opts.keepWorktree !== true,
-        commit: opts.commit === true,
+        commit: opts.commit !== false,
       });
       output(finished, opts.json === true);
     });
@@ -306,7 +306,7 @@ export function buildControllerCommand(): Command {
     .option('--apply', 'Apply the auto-finish actions instead of dry-running')
     .option('--limit <count>', 'Maximum auto-finish Runs', '25')
     .option('--keep-worktree', 'Do not remove isolated worktrees after integration')
-    .option('--commit', 'Create selected-path Git commits after successful finishes')
+    .option('--no-commit', 'Do not create selected-path Git commits after successful finishes')
     .option('--reviewer <name>', 'Reviewer identity', 'repo-harness-completion-backlog')
     .option('--json', 'Output JSON')
     .action((opts: { repo?: string; apply?: boolean; limit?: string; keepWorktree?: boolean; commit?: boolean; reviewer?: string; json?: boolean }) => {
@@ -314,7 +314,7 @@ export function buildControllerCommand(): Command {
         dryRun: opts.apply !== true,
         limit: opts.limit ? Number(opts.limit) : undefined,
         cleanup: opts.keepWorktree !== true,
-        commit: opts.commit === true,
+        commit: opts.commit !== false,
         reviewer: opts.reviewer,
       });
       output(finished, opts.json === true);
@@ -347,7 +347,7 @@ export function buildControllerCommand(): Command {
     .option('--reviewer <name>', 'Reviewer identity', 'repo-harness-completion-decision')
     .option('--note <text>', 'Decision note')
     .option('--keep-worktree', 'Do not remove isolated worktrees after integration')
-    .option('--commit', 'Create selected-path Git commit after finish')
+    .option('--no-commit', 'Do not create the required selected-path Git commit after finish')
     .option('--json', 'Output JSON')
     .action((opts: { repo?: string; action: string; runId?: string; issueId?: string; taskId?: string; reviewer?: string; note?: string; keepWorktree?: boolean; commit?: boolean; json?: boolean }) => {
       const action = String(opts.action ?? '').replace(/-/g, '_') as CompletionDecisionAction;
@@ -362,7 +362,7 @@ export function buildControllerCommand(): Command {
         reviewer: opts.reviewer,
         note: opts.note,
         cleanup: opts.keepWorktree !== true,
-        commit: opts.commit === true,
+        commit: opts.commit !== false,
       }), opts.json === true);
     });
 

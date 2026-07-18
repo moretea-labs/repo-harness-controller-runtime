@@ -1,4 +1,5 @@
 import { randomBytes } from 'crypto';
+import { spawnSync } from 'child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join, sep } from 'path';
 import type {
@@ -501,7 +502,7 @@ function refreshReadiness(repoRoot: string, issue: ControllerIssue): void {
     return !state.terminal && !state.inactive;
   });
   if (issue.tasks.length > 0 && issue.tasks.every((task) => refreshedStates.get(task.id)?.effectiveStatus === 'done')) issue.status = 'done';
-  else if (active.some((task) => ['queued', 'running', 'waiting_for_user', 'review', 'integrated', 'verifying', 'changes_requested', 'verified', 'done'].includes(refreshedStates.get(task.id)!.effectiveStatus))) issue.status = 'in_progress';
+  else if (active.some((task) => ['queued', 'running', 'waiting_for_user', 'review', 'verifying', 'ready_to_integrate', 'integrating', 'integration_blocked', 'integrated', 'cleanup_pending', 'cleanup_blocked', 'changes_requested', 'verified', 'done'].includes(refreshedStates.get(task.id)!.effectiveStatus))) issue.status = 'in_progress';
   else {
     const executable = active.some((task) => buildTaskReadiness(repoRoot, issue, task, refreshedStates, {
       approveRisk: true,
@@ -892,6 +893,30 @@ export function acceptVerifiedTask(repoRoot: string, issueIdValue: string, taskI
   if (!task) throw new Error(`task not found: ${issueIdValue}/${taskId}`);
   if (task.status === 'done') return issue;
   if (task.status !== 'verified' || !task.verification) throw new Error(`task must have passed required verification before acceptance (current: ${task.status})`);
+  const integration = task.verification.integrationEvidence;
+  if (!integration?.reachable || !integration.targetBranch.trim() || !integration.targetRevision.trim()) {
+    throw new Error('task completion requires persisted integration evidence with a reachable target revision');
+  }
+  const reachable = spawnSync(
+    'git',
+    ['merge-base', '--is-ancestor', integration.targetRevision, integration.targetBranch],
+    { cwd: repoRoot, encoding: 'utf-8' },
+  );
+  if (reachable.status !== 0 || reachable.error) {
+    throw new Error(`integrated revision ${integration.targetRevision} is not reachable from ${integration.targetBranch}`);
+  }
+  const cleanup = task.verification.cleanupEvidence;
+  const cleanupComplete = cleanup
+    && cleanup.worktreeRemovedOrNotCreated
+    && cleanup.branchDeletedOrRetained
+    && cleanup.leasesReleased
+    && cleanup.runTerminal
+    && cleanup.editSessionClosedOrNotCreated
+    && cleanup.noActiveProcess
+    && cleanup.noDirtyDiff;
+  if (!cleanupComplete) {
+    throw new Error('task completion requires complete cleanup evidence for worktree, branch, leases, Run, edit session, process, and diff');
+  }
   return updateTask(repoRoot, issueIdValue, taskId, { status: 'done', note });
 }
 
@@ -902,7 +927,7 @@ export function recordTaskVerification(repoRoot: string, issueIdValue: string, t
   const taskState = effectiveTaskState(repoRoot, issue, task);
   if (taskState.terminal || taskState.inactive) throw new Error(`task cannot be verified from effective status ${taskState.effectiveStatus}`);
   if (taskState.activeRunIds.length > 0) throw new Error(`task cannot be verified while Run(s) are active: ${taskState.activeRunIds.join(', ')}`);
-  if (!['planned', 'ready', 'launch_blocked', 'review', 'integrated', 'verifying', 'changes_requested', 'verified'].includes(task.status)) {
+  if (!['planned', 'ready', 'launch_blocked', 'review', 'verifying', 'ready_to_integrate', 'integrating', 'integration_blocked', 'integrated', 'cleanup_pending', 'cleanup_blocked', 'changes_requested', 'verified'].includes(task.status)) {
     throw new Error(`task cannot be verified from status ${task.status}`);
   }
   if (!verification.reviewer.trim()) throw new Error('verification reviewer is required');
@@ -920,21 +945,16 @@ export function recordTaskVerification(repoRoot: string, issueIdValue: string, t
   const successful = outcome.ok;
   // Run-backed verification must stop at verified. Integration and cleanup
   // evidence are finalized by the completion orchestrator before Task done.
-  const autoComplete = successful
-    && !verification.runId
-    && policy.autoCompleteAfterSuccessfulRun
-    && !policy.requiresHumanAcceptance;
+  const autoComplete = false;
   const invalidCheckNote = normalizedDeclaredChecks.invalidCheckIds.length > 0
     ? ` Ignored unregistered check id(s): ${normalizedDeclaredChecks.invalidCheckIds.join(', ')}. Invalid check ids are verification infrastructure metadata, not actual check failures.`
     : '';
   verification.autoCompleted = autoComplete;
   return updateTask(repoRoot, issueIdValue, taskId, {
-    status: successful ? (autoComplete ? 'done' : 'verified') : 'changes_requested',
+    status: successful ? 'verified' : 'changes_requested',
     verification,
     note: successful
-      ? autoComplete
-        ? `Verification evidence passed and ${policy.executionClass} policy auto-completed the Task.${invalidCheckNote}`
-        : `Required verification evidence passed; explicit acceptance remains required.${invalidCheckNote}`
+      ? `Required verification evidence passed; integration and cleanup evidence remain required before completion.${invalidCheckNote}`
       : `Verification evidence is incomplete or failed: ${outcome.reasons.join(' ')}${invalidCheckNote}`,
   });
 }

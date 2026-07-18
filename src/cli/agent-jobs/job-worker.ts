@@ -666,7 +666,7 @@ if (currentOwnershipError) {
   process.exit(1);
 }
 const autoFinalizing = ok && config.autoIntegrate && finalMeta.executionMode === "worktree";
-finalMeta.status = ok ? (autoFinalizing ? "running" : "succeeded") : "failed";
+finalMeta.status = ok ? "succeeded" : "failed";
 finalMeta.exitCode = result.code;
 finalMeta.error = error;
 finalMeta.terminationReason = timedOut
@@ -677,8 +677,7 @@ finalMeta.terminationReason = timedOut
       ? "signal"
       : undefined;
 finalMeta.lastHeartbeatAt = finishedAt;
-if (autoFinalizing) delete finalMeta.finishedAt;
-else finalMeta.finishedAt = finishedAt;
+finalMeta.finishedAt = finishedAt;
 finalMeta.progress = {
   phase: autoFinalizing ? "finalizing" : ok ? "completed" : "failed",
   percent: autoFinalizing ? 96 : 100,
@@ -730,118 +729,31 @@ if (ok) {
 if (ok && config.autoIntegrate && finalMeta.executionMode === "worktree") {
   try {
     assertOwnership();
-    updateProgress("finalizing", "正在自动集成 worktree 修改", 96);
-    const [
-      { integrateAgentJob, cleanupIntegratedWorktree, cleanupNoChangeWorktree, taskRunDiff },
-      { getMcpPolicy },
-    ] = await Promise.all([import("./integration"), import("../mcp/policy")]);
-    const archivedDiff = taskRunDiff(
-      finalMeta.repoRoot,
-      finalMeta.runId,
-      1024 * 1024,
-    );
-    const diffArtifactPath = join(
-      dirname(config.metaPath),
-      "worktree-diff.json",
-    );
-    writeFileSync(
-      diffArtifactPath,
-      `${JSON.stringify(archivedDiff, null, 2)}\n`,
-      "utf-8",
-    );
-    const beforeIntegrationMeta = JSON.parse(
-      readFileSync(config.metaPath, "utf-8"),
-    ) as AgentJobMeta;
-    assertOwnership();
-    beforeIntegrationMeta.diffArtifactPath = relative(
-      finalMeta.repoRoot,
-      diffArtifactPath,
-    ).replace(/\\/g, "/");
-    beforeIntegrationMeta.closureState = "integrating";
-    beforeIntegrationMeta.closureUpdatedAt = new Date().toISOString();
-    persistMeta(beforeIntegrationMeta);
-    const noChanges = !archivedDiff.status && !archivedDiff.diff && archivedDiff.untracked.length === 0;
-    if (noChanges) {
-      const cleanup = cleanupNoChangeWorktree(finalMeta.repoRoot, finalMeta.runId);
-      if (cleanup.preserved) throw new Error(cleanup.message ?? "No-change worktree cleanup was preserved.");
-      const noChangeMeta = JSON.parse(readFileSync(config.metaPath, "utf-8")) as AgentJobMeta;
-      const completedAt = new Date().toISOString();
-      noChangeMeta.status = "succeeded";
-      noChangeMeta.changeOutcome = "no_change";
-      noChangeMeta.changedFiles = [];
-      noChangeMeta.finishedAt = completedAt;
-      noChangeMeta.lastHeartbeatAt = completedAt;
-      noChangeMeta.worktreeCleanedAt = completedAt;
-      if (cleanup.branchDeleted) noChangeMeta.cleanupBranchDeletedAt = completedAt;
-      noChangeMeta.closureState = "completed";
-      noChangeMeta.closureUpdatedAt = completedAt;
-      delete noChangeMeta.preservationReason;
-      delete noChangeMeta.preservationDetails;
-      noChangeMeta.progress = {
-        phase: "completed",
-        percent: 100,
-        currentActivity: "工作树无差异；任务已按无变更结果收敛",
-        lastActivityAt: completedAt,
-        activityCount: (noChangeMeta.progress?.activityCount ?? 0) + 1,
-      };
-      persistMeta(noChangeMeta);
-      event("run_worktree_cleaned", "No-change worktree and temporary branch were removed.", { ...cleanup });
-      event("run_succeeded", "Agent completed with no repository changes.", { changeOutcome: "no_change" });
-    } else {
-      const integrated = integrateAgentJob(
-        finalMeta.repoRoot,
-        getMcpPolicy("controller", { repoRoot: finalMeta.repoRoot }),
-        finalMeta.runId,
-      );
-      assertOwnership();
-      event(
-        "run_auto_integrated",
-        integrated.changeOutcome === "already_integrated"
-          ? `Detected ${integrated.changedPaths.length} changed path(s) already integrated into the main workspace.`
-          : `Automatically integrated ${integrated.changedPaths.length} changed path(s).`,
-        {
-          changedPaths: integrated.changedPaths,
-          changeOutcome: integrated.changeOutcome,
-          sessionId: integrated.session.sessionId,
-        },
-      );
-      const cleanup = cleanupIntegratedWorktree(
-        finalMeta.repoRoot,
-        finalMeta.runId,
-      );
-      if (cleanup.preserved) throw new Error(cleanup.message ?? "Integrated worktree cleanup was preserved.");
-      const integratedMeta = JSON.parse(
-        readFileSync(config.metaPath, "utf-8"),
-      ) as AgentJobMeta;
-      const completedAt = new Date().toISOString();
-      integratedMeta.status = "succeeded";
-      integratedMeta.changeOutcome = integrated.changeOutcome;
-      integratedMeta.changedFiles = integrated.changedPaths;
-      integratedMeta.finishedAt = completedAt;
-      integratedMeta.lastHeartbeatAt = completedAt;
-      integratedMeta.worktreeCleanedAt = completedAt;
-      if (cleanup.branchDeleted) integratedMeta.cleanupBranchDeletedAt = completedAt;
-      integratedMeta.closureState = "completed";
-      integratedMeta.closureUpdatedAt = completedAt;
-      delete integratedMeta.preservationReason;
-      delete integratedMeta.preservationDetails;
-      integratedMeta.progress = {
-        phase: "completed",
-        percent: 100,
-        currentActivity: integrated.changeOutcome === "already_integrated"
-          ? "实现已完成；等价修改已在当前工作区中"
-          : "实现已完成并自动集成到当前工作区",
-        lastActivityAt: completedAt,
-        activityCount: (integratedMeta.progress?.activityCount ?? 0) + 1,
-      };
-      persistMeta(integratedMeta);
-      event(
-        "run_worktree_cleaned",
-        "Integrated worktree and temporary branch were removed.",
-        { ...cleanup },
-      );
-      event("run_succeeded", "Agent process, automatic integration, and worktree cleanup completed.");
+    updateProgress("finalizing", "正在通过统一完成执行器集成、验证并清理", 96);
+    const { taskRunDiff } = await import("./integration");
+    const archivedDiff = taskRunDiff(finalMeta.repoRoot, finalMeta.runId, 1024 * 1024);
+    const diffArtifactPath = join(dirname(config.metaPath), "worktree-diff.json");
+    writeFileSync(diffArtifactPath, `${JSON.stringify(archivedDiff, null, 2)}\n`, "utf-8");
+    const beforeCompletionMeta = JSON.parse(readFileSync(config.metaPath, "utf-8")) as AgentJobMeta;
+    beforeCompletionMeta.diffArtifactPath = relative(finalMeta.repoRoot, diffArtifactPath).replace(/\\/g, "/");
+    beforeCompletionMeta.closureState = "ready_to_integrate";
+    beforeCompletionMeta.closureUpdatedAt = new Date().toISOString();
+    persistMeta(beforeCompletionMeta);
+    const { finishTaskRun } = await import("../controller/completion-orchestrator");
+    const completed = finishTaskRun(finalMeta.repoRoot, {
+      runId: finalMeta.runId,
+      decision: "auto",
+      reviewer: "repo-harness-worker-completion-executor",
+    });
+    if (!["finished", "no_change", "already_done"].includes(completed.action)) {
+      throw new Error(completed.reason ?? `Completion executor stopped at ${completed.taskStatus}.`);
     }
+    event("run_auto_integrated", "Unified completion executor integrated, verified, committed, and finalized the Run.", {
+      action: completed.action,
+      changedPaths: completed.changedPaths,
+      changeOutcome: completed.changeOutcome,
+      commitSha: completed.commitSha,
+    });
   } catch (integrationError) {
     const failedMeta = JSON.parse(
       readFileSync(config.metaPath, "utf-8"),
@@ -855,7 +767,7 @@ if (ok && config.autoIntegrate && finalMeta.executionMode === "worktree") {
       integrationError instanceof Error
         ? integrationError.message
         : String(integrationError);
-    failedMeta.closureState = "cleanup_blocked";
+    failedMeta.closureState = failedMeta.integratedSessionId ? "cleanup_blocked" : "integration_blocked";
     failedMeta.closureUpdatedAt = completedAt;
     failedMeta.preservationReason = failedMeta.preservationReason ?? (
       failedMeta.integratedSessionId
@@ -880,7 +792,7 @@ if (ok && config.autoIntegrate && finalMeta.executionMode === "worktree") {
     );
     try {
       updateTask(failedMeta.repoRoot, failedMeta.issueId, failedMeta.taskId, {
-        status: "review",
+        status: failedMeta.integratedSessionId ? "cleanup_blocked" : "integration_blocked",
         note: `Automatic integration failed for ${failedMeta.runId}: ${failedMeta.autoIntegrationError}`,
       });
     } catch (_error) {

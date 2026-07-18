@@ -63,8 +63,13 @@ const ACTIVE_REVIEW_STATUSES = new Set<TaskStatus>([
   'running',
   'blocked',
   'review',
-  'integrated',
   'verifying',
+  'ready_to_integrate',
+  'integrating',
+  'integration_blocked',
+  'integrated',
+  'cleanup_pending',
+  'cleanup_blocked',
   'verified',
   'changes_requested',
 ]);
@@ -116,6 +121,28 @@ function classifyTask(repoRoot: string, issue: ControllerIssue, task: Controller
     runStatus: run?.status,
     executionClass: policy.executionClass,
   };
+
+  if (task.status === 'done') {
+    const integration = task.verification?.integrationEvidence;
+    const cleanup = task.verification?.cleanupEvidence;
+    const evidenceComplete = Boolean(integration?.reachable && integration.targetRevision && cleanup
+      && cleanup.worktreeRemovedOrNotCreated
+      && cleanup.branchDeletedOrRetained
+      && cleanup.leasesReleased
+      && cleanup.runTerminal
+      && cleanup.editSessionClosedOrNotCreated
+      && cleanup.noActiveProcess
+      && cleanup.noDirtyDiff);
+    if (!evidenceComplete) {
+      return {
+        ...base,
+        action: 'system_blocked',
+        reason: 'Task is declared done without complete integration and cleanup evidence; run the stuck-state migration before any new execution.',
+        canAutoFinish: false,
+        suggestedDecision: 'inspect',
+      };
+    }
+  }
 
   if (TERMINAL_TASK_STATUSES.has(task.status)) {
     return { ...base, action: 'already_terminal', reason: `Task is ${task.status}.`, canAutoFinish: false, suggestedDecision: 'inspect' };
@@ -227,7 +254,7 @@ export function finishCompletionBacklog(repoRoot: string, options: FinishComplet
           decision: 'auto',
           reviewer: options.reviewer ?? 'repo-harness-completion-backlog',
           cleanup: options.cleanup !== false,
-          commit: options.commit === true,
+          commit: options.commit !== false,
         }));
       } catch (error) {
         errors.push({ runId: item.runId!, error: error instanceof Error ? error.message : String(error) });
@@ -321,7 +348,7 @@ export function applyCompletionDecision(repoRoot: string, options: ApplyCompleti
         decision,
         reviewer,
         note: options.note,
-        commit: options.commit === true,
+        commit: options.commit !== false,
         cleanup: options.cleanup !== false,
       }),
     };

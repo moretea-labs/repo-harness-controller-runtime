@@ -1876,7 +1876,7 @@ export async function startLocalBridgeServer(
       const result = finishCompletionBacklog(repoRoot, {
         dryRun: request.body?.apply !== true,
         limit: typeof request.body?.limit === "number" ? request.body.limit : undefined,
-        commit: request.body?.commit === true,
+        commit: request.body?.commit !== false,
         cleanup: request.body?.keepWorktree !== true,
         reviewer: queryString(request.body?.reviewer) ?? "local-bridge-completion",
       });
@@ -1896,7 +1896,7 @@ export async function startLocalBridgeServer(
         taskId: queryString(request.body?.taskId) ?? queryString(request.body?.task_id),
         reviewer: queryString(request.body?.reviewer) ?? "local-bridge-completion",
         note: queryString(request.body?.note),
-        commit: request.body?.commit === true,
+        commit: request.body?.commit !== false,
         cleanup: request.body?.keepWorktree !== true,
       });
       localSnapshotCache.delete(repoRoot);
@@ -2950,7 +2950,7 @@ export async function startLocalBridgeServer(
         reviewer: queryString(request.body?.reviewer) ?? "local-bridge-completion",
         note: queryString(request.body?.note),
         cleanup: request.body?.keepWorktree !== true,
-        commit: request.body?.commit === true,
+        commit: request.body?.commit !== false,
       });
       localSnapshotCache.delete(repoRoot);
       response.json(result);

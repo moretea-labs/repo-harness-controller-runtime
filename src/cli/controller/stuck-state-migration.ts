@@ -1,6 +1,6 @@
 import { getAgentJob } from '../agent-jobs/job-manager';
 import { inspectCompletionBacklog, type CompletionBacklogItem } from './completion-backlog';
-import { getIssue, listIssues, updateTask } from './issue-store';
+import { getIssue, listIssues, updateIssue, updateTask } from './issue-store';
 import type { ControllerIssue, ControllerTask } from './types';
 
 export type StuckStateKind =
@@ -10,7 +10,12 @@ export type StuckStateKind =
   | 'review_without_run'
   | 'blocked_without_run'
   | 'running_without_active_run'
-  | 'terminal_with_open_issue';
+  | 'terminal_with_open_issue'
+  | 'false_completed'
+  | 'pending_integration'
+  | 'integration_blocked'
+  | 'cleanup_pending'
+  | 'cleanup_blocked';
 
 export interface StuckStateFinding {
   kind: StuckStateKind;
@@ -20,7 +25,7 @@ export interface StuckStateFinding {
   taskStatus: string;
   runId?: string;
   runStatus?: string;
-  safeAutomaticAction: 'finish' | 'note_only' | 'none';
+  safeAutomaticAction: 'finish' | 'reopen' | 'note_only' | 'none';
   reason: string;
 }
 
@@ -57,6 +62,11 @@ const ZERO_COUNTS: Record<StuckStateKind, number> = {
   blocked_without_run: 0,
   running_without_active_run: 0,
   terminal_with_open_issue: 0,
+  false_completed: 0,
+  pending_integration: 0,
+  integration_blocked: 0,
+  cleanup_pending: 0,
+  cleanup_blocked: 0,
 };
 
 function countFindings(findings: StuckStateFinding[]): Record<StuckStateKind, number> {
@@ -66,6 +76,7 @@ function countFindings(findings: StuckStateFinding[]): Record<StuckStateKind, nu
 }
 
 function backlogFinding(item: CompletionBacklogItem): StuckStateFinding | undefined {
+  if (['ready_to_integrate', 'integration_blocked', 'cleanup_pending', 'cleanup_blocked'].includes(item.taskStatus)) return undefined;
   if (item.action === 'auto_finish') return {
     kind: 'finishable_run',
     issueId: item.issueId,
@@ -110,17 +121,20 @@ function backlogFinding(item: CompletionBacklogItem): StuckStateFinding | undefi
     safeAutomaticAction: 'note_only',
     reason: item.reason,
   };
-  if (item.action === 'system_blocked') return {
-    kind: 'blocked_without_run',
-    issueId: item.issueId,
-    taskId: item.taskId,
-    title: item.title,
-    taskStatus: item.taskStatus,
-    runId: item.runId,
-    runStatus: item.runStatus,
-    safeAutomaticAction: 'note_only',
-    reason: item.reason,
-  };
+  if (item.action === 'system_blocked') {
+    if (item.taskStatus === 'done') return undefined;
+    return {
+      kind: 'blocked_without_run',
+      issueId: item.issueId,
+      taskId: item.taskId,
+      title: item.title,
+      taskStatus: item.taskStatus,
+      runId: item.runId,
+      runStatus: item.runStatus,
+      safeAutomaticAction: 'note_only',
+      reason: item.reason,
+    };
+  }
   return undefined;
 }
 
@@ -138,6 +152,68 @@ function latestRunIsActive(repoRoot: string, task: ControllerTask): boolean {
 
 function extraFindings(repoRoot: string, issue: ControllerIssue, task: ControllerTask): StuckStateFinding[] {
   const findings: StuckStateFinding[] = [];
+  if (['ready_to_integrate', 'integration_blocked', 'cleanup_pending', 'cleanup_blocked'].includes(task.status)) {
+    const kind: StuckStateKind = task.status === 'ready_to_integrate' ? 'pending_integration'
+      : task.status === 'cleanup_pending' ? 'cleanup_pending'
+        : task.status === 'cleanup_blocked' ? 'cleanup_blocked'
+          : 'integration_blocked';
+    let run;
+    for (const runId of [...task.runIds].reverse()) {
+      try { run = getAgentJob(repoRoot, runId); break; }
+      catch (_error) { /* keep scanning */ }
+    }
+    findings.push({
+      kind,
+      issueId: issue.id,
+      taskId: task.id,
+      title: task.title,
+      taskStatus: task.status,
+      runId: run?.runId,
+      runStatus: run?.status,
+      safeAutomaticAction: 'none',
+      reason: `Task is explicitly ${task.status}; preserve its evidence and resolve this lifecycle blocker before new overlapping work.`,
+    });
+  }
+  if (task.status === 'done') {
+    const cleanup = task.verification?.cleanupEvidence;
+    const integration = task.verification?.integrationEvidence;
+    const complete = Boolean(integration?.reachable && integration.targetRevision && cleanup
+      && cleanup.worktreeRemovedOrNotCreated
+      && cleanup.branchDeletedOrRetained
+      && cleanup.leasesReleased
+      && cleanup.runTerminal
+      && cleanup.editSessionClosedOrNotCreated
+      && cleanup.noActiveProcess
+      && cleanup.noDirtyDiff);
+    if (!complete) {
+      let run;
+      for (const runId of [...task.runIds].reverse()) {
+        try { run = getAgentJob(repoRoot, runId); break; }
+        catch (_error) { /* keep scanning */ }
+      }
+      const closure = run?.closureState;
+      const kind: StuckStateKind = closure === 'cleanup_blocked' || closure === 'preserved' && Boolean(run?.integratedSessionId)
+        ? 'cleanup_blocked'
+        : closure === 'cleanup_pending' || closure === 'cleaning' || closure === 'integrated'
+          ? 'cleanup_pending'
+          : closure === 'integration_blocked' || closure === 'preserved'
+            ? 'integration_blocked'
+            : closure === 'ready_to_integrate' || closure === 'integration_pending' || closure === 'integrating'
+              ? 'pending_integration'
+              : 'false_completed';
+      findings.push({
+        kind,
+        issueId: issue.id,
+        taskId: task.id,
+        title: task.title,
+        taskStatus: task.status,
+        runId: run?.runId,
+        runStatus: run?.status,
+        safeAutomaticAction: 'reopen',
+        reason: `Task is declared done without complete integration and cleanup evidence${closure ? `; latest Run closure is ${closure}` : ''}.`,
+      });
+    }
+  }
   if (task.status === 'running' && !latestRunIsActive(repoRoot, task)) {
     findings.push({
       kind: 'running_without_active_run',
@@ -179,6 +255,8 @@ export function inspectStuckControllerStates(repoRoot: string, options: { limit?
   if (counts.finishable_run) recommendations.push(`Run controller finish-ready-runs --apply to close ${counts.finishable_run} safe completed Run(s).`);
   if (counts.manual_review_required) recommendations.push(`${counts.manual_review_required} high-risk Run(s) require explicit user decision in Local Bridge or finish-run --decision.`);
   if (counts.retry_required) recommendations.push(`${counts.retry_required} failed/cancelled Run(s) should be retried or marked changes_requested with a reason.`);
+  const falseTerminal = counts.false_completed + counts.pending_integration + counts.integration_blocked + counts.cleanup_pending + counts.cleanup_blocked;
+  if (falseTerminal) recommendations.push(`${falseTerminal} Task(s) require explicit integration or cleanup resolution; use migrate-stuck-states --apply only for entries still declared done.`);
   if (counts.review_without_run || counts.running_without_active_run) recommendations.push('Use controller migrate-stuck-states --apply to annotate stale review/running states before retrying them.');
   return { scannedAt: new Date().toISOString(), counts, findings: trimmed, recommendations };
 }
@@ -187,7 +265,7 @@ export function applyStuckStateMigration(repoRoot: string, options: ApplyStuckSt
   const report = inspectStuckControllerStates(repoRoot, { limit: options.limit ?? 100 });
   const dryRun = options.dryRun !== false;
   const reviewer = options.reviewer?.trim() || 'repo-harness-stuck-state-migration';
-  const selected = report.findings.filter((finding) => finding.safeAutomaticAction === 'note_only');
+  const selected = report.findings.filter((finding) => ['note_only', 'reopen'].includes(finding.safeAutomaticAction));
   let applied = 0;
   let skipped = 0;
   const errors: Array<{ issueId: string; taskId: string; error: string }> = [];
@@ -196,7 +274,16 @@ export function applyStuckStateMigration(repoRoot: string, options: ApplyStuckSt
       try {
         getIssue(repoRoot, finding.issueId);
         const note = `${reviewer}: ${finding.kind} inspected. ${finding.reason}`;
-        if (finding.kind === 'retry_required' && options.markRetryRequired === true) {
+        if (finding.safeAutomaticAction === 'reopen') {
+          const currentIssue = getIssue(repoRoot, finding.issueId);
+          if (currentIssue.status === 'done') updateIssue(repoRoot, finding.issueId, { status: 'in_progress' });
+          const status = finding.kind === 'cleanup_blocked' ? 'cleanup_blocked'
+            : finding.kind === 'cleanup_pending' ? 'cleanup_pending'
+              : finding.kind === 'integration_blocked' ? 'integration_blocked'
+                : finding.kind === 'pending_integration' ? 'ready_to_integrate'
+                  : 'integration_blocked';
+          updateTask(repoRoot, finding.issueId, finding.taskId, { status, note, transition: 'restore' });
+        } else if (finding.kind === 'retry_required' && options.markRetryRequired === true) {
           updateTask(repoRoot, finding.issueId, finding.taskId, { status: 'changes_requested', note });
         } else if ((finding.kind === 'review_without_run' || finding.kind === 'running_without_active_run' || finding.kind === 'blocked_without_run') && options.markNoRunEvidence === true) {
           updateTask(repoRoot, finding.issueId, finding.taskId, { status: 'changes_requested', note });
