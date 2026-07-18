@@ -35,7 +35,7 @@ async function waitForHealth(port: number): Promise<void> {
   throw new Error('MCP HTTP server did not become healthy');
 }
 
-function initializeBody(): string {
+function initializeBody(clientName = 'repo-harness-test'): string {
   return JSON.stringify({
     jsonrpc: '2.0',
     id: 1,
@@ -43,7 +43,7 @@ function initializeBody(): string {
     params: {
       protocolVersion: '2024-11-05',
       capabilities: {},
-      clientInfo: { name: 'repo-harness-test', version: '0' },
+      clientInfo: { name: clientName, version: '0' },
     },
   });
 }
@@ -164,6 +164,215 @@ describe('mcp http transport', () => {
         await Bun.sleep(100);
         const closedStreamHealth = await fetch(`http://127.0.0.1:${port}/health`).then((response) => response.json());
         expect(closedStreamHealth.sessions.activeStreams).toBe(0);
+
+        const deleted = await fetch(`http://127.0.0.1:${port}/mcp`, {
+          method: 'DELETE',
+          headers: {
+            authorization: `Bearer ${token}`,
+            'mcp-session-id': sessionId!,
+          },
+        });
+        expect(deleted.status).toBe(200);
+        await Bun.sleep(25);
+        const deletedHealth = await fetch(`http://127.0.0.1:${port}/health`).then((response) => response.json());
+        expect(deletedHealth.sessions).toMatchObject({
+          active: 0,
+          capacityAvailable: 64,
+          acceptingNewSessions: true,
+          closed: { clientDelete: 1 },
+        });
+      });
+    } finally {
+      await stopMcpServerProcess(proc);
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('bounds 500 real reconnect cycles without applying the OAuth principal quota to shared bearer clients', async () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), 'repo-harness-mcp-reconnect-'));
+    const port = await freePort();
+    let proc: Bun.Subprocess<'ignore', 'ignore', 'pipe'> | null = null;
+    try {
+      await withTestControllerHome(repoRoot, async (controllerHome) => {
+        mkdirSync(join(repoRoot, '.ai/harness'), { recursive: true });
+        writeFileSync(join(repoRoot, '.ai/harness/policy.json'), '{}\n');
+        runMcpSetupChatgpt({ repo: repoRoot, port: String(port) });
+        const token = (await Bun.file(mcpControllerHomeTokenPath(controllerHome)).json()).bearerToken;
+
+        proc = Bun.spawn(
+          ['bun', 'src/cli/index.ts', 'mcp', 'serve', '--repo', repoRoot, '--transport', 'http', '--host', '127.0.0.1', '--port', String(port), '--profile', 'planner', '--auth', 'bearer'],
+          {
+            cwd: process.cwd(),
+            stdout: 'ignore',
+            stderr: 'pipe',
+            env: {
+              ...process.env,
+              REPO_HARNESS_CONTROLLER_HOME: controllerHome,
+              REPO_HARNESS_MCP_MAX_SESSIONS: '16',
+              REPO_HARNESS_MCP_MAX_SESSIONS_PER_PRINCIPAL: '2',
+              REPO_HARNESS_MCP_MAX_INITIALIZING_SESSIONS: '32',
+            },
+          },
+        );
+        await waitForHealth(port);
+
+        const burst = await Promise.all(Array.from({ length: 32 }, async (_, index) => {
+          const response = await fetch(`http://127.0.0.1:${port}/mcp`, {
+            method: 'POST',
+            headers: {
+              authorization: `Bearer ${token}`,
+              'content-type': 'application/json',
+              accept: 'application/json, text/event-stream',
+            },
+            body: initializeBody(`burst-${index}`),
+          });
+          await response.body?.cancel().catch(() => undefined);
+          return response.status;
+        }));
+        expect(burst.filter((status) => status === 200).length).toBeGreaterThanOrEqual(9);
+        expect(burst.every((status) => status === 200 || status === 503)).toBe(true);
+        const burstHealth = await fetch(`http://127.0.0.1:${port}/health`).then((response) => response.json());
+        expect(burstHealth.sessions.active).toBeLessThanOrEqual(16);
+        expect(burstHealth.sessions.closed.principalCapacity).toBe(0);
+
+        for (let cycle = 0; cycle < 500; cycle += 1) {
+          const initialized = await fetch(`http://127.0.0.1:${port}/mcp`, {
+            method: 'POST',
+            headers: {
+              authorization: `Bearer ${token}`,
+              'content-type': 'application/json',
+              accept: 'application/json, text/event-stream',
+            },
+            body: initializeBody(`reconnect-${cycle}`),
+          });
+          expect(initialized.status).toBe(200);
+          const sessionId = initialized.headers.get('mcp-session-id');
+          expect(sessionId).toBeTruthy();
+          await initialized.body?.cancel().catch(() => undefined);
+
+          const streamController = new AbortController();
+          const stream = await fetch(`http://127.0.0.1:${port}/mcp`, {
+            headers: {
+              authorization: `Bearer ${token}`,
+              'mcp-session-id': sessionId!,
+              accept: 'text/event-stream',
+            },
+            signal: streamController.signal,
+          });
+          expect(stream.status).toBe(200);
+          streamController.abort();
+          await stream.body?.cancel().catch(() => undefined);
+
+        }
+
+        await Bun.sleep(50);
+        const health = await fetch(`http://127.0.0.1:${port}/health`).then((response) => response.json());
+        expect(health.sessions.active).toBeLessThanOrEqual(16);
+        expect(health.sessions.acceptingNewSessions).toBe(true);
+
+        const finalInitialize = await fetch(`http://127.0.0.1:${port}/mcp`, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${token}`,
+            'content-type': 'application/json',
+            accept: 'application/json, text/event-stream',
+          },
+          body: initializeBody('post-storm'),
+        });
+        expect(finalInitialize.status).toBe(200);
+        await finalInitialize.body?.cancel().catch(() => undefined);
+      });
+    } finally {
+      await stopMcpServerProcess(proc);
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test('shares capacity across all MCP routes and evicts a stale session instead of rejecting reconnect', async () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), 'repo-harness-mcp-capacity-'));
+    const port = await freePort();
+    let proc: Bun.Subprocess<'ignore', 'ignore', 'pipe'> | null = null;
+    try {
+      await withTestControllerHome(repoRoot, async (controllerHome) => {
+        mkdirSync(join(repoRoot, '.ai/harness'), { recursive: true });
+        writeFileSync(join(repoRoot, '.ai/harness/policy.json'), '{}\n');
+        runMcpSetupChatgpt({ repo: repoRoot, port: String(port) });
+        const token = (await Bun.file(mcpControllerHomeTokenPath(controllerHome)).json()).bearerToken;
+
+        proc = Bun.spawn(
+          [
+            'bun',
+            'src/cli/index.ts',
+            'mcp',
+            'serve',
+            '--repo',
+            repoRoot,
+            '--transport',
+            'http',
+            '--host',
+            '127.0.0.1',
+            '--port',
+            String(port),
+            '--profile',
+            'planner',
+            '--auth',
+            'bearer',
+          ],
+          {
+            cwd: process.cwd(),
+            stdout: 'ignore',
+            stderr: 'pipe',
+            env: {
+              ...process.env,
+              REPO_HARNESS_CONTROLLER_HOME: controllerHome,
+              REPO_HARNESS_MCP_MAX_SESSIONS: '2',
+              REPO_HARNESS_MCP_MAX_SESSIONS_PER_PRINCIPAL: '2',
+            },
+          },
+        );
+        await waitForHealth(port);
+
+        const initialize = async (route: '/mcp' | '/mcp-grok' | '/mcp-bearer', clientName: string): Promise<string> => {
+          const response = await fetch(`http://127.0.0.1:${port}${route}`, {
+            method: 'POST',
+            headers: {
+              authorization: `Bearer ${token}`,
+              'content-type': 'application/json',
+              accept: 'application/json, text/event-stream',
+            },
+            body: initializeBody(clientName),
+          });
+          expect(response.status).toBe(200);
+          await response.body?.cancel().catch(() => undefined);
+          const sessionId = response.headers.get('mcp-session-id');
+          expect(sessionId).toBeTruthy();
+          return sessionId!;
+        };
+
+        const oldestSessionId = await initialize('/mcp', 'client-a');
+        await initialize('/mcp-grok', 'client-b');
+        await initialize('/mcp-bearer', 'client-c');
+
+        const health = await fetch(`http://127.0.0.1:${port}/health`).then((response) => response.json());
+        expect(health.sessions).toMatchObject({
+          active: 2,
+          maximum: 2,
+          capacityAvailable: 0,
+          acceptingNewSessions: true,
+        });
+        expect(health.sessions.closed.principalCapacity + health.sessions.closed.capacityEviction).toBe(1);
+
+        const evicted = await fetch(`http://127.0.0.1:${port}/mcp`, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${token}`,
+            'mcp-session-id': oldestSessionId,
+            'content-type': 'application/json',
+            accept: 'application/json, text/event-stream',
+          },
+          body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+        });
+        expect(evicted.status).toBe(404);
       });
     } finally {
       await stopMcpServerProcess(proc);

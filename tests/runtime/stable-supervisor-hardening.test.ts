@@ -7,9 +7,10 @@ import { bootstrapLaunchAgentWithRetry } from '../../src/cli/controller/launch-a
 import { supervisorActivationMatchesRelease } from '../../src/cli/commands/supervisor';
 import { installSupervisorRelease, renderLaunchdSupervisorPlist, renderSystemdSupervisorUnit, supervisorServiceLabel, supervisorSystemdUnitName } from '../../src/runtime/supervisor/installer';
 import { createStableIngressRouter } from '../../src/runtime/supervisor/ingress-router';
+import { createStableIngressProcess } from '../../src/runtime/supervisor/ingress-process';
 import { controllerDaemonMaxLifetimeMs } from '../../src/runtime/control-plane/daemon-entry';
 import { createSupervisorOperation, readSupervisorOperation, updateSupervisorOperation } from '../../src/runtime/supervisor/operation-store';
-import { SUPERVISOR_GATEWAY_HEALTH_FAILURE_THRESHOLD, automaticRecoveryRequestId, managedProcessNeedsReleaseRefresh, probeSupervisorGatewayHealth, reconcileActiveManagedGenerations, reconcileSupervisorStateWithAuthority, supervisorGatewayHealthDecision, terminalizeInterruptedSupervisorOperations } from '../../src/runtime/supervisor/supervisor-runtime';
+import { StableSupervisorRuntime, SUPERVISOR_GATEWAY_HEALTH_FAILURE_THRESHOLD, automaticRecoveryRequestId, managedProcessNeedsReleaseRefresh, probeSupervisorGatewayHealth, reconcileActiveManagedGenerations, reconcileSupervisorStateWithAuthority, supervisorGatewayHealthDecision, terminalizeInterruptedSupervisorOperations } from '../../src/runtime/supervisor/supervisor-runtime';
 import { decideRestart, newRestartBudgetRecord, recordFailure, recordRestart, recordStable } from '../../src/runtime/supervisor/restart-policy';
 import { SupervisorProcessManager } from '../../src/runtime/supervisor/process-manager';
 import { writeMcpServiceLocalConfig } from '../../src/cli/mcp/auth';
@@ -120,6 +121,14 @@ describe('Stable Supervisor production hardening', () => {
       response.writeHead(503, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ status: 'degraded' }));
     });
+    const busy = await listen((_request, response) => {
+      response.writeHead(503, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ ready: false, sessionCapacity: { acceptingNewSessions: false, recoveryRecommended: false } }));
+    });
+    const stalled = await listen((_request, response) => {
+      response.writeHead(503, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ ready: false, sessionCapacity: { acceptingNewSessions: false, recoveryRecommended: true } }));
+    });
 
     expect(await probeSupervisorGatewayHealth(`http://127.0.0.1:${healthy.port}/health`)).toEqual({
       healthy: true,
@@ -130,6 +139,16 @@ describe('Stable Supervisor production hardening', () => {
     expect(unhealthy.healthy).toBe(false);
     expect(unhealthy.statusCode).toBe(503);
     expect(unhealthy.detail).toContain('status=503');
+    expect(await probeSupervisorGatewayHealth(`http://127.0.0.1:${busy.port}/ready`)).toMatchObject({
+      healthy: true,
+      ready: false,
+      recoveryRecommended: false,
+    });
+    expect(await probeSupervisorGatewayHealth(`http://127.0.0.1:${stalled.port}/ready`)).toMatchObject({
+      healthy: true,
+      ready: false,
+      recoveryRecommended: true,
+    });
     expect(SUPERVISOR_GATEWAY_HEALTH_FAILURE_THRESHOLD).toBe(9);
     let failures = 0;
     for (let attempt = 1; attempt < SUPERVISOR_GATEWAY_HEALTH_FAILURE_THRESHOLD; attempt += 1) {
@@ -144,6 +163,79 @@ describe('Stable Supervisor production hardening', () => {
       consecutiveFailures: 0,
       shouldRecover: false,
     });
+  });
+
+  test('Supervisor serializes monitor ticks so ingress recovery cannot overlap', async () => {
+    const controllerHome = mkdtempSync(join(tmpdir(), 'repo-harness-monitor-serialization-'));
+    try {
+      const runtime = new StableSupervisorRuntime({
+        repoRoot: process.cwd(),
+        controllerHome,
+        runtimeSourceRoot: process.cwd(),
+        ownerEpoch: 1,
+        logPath: join(controllerHome, 'supervisor.log'),
+      });
+      const internal = runtime as unknown as {
+        monitorTick: () => Promise<void>;
+        scheduleMonitorTick: () => void;
+        monitorPromise?: Promise<void>;
+      };
+      let releaseFirst!: () => void;
+      let runs = 0;
+      internal.monitorTick = async () => {
+        runs += 1;
+        if (runs === 1) await new Promise<void>((resolve) => { releaseFirst = resolve; });
+      };
+
+      internal.scheduleMonitorTick();
+      internal.scheduleMonitorTick();
+      await Bun.sleep(0);
+      expect(runs).toBe(1);
+      releaseFirst();
+      await internal.monitorPromise;
+      await Bun.sleep(0);
+
+      internal.scheduleMonitorTick();
+      await internal.monitorPromise;
+      expect(runs).toBe(2);
+    } finally {
+      rmSync(controllerHome, { recursive: true, force: true });
+    }
+  });
+
+  test('stable ingress data plane runs in a supervised process separate from lifecycle control', async () => {
+    const controllerHome = mkdtempSync(join(tmpdir(), 'repo-harness-ingress-process-'));
+    const main = await listen((_request, response) => {
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify({ status: 'ok', source: 'isolated-main' }));
+    });
+    const rescue = await listen((request, response) => {
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify({ status: 'ok', path: request.url }));
+    });
+    const ingress = await createStableIngressProcess({
+      executable: join(process.cwd(), 'src/runtime/supervisor/entry.ts'),
+      repoRoot: process.cwd(),
+      controllerHome,
+      host: '127.0.0.1',
+      port: 0,
+      rescueHost: '127.0.0.1',
+      rescuePort: rescue.port,
+      blueUpstreamPort: main.port,
+      greenUpstreamPort: main.port,
+    });
+    try {
+      expect(ingress.pid).not.toBe(process.pid);
+      expect(ingress.alive()).toBe(true);
+      const health = await fetch(`http://127.0.0.1:${ingress.port}/health`).then((response) => response.json()) as { source?: string };
+      expect(health.source).toBe('isolated-main');
+      const rescueHealth = await fetch(`http://127.0.0.1:${ingress.port}/rescue/health`).then((response) => response.json()) as { path?: string };
+      expect(rescueHealth.path).toBe('/health');
+    } finally {
+      await ingress.close();
+      rmSync(controllerHome, { recursive: true, force: true });
+    }
+    expect(ingress.alive()).toBe(false);
   });
 
   test('temporary harness daemons self-expire while production homes do not', () => {

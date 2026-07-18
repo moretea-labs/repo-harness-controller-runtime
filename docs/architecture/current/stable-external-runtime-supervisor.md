@@ -12,7 +12,7 @@ The runtime topology is:
 launchd / systemd
         |
 Stable Supervisor
-        +-- stable loopback ingress (configured public MCP port)
+        +-- isolated ingress child (configured public MCP port)
         +-- loopback control + Rescue MCP
         +-- active Controller Daemon
         +-- active Gateway Host / KeepAlive
@@ -20,7 +20,9 @@ Stable Supervisor
                 +-- embedded Local Controller
 ```
 
-The stable ingress owns the public local binding, normally `127.0.0.1:8765`. Active Gateway Hosts bind private slot backends (`8785` for blue and `8795` for green by default) and run with `--tunnel none`. An operator-managed named tunnel therefore continues to target one stable local port while Gateway Hosts restart or slots change. Recovery routes are served independently of the active Gateway at `/rescue/mcp` and `/rescue/health`; ordinary paths proxy to the active slot selected by the existing `active-slot.json` authority.
+The stable ingress child owns the public local binding, normally `127.0.0.1:8765`, in an event loop separate from the Supervisor lifecycle parent. Active Gateway Hosts bind private slot backends (`8785` for blue and `8795` for green by default) and run with `--tunnel none`. An operator-managed named tunnel therefore continues to target one stable local port while Gateway Hosts restart or slots change. Recovery routes are served independently of the active Gateway at `/rescue/mcp` and `/rescue/health`; ordinary paths proxy to the active slot selected by the existing `active-slot.json` authority.
+
+The ingress child is launched from the same immutable `supervisor.js` bundle, reports readiness to its parent over IPC, reads active-slot authority on each request, and exits on parent disconnect or parent PID loss. The parent monitors and recreates the child. Long-lived SSE sockets therefore cannot block control, durable recovery operations, or Supervisor monitoring.
 
 The Supervisor persists its epoch, process identities, desired/observed state, active and standby child identities, slot/generation projections, durable operation phases, restart budgets, ingress status, and incidents under `<controllerHome>/supervisor/`. `runtime-generation.json` in each managed Controller Home and root `active-slot.json` remain canonical. Supervisor state is a recovery projection, not a competing authority.
 
@@ -38,7 +40,7 @@ launchd uses `KeepAlive.SuccessfulExit=false`, and systemd uses `Restart=on-fail
 
 Restart, rollout, rollback, and lockout recovery are persisted before mutation. Reusing a request ID returns the original operation. If the Supervisor itself restarts, operations that were merely accepted or scheduled remain eligible to run, while operations interrupted after mutation began are terminalized as explicit failures rather than blindly replayed.
 
-Restart attempts use component- and generation-scoped persistent budgets, bounded backoff, jitter, a stable reset window, and lockout. Business readiness, projection age, WorkContract state, plugin state, and historical incidents are not top-level restart triggers. The Gateway Host's existing KeepAlive remains responsible for bounded MCP health recovery.
+Restart attempts use component- and generation-scoped persistent budgets, bounded backoff, jitter, a stable reset window, and lockout. Business readiness, projection age, WorkContract state, plugin state, and historical incidents are not top-level restart triggers. Structured Gateway readiness may mark the runtime degraded without authorizing restart. The Gateway is restart-eligible only after liveness loss or an explicit bounded recovery recommendation, such as protected session saturation exceeding the active-POST stall limit. The Gateway Host's existing KeepAlive remains responsible for bounded MCP health recovery.
 
 ## Rescue MCP and ChatGPT paths
 

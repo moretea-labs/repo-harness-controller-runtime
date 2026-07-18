@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "capabilities": [
+    {
+      "id": "mcp-http-transport-lifecycle",
+      "domain": "controller-runtime",
+      "name": "transport-lifecycle",
+      "prefixes": [
+        "src/cli/mcp/transports"
+      ],
+      "contract_files": {
+        "agents": "src/cli/mcp/transports/AGENTS.md",
+        "claude": "src/cli/mcp/transports/CLAUDE.md"
+      },
+      "architecture_module": "docs/architecture/modules/controller-runtime/transport-lifecycle.md",
+      "workstream_dir": "tasks/workstreams/controller-runtime/transport-lifecycle",
+      "lsp_profile": "typescript-lsp",
+      "verification_hints": [
+        "bun test tests/unit/fix-mcp-session-lifecycle.test.ts tests/cli/mcp-http.test.ts"
+      ]
+    },
+    {
+      "id": "stable-runtime-supervisor",
+      "domain": "controller-runtime",
+      "name": "stable-supervisor",
+      "prefixes": [
+        "src/runtime/supervisor"
+      ],
+      "contract_files": {
+        "agents": "src/runtime/supervisor/AGENTS.md",
+        "claude": "src/runtime/supervisor/CLAUDE.md"
+      },
+      "architecture_module": "docs/architecture/modules/controller-runtime/stable-supervisor.md",
+      "workstream_dir": "tasks/workstreams/controller-runtime/stable-supervisor",
+      "lsp_profile": "typescript-lsp",
+      "verification_hints": [
+        "bun test tests/runtime/stable-supervisor-hardening.test.ts tests/runtime/stable-supervisor-integration.test.ts"
+      ]
+    }
+  ]
+}

@@ -314,6 +314,18 @@ MUST NOT:
 
 Primary implementation: `src/runtime/control-plane/runtime-generation.ts`, with shared consumers in MCP `rh_status`, CLI `controllerServiceStatus`, Local Bridge access state, keepalive, and daemon start.
 
+## Invariant 27 — Transport Connectivity Is Not Execution Ownership
+
+**Current Implementation — MUST**
+
+An MCP SSE stream is a replaceable transport lease. It MUST NOT retain session capacity indefinitely and MUST NOT be treated as proof that durable work is still executing.
+
+- `/mcp`, `/mcp-grok`, and `/mcp-bearer` MUST share one global session-capacity authority.
+- Client DELETE, explicit prior-session replacement, bounded stream lease, absolute lifetime, and capacity pressure MAY close a session that has no active POST.
+- Session-capacity management MUST NOT evict a session with active POST work.
+- Closing a transport MUST NOT cancel a durably accepted Job.
+- Liveness and admission readiness MUST remain separate signals.
+
 ## Review Use
 
 Every architecture-sensitive Task should cite the invariants it affects. Verification should include a statement that the resulting implementation preserves them or an accepted ADR that changes them.

@@ -10,6 +10,9 @@ repo-harness Controller Runtime is an Agent Engineering Control Plane for one or
 
 ```text
 Client
+  -> isolated stable ingress child (public loopback HTTP data plane)
+       |
+       v
   -> repo-harness-gateway (MCP HTTP/stdio)
        auth / schema / repository routing / hot projections / durable acknowledgement
        |
@@ -36,6 +39,8 @@ Client
 
 The processes communicate through atomic file-backed state. Gateway restart does not cancel accepted Jobs. Worker exit does not take down Gateway or Daemon. Daemon restart persists `starting`, rebuilds durable indexes and projections, reconciles Jobs, Local Jobs and Leases, and publishes `ready` only after bounded startup recovery returns. Partial recovery publishes structured degraded state instead of silently claiming health.
 
+The Stable Supervisor lifecycle parent owns control and recovery decisions, while a supervised ingress child owns long-lived public proxy sockets. This data-plane/control-plane split prevents SSE connection count from sharing the lifecycle owner's event loop. The child reads `active-slot.json` for each request and exits when its parent identity disappears.
+
 ## 3. Thin Gateway
 
 Implemented under:
@@ -48,6 +53,8 @@ Implemented under:
 The Gateway performs authentication, schema validation, repository selection, compact reads and Job admission. Mutating or potentially long legacy tools are converted to `ExecutionJob` records and acknowledged immediately. It does not start an Agent or wait for a full check in the HTTP request stack.
 
 Bounded direct reads include health, Controller context, Job/Run status and bounded logs. Overload is rejected with explicit 429/503 responses instead of unbounded accumulation.
+
+The three MCP HTTP paths share one global session registry. SSE streams are bounded transport leases, not work ownership. Client DELETE, explicit prior-session replacement, lease expiry, absolute lifetime and oldest-safe capacity eviction may close a session with no active POST; capacity management never evicts active POST work. `/health` reports the global pool, while `/ready` reports whether a new initialize can be admitted safely.
 
 ## 4. Global Control Plane
 

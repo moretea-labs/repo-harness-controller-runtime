@@ -101,6 +101,10 @@ The following domain pages describe the earlier repo-local workflow-harness arch
 - (none)
 <!-- END ARCHITECTURE PENDING REQUESTS -->
 
+## Accepted Architecture Decisions
+
+- [MCP Session Lifecycle and Stable Ingress Isolation](decisions/20260718-mcp-session-lifecycle-and-ingress-isolation.md) — one global transport-capacity authority, bounded stream leases, capacity-aware readiness, and a supervised ingress child process.
+
 ## Review Backlog
 
 - Continue converging P0 runtime behavior with the gaps recorded in `current/implementation-status.md`.

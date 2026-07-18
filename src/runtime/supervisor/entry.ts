@@ -2,12 +2,14 @@
 import { dirname, join, resolve } from 'path';
 import { existsSync } from 'fs';
 import { ensureControllerHome } from '../../cli/repositories/controller-home';
+import { readActiveSlotAuthority } from '../../cli/controller/runtime-slots';
 import { resolveMcpRepoRoot } from '../../cli/mcp/repo';
 import { resolveControllerRuntimeSourceRoot } from '../control-plane/runtime-generation';
 import { acquireSupervisorLock } from './lock';
 import { supervisorLogPath } from './paths';
 import { readSupervisorState } from './state-store';
 import { StableSupervisorRuntime } from './supervisor-runtime';
+import { createStableIngressRouter } from './ingress-router';
 
 function option(name: string): string | undefined {
   const index = process.argv.indexOf(name);
@@ -17,6 +19,73 @@ function option(name: string): string | undefined {
 function numberOption(name: string, fallback: number): number {
   const value = Number(option(name) ?? process.env.REPO_HARNESS_SUPERVISOR_CONTROL_PORT ?? fallback);
   return Number.isInteger(value) && value >= 0 && value <= 65_535 ? value : fallback;
+}
+
+function integerOption(name: string, fallback: number): number {
+  const value = Number(option(name) ?? fallback);
+  return Number.isInteger(value) && value >= 0 && value <= 65_535 ? value : fallback;
+}
+
+function processIdOption(name: string): number {
+  const value = Number(option(name));
+  return Number.isSafeInteger(value) && value > 0 ? value : 0;
+}
+
+export async function runStableIngressChild(): Promise<void> {
+  const repoRoot = resolveMcpRepoRoot(option('--repo') ?? process.cwd());
+  const controllerHome = ensureControllerHome(option('--controller-home'));
+  const host = option('--stable-ingress-host') ?? '127.0.0.1';
+  const port = integerOption('--stable-ingress-port', 8765);
+  const rescueHost = option('--rescue-host') ?? '127.0.0.1';
+  const rescuePort = integerOption('--rescue-port', 8770);
+  const blueUpstreamPort = integerOption('--blue-upstream-port', port + 20);
+  const greenUpstreamPort = integerOption('--green-upstream-port', port + 30);
+  const parentPid = processIdOption('--parent-pid');
+  if (parentPid <= 0) throw new Error('SUPERVISOR_INGRESS_PARENT_PID_REQUIRED');
+
+  const router = await createStableIngressRouter({
+    host,
+    port,
+    rescueHost,
+    rescuePort,
+    upstream: () => {
+      const slot = readActiveSlotAuthority(controllerHome).activeSlot;
+      return {
+        host: '127.0.0.1',
+        port: slot === 'green' ? greenUpstreamPort : blueUpstreamPort,
+      };
+    },
+  });
+  process.send?.({
+    type: 'repo-harness-ingress-ready',
+    host: router.host,
+    port: router.port,
+    pid: process.pid,
+    parentPid,
+  });
+
+  let stopping = false;
+  const stop = async (code: number): Promise<void> => {
+    if (stopping) return;
+    stopping = true;
+    clearInterval(parentMonitor);
+    await router.close().catch(() => undefined);
+    try { process.disconnect?.(); } catch { /* parent may already be gone */ }
+    process.exit(code);
+  };
+  const parentMonitor = setInterval(() => {
+    try {
+      process.kill(parentPid, 0);
+    } catch {
+      void stop(1);
+    }
+  }, 1_000);
+  parentMonitor.unref?.();
+  process.once('SIGINT', () => { void stop(0); });
+  process.once('SIGTERM', () => { void stop(0); });
+  process.once('disconnect', () => { void stop(1); });
+  console.error(`[repo-harness ingress] isolated data plane listening on ${router.host}:${router.port} parent=${parentPid} repo=${repoRoot}`);
+  await new Promise<void>(() => { /* ingress server and parent monitor own the event loop */ });
 }
 
 export async function runStableSupervisor(): Promise<void> {
@@ -44,6 +113,7 @@ export async function runStableSupervisor(): Promise<void> {
     controllerHome,
     ownerEpoch: lock.metadata.ownerEpoch,
     runtimeSourceRoot: runtimeRoot,
+    ingressExecutable: process.argv[1] ? resolve(process.argv[1]) : undefined,
     runtimeExecutable,
     daemonExecutable,
     ...(releaseRoot ? { releasePath: releaseRoot } : {}),
@@ -85,6 +155,8 @@ export async function runStableSupervisor(): Promise<void> {
   }
 }
 
-if (import.meta.main || /[\\/]supervisor(?:\.bundle)?\.[cm]?[jt]s$/.test(process.argv[1] ?? '')) {
+if (process.argv.includes('--ingress-child')) {
+  await runStableIngressChild();
+} else if (import.meta.main || /[\\/]supervisor(?:\.bundle)?\.[cm]?[jt]s$/.test(process.argv[1] ?? '')) {
   await runStableSupervisor();
 }

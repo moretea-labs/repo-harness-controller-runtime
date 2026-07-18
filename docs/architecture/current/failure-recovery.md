@@ -52,9 +52,13 @@ If a command was durably accepted before disconnection:
 
 If durable acceptance cannot be proven, the caller may retry using the same request ID.
 
+Transport sessions use one global registry across all HTTP MCP paths. A client SHOULD send DELETE when ending a session. The runtime MUST reclaim stream-only sessions through explicit prior-session replacement, bounded SSE lease, absolute lifetime, or oldest-safe capacity eviction. An active POST is protected from session-capacity eviction; an SSE GET by itself is not protected execution ownership.
+
 ### Health Requirement
 
 Gateway health endpoints and compact status queries must not wait for active long operations.
+
+`/health` proves liveness and reports actual global session counts. `/ready` additionally proves that a new initialize can be accepted safely. A full pool remains ready when it contains a safe eviction candidate; it becomes not-ready when every slot is protected by active POST work. Supervisor recovery is recommended only after protected work exceeds its bounded stall threshold.
 
 A 502 may describe Gateway or proxy availability. It must not be used as evidence that a Job failed or never started.
 

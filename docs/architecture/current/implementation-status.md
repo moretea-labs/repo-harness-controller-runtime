@@ -23,9 +23,11 @@ The migration preserves the existing Issue, Task, Run, Edit Session, Local Job, 
 | Capability | Status | Runtime evidence |
 | --- | --- | --- |
 | Thin MCP Gateway | Implemented | `src/runtime/gateway/mcp/router.ts`, `src/cli/mcp/server.ts`, `src/cli/mcp/transports/http.ts` |
+| Deterministic MCP transport lifecycle | Implemented | global `McpSessionRegistry`, three-path DELETE support, stream leases, active-POST protection, capacity-aware `/ready`, and reconnect regression coverage |
 | Persist-before-execute durable commands | Implemented | `src/runtime/execution/jobs/store.ts`, global request index and semantic conflict detection |
 | Independently restartable Controller Daemon | Implemented | `src/runtime/control-plane/daemon-entry.ts`, `daemon-client.ts` |
 | Stable external lifecycle Supervisor | Implemented | `src/runtime/supervisor/`, immutable release installer, lifecycle bridge, typed Rescue MCP, durable operation store, identity fencing, and bounded recovery policy |
+| Stable ingress event-loop isolation | Implemented in source; deployment pending | supervised ingress child from the immutable Supervisor bundle, IPC startup proof, parent-loss exit, active-slot routing, and child-process integration test |
 | Isolated Worker processes | Implemented | `src/runtime/execution/workers/worker-entry.ts`, Scheduler process spawning |
 | Per-Repository Actor | Implemented | `src/runtime/control-plane/repo-actor/actor.ts`, actor registry and repository mailbox lock |
 | Resource Claims | Implemented | `src/runtime/gateway/mcp/resource-policy.ts`, `resources/claims/conflicts.ts` |
@@ -48,7 +50,7 @@ The migration preserves the existing Issue, Task, Run, Edit Session, Local Job, 
 | Materialized projections | Implemented | dirty-marker invalidation, indexed runtime projections and non-blocking Controller Context refresh |
 | Release Freeze and Gate | Implemented | exclusive `release:<repoId>` Lease and deterministic exact-revision release manifest |
 | External side-effect authorization | Implemented | Gateway/Portfolio/Schedule/Worker defense-in-depth policy |
-| Runtime health split | Implemented | `/health`, `/ready`, `/repos/:repoId/health` |
+| Runtime health split | Implemented | `/health`, capacity-aware `/ready`, `/repos/:repoId/health`, and structured Supervisor recovery recommendation |
 | Legacy compatibility | Implemented | stable MCP facade, unchanged compatibility fingerprint, Local Job projection into Execution Job |
 | Node/Bun process portability | Implemented | project TypeScript Loader for Daemon/Worker/Gateway smoke execution; Bun remains the supported package/test runtime |
 

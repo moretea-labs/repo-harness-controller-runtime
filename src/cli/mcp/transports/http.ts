@@ -38,6 +38,7 @@ import {
   controllerToolSurfaceFingerprint,
   repositoryIdentity,
 } from '../../controller/runtime-config';
+import { McpSessionRegistry, type McpSessionRoute } from './session-registry';
 
 export interface McpHttpOptions extends McpServerOptions {
   host?: string;
@@ -71,6 +72,19 @@ function rawBodyToJson(body: Buffer): unknown | undefined {
 
 function isInitializeRequest(body: unknown): boolean {
   return typeof body === 'object' && body !== null && (body as Record<string, unknown>).method === 'initialize';
+}
+
+function initializeClientIdentity(req: Request, body: unknown, route: McpSessionRoute, principalId: string): string {
+  const params = typeof body === 'object' && body !== null
+    ? (body as { params?: { clientInfo?: { name?: unknown; version?: unknown } } }).params
+    : undefined;
+  const clientInfo = params?.clientInfo;
+  const clientName = typeof clientInfo?.name === 'string' && clientInfo.name.trim() ? clientInfo.name.trim() : 'unknown-client';
+  const clientVersion = typeof clientInfo?.version === 'string' && clientInfo.version.trim() ? clientInfo.version.trim() : 'unknown-version';
+  const userAgent = typeof req.headers['user-agent'] === 'string' && req.headers['user-agent'].trim()
+    ? req.headers['user-agent'].trim().slice(0, 160)
+    : 'unknown-agent';
+  return `${principalId}|${route}|${clientName}/${clientVersion}|${userAgent}`;
 }
 
 export interface McpSessionLookupErrorResponse {
@@ -540,62 +554,37 @@ function requireMcpHttpAuth(
   };
 }
 
-interface ManagedTransport {
-  transport: StreamableHTTPServerTransport;
-  toolContext: ReturnType<typeof createMcpToolContext>;
-  lastSeenAt: number;
-  inFlightPosts: number;
-  inFlightGets: number;
-}
-
 interface McpRuntimeStats {
   initializing: number;
   activePosts: number;
   rejectedOverload: number;
 }
 
-const MAX_MCP_SESSIONS = 64;
-const MAX_INITIALIZING_SESSIONS = 8;
-const MAX_POSTS_PER_SESSION = 4;
-const MAX_ACTIVE_POSTS = 32;
-const MCP_SESSION_TTL_MS = 15 * 60_000;
-
-async function closeManagedTransport(entry: ManagedTransport): Promise<void> {
-  try {
-    await entry.transport.close();
-  } catch (_error) {
-    // Session may already be closed by the client.
-  }
+function positiveIntegerEnv(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isInteger(value) && value > 0 ? value : fallback;
 }
 
-async function pruneTransports(transports: Map<string, ManagedTransport>, forceCapacity = false): Promise<boolean> {
-  const now = Date.now();
-  const expired = [...transports.entries()]
-    .filter(([, entry]) => entry.inFlightPosts === 0 && entry.inFlightGets === 0 && now - entry.lastSeenAt > MCP_SESSION_TTL_MS)
-    .map(([sessionId]) => sessionId);
-  for (const sessionId of expired) {
-    const entry = transports.get(sessionId);
-    transports.delete(sessionId);
-    if (entry) await closeManagedTransport(entry);
-  }
-  if (!forceCapacity || transports.size < MAX_MCP_SESSIONS) return transports.size < MAX_MCP_SESSIONS;
-  const oldest = [...transports.entries()]
-    .filter(([, entry]) => entry.inFlightPosts === 0 && entry.inFlightGets === 0)
-    .sort((a, b) => a[1].lastSeenAt - b[1].lastSeenAt);
-  while (transports.size >= MAX_MCP_SESSIONS && oldest.length > 0) {
-    const [sessionId, entry] = oldest.shift()!;
-    transports.delete(sessionId);
-    await closeManagedTransport(entry);
-  }
-  return transports.size < MAX_MCP_SESSIONS;
-}
+const MAX_MCP_SESSIONS = positiveIntegerEnv('REPO_HARNESS_MCP_MAX_SESSIONS', 64);
+const MAX_MCP_SESSIONS_PER_PRINCIPAL = positiveIntegerEnv('REPO_HARNESS_MCP_MAX_SESSIONS_PER_PRINCIPAL', 8);
+const MAX_INITIALIZING_SESSIONS = positiveIntegerEnv('REPO_HARNESS_MCP_MAX_INITIALIZING_SESSIONS', 8);
+const MAX_POSTS_PER_SESSION = positiveIntegerEnv('REPO_HARNESS_MCP_MAX_POSTS_PER_SESSION', 4);
+const MAX_ACTIVE_POSTS = positiveIntegerEnv('REPO_HARNESS_MCP_MAX_ACTIVE_POSTS', 32);
+const MCP_SESSION_IDLE_TTL_MS = positiveIntegerEnv('REPO_HARNESS_MCP_SESSION_IDLE_TTL_MS', 15 * 60_000);
+const MCP_STREAM_LEASE_MS = positiveIntegerEnv('REPO_HARNESS_MCP_STREAM_LEASE_MS', 30 * 60_000);
+const MCP_SESSION_ABSOLUTE_LIFETIME_MS = positiveIntegerEnv('REPO_HARNESS_MCP_SESSION_ABSOLUTE_LIFETIME_MS', 2 * 60 * 60_000);
+const MCP_ACTIVE_POST_STALL_MS = positiveIntegerEnv('REPO_HARNESS_MCP_ACTIVE_POST_STALL_MS', 10 * 60_000);
+
+type McpToolContext = ReturnType<typeof createMcpToolContext>;
+type HttpSessionRegistry = McpSessionRegistry<StreamableHTTPServerTransport, McpToolContext>;
 
 async function handleMcpPost(
   req: Request,
   res: Response,
   baseOptions: McpServerOptions,
-  transports: Map<string, ManagedTransport>,
+  registry: HttpSessionRegistry,
   stats: McpRuntimeStats,
+  route: McpSessionRoute,
 ): Promise<void> {
   let body: unknown;
   try {
@@ -619,32 +608,51 @@ async function handleMcpPost(
     stats.initializing += 1;
     stats.activePosts += 1;
     let transport: StreamableHTTPServerTransport | undefined;
+    let reservationId: string | undefined;
+    let initializedSessionId: string | undefined;
     try {
-      const hasCapacity = await pruneTransports(transports, true);
-      if (!hasCapacity || transports.size + stats.initializing > MAX_MCP_SESSIONS) {
+      const principalId = principalFromRequest(req);
+      const clientIdentity = initializeClientIdentity(req, body, route, principalId);
+      reservationId = await registry.reserveForInitialize({
+        principalId,
+        route,
+        ...(principalId === 'mcp-bearer-client' ? { enforcePrincipalCapacity: false } : {}),
+        ...(sessionId ? { supersedeSessionId: sessionId } : {}),
+      });
+      if (!reservationId) {
         stats.rejectedOverload += 1;
         res.setHeader('retry-after', '1');
-        res.status(503).json({ error: 'session_capacity', message: 'All MCP sessions are active; retry shortly' });
+        res.status(503).json({ error: 'session_capacity', message: 'All MCP sessions are executing active work; retry shortly' });
         return;
       }
       const sessionContext = createMcpToolContext({
         ...baseOptions,
         sessionId: `mcp_${randomUUID().replace(/-/g, '')}`,
-        principalId: principalFromRequest(req),
+        principalId,
       });
       transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (newSessionId: string): void => {
-          transports.set(newSessionId, { transport: transport!, toolContext: sessionContext, lastSeenAt: Date.now(), inFlightPosts: 0, inFlightGets: 0 });
+          registry.commitInitialize(reservationId!, {
+            sessionId: newSessionId,
+            transport: transport!,
+            toolContext: sessionContext,
+            route,
+            principalId,
+            clientIdentity,
+          });
+          initializedSessionId = newSessionId;
         },
       });
       transport.onclose = () => {
-        if (transport?.sessionId) transports.delete(transport.sessionId);
+        if (transport?.sessionId) registry.detach(transport.sessionId);
       };
       const server = createRepoHarnessMcpServerFromContext(sessionContext);
       await server.connect(transport);
       await transport.handleRequest(req, res, body);
     } finally {
+      if (initializedSessionId) registry.endPost(initializedSessionId);
+      if (reservationId) registry.releaseInitialize(reservationId);
       stats.initializing -= 1;
       stats.activePosts -= 1;
       if (!transport?.sessionId) await transport?.close().catch(() => undefined);
@@ -652,21 +660,20 @@ async function handleMcpPost(
     return;
   }
   if (sessionId) {
-    const managed = transports.get(sessionId);
-    if (managed) {
+    const managed = registry.get(sessionId);
+    if (managed && managed.route === route && managed.principalId === principalFromRequest(req)) {
       if (managed.inFlightPosts >= MAX_POSTS_PER_SESSION || stats.activePosts >= MAX_ACTIVE_POSTS) {
         stats.rejectedOverload += 1;
         res.setHeader('retry-after', '1');
         res.status(429).json({ error: 'session_busy', message: 'Too many MCP requests are active; retry shortly' });
         return;
       }
-      managed.lastSeenAt = Date.now();
-      managed.inFlightPosts += 1;
+      registry.beginPost(sessionId);
       stats.activePosts += 1;
       try {
         await managed.transport.handleRequest(req, res, body);
       } finally {
-        managed.inFlightPosts -= 1;
+        registry.endPost(sessionId);
         stats.activePosts -= 1;
       }
       return;
@@ -675,21 +682,19 @@ async function handleMcpPost(
   sendMcpSessionLookupError(res, sessionId);
 }
 
-async function handleMcpGet(req: Request, res: Response, transports: Map<string, ManagedTransport>): Promise<void> {
+async function handleMcpGet(req: Request, res: Response, registry: HttpSessionRegistry, route: McpSessionRoute): Promise<void> {
   const sessionId = req.headers['mcp-session-id'] as string | undefined;
-  const managed = sessionId ? transports.get(sessionId) : undefined;
-  if (!managed) {
+  const managed = sessionId ? registry.get(sessionId) : undefined;
+  if (!managed || managed.route !== route || managed.principalId !== principalFromRequest(req)) {
     sendMcpSessionLookupError(res, sessionId);
     return;
   }
-  managed.lastSeenAt = Date.now();
-  managed.inFlightGets += 1;
+  registry.beginStream(sessionId!);
   let released = false;
   const releaseStream = (): void => {
     if (released) return;
     released = true;
-    managed.inFlightGets = Math.max(0, managed.inFlightGets - 1);
-    managed.lastSeenAt = Date.now();
+    registry.endStream(sessionId!);
   };
   req.once('aborted', releaseStream);
   res.once('close', releaseStream);
@@ -700,6 +705,18 @@ async function handleMcpGet(req: Request, res: Response, transports: Map<string,
     res.off('close', releaseStream);
     releaseStream();
   }
+}
+
+async function handleMcpDelete(req: Request, res: Response, registry: HttpSessionRegistry, route: McpSessionRoute): Promise<void> {
+  const sessionId = req.headers['mcp-session-id'] as string | undefined;
+  const managed = sessionId ? registry.get(sessionId) : undefined;
+  if (!managed || managed.route !== route || managed.principalId !== principalFromRequest(req)) {
+    sendMcpSessionLookupError(res, sessionId);
+    return;
+  }
+  registry.setPendingCloseReason(sessionId!, 'client_delete');
+  await managed.transport.handleRequest(req, res);
+  if (registry.get(sessionId!)) await registry.close(sessionId!, 'client_delete');
 }
 
 export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
@@ -723,10 +740,14 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   tokenStore?.load();
   const oauthProvider = tokenStore ? createMcpOAuthProvider(tokenStore) : null;
   const configuredPublicOrigin = getConfiguredPublicOrigin(serviceConfig);
-  // Separate transport maps so ChatGPT OAuth, Grok OAuth, and static bearer clients do not share session IDs.
-  const transports = new Map<string, ManagedTransport>();
-  const grokTransports = new Map<string, ManagedTransport>();
-  const bearerTransports = new Map<string, ManagedTransport>();
+  const sessionRegistry = new McpSessionRegistry<StreamableHTTPServerTransport, McpToolContext>({
+    maximumSessions: MAX_MCP_SESSIONS,
+    maximumSessionsPerPrincipal: MAX_MCP_SESSIONS_PER_PRINCIPAL,
+    idleTtlMs: MCP_SESSION_IDLE_TTL_MS,
+    streamLeaseMs: MCP_STREAM_LEASE_MS,
+    absoluteLifetimeMs: MCP_SESSION_ABSOLUTE_LIFETIME_MS,
+    activePostStallMs: MCP_ACTIVE_POST_STALL_MS,
+  });
   const runtimeStats: McpRuntimeStats = { initializing: 0, activePosts: 0, rejectedOverload: 0 };
   const toolContext = createMcpToolContext({ ...opts, repo: repoRoot, controllerHome, profile });
   const baseOptions: McpServerOptions = {
@@ -787,10 +808,7 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
     if (health?.toolset) res.setHeader('x-repo-harness-toolset', health.toolset);
     if (health?.runtimeToolSurfaceFingerprint) res.setHeader('x-repo-harness-runtime-tool-surface-fingerprint', health.runtimeToolSurfaceFingerprint);
     if (health?.toolSurfaceFingerprint) res.setHeader('x-repo-harness-tool-surface-fingerprint', health.toolSurfaceFingerprint);
-    const activeStreams =
-      [...transports.values()].reduce((count, entry) => count + entry.inFlightGets, 0)
-      + [...grokTransports.values()].reduce((count, entry) => count + entry.inFlightGets, 0)
-      + [...bearerTransports.values()].reduce((count, entry) => count + entry.inFlightGets, 0);
+    const sessionSnapshot = sessionRegistry.snapshot();
     res.json({
       status: 'ok',
       server: 'repo-harness-mcp',
@@ -827,11 +845,9 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
       grokEndpoint: `${advertisedOrigin}/mcp-grok`,
       bearerEndpoint: `${advertisedOrigin}/mcp-bearer`,
       sessions: {
-        active: transports.size + grokTransports.size + bearerTransports.size,
-        maximum: MAX_MCP_SESSIONS,
+        ...sessionSnapshot,
         initializing: runtimeStats.initializing,
         activePosts: runtimeStats.activePosts,
-        activeStreams,
         maximumActivePosts: MAX_ACTIVE_POSTS,
         rejectedOverload: runtimeStats.rejectedOverload,
       },
@@ -839,8 +855,18 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   });
 
   app.get('/ready', async (_req, res) => {
+    const sessionSnapshot = sessionRegistry.snapshot();
+    const sessionCapacityReady = sessionSnapshot.acceptingNewSessions
+      && runtimeStats.initializing < MAX_INITIALIZING_SESSIONS
+      && runtimeStats.activePosts < MAX_ACTIVE_POSTS;
     if (!runtimeControllerHome) {
-      res.status(200).json({ ready: true, profile: toolContext.policy.profile, gateway: 'ready', controllerDaemon: 'not-required' });
+      res.status(sessionCapacityReady ? 200 : 503).json({
+        ready: sessionCapacityReady,
+        profile: toolContext.policy.profile,
+        gateway: sessionCapacityReady ? 'ready' : 'saturated',
+        controllerDaemon: 'not-required',
+        sessionCapacity: sessionSnapshot,
+      });
       return;
     }
     const daemon = readControllerDaemonStatus(runtimeControllerHome);
@@ -873,7 +899,7 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
       && (!runtimeGeneration?.generation || runtimeState?.generation === runtimeGeneration.generation)
       && (!runtimeGeneration?.generation || runtimeState?.server.generation === runtimeGeneration.generation)
     );
-    const ready = daemonReady && projectionReady && localBridgeReady;
+    const ready = daemonReady && projectionReady && localBridgeReady && sessionCapacityReady;
     res.status(ready ? 200 : 503).json({
       ready,
       generation: runtimeGeneration?.generation,
@@ -901,6 +927,7 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
         ready: connectorReady,
         connectorNeedsReconnect: runtimeState?.tunnel?.connectorNeedsReconnect === true,
       },
+      sessionCapacity: sessionSnapshot,
     });
   });
 
@@ -988,12 +1015,17 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   // Primary MCP path: OAuth (or bearer when --auth bearer). Unchanged for ChatGPT.
   app.use('/mcp', setMcpResponseHeaders);
   app.post('/mcp', requireMcpHttpAuth(authMode, authToken, oauthProvider, configuredPublicOrigin), express.raw({ type: '*/*', limit: '1mb' }), (req, res) => {
-    handleMcpPost(req, res, baseOptions, transports, runtimeStats).catch((error: unknown) => {
+    handleMcpPost(req, res, baseOptions, sessionRegistry, runtimeStats, '/mcp').catch((error: unknown) => {
       if (!res.headersSent) sendMcpRequestError(res, error);
     });
   });
   app.get('/mcp', requireMcpHttpAuth(authMode, authToken, oauthProvider, configuredPublicOrigin), (req, res) => {
-    handleMcpGet(req, res, transports).catch((error: unknown) => {
+    handleMcpGet(req, res, sessionRegistry, '/mcp').catch((error: unknown) => {
+      if (!res.headersSent) sendMcpRequestError(res, error);
+    });
+  });
+  app.delete('/mcp', requireMcpHttpAuth(authMode, authToken, oauthProvider, configuredPublicOrigin), (req, res) => {
+    handleMcpDelete(req, res, sessionRegistry, '/mcp').catch((error: unknown) => {
       if (!res.headersSent) sendMcpRequestError(res, error);
     });
   });
@@ -1001,12 +1033,17 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   // Grok-compatible MCP path: OAuth resource separate from ChatGPT's /mcp, same tools.
   app.use('/mcp-grok', setMcpResponseHeaders);
   app.post('/mcp-grok', requireMcpHttpAuth(authMode, authToken, oauthProvider, configuredPublicOrigin, '/mcp-grok'), express.raw({ type: '*/*', limit: '1mb' }), (req, res) => {
-    handleMcpPost(req, res, baseOptions, grokTransports, runtimeStats).catch((error: unknown) => {
+    handleMcpPost(req, res, baseOptions, sessionRegistry, runtimeStats, '/mcp-grok').catch((error: unknown) => {
       if (!res.headersSent) sendMcpRequestError(res, error);
     });
   });
   app.get('/mcp-grok', requireMcpHttpAuth(authMode, authToken, oauthProvider, configuredPublicOrigin, '/mcp-grok'), (req, res) => {
-    handleMcpGet(req, res, grokTransports).catch((error: unknown) => {
+    handleMcpGet(req, res, sessionRegistry, '/mcp-grok').catch((error: unknown) => {
+      if (!res.headersSent) sendMcpRequestError(res, error);
+    });
+  });
+  app.delete('/mcp-grok', requireMcpHttpAuth(authMode, authToken, oauthProvider, configuredPublicOrigin, '/mcp-grok'), (req, res) => {
+    handleMcpDelete(req, res, sessionRegistry, '/mcp-grok').catch((error: unknown) => {
       if (!res.headersSent) sendMcpRequestError(res, error);
     });
   });
@@ -1014,12 +1051,17 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   // Bearer-only MCP path for clients that can send Authorization headers. Never advertises OAuth resource_metadata.
   app.use('/mcp-bearer', setMcpResponseHeaders);
   app.post('/mcp-bearer', requireMcpHttpAuth('bearer', authToken, null, configuredPublicOrigin), express.raw({ type: '*/*', limit: '1mb' }), (req, res) => {
-    handleMcpPost(req, res, baseOptions, bearerTransports, runtimeStats).catch((error: unknown) => {
+    handleMcpPost(req, res, baseOptions, sessionRegistry, runtimeStats, '/mcp-bearer').catch((error: unknown) => {
       if (!res.headersSent) sendMcpRequestError(res, error);
     });
   });
   app.get('/mcp-bearer', requireMcpHttpAuth('bearer', authToken, null, configuredPublicOrigin), (req, res) => {
-    handleMcpGet(req, res, bearerTransports).catch((error: unknown) => {
+    handleMcpGet(req, res, sessionRegistry, '/mcp-bearer').catch((error: unknown) => {
+      if (!res.headersSent) sendMcpRequestError(res, error);
+    });
+  });
+  app.delete('/mcp-bearer', requireMcpHttpAuth('bearer', authToken, null, configuredPublicOrigin), (req, res) => {
+    handleMcpDelete(req, res, sessionRegistry, '/mcp-bearer').catch((error: unknown) => {
       if (!res.headersSent) sendMcpRequestError(res, error);
     });
   });
@@ -1027,9 +1069,7 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   app.use((_req, res) => res.status(404).json({ error: 'not_found' }));
 
   const cleanupTimer = setInterval(() => {
-    void pruneTransports(transports);
-    void pruneTransports(grokTransports);
-    void pruneTransports(bearerTransports);
+    void sessionRegistry.prune();
   }, 60_000);
   cleanupTimer.unref();
 
@@ -1040,12 +1080,7 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
 
   httpServer.on('close', () => {
     clearInterval(cleanupTimer);
-    for (const entry of transports.values()) void closeManagedTransport(entry);
-    for (const entry of grokTransports.values()) void closeManagedTransport(entry);
-    for (const entry of bearerTransports.values()) void closeManagedTransport(entry);
-    transports.clear();
-    grokTransports.clear();
-    bearerTransports.clear();
+    void sessionRegistry.closeAll('shutdown');
   });
 
   await new Promise<void>((resolve) => {
@@ -1057,15 +1092,7 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   );
 
   const shutdown = () => {
-    for (const entry of transports.values()) {
-      void closeManagedTransport(entry);
-    }
-    for (const entry of grokTransports.values()) {
-      void closeManagedTransport(entry);
-    }
-    for (const entry of bearerTransports.values()) {
-      void closeManagedTransport(entry);
-    }
+    void sessionRegistry.closeAll('shutdown');
     tokenStore?.flush();
     httpServer.close(() => process.exit(0));
   };

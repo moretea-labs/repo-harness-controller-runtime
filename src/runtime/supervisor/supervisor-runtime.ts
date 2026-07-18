@@ -19,7 +19,7 @@ import { readControllerDaemonStatus } from '../control-plane/daemon-client';
 import { createExecutionJob, getExecutionJob } from '../execution/jobs/store';
 import { readRuntimeGeneration } from '../control-plane/runtime-generation';
 import { createSupervisorControlServer, type SupervisorControlServerHandle, type SupervisorControlHandlers } from './control-server';
-import { createStableIngressRouter, type StableIngressRouterHandle } from './ingress-router';
+import { createStableIngressProcess, type StableIngressProcessHandle } from './ingress-process';
 import { createSupervisorOperation, listSupervisorOperations, readSupervisorOperation, updateSupervisorOperation } from './operation-store';
 import { DEFAULT_RESTART_POLICY, decideRestart, lockout, newRestartBudgetRecord, recordFailure, recordRestart, recordStable } from './restart-policy';
 import { SupervisorProcessManager, type SpawnedSupervisorProcess, type SupervisorProcessManagerOptions } from './process-manager';
@@ -32,6 +32,7 @@ export interface StableSupervisorRuntimeOptions extends SupervisorProcessManager
   controlPort?: number;
   rescueAuthToken?: string;
   releaseRevision?: string;
+  ingressExecutable?: string;
   onStopped?: () => void;
 }
 
@@ -48,6 +49,8 @@ export interface SupervisorGatewayHealthProbeResult {
   healthy: boolean;
   detail: string;
   statusCode?: number;
+  ready?: boolean;
+  recoveryRecommended?: boolean;
 }
 
 export function supervisorGatewayHealthDecision(
@@ -73,11 +76,31 @@ export async function probeSupervisorGatewayHealth(
       headers: { accept: 'application/json' },
     });
     let healthStatus: unknown;
+    let readiness: unknown;
+    let recoveryRecommended = false;
     try {
-      const payload = await response.json() as { status?: unknown };
+      const payload = await response.json() as {
+        status?: unknown;
+        ready?: unknown;
+        sessionCapacity?: { recoveryRecommended?: unknown; acceptingNewSessions?: unknown };
+      };
       healthStatus = payload?.status;
+      readiness = payload?.ready;
+      recoveryRecommended = payload?.sessionCapacity?.recoveryRecommended === true;
     } catch {
       healthStatus = undefined;
+      readiness = undefined;
+    }
+    if (readiness === false) {
+      return {
+        healthy: true,
+        ready: false,
+        recoveryRecommended,
+        statusCode: response.status,
+        detail: recoveryRecommended
+          ? 'gateway readiness requires bounded recovery'
+          : 'gateway is live but temporarily not ready',
+      };
     }
     if (!response.ok) {
       return {
@@ -85,6 +108,9 @@ export async function probeSupervisorGatewayHealth(
         statusCode: response.status,
         detail: `status=${response.status}${healthStatus === undefined ? '' : ` health=${String(healthStatus)}`}`,
       };
+    }
+    if (readiness === true) {
+      return { healthy: true, ready: true, recoveryRecommended: false, statusCode: response.status, detail: 'ready' };
     }
     if (healthStatus !== 'ok') {
       return { healthy: false, statusCode: response.status, detail: `health=${String(healthStatus)}` };
@@ -289,8 +315,9 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
   readonly manager: SupervisorProcessManager;
   private state: SupervisorState;
   private control?: SupervisorControlServerHandle;
-  private ingressRouter?: StableIngressRouterHandle;
+  private ingressProcess?: StableIngressProcessHandle;
   private monitorTimer?: ReturnType<typeof setInterval>;
+  private monitorPromise?: Promise<void>;
   private executionPromise?: Promise<void>;
   private stopping = false;
 
@@ -363,6 +390,24 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
     return accepted;
   }
 
+  private async replaceIngressProcess(): Promise<StableIngressProcessHandle> {
+    await this.ingressProcess?.close();
+    const ingressExecutable = this.options.ingressExecutable ?? process.argv[1];
+    if (!ingressExecutable || !this.control) throw new Error('SUPERVISOR_INGRESS_RESTART_CONTEXT_MISSING');
+    this.ingressProcess = await createStableIngressProcess({
+      executable: ingressExecutable,
+      repoRoot: this.options.repoRoot,
+      controllerHome: this.options.controllerHome,
+      host: this.options.stableIngressHost ?? '127.0.0.1',
+      port: this.options.stableIngressPort ?? 8765,
+      rescueHost: this.control.host,
+      rescuePort: this.control.port,
+      blueUpstreamPort: this.manager.gatewayBinding('blue').port,
+      greenUpstreamPort: this.manager.gatewayBinding('green').port,
+    });
+    return this.ingressProcess;
+  }
+
   async start(): Promise<void> {
     this.stopping = false;
     this.reconcileInterruptedOperations();
@@ -377,19 +422,7 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
       handlers: this,
       onStopped: this.options.onStopped,
     });
-    this.ingressRouter = await createStableIngressRouter({
-      host: this.options.stableIngressHost ?? '127.0.0.1',
-      port: this.options.stableIngressPort ?? 8765,
-      rescueHost: this.control.host,
-      rescuePort: this.control.port,
-      upstream: () => {
-        const activeSlot = readActiveSlotAuthority(this.options.controllerHome).activeSlot;
-        const gateway = this.gatewayForSlot(activeSlot);
-        return gateway && this.manager.observe(gateway) === 'alive'
-          ? this.manager.gatewayBinding(activeSlot)
-          : null;
-      },
-    });
+    this.ingressProcess = await this.replaceIngressProcess();
     this.state = this.persist({
       ingress: {
         ...this.state.ingress,
@@ -402,12 +435,12 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
         host: this.control.host,
         port: this.control.port,
         socketPath: supervisorControlSocketPath(this.options.controllerHome),
-        rescueEndpoint: `http://${this.ingressRouter.host}:${this.ingressRouter.port}/rescue/mcp`,
+        rescueEndpoint: `http://${this.ingressProcess.host}:${this.ingressProcess.port}/rescue/mcp`,
       },
     });
     await this.ensureRuntime();
     this.state = this.persist({ observedState: 'healthy' });
-    this.monitorTimer = setInterval(() => { void this.monitorTick(); }, 5_000);
+    this.monitorTimer = setInterval(() => this.scheduleMonitorTick(), 5_000);
     this.monitorTimer.unref?.();
     await this.runPendingOperations();
   }
@@ -1113,6 +1146,27 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
   private async monitorTick(): Promise<void> {
     if (this.stopping || this.state.desiredState !== 'running') return;
     let degraded = !this.synchronizeActiveRuntimeGeneration(false);
+    if (!this.ingressProcess?.alive()) {
+      degraded = true;
+      try {
+        this.ingressProcess = await this.replaceIngressProcess();
+        this.persist({
+          ingress: {
+            ...this.state.ingress,
+            state: 'running',
+            lastHealthyAt: new Date().toISOString(),
+          },
+        });
+      } catch (error) {
+        this.persist({
+          ingress: { ...this.state.ingress, state: 'degraded' },
+          lastIncident: {
+            at: new Date().toISOString(),
+            reason: `stable ingress process recovery failed: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        });
+      }
+    }
     for (const component of ['controllerDaemon', 'gatewayHost'] as const) {
       const managed = this.componentState(component);
       const observation = this.manager.observe(managed);
@@ -1120,12 +1174,22 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
         if (component === 'gatewayHost') {
           const slot = managed.slot ?? this.state.activeSlot;
           const binding = this.managerForManaged(managed, slot).gatewayBinding(slot);
-          const health = await probeSupervisorGatewayHealth(`http://${binding.host}:${binding.port}/health`);
-          if (!health.healthy) {
+          const health = await probeSupervisorGatewayHealth(`http://${binding.host}:${binding.port}/ready`);
+          if (!health.healthy || health.ready === false) {
             degraded = true;
+            if (health.healthy && health.recoveryRecommended !== true) {
+              this.setComponent('gatewayHost', {
+                ...managed,
+                state: 'running',
+                lastLivenessAt: new Date().toISOString(),
+                consecutiveFailures: 0,
+              });
+              this.persist({ lastIncident: { at: new Date().toISOString(), component, reason: health.detail } });
+              continue;
+            }
             const decision = supervisorGatewayHealthDecision(managed.consecutiveFailures, false);
             const consecutiveFailures = decision.consecutiveFailures;
-            const failureReason = `gatewayHost health probe failed ${consecutiveFailures}/${SUPERVISOR_GATEWAY_HEALTH_FAILURE_THRESHOLD}: ${health.detail}`;
+            const failureReason = `gatewayHost readiness probe requires recovery ${consecutiveFailures}/${SUPERVISOR_GATEWAY_HEALTH_FAILURE_THRESHOLD}: ${health.detail}`;
             this.setComponent('gatewayHost', {
               ...managed,
               state: 'running',
@@ -1178,16 +1242,26 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
     await this.cleanupExpiredStandby();
   }
 
+  private scheduleMonitorTick(): void {
+    if (this.monitorPromise) return;
+    const run = this.monitorTick();
+    this.monitorPromise = run;
+    void run.finally(() => {
+      if (this.monitorPromise === run) this.monitorPromise = undefined;
+    }).catch(() => undefined);
+  }
+
   async stop(): Promise<void> {
     this.stopping = true;
     if (this.monitorTimer) clearInterval(this.monitorTimer);
+    await this.monitorPromise?.catch(() => undefined);
     this.persist({ desiredState: 'stopped', observedState: 'stopped' });
     await this.stopComponent('gatewayHost');
     await this.stopComponent('controllerDaemon');
     if (this.state.standby) await this.stopSlotProcesses(this.state.standby);
     this.persist({ standby: undefined });
-    if (this.ingressRouter) await this.ingressRouter.close();
-    this.ingressRouter = undefined;
+    if (this.ingressProcess) await this.ingressProcess.close();
+    this.ingressProcess = undefined;
     if (this.control) await this.control.close();
     this.control = undefined;
     this.persist({ currentOperationId: null, ingress: { ...this.state.ingress, state: 'stopped' } });

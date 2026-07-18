@@ -115,7 +115,10 @@ _ops/
 .repo-harness/**/*.tokens.json
 .repo-harness/**/*.oauth*.json
 .repo-harness/**/*.runtime.json
-.ai
+.ai/*
+!.ai/context/
+.ai/context/*
+!.ai/context/capabilities.json
 
 # repo-harness local browser/runtime scratch
 .repo-harness/browser/
