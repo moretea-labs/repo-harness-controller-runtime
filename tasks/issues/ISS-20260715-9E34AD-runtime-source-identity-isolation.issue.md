@@ -1,8 +1,8 @@
 ---
 id: "ISS-20260715-9E34AD"
 kind: "bug"
-status: "done"
-updated_at: "2026-07-15T12:45:00.000Z"
+status: "in_progress"
+updated_at: "2026-07-18T00:30:57.304Z"
 source: "repo-harness-controller-v8"
 ---
 
@@ -36,7 +36,7 @@ Selecting a business execution repository (different root/branch from the contro
 
 ### T1 — Runtime Source isolation fix
 
-- Status: `done`
+- Status: `integration_blocked`
 - Objective: Introduce unique runtime source resolver; stop comparing execution repository roots; pin daemon/keepalive startup source; add targeted tests and architecture invariant.
 - Checks: `bun test tests/runtime/runtime-source-isolation.test.ts tests/cli/controller-runtime-status.test.ts tests/runtime/facade-mcp-surface.test.ts`, `bun run check:type`
 
