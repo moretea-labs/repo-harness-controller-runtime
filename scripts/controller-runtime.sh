@@ -6,6 +6,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/scripts/lib/controller-home-env.sh"
 
 repo_harness_use_local_controller_home "$ROOT"
+repo_harness_prepare_runtime_path
+BUN_BIN="$(repo_harness_resolve_bun || true)"
 
 # Local HTTP/SOCKS proxies must not intercept Tailscale Funnel / MagicDNS or loopback.
 # Bun fetch only honors leading-dot NO_PROXY forms for multi-label hosts (e.g. .ts.net).
@@ -49,10 +51,10 @@ TUNNEL_CONFIG_DEFAULT="$ROOT/_ops/secrets/controller-ngrok-rotation.env"
 TUNNEL_CONFIG="${REPO_HARNESS_NGROK_ROTATION_CONFIG:-$TUNNEL_CONFIG_DEFAULT}"
 EXTERNAL_TUNNEL_MANAGER="${REPO_HARNESS_CONTROLLER_EXTERNAL_TUNNEL:-none}"
 
-command -v bun >/dev/null 2>&1 || {
-  echo "Bun is required to manage the repo-harness Controller stack." >&2
+if [ -z "$BUN_BIN" ]; then
+  echo "Bun is required to manage the repo-harness Controller stack. Set REPO_HARNESS_BUN_BIN or install Bun under ~/.bun/bin." >&2
   exit 127
-}
+fi
 
 if [ "$#" -eq 0 ]; then
   echo "Usage: scripts/controller-runtime.sh <start|stop|status|restart|logs|rollout|rollback> [args...]" >&2
@@ -70,11 +72,11 @@ run_controller_service() {
 RESTART_ENTRY="$ROOT/src/cli/controller/restart-coordinator-entry.ts"
 
 run_restart_request() {
-  bun "$RESTART_ENTRY" request --repo "$ROOT" --controller-home "$REPO_HARNESS_CONTROLLER_HOME" "$@"
+  "$BUN_BIN" "$RESTART_ENTRY" request --repo "$ROOT" --controller-home "$REPO_HARNESS_CONTROLLER_HOME" "$@"
 }
 
 run_restart_coordinator() {
-  bun "$RESTART_ENTRY" run --repo "$ROOT" --controller-home "$REPO_HARNESS_CONTROLLER_HOME" "$@"
+  "$BUN_BIN" "$RESTART_ENTRY" run --repo "$ROOT" --controller-home "$REPO_HARNESS_CONTROLLER_HOME" "$@"
 }
 
 maybe_manage_external_tunnel() {

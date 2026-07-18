@@ -79,6 +79,8 @@ describe('Stable Supervisor production hardening', () => {
     expect(plist).toContain('<key>SuccessfulExit</key><false/>');
     expect(plist).toContain('--release-revision');
     expect(plist).toContain('revision-a');
+    expect(plist).toContain('<key>EnvironmentVariables</key>');
+    expect(plist).toContain('<key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>');
     expect(plist).not.toContain('<key>KeepAlive</key><true/>');
     const unit = renderSystemdSupervisorUnit({
       bunPath: '/usr/local/bin/bun',
@@ -87,6 +89,7 @@ describe('Stable Supervisor production hardening', () => {
       controllerHome: '/tmp/home',
       runtimeSourceRoot: '/tmp/repo',
     });
+    expect(unit).toContain('Environment="PATH=/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"');
     expect(unit).toContain('Restart=on-failure');
     expect(unit).not.toContain('Restart=always');
     const spaced = renderSystemdSupervisorUnit({
@@ -96,6 +99,7 @@ describe('Stable Supervisor production hardening', () => {
       controllerHome: '/Users/example/Controller Home',
       runtimeSourceRoot: '/Users/example/Repo Harness',
     });
+    expect(spaced).toContain('Environment="PATH=/Users/example/My Tools:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"');
     expect(spaced).toContain('ExecStart="/Users/example/My Tools/bun"');
     expect(supervisorSystemdUnitName('/tmp/a/controller-home')).not.toBe(supervisorSystemdUnitName('/tmp/b/controller-home'));
     expect(supervisorServiceLabel('/tmp/a/controller-home')).not.toBe(supervisorServiceLabel('/tmp/b/controller-home'));
