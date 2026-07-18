@@ -143,10 +143,31 @@ describe('task integration recovery', () => {
     expect(meta.worktreeCleanedAt).toBeTruthy();
     expect(meta.cleanupBranchDeletedAt).toBeTruthy();
     expect(meta.closureState).toBe('completed');
+    expect(meta.integrationEvidence?.targetRevision).toBe(result.commitSha);
+    expect(meta.integrationEvidence?.reachable).toBe(true);
+    expect(meta.cleanupEvidence?.editSessionClosedOrNotCreated).toBe(true);
+    expect(meta.cleanupEvidence?.worktreeRemovedOrNotCreated).toBe(true);
 
     const repeated = finishTaskRun(repoRoot, { runId, commit: true });
     expect(repeated.action).toBe('already_done');
     expect(getAgentJob(repoRoot, runId).closureState).toBe('completed');
+  }));
+
+  test('recovers a target commit written before Run evidence without creating a duplicate commit', () => withRepo((repoRoot, registerCleanupPath) => {
+    const runId = 'RUN-commit-before-evidence';
+    const prepared = prepareWorktreeRun(repoRoot, runId, registerCleanupPath);
+    writeFileSync(join(prepared.worktree, 'src/example.ts'), 'export const value = 2;\n');
+    writeFileSync(join(repoRoot, 'src/example.ts'), 'export const value = 2;\n');
+    git(repoRoot, ['add', 'src/example.ts']);
+    git(repoRoot, ['commit', '-m', 'Recovered integration commit']);
+    const committedBeforeEvidence = git(repoRoot, ['rev-parse', 'HEAD']).trim();
+
+    const result = finishTaskRun(repoRoot, { runId });
+
+    expect(result.action).toBe('finished');
+    expect(result.commitSha).toBe(committedBeforeEvidence);
+    expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(committedBeforeEvidence);
+    expect(getAgentJob(repoRoot, runId).integrationEvidence?.targetRevision).toBe(committedBeforeEvidence);
   }));
 
   test('preserves an integrated worktree when it contains changes outside durable integration evidence', () => withRepo((repoRoot, registerCleanupPath) => {
@@ -188,7 +209,7 @@ describe('task integration recovery', () => {
 
     const meta = getAgentJob(repoRoot, runId);
     expect(meta.integrationReviewPath).toBe(result.integrationReviewPath);
-    expect(meta.closureState).toBe('preserved');
+    expect(meta.closureState).toBe('integration_blocked');
     expect(meta.preservationReason).toBe('integration_review_required');
 
     const packet = JSON.parse(

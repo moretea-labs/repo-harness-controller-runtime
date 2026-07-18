@@ -1,4 +1,4 @@
-import type { ControllerAgent } from "../controller/types";
+import type { CleanupEvidence, ControllerAgent, IntegrationEvidence } from "../controller/types";
 import type { TaskExecutionClass } from "../controller/execution-policy";
 import type { ExecutorHealth } from "./executor-health";
 import type { ManagedResource } from "../../runtime/resources";
@@ -17,6 +17,7 @@ export type AgentJobClosureState =
   | "ready_to_integrate"
   | "integration_pending"
   | "integrating"
+  | "integration_blocked"
   | "integrated"
   | "cleanup_pending"
   | "cleaning"
@@ -32,6 +33,10 @@ export type AgentJobPreservationReason =
   | "main_workspace_occupied"
   | "integration_review_required"
   | "integration_failed"
+  | "target_branch_drift"
+  | "verification_stale"
+  | "ownership_unknown"
+  | "overlapping_unmerged_work"
   | "cleanup_failed";
 export type AgentExecutionProvider = "local" | "github";
 export type AgentExecutionMode = "workspace" | "worktree" | "github";
@@ -140,6 +145,8 @@ export interface AgentJobMeta {
   finishedAt?: string;
   integratedSessionId?: string;
   integratedAt?: string;
+  integrationEvidence?: IntegrationEvidence;
+  cleanupEvidence?: CleanupEvidence;
   timing?: { elapsedMs: number; remainingMs: number | null; overdue: boolean };
   github?: {
     owner: string;

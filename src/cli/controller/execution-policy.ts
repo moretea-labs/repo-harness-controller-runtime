@@ -1,4 +1,4 @@
-import type { ControllerTask, TaskRisk, TaskVerification } from './types';
+import type { CleanupEvidence, ControllerTask, IntegrationEvidence, TaskRisk, TaskVerification } from './types';
 
 export type TaskExecutionClass =
   | 'read_only'
@@ -23,6 +23,31 @@ export interface TaskExecutionPolicy {
   warnings: string[];
   sensitivePaths: string[];
   destructiveSignals: string[];
+}
+
+export function completionEvidenceComplete(
+  verification: TaskVerification | undefined,
+): verification is TaskVerification & {
+  runId: string;
+  integrationEvidence: IntegrationEvidence;
+  cleanupEvidence: CleanupEvidence;
+} {
+  const runId = verification?.runId;
+  const integration = verification?.integrationEvidence;
+  const cleanup = verification?.cleanupEvidence;
+  return Boolean(runId
+    && integration?.runId === runId
+    && cleanup?.runId === runId
+    && integration.reachable
+    && integration.targetBranch.trim()
+    && integration.targetRevision.trim()
+    && cleanup.worktreeRemovedOrNotCreated
+    && cleanup.branchDeletedOrRetained
+    && cleanup.leasesReleased
+    && cleanup.runTerminal
+    && cleanup.editSessionClosedOrNotCreated
+    && cleanup.noActiveProcess
+    && cleanup.noDirtyDiff);
 }
 
 const READ_ONLY_INTENT = /\b(read|inspect|analy[sz]e|audit|review|summari[sz]e|explain|diagnose|investigate|search|find|report|compare|trace)\b|只读|分析|审计|检查|排查|调查|搜索|查找|报告|对比|梳理/i;

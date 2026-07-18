@@ -3,7 +3,12 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs"
 import { tmpdir } from "os";
 import { join } from "path";
 import { getAgentJob, startTaskJob } from "../../src/cli/agent-jobs/job-manager";
-import { invalidateAgentWorker } from "../../src/cli/agent-jobs/worker-lifecycle";
+import type { AgentJobMeta } from "../../src/cli/agent-jobs/types";
+import {
+  invalidateAgentWorker,
+  matchesAgentWorkerCommand,
+  shouldTolerateOwnedFinalizationInvalidation,
+} from "../../src/cli/agent-jobs/worker-lifecycle";
 import {
   createIssue,
   inspectIssueReadiness,
@@ -171,8 +176,8 @@ describe("Controller v7 compatibility on the V8 execution bridge", () => {
       acceptanceResults: [],
       verifiedAt: new Date().toISOString(),
     });
-    expect(completed.tasks[0]?.status).toBe("done");
-    expect(completed.tasks[0]?.verification?.autoCompleted).toBe(true);
+    expect(completed.tasks[0]?.status).toBe("verified");
+    expect(completed.tasks[0]?.verification?.autoCompleted).toBe(false);
   });
 
   test("real failed checks remain authoritative for change Tasks", () => {
@@ -248,7 +253,7 @@ describe("Controller v7 compatibility on the V8 execution bridge", () => {
     expect(listIssues(root)).toHaveLength(2);
   });
 
-  test("superseded dependency replacements are authoritative", () => {
+  test("replacement dependencies are not satisfied by legacy done labels without closure evidence", () => {
     const root = repo();
     const issue = createIssue(root, {
       title: "Dependency migration",
@@ -265,8 +270,8 @@ describe("Controller v7 compatibility on the V8 execution bridge", () => {
     const refreshed = listIssues(root).find((entry) => entry.id === issue.id)!;
     const states = resolveIssueTaskStates(refreshed);
     const dependency = resolveTaskDependencies(refreshed, refreshed.tasks[3]!, states);
-    expect(dependency.ready).toBe(true);
-    expect(dependency.pendingTaskIds).toEqual([]);
+    expect(dependency.ready).toBe(false);
+    expect(dependency.pendingTaskIds).toEqual(["T2", "T3"]);
     expect(refreshed.tasks[3]!.dependsOn).toEqual(["T2", "T3"]);
     expect(dependency.supersededMigrations).toEqual([]);
   });
@@ -309,6 +314,39 @@ describe("Controller v7 compatibility on the V8 execution bridge", () => {
       timeoutMs: 10_000,
       isolate: true,
     })).toThrow("ACTIVE_SCOPE_CONFLICT");
+  });
+
+  test("unresolved integration evidence blocks a later overlapping launch", () => {
+    const root = repo();
+    const issue = createIssue(root, {
+      title: "Drift prevention",
+      tasks: [
+        { title: "Pending integration", objective: "Edit shared source.", allowedPaths: ["src/shared/**"], risk: "low" },
+        { title: "Later writer", objective: "Edit the same source.", allowedPaths: ["src/shared/value.ts"], risk: "low" },
+      ],
+    });
+    const runId = "RUN-pending-integration";
+    writeRun(root, issue.id, "T1", runId, 96, {
+      executionClass: "low_risk_change",
+      allowedPaths: ["src/shared/**"],
+    });
+    const metaPath = join(root, ".ai/harness/jobs", runId, "meta.json");
+    const pending = JSON.parse(readFileSync(metaPath, "utf-8"));
+    pending.status = "waiting_for_user";
+    pending.closureState = "integration_blocked";
+    pending.preservationReason = "overlapping_unmerged_work";
+    pending.finishedAt = new Date().toISOString();
+    writeFileSync(metaPath, `${JSON.stringify(pending, null, 2)}\n`);
+    updateTask(root, issue.id, "T1", { status: "integration_blocked", runId });
+
+    expect(() => startTaskJob({
+      repoRoot: root,
+      issueId: issue.id,
+      taskId: "T2",
+      agent: "codex",
+      timeoutMs: 10_000,
+      isolate: false,
+    })).toThrow("DRIFT_PREVENTION_BLOCKED");
   });
 
   test("does not delete a live launch lock while allowing the current Controller to proceed", () => {
@@ -438,7 +476,7 @@ describe("Controller v7 compatibility on the V8 execution bridge", () => {
     expect(refreshed.tasks[0]!.status).toBe("blocked");
   });
 
-  test("orphaned successful Run evidence automatically continues a low-risk Task", () => {
+  test("orphaned successful Run evidence verifies but cannot complete without integration evidence", () => {
     const root = repo();
     const issue = createIssue(root, {
       title: "Terminal reconciliation",
@@ -464,8 +502,8 @@ describe("Controller v7 compatibility on the V8 execution bridge", () => {
     const run = getAgentJob(root, runId);
     expect(run.status).toBe("succeeded");
     const refreshed = listIssues(root).find((entry) => entry.id === issue.id)!;
-    expect(refreshed.tasks[0]!.status).toBe("done");
-    expect(refreshed.tasks[0]!.verification?.autoCompleted).toBe(true);
+    expect(refreshed.tasks[0]!.status).toBe("verified");
+    expect(refreshed.tasks[0]!.verification?.autoCompleted).toBe(false);
   });
 
   test("isolated Runs do not become succeeded before automatic integration finishes", () => {
@@ -575,6 +613,76 @@ describe("Controller v7 compatibility on the V8 execution bridge", () => {
     });
     expect(invalidation?.code).toBe("PARENT_DISCONNECTED");
     expect(invalidation?.message).toContain("PPID became 1");
+  });
+
+  test("hands a live owned finalizer across a Controller epoch change without weakening Worker fencing", () => {
+    const now = new Date().toISOString();
+    const finalizing = {
+      schemaVersion: 3,
+      runId: "RUN-finalizer-handoff",
+      issueId: "ISS-1",
+      taskId: "T1",
+      agent: "codex",
+      provider: "local",
+      executionMode: "worktree",
+      status: "running",
+      repoRoot: "/repo",
+      worktree: "/repo/worktree",
+      branch: "controller/finalizer",
+      baseRevision: "base",
+      promptPath: "prompt.md",
+      stdoutPath: "stdout.log",
+      stderrPath: "stderr.log",
+      resultPath: "result.json",
+      eventsPath: "events.jsonl",
+      workerPid: 321,
+      autoIntegrate: true,
+      progress: {
+        phase: "finalizing",
+        percent: 96,
+        currentActivity: "finalizing",
+        lastActivityAt: now,
+        activityCount: 1,
+      },
+      createdAt: now,
+    } satisfies AgentJobMeta;
+    const epochChanged = {
+      code: "CONTROLLER_EPOCH_STALE",
+      message: "Controller ownership epoch changed",
+    } as const;
+
+    expect(shouldTolerateOwnedFinalizationInvalidation(finalizing, epochChanged, {
+      workerPid: 321,
+      childExited: true,
+    })).toBe(true);
+    expect(shouldTolerateOwnedFinalizationInvalidation(finalizing, epochChanged, {
+      workerPid: 999,
+      childExited: true,
+    })).toBe(false);
+    expect(shouldTolerateOwnedFinalizationInvalidation(finalizing, {
+      code: "WORKER_REPLACED",
+      message: "Run belongs to another Worker",
+    }, {
+      workerPid: 321,
+      childExited: true,
+    })).toBe(false);
+  });
+
+  test("does not confuse a PID-reused process with the expected Agent Worker command", () => {
+    const configPath = "/repo/.ai/harness/jobs/RUN-1/worker-config.json";
+    expect(matchesAgentWorkerCommand(
+      `/usr/bin/node /repo/src/cli/agent-jobs/job-worker.ts ${configPath}`,
+      configPath,
+    )).toBe(true);
+    expect(matchesAgentWorkerCommand("/usr/bin/node unrelated-server.js", configPath)).toBe(false);
+    expect(matchesAgentWorkerCommand(
+      "/usr/bin/node /repo/src/cli/agent-jobs/job-worker.ts /repo/.ai/harness/jobs/RUN-2/worker-config.json",
+      configPath,
+    )).toBe(false);
+    expect(matchesAgentWorkerCommand(
+      `/usr/bin/node unrelated.js --log=job-worker.ts ${configPath}`,
+      configPath,
+    )).toBe(false);
   });
 
 });

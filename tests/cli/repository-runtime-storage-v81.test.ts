@@ -94,6 +94,21 @@ describe('v8.1 repository runtime storage isolation', () => {
     }
   });
 
+  test('reuses an already-linked Local Job binding during repeated initialization', () => {
+    const fixture = repositoryFixture();
+    try {
+      const first = ensureRepositoryRuntimeStorage(fixture.repoA, fixture.controllerHome);
+      const second = ensureRepositoryRuntimeStorage(fixture.repoA, fixture.controllerHome);
+      const source = join(fixture.repoA.canonicalRoot, '.ai', 'harness', 'local-jobs');
+      expect(first.readyForExecution).toBe(true);
+      expect(second.readyForExecution).toBe(true);
+      expect(second.bindings.find((binding) => binding.name === 'local-jobs')?.status).toBe('already-linked');
+      expect(lstatSync(source).isSymbolicLink()).toBe(true);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   test('migrates terminal legacy Local Jobs before linking repository runtime storage', () => {
     const fixture = repositoryFixture();
     try {

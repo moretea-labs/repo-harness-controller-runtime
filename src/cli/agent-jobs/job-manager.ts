@@ -12,7 +12,7 @@ import {
   appendFileSync,
 } from "fs";
 import { dirname, join, relative } from "path";
-import { spawn } from "child_process";
+import { spawn, spawnSync } from "child_process";
 import { fileURLToPath } from "url";
 import { runProcess } from "../../effects/process-runner";
 import {
@@ -40,6 +40,8 @@ import {
   hasControllerOwnershipMetadata,
   invalidateAgentWorker,
   isPidAlive,
+  matchesAgentWorkerCommand,
+  shouldTolerateOwnedFinalizationInvalidation,
 } from "./worker-lifecycle";
 import { terminateProcessTreeSync } from "../../runtime/shared/process-tree";
 import { managedResource } from "../../runtime/resources";
@@ -347,7 +349,10 @@ function updateRunIndexes(repoRoot: string, meta: AgentJobMeta): void {
 
     const pendingIntegration = readRunIndex(repoRoot, 'pending-integration');
     pendingIntegration.runs = pendingIntegration.runs.filter((candidate) => candidate.runId !== meta.runId);
-    if (meta.status === 'succeeded' && meta.executionMode === 'worktree' && !meta.integratedSessionId) pendingIntegration.runs.push(entry);
+    if (meta.closureState && [
+      'ready_to_integrate', 'integration_pending', 'integrating', 'integration_blocked',
+      'integrated', 'cleanup_pending', 'cleaning', 'cleanup_blocked', 'preserved',
+    ].includes(meta.closureState)) pendingIntegration.runs.push(entry);
     pendingIntegration.updatedAt = new Date().toISOString();
     pendingIntegration.runs = pendingIntegration.runs.sort((a, b) => a.createdAt.localeCompare(b.createdAt)).slice(-5000);
     writeJson(runIndexPath(repoRoot, 'pending-integration'), pendingIntegration);
@@ -563,6 +568,24 @@ function reconcileLocalRunOwnership(
     markRunUnknown(repoRoot, path, meta, "Run ownership metadata is missing");
     return;
   }
+  const workerAlive = isAlive(meta.workerPid);
+  if (workerAlive && meta.workerPid) {
+    const identity = runProcess("ps", ["-o", "command=", "-p", String(meta.workerPid)], {
+      timeoutMs: 1_000,
+      maxOutputBytes: 32 * 1024,
+    });
+    if (identity.ok && identity.stdout.trim()) {
+      const command = identity.stdout.trim();
+      const expectedConfig = join(repoRoot, JOB_ROOT, meta.runId, "worker-config.json");
+      if (!matchesAgentWorkerCommand(command, expectedConfig)) {
+        meta.agentPid = undefined;
+        meta.workerPid = undefined;
+        meta.launchPid = undefined;
+        markRunUnknown(repoRoot, path, meta, `Worker PID was reused by an unrelated process: ${command.slice(0, 200)}`);
+        return;
+      }
+    }
+  }
   const invalidation = invalidateAgentWorker(meta, {
     controllerPid: meta.controllerPid,
     controllerEpoch: meta.controllerEpoch,
@@ -573,6 +596,12 @@ function reconcileLocalRunOwnership(
     workerPid: meta.workerPid,
   });
   if (!invalidation) return;
+  const ownedCompletionInFlight = workerAlive
+    && shouldTolerateOwnedFinalizationInvalidation(meta, invalidation, {
+      workerPid: meta.workerPid!,
+      childExited: true,
+    });
+  if (ownedCompletionInFlight) return;
   terminateRunProcesses(meta);
   meta.agentPid = undefined;
   meta.workerPid = undefined;
@@ -664,7 +693,10 @@ function assertNoTaskScopeConflict(
 ): void {
   const policy = taskExecutionPolicy(task);
   if (policy.executionClass === "read_only" || task.allowedPaths.length === 0) return;
-  for (const run of activeRuns(repoRoot)) {
+  const candidates = new Map<string, AgentJobMeta>();
+  for (const run of activeRuns(repoRoot)) candidates.set(run.runId, run);
+  for (const run of listPendingIntegrationRuns(repoRoot, 5000)) candidates.set(run.runId, run);
+  for (const run of candidates.values()) {
     if (run.issueId === issueId && run.taskId === task.id) continue;
     let otherScope = run.executionClass && run.allowedPaths
       ? { executionClass: run.executionClass, allowedPaths: run.allowedPaths }
@@ -686,8 +718,11 @@ function assertNoTaskScopeConflict(
       { executionClass: policy.executionClass, allowedPaths: task.allowedPaths },
       otherScope,
     )) continue;
+    const currentHeadResult = spawnSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf-8" });
+    const currentHead = currentHeadResult.status === 0 ? currentHeadResult.stdout.trim() : "";
+    const baseDrift = Boolean(run.baseRevision && currentHead && currentHead !== run.baseRevision);
     throw new Error(
-      `task-local launch blocked by concurrent path conflict with ${run.issueId}/${run.taskId} (${run.runId})`,
+      `DRIFT_PREVENTION_BLOCKED: task-local launch overlaps unresolved Run ${run.issueId}/${run.taskId} (${run.runId})${baseDrift ? ` whose base ${run.baseRevision} differs from target ${currentHead}` : ""}`,
     );
   }
 }
@@ -1746,13 +1781,41 @@ export function reconcileAgentJobs(repoRoot: string): {
 
 export function listPendingIntegrationRuns(repoRoot: string, limit = 500): AgentJobMeta[] {
   const bounded = Math.max(1, Math.min(limit, 5000));
-  return readRunIndex(repoRoot, 'pending-integration').runs.slice(0, bounded).flatMap((entry) => {
+  let pending = readRunIndex(repoRoot, 'pending-integration');
+  if (!existsSync(runIndexPath(repoRoot, 'pending-integration')) && existsSync(join(repoRoot, JOB_ROOT))) {
+    for (const meta of scanLegacyJobMeta(repoRoot, bounded)) updateRunIndexes(repoRoot, meta);
+    pending = readRunIndex(repoRoot, 'pending-integration');
+  }
+  return pending.runs.slice(0, bounded).flatMap((entry) => {
     try {
       const { stdoutTail: _stdout, stderrTail: _stderr, ...meta } = getAgentJob(repoRoot, entry.runId);
-      if (meta.status === 'succeeded' && meta.executionMode === 'worktree' && !meta.integratedSessionId) return [meta];
+      if (meta.closureState && [
+        'ready_to_integrate', 'integration_pending', 'integrating', 'integration_blocked',
+        'integrated', 'cleanup_pending', 'cleaning', 'cleanup_blocked', 'preserved',
+      ].includes(meta.closureState)) return [meta];
       return [];
     } catch (_error) { return []; }
   });
+}
+
+export function recordAgentJobIntegrationEvidence(
+  repoRoot: string,
+  runId: string,
+  evidence: NonNullable<AgentJobMeta['integrationEvidence']>,
+): AgentJobMeta {
+  const current = getAgentJob(repoRoot, runId);
+  const { stdoutTail: _stdout, stderrTail: _stderr, ...meta } = current;
+  meta.integrationEvidence = evidence;
+  meta.integratedAt = meta.integratedAt ?? evidence.recordedAt;
+  meta.closureState = 'cleanup_pending';
+  meta.closureUpdatedAt = evidence.recordedAt;
+  writeAgentMeta(repoRoot, metaPath(repoRoot, runId), meta);
+  appendAgentJobEvent(repoRoot, runId, {
+    type: 'run_activity',
+    message: `Durable integration evidence recorded for ${evidence.targetRevision}; cleanup is pending.`,
+    data: { integrationEvidence: evidence },
+  });
+  return meta;
 }
 
 export function listAgentJobs(repoRoot: string, limit = 50): AgentJobMeta[] {
@@ -2015,13 +2078,15 @@ export function markAgentJobClosure(
           : {}),
     }));
   }
-  if (input.state === "preserved" || input.state === "cleanup_blocked") {
+  if (input.state === "preserved" || input.state === "integration_blocked" || input.state === "cleanup_blocked") {
     meta.status = "waiting_for_user";
     delete meta.finishedAt;
     meta.preservationReason = input.preservationReason ?? "unknown_worktree_state";
     meta.preservationDetails = input.details ?? (input.state === "cleanup_blocked"
       ? "Run cleanup is blocked because resource safety could not be proven."
-      : "Run closure was preserved because cleanup safety could not be proven.");
+      : input.state === "integration_blocked"
+        ? "Run integration is blocked because target safety could not be proven."
+        : "Run closure was preserved because cleanup safety could not be proven.");
     meta.autoIntegrationError = meta.preservationDetails;
   } else if (input.state === "completed") {
     delete meta.preservationReason;
@@ -2034,7 +2099,7 @@ export function markAgentJobClosure(
   }
   writeAgentMeta(repoRoot, metaPath(repoRoot, runId), meta);
   appendAgentJobEvent(repoRoot, runId, {
-    type: input.state === "preserved" || input.state === "cleanup_blocked" ? "run_waiting" : "run_activity",
+    type: input.state === "preserved" || input.state === "integration_blocked" || input.state === "cleanup_blocked" ? "run_waiting" : "run_activity",
     message: input.details ?? `Run closure moved to ${input.state}.`,
     data: {
       closureState: input.state,
@@ -2054,22 +2119,45 @@ export function markAgentJobReviewedCompletion(
     changedFiles?: string[];
     worktreeCleaned?: boolean;
     branchDeleted?: boolean;
+    integrationEvidence?: AgentJobMeta["integrationEvidence"];
+    cleanupEvidence?: AgentJobMeta["cleanupEvidence"];
   } = {},
 ): AgentJobMeta {
   const current = getAgentJob(repoRoot, runId);
   if (current.provider !== "local") return current;
   const { stdoutTail: _stdout, stderrTail: _stderr, ...meta } = current;
   const completedAt = new Date().toISOString();
-  const isolatedLocalRun = meta.executionMode === "worktree" && meta.worktree !== repoRoot;
-  const integrationProven = !isolatedLocalRun || Boolean(meta.integratedSessionId);
-  const cleanupProven = !isolatedLocalRun || Boolean(options.worktreeCleaned || meta.worktreeCleanedAt);
-  if (!integrationProven || !cleanupProven) {
+  const integrationEvidence = options.integrationEvidence ?? meta.integrationEvidence;
+  const cleanupEvidence = options.cleanupEvidence ?? meta.cleanupEvidence;
+  const integrationMissing = [
+    integrationEvidence?.runId === runId ? undefined : "runId",
+    integrationEvidence?.reachable ? undefined : "reachable",
+    integrationEvidence?.targetRevision ? undefined : "targetRevision",
+  ].filter((field): field is string => Boolean(field));
+  const cleanupMissing = [
+    cleanupEvidence?.runId === runId ? undefined : "runId",
+    cleanupEvidence?.worktreeRemovedOrNotCreated ? undefined : "worktreeRemovedOrNotCreated",
+    cleanupEvidence?.branchDeletedOrRetained ? undefined : "branchDeletedOrRetained",
+    cleanupEvidence?.leasesReleased ? undefined : "leasesReleased",
+    cleanupEvidence?.editSessionClosedOrNotCreated ? undefined : "editSessionClosedOrNotCreated",
+    cleanupEvidence?.noActiveProcess ? undefined : "noActiveProcess",
+    cleanupEvidence?.noDirtyDiff ? undefined : "noDirtyDiff",
+  ].filter((field): field is string => Boolean(field));
+  const formatMissing = (label: string, fields: string[]): string => {
+    const shown = fields.slice(0, 5);
+    const suffix = fields.length > shown.length ? `, and ${fields.length - shown.length} more` : "";
+    return `Run ${label} evidence is incomplete: ${shown.join(", ")}${suffix}.`;
+  };
+  const integrationProven = integrationMissing.length === 0;
+  const cleanupProven = Boolean(cleanupEvidence
+    && cleanupMissing.length === 0);
+  if (!integrationProven || !cleanupProven || !cleanupEvidence) {
     return markAgentJobClosure(repoRoot, runId, {
-      state: !integrationProven ? "ready_to_integrate" : "cleanup_blocked",
+      state: !integrationProven ? "integration_blocked" : "cleanup_blocked",
       preservationReason: !integrationProven ? "unmerged_branch" : "cleanup_failed",
       details: !integrationProven
-        ? "Run cannot complete before isolated changes are integrated."
-        : "Run cannot complete before isolated worktree cleanup is proven.",
+        ? formatMissing("integration", integrationMissing)
+        : formatMissing("cleanup", cleanupMissing),
       worktreeCleaned: options.worktreeCleaned,
       branchDeleted: options.branchDeleted,
     });
@@ -2090,6 +2178,12 @@ export function markAgentJobReviewedCompletion(
   if (options.changedFiles) meta.changedFiles = options.changedFiles;
   if (options.worktreeCleaned) meta.worktreeCleanedAt = meta.worktreeCleanedAt ?? completedAt;
   if (options.branchDeleted) meta.cleanupBranchDeletedAt = meta.cleanupBranchDeletedAt ?? completedAt;
+  meta.integrationEvidence = integrationEvidence;
+  meta.cleanupEvidence = {
+    ...cleanupEvidence,
+    runId,
+    runTerminal: true,
+  };
   meta.closureState = "completed";
   meta.closureUpdatedAt = completedAt;
   delete meta.preservationReason;

@@ -1,6 +1,6 @@
 export type IssueKind = 'bug' | 'feature' | 'governance' | 'investigation';
 export type IssueStatus = 'backlog' | 'analysis' | 'planned' | 'launch_blocked' | 'in_progress' | 'review' | 'done' | 'cancelled';
-export type TaskStatus = 'backlog' | 'analysis' | 'planned' | 'ready' | 'launch_blocked' | 'running' | 'blocked' | 'review' | 'integrated' | 'verifying' | 'changes_requested' | 'verified' | 'done' | 'cancelled' | 'superseded';
+export type TaskStatus = 'backlog' | 'analysis' | 'planned' | 'ready' | 'launch_blocked' | 'running' | 'blocked' | 'review' | 'verifying' | 'ready_to_integrate' | 'integrating' | 'integration_blocked' | 'integrated' | 'cleanup_pending' | 'cleanup_blocked' | 'changes_requested' | 'verified' | 'done' | 'cancelled' | 'superseded';
 export type TaskRisk = 'readonly' | 'low' | 'medium' | 'high' | 'destructive';
 export type ControllerAgent = 'codex' | 'claude' | 'github-copilot';
 
@@ -29,6 +29,32 @@ export interface TaskCommandEvidence {
   source?: 'reported' | 'controller';
 }
 
+export interface IntegrationEvidence {
+  runId: string;
+  kind: 'commit' | 'no_change' | 'superseded';
+  targetBranch: string;
+  targetRevision: string;
+  sourceRevision?: string;
+  baseRevision?: string;
+  strategy: 'edit_session_commit' | 'already_integrated' | 'no_change' | 'superseded';
+  editSessionId?: string;
+  reachable: boolean;
+  recordedAt: string;
+}
+
+export interface CleanupEvidence {
+  runId: string;
+  worktreeRemovedOrNotCreated: boolean;
+  branchDeletedOrRetained: boolean;
+  leasesReleased: boolean;
+  runTerminal: boolean;
+  editSessionClosedOrNotCreated: boolean;
+  noActiveProcess: boolean;
+  noDirtyDiff: boolean;
+  retainedReason?: string;
+  recordedAt: string;
+}
+
 export interface TaskVerification {
   repoId?: string;
   runId?: string;
@@ -40,6 +66,8 @@ export interface TaskVerification {
   reviewer: string;
   verifiedAt: string;
   autoCompleted?: boolean;
+  integrationEvidence?: IntegrationEvidence;
+  cleanupEvidence?: CleanupEvidence;
 }
 
 export interface ControllerTask {

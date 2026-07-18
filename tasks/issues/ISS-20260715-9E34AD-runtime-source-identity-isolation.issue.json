@@ -4,7 +4,7 @@
   "title": "Isolate Controller Runtime Source Identity from execution repositories",
   "slug": "runtime-source-identity-isolation",
   "kind": "bug",
-  "status": "done",
+  "status": "in_progress",
   "summary": "False RUNTIME_SOURCE_SNAPSHOT_STALE when selecting a business repository was caused by comparing daemon Runtime Source against execution canonicalRoot. Fixed by a unique Controller Runtime Source resolver shared across MCP, CLI, and Local Bridge; generation rotation remains start/restart only; missing snapshots stay fail-closed.",
   "goals": [
     "Keep Runtime Source Identity controller-scoped and package/source-derived.",
@@ -34,7 +34,7 @@
       "id": "T1",
       "title": "Runtime Source isolation fix",
       "objective": "Introduce unique runtime source resolver; stop comparing execution repository roots; pin daemon/keepalive startup source; add targeted tests and architecture invariant.",
-      "status": "done",
+      "status": "integration_blocked",
       "dependsOn": [],
       "allowedPaths": [
         "src/runtime/control-plane/**",
@@ -64,15 +64,16 @@
       "risk": "medium",
       "notes": [
         "Root cause confirmed as false comparison, not generation overwrite by session_bind/work_prepare.",
-        "evaluateRuntimeSourceDrift(undefined, current) restored to fail-closed missing snapshot behavior."
+        "evaluateRuntimeSourceDrift(undefined, current) restored to fail-closed missing snapshot behavior.",
+        "repo-harness-stuck-state-migration: false_completed inspected. Task is declared done without complete integration and cleanup evidence."
       ],
       "runIds": [],
       "createdAt": "2026-07-15T12:40:00.000Z",
-      "updatedAt": "2026-07-15T12:45:00.000Z",
+      "updatedAt": "2026-07-18T00:30:57.304Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     }
   ],
   "repoId": "repo_123b7cf58b6b17b5cbe46a56",
   "createdAt": "2026-07-15T12:40:00.000Z",
-  "updatedAt": "2026-07-15T12:45:00.000Z"
+  "updatedAt": "2026-07-18T00:30:57.304Z"
 }

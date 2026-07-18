@@ -143,6 +143,17 @@ const INLINE_ERROR_DETAIL_KEYS = new Set([
   'failureClass',
   'candidateId',
   'executionJobId',
+  'executable',
+  'cwd',
+  'exitCode',
+  'signal',
+  'stderr',
+  'stderrPath',
+  'stderrTruncated',
+  'processGroupId',
+  'ownerPid',
+  'ownerEpoch',
+  'startupError',
 ]);
 
 function inlineSafeErrorDetails(details: Record<string, unknown>): Record<string, unknown> {
@@ -458,7 +469,7 @@ function transitionAllowed(from: ExecutionJobStatus, to: ExecutionJobStatus): bo
     return ['queued', 'waiting_for_approval', 'succeeded', 'failed', 'timed_out', 'cancelled', 'orphaned', 'stale', 'human_attention_required'].includes(to);
   }
   if (from === 'dispatched') {
-    return ['running', 'succeeded', 'failed', 'timed_out', 'cancelled', 'orphaned', 'stale', 'human_attention_required'].includes(to);
+    return ['queued', 'running', 'succeeded', 'failed', 'timed_out', 'cancelled', 'orphaned', 'stale', 'human_attention_required'].includes(to);
   }
   return false;
 }
@@ -532,6 +543,15 @@ export function attachExecutionWorker(
         ...current,
         status: 'running',
         workerPid,
+        workerLifecycle: current.workerLifecycle
+          ? {
+              ...current.workerLifecycle,
+              attachedAt: timestamp,
+              processGroupId: process.platform !== 'win32' ? workerPid : undefined,
+              workerPid,
+              startupState: 'registered',
+            }
+          : current.workerLifecycle,
         heartbeatAt: timestamp,
         startedAt: current.startedAt ?? timestamp,
         timings: {

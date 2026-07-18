@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { execFileSync } from 'child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
@@ -18,6 +19,11 @@ function withRepo<T>(fn: (repoRoot: string) => T): T {
     mkdirSync(join(repoRoot, 'src'), { recursive: true });
     writeFileSync(join(repoRoot, 'src/example.ts'), 'export const value = 1;\n');
     writeFileSync(join(repoRoot, 'tasks/current.md'), '# Current\n');
+    execFileSync('git', ['init', '-q'], { cwd: repoRoot });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoRoot });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repoRoot });
+    execFileSync('git', ['add', '.'], { cwd: repoRoot });
+    execFileSync('git', ['commit', '-qm', 'Initial commit'], { cwd: repoRoot });
     return fn(repoRoot);
   } finally {
     rmSync(repoRoot, { recursive: true, force: true });
@@ -75,12 +81,82 @@ describe('completion orchestrator', () => {
     });
     updateTask(repoRoot, issue.id, 'T1', { status: 'review', runId: 'RUN-finishable' });
     seedRun(repoRoot, { runId: 'RUN-finishable', issueId: issue.id, taskId: 'T1' });
+    writeFileSync(join(repoRoot, 'src/example.ts'), 'export const value = 2;\n');
 
     const result = finishTaskRun(repoRoot, { runId: 'RUN-finishable' });
 
     expect(result.action).toBe('finished');
     expect(result.taskStatus).toBe('done');
     expect(result.issue.tasks[0].status).toBe('done');
+    expect(result.commitSha).toBeTruthy();
+    const completedRun = getAgentJob(repoRoot, 'RUN-finishable');
+    const completedTask = getIssue(repoRoot, issue.id).tasks[0]!;
+    expect(completedRun.status).toBe('succeeded');
+    expect(completedRun.cleanupEvidence?.runTerminal).toBe(true);
+    expect(completedRun.integrationEvidence?.runId).toBe(completedRun.runId);
+    expect(completedRun.cleanupEvidence?.runId).toBe(completedRun.runId);
+    expect(completedTask.verification?.runId).toBe(completedRun.runId);
+    expect(completedTask.verification?.integrationEvidence?.runId).toBe(completedRun.runId);
+    expect(completedTask.verification?.cleanupEvidence?.runId).toBe(completedRun.runId);
+  }));
+
+  test('rejects completion evidence assembled from different Runs', () => withRepo((repoRoot) => {
+    const issue = createIssue(repoRoot, {
+      title: 'Cross-run evidence',
+      tasks: [{ title: 'Keep evidence scoped', objective: 'Reject mixed evidence.', allowedPaths: ['src/**'], risk: 'medium' }],
+      allowDuplicate: true,
+    });
+    seedRun(repoRoot, { runId: 'RUN-cross-evidence', issueId: issue.id, taskId: 'T1' });
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf-8' }).trim();
+
+    const closure = markAgentJobReviewedCompletion(repoRoot, 'RUN-cross-evidence', {
+      integrationEvidence: {
+        runId: 'RUN-cross-evidence', kind: 'commit', targetBranch: 'main', targetRevision: head,
+        strategy: 'already_integrated', reachable: true, recordedAt: new Date().toISOString(),
+      },
+      cleanupEvidence: {
+        runId: 'RUN-other', worktreeRemovedOrNotCreated: true, branchDeletedOrRetained: true,
+        leasesReleased: true, runTerminal: false, editSessionClosedOrNotCreated: true,
+        noActiveProcess: true, noDirtyDiff: true, recordedAt: new Date().toISOString(),
+      },
+    });
+
+    expect(closure.status).toBe('waiting_for_user');
+    expect(closure.closureState).toBe('cleanup_blocked');
+    expect(closure.preservationDetails).toContain('cleanup evidence is incomplete: runId');
+  }));
+
+  test('keeps Run-backed verification out of done until integration and cleanup evidence exist', () => withRepo((repoRoot) => {
+    const issue = createIssue(repoRoot, {
+      title: 'Evidence gated completion',
+      tasks: [{ title: 'Change code', objective: 'Update source.', allowedPaths: ['src/**'], risk: 'medium' }],
+      allowDuplicate: true,
+    });
+    updateTask(repoRoot, issue.id, 'T1', { status: 'review', runId: 'RUN-evidence-gate' });
+    seedRun(repoRoot, {
+      runId: 'RUN-evidence-gate',
+      issueId: issue.id,
+      taskId: 'T1',
+      executionMode: 'worktree',
+      worktree: join(repoRoot, '.ai/harness/worktrees/RUN-evidence-gate'),
+      branch: 'agent/RUN-evidence-gate',
+    });
+
+    const verified = recordTaskVerification(repoRoot, issue.id, 'T1', {
+      runId: 'RUN-evidence-gate',
+      reviewer: 'test',
+      checkResults: [],
+      commandEvidence: [{ command: ['true'], ok: true, reportedBy: 'test', source: 'controller' }],
+      acceptanceResults: [],
+      verifiedAt: new Date().toISOString(),
+    });
+    expect(verified.tasks[0].status).toBe('verified');
+
+    const closure = markAgentJobReviewedCompletion(repoRoot, 'RUN-evidence-gate');
+    expect(closure.closureState).toBe('integration_blocked');
+    expect(getAgentJob(repoRoot, 'RUN-evidence-gate').status).toBe('waiting_for_user');
+    const boardTask = (projectBoard(repoRoot).issues[0].tasks as Array<Record<string, unknown>>)[0];
+    expect(boardTask.latestRunClosureState).toBe('integration_blocked');
   }));
 
   test('keeps Run-backed verification out of done until integration and cleanup evidence exist', () => withRepo((repoRoot) => {
@@ -247,6 +323,22 @@ describe('completion decision queues and stuck-state migration', () => {
     expect(applied.applied).toBe(1);
     const after = getIssue(repoRoot, issue.id);
     expect(after.tasks[0].notes.at(-1)).toContain('review_without_run inspected');
+  }));
+
+  test('reopens legacy done tasks that lack integration and cleanup evidence', () => withRepo((repoRoot) => {
+    const issue = createIssue(repoRoot, {
+      title: 'Legacy false completion',
+      tasks: [{ title: 'Legacy done', objective: 'Recover honest lifecycle state.', allowedPaths: ['src/**'], risk: 'medium' }],
+      allowDuplicate: true,
+    });
+    updateTask(repoRoot, issue.id, 'T1', { status: 'done', note: 'Legacy completion without closure evidence.' });
+
+    const before = inspectStuckControllerStates(repoRoot);
+    expect(before.counts.false_completed).toBe(1);
+    const migrated = applyStuckStateMigration(repoRoot, { dryRun: false });
+    expect(migrated.errors).toEqual([]);
+    expect(getIssue(repoRoot, issue.id).tasks[0]?.status).toBe('integration_blocked');
+    expect(getIssue(repoRoot, issue.id).status).toBe('in_progress');
   }));
 
   test('writes a Codex continuation packet without launching by default', () => withRepo((repoRoot) => {

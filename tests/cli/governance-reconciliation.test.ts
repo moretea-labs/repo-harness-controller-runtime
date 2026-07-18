@@ -107,7 +107,7 @@ describe("governance reconciliation", () => {
     expect(result.governance.status.taskId).toBe("T1");
   });
 
-  test("auto-completes verified work when policy allows and surfaces terminal issues for archive", () => {
+  test("does not auto-complete verified work without integration and cleanup evidence", () => {
     const root = repo();
     const issue = createIssue(root, {
       title: "Verification closeout",
@@ -132,12 +132,10 @@ describe("governance reconciliation", () => {
     const result = reconcileProjectGovernance(root);
     const refreshed = getIssue(root, issue.id);
 
-    expect(result.changed).toBe(true);
-    expect(result.changes.some((entry) => entry.action === "auto_accept_verified_task")).toBe(true);
-    expect(refreshed.tasks.find((entry) => entry.id === "T1")?.status).toBe("done");
-    expect(refreshed.status).toBe("done");
-    expect(result.governance.findings.some((entry) => entry.code === "TERMINAL_ISSUE_NOT_ARCHIVED")).toBe(true);
-    expect(result.governance.status.kind).toBe("archive_ready");
+    expect(result.changes.some((entry) => entry.action === "auto_accept_verified_task")).toBe(false);
+    expect(refreshed.tasks.find((entry) => entry.id === "T1")?.status).toBe("verified");
+    expect(refreshed.status).toBe("in_progress");
+    expect(result.governance.status.kind).toBe("needs_review");
   });
 
   test("reports ready status when a launchable task is available", () => {

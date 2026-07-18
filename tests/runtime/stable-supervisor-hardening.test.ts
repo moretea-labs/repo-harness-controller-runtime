@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http';
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { bootstrapLaunchAgentWithRetry } from '../../src/cli/controller/launch-agents';
 import { supervisorActivationMatchesRelease } from '../../src/cli/commands/supervisor';
-import { renderLaunchdSupervisorPlist, renderSystemdSupervisorUnit, supervisorServiceLabel, supervisorSystemdUnitName } from '../../src/runtime/supervisor/installer';
+import { installSupervisorRelease, renderLaunchdSupervisorPlist, renderSystemdSupervisorUnit, supervisorServiceLabel, supervisorSystemdUnitName } from '../../src/runtime/supervisor/installer';
 import { createStableIngressRouter } from '../../src/runtime/supervisor/ingress-router';
 import { controllerDaemonMaxLifetimeMs } from '../../src/runtime/control-plane/daemon-entry';
 import { createSupervisorOperation, readSupervisorOperation, updateSupervisorOperation } from '../../src/runtime/supervisor/operation-store';
@@ -53,6 +53,18 @@ function managedProcess(slot: 'blue' | 'green', pid: number, generation: string)
 }
 
 describe('Stable Supervisor production hardening', () => {
+  test('release bundles include the durable Worker entrypoint', () => {
+    const controllerHome = mkdtempSync(join(tmpdir(), 'repo-harness-worker-release-'));
+    try {
+      const release = installSupervisorRelease({ controllerHome, repoRoot: process.cwd(), sourceRoot: process.cwd() });
+      expect(existsSync(join(release.releasePath, 'worker.js'))).toBe(true);
+      const manifest = JSON.parse(readFileSync(join(release.releasePath, 'manifest.json'), 'utf8')) as { workerEntrypoint?: string };
+      expect(manifest.workerEntrypoint).toBe('worker.js');
+    } finally {
+      rmSync(controllerHome, { recursive: true, force: true });
+    }
+  }, 180_000);
+
   test('OS services restart crashes but preserve explicit successful stop', () => {
     const plist = renderLaunchdSupervisorPlist({
       label: 'com.example.supervisor',

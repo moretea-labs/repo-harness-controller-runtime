@@ -8,7 +8,7 @@ function runningJob(workerPid: number): ExecutionJob {
     workerPid,
     attempt: 1,
     leaseRefs: [],
-  } as ExecutionJob;
+  } as unknown as ExecutionJob;
 }
 
 describe('Execution Worker ownership', () => {

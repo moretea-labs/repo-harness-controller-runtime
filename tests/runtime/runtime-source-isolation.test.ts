@@ -161,6 +161,27 @@ describe('runtime source isolation', () => {
     expect(formatRuntimeSourceDriftMessage(drift)).toContain('Controller runtime source changed after startup');
   });
 
+  test('accepts a clean non-default branch as the authoritative runtime checkout', () => {
+    const runtimeRoot = tempRoot('repo-harness-runtime-stable-branch-');
+    initGitRepo(runtimeRoot, 'controller-runtime-fixture');
+    git(runtimeRoot, 'checkout', '-b', 'codex/canonical-stable-baseline');
+    const active = collectRuntimeSourceIdentity(runtimeRoot);
+
+    writeFileSync(join(runtimeRoot, 'src', 'main-only-change.ts'), 'export const mainOnly = true;\n');
+    git(runtimeRoot, 'checkout', 'main');
+    git(runtimeRoot, 'add', '.');
+    git(runtimeRoot, 'commit', '-m', 'main diverges from stable runtime');
+    git(runtimeRoot, 'checkout', 'codex/canonical-stable-baseline');
+
+    const current = collectRuntimeSourceIdentity(runtimeRoot);
+    expect(current.defaultBranch).toBe('main');
+    expect(current.defaultBranchCommit).not.toBe(active.commit);
+    const drift = evaluateRuntimeSourceDrift(active, current);
+
+    expect(drift.restartRequired).toBe(false);
+    expect(drift.code).toBe('RUNTIME_SOURCE_OK');
+  });
+
   test('MCP rh_status does not mark RUNTIME_SOURCE stale for a different execution repository', async () => {
     const runtimeRoot = tempRoot('repo-harness-runtime-mcp-');
     const businessRoot = tempRoot('repo-harness-business-mcp-');

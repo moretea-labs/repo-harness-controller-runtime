@@ -17,6 +17,7 @@ import {
 import { markOperationCompleted, markOperationStarted, readOperationReceipt } from '../jobs/receipt-store';
 import { markScheduledExecutionRunning } from '../../workflow/schedules/settlement';
 import { invalidateExecutionWorker } from './ownership';
+import { rebuildRepositoryProjection } from '../../projections/materialized-view';
 
 function option(name: string): string | undefined {
   const index = process.argv.indexOf(name);
@@ -39,6 +40,16 @@ let claimedAttempt: number | undefined;
 let claimedLeaseRefs: Array<{ leaseId: string; fencingToken: number }> = [];
 let exitingForOwnershipLoss = false;
 let executionStarted = false;
+
+function refreshRepositoryProjection(): void {
+  try {
+    rebuildRepositoryProjection(controllerHome, repoId);
+  } catch {
+    // Projection refresh is best-effort at process shutdown. The durable
+    // dirty marker remains when the rebuild itself cannot be completed, so
+    // startup recovery and the scheduler can retry it safely.
+  }
+}
 
 function recoverDelegatedChildIfPresent(message: string): boolean {
   try {
@@ -111,6 +122,7 @@ function exitForOwnershipLoss(message: string): never {
     }
     try { releaseExecutionLeases(controllerHome, repoId, jobId, claimedLeaseRefs); }
     catch { /* the lease expired or ownership moved */ }
+    refreshRepositoryProjection();
   }
   console.error(message);
   process.exit(1);
@@ -258,4 +270,5 @@ main()
     if (heartbeat) clearInterval(heartbeat);
     try { releaseExecutionLeases(controllerHome, repoId, jobId, claimedLeaseRefs); }
     catch { /* the lease expired or ownership moved */ }
+    refreshRepositoryProjection();
   });
