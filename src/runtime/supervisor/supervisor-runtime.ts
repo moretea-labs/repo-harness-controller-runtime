@@ -948,7 +948,7 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
           if (daemon.status === 'ready') return;
         } else {
           const runtime = loadMcpServiceRuntimeState(managed.controllerHome, this.options.repoRoot);
-          if (runtime?.server.healthy === true || runtime?.status === 'running') return;
+          if (runtime?.status === 'running' && runtime.server.healthy === true) return;
         }
       }
       await sleep(250);

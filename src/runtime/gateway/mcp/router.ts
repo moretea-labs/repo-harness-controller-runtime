@@ -23,9 +23,17 @@ const DIRECT_REPOSITORY_TOOLS = new Set(['repository_list', 'repository_get', 'r
 
 /** Blocking native host tools must never execute on the public MCP event loop. */
 const GATEWAY_ISOLATED_TOOLS = new Set([
+  // Native Apple tooling uses synchronous xcodebuild/simctl subprocesses.
   'ios_review_packet', 'ios_xcode_status', 'ios_simulators_list', 'ios_project_discover',
   'ios_schemes_list', 'ios_simulator_boot', 'ios_app_build', 'ios_app_install',
   'ios_app_launch', 'ios_simulator_screenshot', 'ios_simulator_log_tail', 'ios_ui_smoke_test',
+  // Plugin actions may drive browsers, provider CLIs, filesystem transfers, or remote APIs.
+  'plugin_action_execute',
+  // Diagnostics and maintenance perform process-table and recursive filesystem scans.
+  'workflow_watchdog_report', 'runtime_cleanup_preview', 'runtime_cleanup_apply',
+  'runtime_maintenance_status', 'runtime_maintenance_apply',
+  // Release and recovery operations may spawn Git/process checks or restart managed children.
+  'release_gate', 'runtime_recovery', 'capability_recovery',
 ]);
 
 export function isGatewayIsolatedTool(name: string): boolean {

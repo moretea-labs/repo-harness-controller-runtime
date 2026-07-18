@@ -22,8 +22,12 @@ describe('MCP durable routing hot path', () => {
     expect(isDirectHotReadTool('repository_command_execute')).toBe(false);
   });
 
-  test('blocking iOS host tools are isolated from the Gateway event loop', () => {
-    for (const name of ['ios_xcode_status', 'ios_simulators_list', 'ios_app_build', 'ios_simulator_screenshot', 'ios_simulator_log_tail', 'ios_ui_smoke_test']) {
+  test('host-blocking runtime tools are isolated from the Gateway event loop', () => {
+    for (const name of [
+      'ios_xcode_status', 'ios_simulators_list', 'ios_app_build', 'ios_simulator_screenshot',
+      'plugin_action_execute', 'workflow_watchdog_report', 'runtime_cleanup_apply',
+      'runtime_maintenance_apply', 'release_gate', 'runtime_recovery',
+    ]) {
       expect(isGatewayIsolatedTool(name)).toBe(true);
     }
     expect(isGatewayIsolatedTool('rh_status')).toBe(false);
