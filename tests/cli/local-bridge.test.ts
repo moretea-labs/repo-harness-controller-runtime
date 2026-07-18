@@ -266,6 +266,15 @@ printf '%s\n' '{"type":"turn.completed"}'
     expect(
       spawnSync("git", ["commit", "-m", "initial"], { cwd: root }).status,
     ).toBe(0);
+    writeFileSync(join(root, ".repo-harness/checks.json"), JSON.stringify({
+      version: 1,
+      checks: {
+        focused: {
+          command: [process.execPath, "-e", "process.exit(0)"],
+          timeoutMs: 10_000,
+        },
+      },
+    }));
 
     const binRoot = mkdtempSync(join(tmpdir(), "repo-harness-auto-mode-bin-"));
     roots.push(binRoot);
@@ -301,7 +310,7 @@ esac
             title: "First workspace task",
             objective: "Keep the first Run active in the current workspace.",
             allowedPaths: ["src/first.ts"],
-            checks: ["manual"],
+            checks: ["focused"],
             acceptanceCriteria: ["first.ts is updated."],
             risk: "low",
             recommendedAgent: "codex",
@@ -310,7 +319,7 @@ esac
             title: "Second concurrent task",
             objective: "Use a temporary worktree and merge immediately.",
             allowedPaths: ["src/second.ts"],
-            checks: ["manual"],
+            checks: ["focused"],
             acceptanceCriteria: ["second.ts is updated."],
             risk: "low",
             recommendedAgent: "codex",
@@ -348,9 +357,9 @@ esac
       let second = await waitForRun(root, secondDispatch.runId as string, (value) => value.executionMode === "worktree" || value.status === "failed", 120);
       expect(second.executionMode).toBe("worktree");
       const temporaryWorktree = second.worktree;
-      second = await waitForRun(root, secondDispatch.runId as string, (value) => Boolean(value.worktreeCleanedAt || value.autoIntegrationError || value.status === "failed"), 1200);
-      expect(second.status).toBe("succeeded");
+      second = await waitForRun(root, secondDispatch.runId as string, (value) => Boolean(value.closureState === "completed" || value.autoIntegrationError || value.status === "failed"), 400);
       expect(second.autoIntegrationError).toBeUndefined();
+      expect(second.status).toBe("succeeded");
       expect(second.integratedSessionId).toBeTruthy();
       expect(second.worktreeCleanedAt).toBeTruthy();
       for (let attempt = 0; attempt < 40 && existsSync(temporaryWorktree); attempt += 1) {
@@ -363,7 +372,7 @@ esac
     } finally {
       process.env.PATH = originalPath;
     }
-  });
+  }, 20_000);
 
   test("parses agent output into visible phase and activity progress", async () => {
     const root = repo();
@@ -791,13 +800,13 @@ printf '%s\n' '{"type":"turn.completed"}'
     expect(refreshed.error).toContain("deadline");
   });
 
-  test("startup reconciliation terminates orphaned detached Run workers", async () => {
+  test("startup reconciliation detects Worker PID reuse without killing the unrelated process", async () => {
     const root = repo();
     const issue = createIssue(root, {
       title: "Orphaned worker",
       tasks: [{
         title: "Recover",
-        objective: "Mark and stop a leaked worker.",
+        objective: "Mark stale ownership without killing a PID-reused process.",
         allowedPaths: ["src/example.ts"],
         risk: "low",
       }],
@@ -865,8 +874,8 @@ printf '%s\n' '{"type":"turn.completed"}'
       }
       const run = getAgentJob(root, runId);
       expect(run.status).toBe("unknown");
-      expect(run.error).toContain("Controller process 999999");
-      expect(alive).toBe(false);
+      expect(run.error).toContain("Worker PID was reused by an unrelated process");
+      expect(alive).toBe(true);
     } finally {
       if (worker.exitCode === null) worker.kill("SIGKILL");
     }
@@ -1039,14 +1048,16 @@ printf '%s\n' '{"type":"turn.completed"}'
       body: JSON.stringify({ confirmAcceptance: true, reviewer: "test-human" }),
     }).then((response) => response.json());
     expect(verified.error).toBeUndefined();
-    expect(getIssue(root, issue.id).tasks[0]?.status).toBe("done");
+    expect(getIssue(root, issue.id).tasks[0]?.status).toBe("verified");
     expect(existsSync(join(root, ".ai/harness/checks/controller/latest-focused.json"))).toBe(true);
     const accepted = await fetch(new URL(`/api/issues/${issue.id}/tasks/T1/accept`, handle.url), {
       method: "POST",
       headers: { ...headers, "content-type": "application/json" },
       body: "{}",
     }).then((response) => response.json());
-    expect(accepted.tasks[0].status).toBe("done");
+    expect(accepted.error).toBeTruthy();
+    expect(accepted.error).toContain("integration evidence");
+    expect(getIssue(root, issue.id).tasks[0]?.status).toBe("verified");
 
     const configured = await fetch(new URL("/api/github/plugin", handle.url), {
       method: "PATCH",

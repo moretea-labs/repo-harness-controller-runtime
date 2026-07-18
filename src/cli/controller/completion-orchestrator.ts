@@ -256,10 +256,13 @@ function buildCleanupEvidence(input: {
   noDirtyDiff: boolean;
 }): CleanupEvidence {
   return {
+    runId: input.run.runId,
     worktreeRemovedOrNotCreated: input.worktreeRemovedOrNotCreated,
     branchDeletedOrRetained: input.branchDeletedOrRetained,
     leasesReleased: runLeasesReleased(input.run.repoRoot, input.run),
-    runTerminal: true,
+    // markAgentJobReviewedCompletion flips this to true in the same atomic
+    // metadata write that makes the Run terminal.
+    runTerminal: false,
     editSessionClosedOrNotCreated: input.editSessionClosedOrNotCreated,
     noActiveProcess: !processAlive(input.run.agentPid),
     noDirtyDiff: input.noDirtyDiff,
@@ -280,6 +283,7 @@ function persistVerification(
     issue.id,
     task.id,
     verificationForRun(repoRoot, run, task, reviewer, evidence),
+    { completingRunId: run.runId },
   );
   return { issue: updated, task: taskForRun(updated, task.id) };
 }
@@ -353,7 +357,11 @@ function finishTaskRunUnlocked(repoRoot: string, options: FinishTaskRunOptions):
     });
   }
 
-  if (!['succeeded', 'waiting_for_user'].includes(run.status)) {
+  const ownedAutoFinalization = run.status === 'running'
+    && run.autoIntegrate === true
+    && run.executionMode === 'worktree'
+    && run.progress?.phase === 'finalizing';
+  if (!['succeeded', 'waiting_for_user'].includes(run.status) && !ownedAutoFinalization) {
     return result(repoRoot, {
       action: 'blocked',
       runId: run.runId,
@@ -405,7 +413,7 @@ function finishTaskRunUnlocked(repoRoot: string, options: FinishTaskRunOptions):
         note: `Run ${run.runId} has no repository changes; recording explicit no-change integration evidence.`,
       });
       const noChangeIntegration: IntegrationEvidence = {
-        kind: 'no_change', targetBranch: target.branch, targetRevision: target.revision,
+        runId: run.runId, kind: 'no_change', targetBranch: target.branch, targetRevision: target.revision,
         sourceRevision: run.baseRevision ?? undefined, baseRevision: run.baseRevision ?? undefined,
         strategy: 'no_change', reachable: revisionReachable(repoRoot, target.revision, target.branch), recordedAt: nowIso(),
       };
@@ -456,6 +464,9 @@ function finishTaskRunUnlocked(repoRoot: string, options: FinishTaskRunOptions):
         branchDeletedOrRetained: cleanupResult.removed || run.worktree === repoRoot,
         editSessionClosedOrNotCreated: true, noDirtyDiff: true,
       });
+      changeOutcome = 'no_change';
+      cleaned = cleanupResult.removed;
+      branchDeleted = cleanupResult.branchDeleted;
       currentRun = markAgentJobReviewedCompletion(repoRoot, run.runId, {
         changeOutcome: 'no_change',
         changedFiles: [],
@@ -464,12 +475,16 @@ function finishTaskRunUnlocked(repoRoot: string, options: FinishTaskRunOptions):
         integrationEvidence: noChangeIntegration,
         cleanupEvidence: noChangeCleanup,
       });
-      changeOutcome = 'no_change';
-      cleaned = cleanupResult.removed;
-      branchDeleted = cleanupResult.branchDeleted;
+      if (currentRun.status !== 'succeeded' || !currentRun.cleanupEvidence?.runTerminal) {
+        return result(repoRoot, {
+          action: 'blocked', runId: run.runId, issueId: issue.id, taskId: task.id, decision,
+          taskStatus: 'cleanup_blocked', integrated: true, cleaned, branchDeleted,
+          changedPaths: [], changeOutcome, reason: currentRun.preservationDetails ?? 'Run terminal cleanup evidence was not persisted.',
+        });
+      }
       const verified = persistVerification(repoRoot, currentRun, reviewer, {
         integrationEvidence: noChangeIntegration,
-        cleanupEvidence: noChangeCleanup,
+        cleanupEvidence: currentRun.cleanupEvidence,
       });
       const accepted = (decision === 'approve_and_finish' || canAutoFinish(verified.task))
         ? acceptVerifiedTask(repoRoot, issue.id, task.id, options.note ?? `Accepted explicit no-change evidence for ${run.runId}.`)
@@ -598,6 +613,7 @@ function finishTaskRunUnlocked(repoRoot: string, options: FinishTaskRunOptions):
     const afterIntegration = currentTarget(repoRoot);
     const noTargetChanges = (changedPaths ?? []).length === 0;
     const integrationEvidence: IntegrationEvidence = {
+      runId: run.runId,
       kind: commitSha ? 'commit' : noTargetChanges ? 'no_change' : 'superseded',
       targetBranch: target.branch,
       targetRevision: commitSha ?? afterIntegration.revision,
@@ -694,9 +710,16 @@ function finishTaskRunUnlocked(repoRoot: string, options: FinishTaskRunOptions):
       integrationEvidence,
       cleanupEvidence: finalCleanupEvidence,
     });
+    if (currentRun.status !== 'succeeded' || !currentRun.cleanupEvidence?.runTerminal) {
+      return result(repoRoot, {
+        action: 'blocked', runId: run.runId, issueId: issue.id, taskId: task.id, decision,
+        taskStatus: 'cleanup_blocked', integrated, cleaned, branchDeleted, changedPaths, changeOutcome,
+        commitSha, commitError, reason: currentRun.preservationDetails ?? 'Run terminal cleanup evidence was not persisted.',
+      });
+    }
     const finalVerification = persistVerification(repoRoot, currentRun, reviewer, {
       integrationEvidence,
-      cleanupEvidence: finalCleanupEvidence,
+      cleanupEvidence: currentRun.cleanupEvidence,
     });
     const finalIssue = (decision === 'approve_and_finish' || canAutoFinish(finalVerification.task))
       ? acceptVerifiedTask(repoRoot, issue.id, task.id, options.note ?? `Accepted verified integration and cleanup evidence for ${run.runId}.`)

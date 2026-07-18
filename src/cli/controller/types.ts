@@ -30,6 +30,7 @@ export interface TaskCommandEvidence {
 }
 
 export interface IntegrationEvidence {
+  runId: string;
   kind: 'commit' | 'no_change' | 'superseded';
   targetBranch: string;
   targetRevision: string;
@@ -42,6 +43,7 @@ export interface IntegrationEvidence {
 }
 
 export interface CleanupEvidence {
+  runId: string;
   worktreeRemovedOrNotCreated: boolean;
   branchDeletedOrRetained: boolean;
   leasesReleased: boolean;

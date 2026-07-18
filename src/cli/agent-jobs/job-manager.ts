@@ -40,6 +40,8 @@ import {
   hasControllerOwnershipMetadata,
   invalidateAgentWorker,
   isPidAlive,
+  matchesAgentWorkerCommand,
+  shouldTolerateOwnedFinalizationInvalidation,
 } from "./worker-lifecycle";
 import { terminateProcessTreeSync } from "../../runtime/shared/process-tree";
 import { managedResource } from "../../runtime/resources";
@@ -566,6 +568,24 @@ function reconcileLocalRunOwnership(
     markRunUnknown(repoRoot, path, meta, "Run ownership metadata is missing");
     return;
   }
+  const workerAlive = isAlive(meta.workerPid);
+  if (workerAlive && meta.workerPid) {
+    const identity = runProcess("ps", ["-o", "command=", "-p", String(meta.workerPid)], {
+      timeoutMs: 1_000,
+      maxOutputBytes: 32 * 1024,
+    });
+    if (identity.ok && identity.stdout.trim()) {
+      const command = identity.stdout.trim();
+      const expectedConfig = join(repoRoot, JOB_ROOT, meta.runId, "worker-config.json");
+      if (!matchesAgentWorkerCommand(command, expectedConfig)) {
+        meta.agentPid = undefined;
+        meta.workerPid = undefined;
+        meta.launchPid = undefined;
+        markRunUnknown(repoRoot, path, meta, `Worker PID was reused by an unrelated process: ${command.slice(0, 200)}`);
+        return;
+      }
+    }
+  }
   const invalidation = invalidateAgentWorker(meta, {
     controllerPid: meta.controllerPid,
     controllerEpoch: meta.controllerEpoch,
@@ -576,6 +596,12 @@ function reconcileLocalRunOwnership(
     workerPid: meta.workerPid,
   });
   if (!invalidation) return;
+  const ownedCompletionInFlight = workerAlive
+    && shouldTolerateOwnedFinalizationInvalidation(meta, invalidation, {
+      workerPid: meta.workerPid!,
+      childExited: true,
+    });
+  if (ownedCompletionInFlight) return;
   terminateRunProcesses(meta);
   meta.agentPid = undefined;
   meta.workerPid = undefined;
@@ -2103,22 +2129,35 @@ export function markAgentJobReviewedCompletion(
   const completedAt = new Date().toISOString();
   const integrationEvidence = options.integrationEvidence ?? meta.integrationEvidence;
   const cleanupEvidence = options.cleanupEvidence ?? meta.cleanupEvidence;
-  const integrationProven = Boolean(integrationEvidence?.reachable && integrationEvidence.targetRevision);
+  const integrationMissing = [
+    integrationEvidence?.runId === runId ? undefined : "runId",
+    integrationEvidence?.reachable ? undefined : "reachable",
+    integrationEvidence?.targetRevision ? undefined : "targetRevision",
+  ].filter((field): field is string => Boolean(field));
+  const cleanupMissing = [
+    cleanupEvidence?.runId === runId ? undefined : "runId",
+    cleanupEvidence?.worktreeRemovedOrNotCreated ? undefined : "worktreeRemovedOrNotCreated",
+    cleanupEvidence?.branchDeletedOrRetained ? undefined : "branchDeletedOrRetained",
+    cleanupEvidence?.leasesReleased ? undefined : "leasesReleased",
+    cleanupEvidence?.editSessionClosedOrNotCreated ? undefined : "editSessionClosedOrNotCreated",
+    cleanupEvidence?.noActiveProcess ? undefined : "noActiveProcess",
+    cleanupEvidence?.noDirtyDiff ? undefined : "noDirtyDiff",
+  ].filter((field): field is string => Boolean(field));
+  const formatMissing = (label: string, fields: string[]): string => {
+    const shown = fields.slice(0, 5);
+    const suffix = fields.length > shown.length ? `, and ${fields.length - shown.length} more` : "";
+    return `Run ${label} evidence is incomplete: ${shown.join(", ")}${suffix}.`;
+  };
+  const integrationProven = integrationMissing.length === 0;
   const cleanupProven = Boolean(cleanupEvidence
-    && cleanupEvidence.worktreeRemovedOrNotCreated
-    && cleanupEvidence.branchDeletedOrRetained
-    && cleanupEvidence.leasesReleased
-    && cleanupEvidence.runTerminal
-    && cleanupEvidence.editSessionClosedOrNotCreated
-    && cleanupEvidence.noActiveProcess
-    && cleanupEvidence.noDirtyDiff);
-  if (!integrationProven || !cleanupProven) {
+    && cleanupMissing.length === 0);
+  if (!integrationProven || !cleanupProven || !cleanupEvidence) {
     return markAgentJobClosure(repoRoot, runId, {
       state: !integrationProven ? "integration_blocked" : "cleanup_blocked",
       preservationReason: !integrationProven ? "unmerged_branch" : "cleanup_failed",
       details: !integrationProven
-        ? "Run cannot complete before isolated changes are integrated."
-        : "Run cannot complete before isolated worktree cleanup is proven.",
+        ? formatMissing("integration", integrationMissing)
+        : formatMissing("cleanup", cleanupMissing),
       worktreeCleaned: options.worktreeCleaned,
       branchDeleted: options.branchDeleted,
     });
@@ -2140,7 +2179,11 @@ export function markAgentJobReviewedCompletion(
   if (options.worktreeCleaned) meta.worktreeCleanedAt = meta.worktreeCleanedAt ?? completedAt;
   if (options.branchDeleted) meta.cleanupBranchDeletedAt = meta.cleanupBranchDeletedAt ?? completedAt;
   meta.integrationEvidence = integrationEvidence;
-  meta.cleanupEvidence = cleanupEvidence;
+  meta.cleanupEvidence = {
+    ...cleanupEvidence,
+    runId,
+    runTerminal: true,
+  };
   meta.closureState = "completed";
   meta.closureUpdatedAt = completedAt;
   delete meta.preservationReason;

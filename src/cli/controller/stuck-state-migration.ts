@@ -1,6 +1,7 @@
 import { getAgentJob } from '../agent-jobs/job-manager';
 import { inspectCompletionBacklog, type CompletionBacklogItem } from './completion-backlog';
 import { getIssue, listIssues, updateIssue, updateTask } from './issue-store';
+import { completionEvidenceComplete } from './execution-policy';
 import type { ControllerIssue, ControllerTask } from './types';
 
 export type StuckStateKind =
@@ -175,17 +176,7 @@ function extraFindings(repoRoot: string, issue: ControllerIssue, task: Controlle
     });
   }
   if (task.status === 'done') {
-    const cleanup = task.verification?.cleanupEvidence;
-    const integration = task.verification?.integrationEvidence;
-    const complete = Boolean(integration?.reachable && integration.targetRevision && cleanup
-      && cleanup.worktreeRemovedOrNotCreated
-      && cleanup.branchDeletedOrRetained
-      && cleanup.leasesReleased
-      && cleanup.runTerminal
-      && cleanup.editSessionClosedOrNotCreated
-      && cleanup.noActiveProcess
-      && cleanup.noDirtyDiff);
-    if (!complete) {
+    if (!completionEvidenceComplete(task.verification)) {
       let run;
       for (const runId of [...task.runIds].reverse()) {
         try { run = getAgentJob(repoRoot, runId); break; }

@@ -1,5 +1,6 @@
 import type { AgentJobMeta, AgentJobStatus } from "../agent-jobs/types";
 import type { ControllerIssue, ControllerTask, TaskStatus } from "./types";
+import { completionEvidenceComplete } from "./execution-policy";
 
 export type IssueLifecycleStatus = "active" | "completed" | "cancelled" | "archived";
 
@@ -39,6 +40,7 @@ export interface HistoricalRunOutcome {
 
 export interface RunEvidenceAggregate {
   latestRun?: AgentJobMeta;
+  verificationRun?: AgentJobMeta;
   currentActiveRun?: AgentJobMeta;
   activeRuns: AgentJobMeta[];
   historicalOutcomes: HistoricalRunOutcome[];
@@ -123,6 +125,9 @@ export function aggregateRunEvidence(
     .map((run) => ({ runId: run.runId, status: run.status, finishedAt: run.finishedAt }));
   return {
     latestRun,
+    verificationRun: task.verification?.runId
+      ? ordered.find((run) => run.runId === task.verification?.runId)
+      : undefined,
     // Only the latest linked Run can be the current lifecycle owner. Older
     // queued/running metadata is stale evidence and must not resurrect a Task.
     currentActiveRun: latestRun && ACTIVE_RUN.has(latestRun.status) ? latestRun : undefined,
@@ -141,23 +146,10 @@ export function resolveIssueLifecycleStatus(issue: ControllerIssue): IssueLifecy
 
 function resolveVerificationStatus(task: ControllerTask): VerificationStatus {
   if (task.status === "changes_requested") return "changes_requested";
-  if (task.verification && task.status === "done" && !completionEvidenceComplete(task)) return "pending";
+  if (task.verification && task.status === "done" && !completionEvidenceComplete(task.verification)) return "pending";
   if (task.verification && ["verified", "done"].includes(task.status)) return "passed";
   if (["review", "integrated", "verifying", "verified"].includes(task.status)) return "pending";
   return "not_started";
-}
-
-function completionEvidenceComplete(task: ControllerTask): boolean {
-  const integration = task.verification?.integrationEvidence;
-  const cleanup = task.verification?.cleanupEvidence;
-  return Boolean(integration?.reachable && integration.targetRevision && cleanup
-    && cleanup.worktreeRemovedOrNotCreated
-    && cleanup.branchDeletedOrRetained
-    && cleanup.leasesReleased
-    && cleanup.runTerminal
-    && cleanup.editSessionClosedOrNotCreated
-    && cleanup.noActiveProcess
-    && cleanup.noDirtyDiff);
 }
 
 function baseState(
@@ -243,9 +235,14 @@ export function resolveEffectiveTaskState(input: {
   }
 
   // Explicit Task terminal state always wins over Run evidence.
-  if (task.status === "done" && completionEvidenceComplete(task)) return finalizeState(base, "done", "declared_done", true, false);
+  if (task.status === "done" && completionEvidenceComplete(task.verification)) return finalizeState(base, "done", "declared_done", true, false);
   if (task.status === "done") {
-    const closure = evidence.latestRun?.closureState;
+    // When verification names a Run, only that Run can classify its missing
+    // closure evidence. A later unrelated Run must not rewrite the historical
+    // Task from integration-blocked to cleanup-blocked (or the reverse).
+    const closure = (task.verification?.runId
+      ? evidence.verificationRun
+      : evidence.latestRun)?.closureState;
     const effective = closure === "cleanup_blocked" ? "cleanup_blocked"
       : closure === "cleanup_pending" || closure === "cleaning" || closure === "integrated" ? "cleanup_pending"
         : closure === "ready_to_integrate" || closure === "integration_pending" ? "ready_to_integrate"

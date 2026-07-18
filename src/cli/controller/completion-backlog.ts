@@ -1,7 +1,7 @@
 import { getAgentJob, listAgentJobs } from '../agent-jobs/job-manager';
 import type { AgentJobMeta } from '../agent-jobs/types';
 import { getIssue, listIssues, projectIssueEffectiveView, updateTask } from './issue-store';
-import { taskExecutionPolicy } from './execution-policy';
+import { completionEvidenceComplete, taskExecutionPolicy } from './execution-policy';
 import type { ControllerIssue, ControllerTask, TaskStatus } from './types';
 import { finishTaskRun, type FinishTaskRunResult } from './completion-orchestrator';
 
@@ -123,17 +123,7 @@ function classifyTask(repoRoot: string, issue: ControllerIssue, task: Controller
   };
 
   if (task.status === 'done') {
-    const integration = task.verification?.integrationEvidence;
-    const cleanup = task.verification?.cleanupEvidence;
-    const evidenceComplete = Boolean(integration?.reachable && integration.targetRevision && cleanup
-      && cleanup.worktreeRemovedOrNotCreated
-      && cleanup.branchDeletedOrRetained
-      && cleanup.leasesReleased
-      && cleanup.runTerminal
-      && cleanup.editSessionClosedOrNotCreated
-      && cleanup.noActiveProcess
-      && cleanup.noDirtyDiff);
-    if (!evidenceComplete) {
+    if (!completionEvidenceComplete(task.verification)) {
       return {
         ...base,
         action: 'system_blocked',

@@ -2,7 +2,10 @@ import { appendFileSync, readFileSync, renameSync, writeFileSync } from "fs";
 import { dirname, join, relative } from "path";
 import { spawn } from "child_process";
 import { getIssue, removeEphemeralIssue, updateTask } from "../controller/issue-store";
-import { invalidateAgentWorker } from "./worker-lifecycle";
+import {
+  invalidateAgentWorker,
+  shouldTolerateOwnedFinalizationInvalidation,
+} from "./worker-lifecycle";
 import type {
   AgentJobEvent,
   AgentJobMeta,
@@ -101,6 +104,12 @@ function ownershipFailure(current: AgentJobMeta | undefined): Error | undefined 
     currentParentPid: process.ppid,
     workerPid: process.pid,
   });
+  if (shouldTolerateOwnedFinalizationInvalidation(current, invalidation, {
+    workerPid: process.pid,
+    childExited,
+  })) {
+    return undefined;
+  }
   return invalidation ? new Error(invalidation.message) : undefined;
 }
 
@@ -666,7 +675,11 @@ if (currentOwnershipError) {
   process.exit(1);
 }
 const autoFinalizing = ok && config.autoIntegrate && finalMeta.executionMode === "worktree";
-finalMeta.status = ok ? "succeeded" : "failed";
+// An isolated Run is still active while its owned completion executor is
+// integrating, committing, and cleaning. Publishing `succeeded` here would
+// invalidate this worker's own ownership before the finalizer can run and
+// would expose a false terminal state without closure evidence.
+finalMeta.status = autoFinalizing ? "running" : ok ? "succeeded" : "failed";
 finalMeta.exitCode = result.code;
 finalMeta.error = error;
 finalMeta.terminationReason = timedOut
@@ -677,7 +690,8 @@ finalMeta.terminationReason = timedOut
       ? "signal"
       : undefined;
 finalMeta.lastHeartbeatAt = finishedAt;
-finalMeta.finishedAt = finishedAt;
+if (autoFinalizing) delete finalMeta.finishedAt;
+else finalMeta.finishedAt = finishedAt;
 finalMeta.progress = {
   phase: autoFinalizing ? "finalizing" : ok ? "completed" : "failed",
   percent: autoFinalizing ? 96 : 100,

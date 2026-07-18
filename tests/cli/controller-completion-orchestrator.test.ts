@@ -89,6 +89,41 @@ describe('completion orchestrator', () => {
     expect(result.taskStatus).toBe('done');
     expect(result.issue.tasks[0].status).toBe('done');
     expect(result.commitSha).toBeTruthy();
+    const completedRun = getAgentJob(repoRoot, 'RUN-finishable');
+    const completedTask = getIssue(repoRoot, issue.id).tasks[0]!;
+    expect(completedRun.status).toBe('succeeded');
+    expect(completedRun.cleanupEvidence?.runTerminal).toBe(true);
+    expect(completedRun.integrationEvidence?.runId).toBe(completedRun.runId);
+    expect(completedRun.cleanupEvidence?.runId).toBe(completedRun.runId);
+    expect(completedTask.verification?.runId).toBe(completedRun.runId);
+    expect(completedTask.verification?.integrationEvidence?.runId).toBe(completedRun.runId);
+    expect(completedTask.verification?.cleanupEvidence?.runId).toBe(completedRun.runId);
+  }));
+
+  test('rejects completion evidence assembled from different Runs', () => withRepo((repoRoot) => {
+    const issue = createIssue(repoRoot, {
+      title: 'Cross-run evidence',
+      tasks: [{ title: 'Keep evidence scoped', objective: 'Reject mixed evidence.', allowedPaths: ['src/**'], risk: 'medium' }],
+      allowDuplicate: true,
+    });
+    seedRun(repoRoot, { runId: 'RUN-cross-evidence', issueId: issue.id, taskId: 'T1' });
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf-8' }).trim();
+
+    const closure = markAgentJobReviewedCompletion(repoRoot, 'RUN-cross-evidence', {
+      integrationEvidence: {
+        runId: 'RUN-cross-evidence', kind: 'commit', targetBranch: 'main', targetRevision: head,
+        strategy: 'already_integrated', reachable: true, recordedAt: new Date().toISOString(),
+      },
+      cleanupEvidence: {
+        runId: 'RUN-other', worktreeRemovedOrNotCreated: true, branchDeletedOrRetained: true,
+        leasesReleased: true, runTerminal: false, editSessionClosedOrNotCreated: true,
+        noActiveProcess: true, noDirtyDiff: true, recordedAt: new Date().toISOString(),
+      },
+    });
+
+    expect(closure.status).toBe('waiting_for_user');
+    expect(closure.closureState).toBe('cleanup_blocked');
+    expect(closure.preservationDetails).toContain('cleanup evidence is incomplete: runId');
   }));
 
   test('keeps Run-backed verification out of done until integration and cleanup evidence exist', () => withRepo((repoRoot) => {

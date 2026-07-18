@@ -25,7 +25,7 @@ import {
   resolveTaskDependencies,
 } from './task-status-resolver';
 import { tryAppendControllerWorklogEvent } from './worklog';
-import { executionScopesConflict, taskExecutionPolicy, verificationEvidencePassed } from './execution-policy';
+import { completionEvidenceComplete, executionScopesConflict, taskExecutionPolicy, verificationEvidencePassed } from './execution-policy';
 import { listControllerChecks } from './check-runner';
 import { normalizeCheckIds } from '../../runtime/control-plane/facade/check-normalization';
 
@@ -893,10 +893,11 @@ export function acceptVerifiedTask(repoRoot: string, issueIdValue: string, taskI
   if (!task) throw new Error(`task not found: ${issueIdValue}/${taskId}`);
   if (task.status === 'done') return issue;
   if (task.status !== 'verified' || !task.verification) throw new Error(`task must have passed required verification before acceptance (current: ${task.status})`);
-  const integration = task.verification.integrationEvidence;
-  if (!integration?.reachable || !integration.targetBranch.trim() || !integration.targetRevision.trim()) {
-    throw new Error('task completion requires persisted integration evidence with a reachable target revision');
+  const verification = task.verification;
+  if (!completionEvidenceComplete(verification)) {
+    throw new Error('task completion requires matching integration evidence and cleanup evidence for one Run');
   }
+  const integration = verification.integrationEvidence;
   const reachable = spawnSync(
     'git',
     ['merge-base', '--is-ancestor', integration.targetRevision, integration.targetBranch],
@@ -905,28 +906,28 @@ export function acceptVerifiedTask(repoRoot: string, issueIdValue: string, taskI
   if (reachable.status !== 0 || reachable.error) {
     throw new Error(`integrated revision ${integration.targetRevision} is not reachable from ${integration.targetBranch}`);
   }
-  const cleanup = task.verification.cleanupEvidence;
-  const cleanupComplete = cleanup
-    && cleanup.worktreeRemovedOrNotCreated
-    && cleanup.branchDeletedOrRetained
-    && cleanup.leasesReleased
-    && cleanup.runTerminal
-    && cleanup.editSessionClosedOrNotCreated
-    && cleanup.noActiveProcess
-    && cleanup.noDirtyDiff;
-  if (!cleanupComplete) {
-    throw new Error('task completion requires complete cleanup evidence for worktree, branch, leases, Run, edit session, process, and diff');
-  }
   return updateTask(repoRoot, issueIdValue, taskId, { status: 'done', note });
 }
 
-export function recordTaskVerification(repoRoot: string, issueIdValue: string, taskId: string, verification: TaskVerification): ControllerIssue {
+export function recordTaskVerification(
+  repoRoot: string,
+  issueIdValue: string,
+  taskId: string,
+  verification: TaskVerification,
+  options: { completingRunId?: string } = {},
+): ControllerIssue {
   const issue = getIssue(repoRoot, issueIdValue);
   const task = issue.tasks.find((entry) => entry.id === taskId);
   if (!task) throw new Error(`task not found: ${issueIdValue}/${taskId}`);
   const taskState = effectiveTaskState(repoRoot, issue, task);
   if (taskState.terminal || taskState.inactive) throw new Error(`task cannot be verified from effective status ${taskState.effectiveStatus}`);
-  if (taskState.activeRunIds.length > 0) throw new Error(`task cannot be verified while Run(s) are active: ${taskState.activeRunIds.join(', ')}`);
+  const completingRunOwnsVerification = Boolean(
+    options.completingRunId && verification.runId === options.completingRunId,
+  );
+  const blockingRunIds = taskState.activeRunIds.filter((runId) =>
+    !(completingRunOwnsVerification && runId === options.completingRunId),
+  );
+  if (blockingRunIds.length > 0) throw new Error(`task cannot be verified while Run(s) are active: ${blockingRunIds.join(', ')}`);
   if (!['planned', 'ready', 'launch_blocked', 'review', 'verifying', 'ready_to_integrate', 'integrating', 'integration_blocked', 'integrated', 'cleanup_pending', 'cleanup_blocked', 'changes_requested', 'verified'].includes(task.status)) {
     throw new Error(`task cannot be verified from status ${task.status}`);
   }

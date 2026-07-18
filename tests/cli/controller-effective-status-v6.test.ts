@@ -36,6 +36,40 @@ function task(
   };
 }
 
+function completedTask(patch: Partial<ControllerTask> = {}): ControllerTask {
+  return task("done", {
+    verification: {
+      runId: "RUN-completed",
+      reviewer: "test",
+      verifiedAt: "2026-06-21T00:00:00.000Z",
+      checkResults: [],
+      acceptanceResults: [],
+      autoCompleted: true,
+      integrationEvidence: {
+        runId: "RUN-completed",
+        kind: "commit",
+        targetBranch: "main",
+        targetRevision: "abc123",
+        reachable: true,
+        recordedAt: "2026-06-21T00:00:00.000Z",
+        strategy: "already_integrated",
+      },
+      cleanupEvidence: {
+        runId: "RUN-completed",
+        worktreeRemovedOrNotCreated: true,
+        branchDeletedOrRetained: true,
+        leasesReleased: true,
+        runTerminal: true,
+        editSessionClosedOrNotCreated: true,
+        noActiveProcess: true,
+        noDirtyDiff: true,
+        recordedAt: "2026-06-21T00:00:00.000Z",
+      },
+    },
+    ...patch,
+  });
+}
+
 function issue(
   taskValue: ControllerTask,
   status: IssueStatus = "in_progress",
@@ -84,7 +118,7 @@ function run(status: AgentJobStatus, runId = `RUN-${status}`): AgentJobMeta {
 }
 
 describe("Controller v6 effective Task state", () => {
-  test.each(["done", "cancelled", "superseded"] as TaskStatus[])(
+  test.each(["cancelled", "superseded"] as TaskStatus[])(
     "explicit terminal %s cannot be resurrected by active or historical Runs",
     (status) => {
       for (const runStatus of ["queued", "running", "succeeded", "failed", "cancelled", "unknown"] as AgentJobStatus[]) {
@@ -96,6 +130,51 @@ describe("Controller v6 effective Task state", () => {
       }
     },
   );
+
+  test("done remains terminal only when integration and cleanup evidence are complete", () => {
+    for (const runStatus of ["queued", "running", "succeeded", "failed", "cancelled", "unknown"] as AgentJobStatus[]) {
+      const value = completedTask({ runIds: [`RUN-${runStatus}`] });
+      const state = resolveEffectiveTaskState({ issue: issue(value), task: value, runs: [run(runStatus)] });
+      expect(state.effectiveStatus).toBe("done");
+      expect(state.terminal).toBe(true);
+      expect(state.dispatchable).toBe(false);
+    }
+  });
+
+  test("legacy done without completion evidence is reopened as integration blocked", () => {
+    const value = task("done");
+    const state = resolveEffectiveTaskState({ issue: issue(value), task: value });
+    expect(state.effectiveStatus).toBe("integration_blocked");
+    expect(state.terminal).toBe(false);
+    expect(state.reason).toBe("completion_evidence_missing");
+  });
+
+  test("missing completion evidence is classified by the verified Run rather than a later Run", () => {
+    const verifiedRun = run("succeeded", "RUN-verified");
+    verifiedRun.closureState = "integration_blocked";
+    const laterRun = run("waiting_for_user", "RUN-later");
+    laterRun.createdAt = "2026-06-21T02:00:00.000Z";
+    laterRun.closureState = "cleanup_blocked";
+    const value = task("done", {
+      runIds: [verifiedRun.runId, laterRun.runId],
+      verification: {
+        runId: verifiedRun.runId,
+        reviewer: "test",
+        verifiedAt: "2026-06-21T01:30:00.000Z",
+        checkResults: [],
+        acceptanceResults: [],
+      },
+    });
+
+    const state = resolveEffectiveTaskState({
+      issue: issue(value),
+      task: value,
+      runs: [verifiedRun, laterRun],
+    });
+
+    expect(state.effectiveStatus).toBe("integration_blocked");
+    expect(state.latestRunId).toBe(laterRun.runId);
+  });
 
   test.each(["ready", "done", "cancelled"] as TaskStatus[])(
     "supersededBy is authoritative even when legacy declared status is %s",
@@ -130,7 +209,7 @@ describe("Controller v6 effective Task state", () => {
   });
 
   test("terminal Task ignores retry requirements from historical failed Run evidence", () => {
-    const value = task("done", { runIds: ["RUN-failed"] });
+    const value = completedTask({ runIds: ["RUN-failed"] });
     const state = resolveEffectiveTaskState({ issue: issue(value, "done"), task: value, runs: [run("failed")] });
     expect(state.effectiveStatus).toBe("done");
     expect(state.retryable).toBe(false);
@@ -148,7 +227,7 @@ describe("Controller v6 effective Task state", () => {
 
   test("superseded dependency becomes a migration anomaly rather than an old-task blocker", () => {
     const old = task("superseded", { id: "T1", supersededBy: ["T2", "T3"] });
-    const replacementA = task("done", { id: "T2" });
+    const replacementA = completedTask({ id: "T2" });
     const replacementB = task("ready", { id: "T3" });
     const downstream = task("planned", { id: "T4", dependsOn: ["T1"] });
     const parent = issue(old, "in_progress", { tasks: [old, replacementA, replacementB, downstream] });

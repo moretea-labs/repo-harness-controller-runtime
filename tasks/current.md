@@ -1,35 +1,41 @@
 # Current Status Snapshot
 
-<!-- updated_at: 2026-07-17 -->
+<!-- updated_at: 2026-07-18 -->
 <!-- stale_after: 24h -->
 
-> **Status**: Stable External Runtime Supervisor repair accepted on main
-> **Updated At**: 2026-07-17
-> **Source**: plans/plan-20260716-stable-external-runtime-supervisor.md
-> **Target**: Make the immutable external Supervisor the primary lifecycle/recovery owner while preserving existing authorities and compatibility fallbacks
+> **Status**: Canonical stable-baseline recovery is implementation-complete and awaiting final integration/release acceptance
+> **Updated At**: 2026-07-18
+> **Source**: Codex `/goal` canonical stable-baseline recovery
+> **Target**: Preserve historical work, make Task completion evidence-exact, keep detached Workers durable, and verify the stable runtime
 > **Stale After**: 24h
 
 This snapshot is a read model, not an execution gate.
 
 ## Current Focus
 
-- Stable Supervisor release handoff now replaces stale healthy Daemon/Gateway children when the current immutable release changes.
-- Real-machine acceptance covers user LaunchAgent installation, bounded launchd bootstrap retry/recovery, stable ingress/control health, and one exact Daemon plus one exact Gateway recovery.
-- Runtime storage relocation is finalized; safe historical Run/worktree cleanup and a repository-command Local Job completed without the Durable Job gate blocking synchronous recovery.
-- Controller Runtime Source Identity is controller-scoped and resolved from package/source authority, not the selected execution repository.
-- MCP `rh_status`, CLI controller status, and Local Bridge access state share `evaluateActiveRuntimeSourceDrift`.
-- Daemon/keepalive pin `REPO_HARNESS_CONTROLLER_RUNTIME_SOURCE_ROOT` so ambient business cwd cannot redefine generation.
+- New business Task execution remains frozen while the recovery branch is validated and delivered.
+- Historical recovery classified nine candidate work lines: three rescued into the canonical baseline, four superseded or patch-equivalent, and two intentionally retained without merge. The 453 historical Direct Edit sessions remain preserved as evidence.
+- Four historical Tasks incorrectly labeled `done` were reopened as `integration_blocked`; no cleanup-only blocker remains.
+- Task completion now requires a reachable target revision plus persisted verification, integration, and cleanup evidence. The unified finalizer owns integration, final verification, Run termination, cleanup, and Task acceptance.
+- Same-path source drift blocks integration while unrelated source changes remain eligible. Pending integration is indexed instead of scanning bounded Run history.
+- Detached repository-command Workers remain valid after reparenting to PID 1. The narrow ownership exception applies only after the child command exits and the owned auto-finalizer is running; ordinary execution still fails closed on ownership loss.
+- The Stable Supervisor, local Gateway/control endpoints, public MCP health, OAuth discovery, and the separately launchd-managed Cloudflare tunnel are healthy. The historical 502 window was local origin downtime rather than tunnel ownership failure.
 
 ## Validation Completed
 
-- `bun x tsc --noEmit`
-- `bun test tests/runtime/interactive-sync-router.test.ts`
-- `bun test tests/runtime/stable-supervisor-hardening.test.ts`
-- `bun test tests/runtime/stable-supervisor-integration.test.ts`
-- `git diff --check`
-- Real immutable release acceptance: Supervisor/Daemon/Gateway all on one release revision, stable ingress `8765`, control `8770`, `/health`, `/rescue/health`, exact Daemon recovery, exact Gateway recovery, and consistent generation.
+- `bun test`: 1678 passed, 0 failed, 12293 assertions across 197 files.
+- `bunx tsc --noEmit`.
+- `bash scripts/check-deploy-sql-order.sh`.
+- `bash scripts/check-architecture-sync.sh`.
+- `bash scripts/check-task-workflow.sh --strict` (source/document contracts pass; ignored generated runtime bootstrap advisories remain).
+- `bun scripts/inspect-project-state.ts --repo . --format text`.
+- `bash scripts/migrate-project-template.sh --repo . --dry-run`.
+- Historical stuck-state migration: four false completions reopened, zero remaining false completions, four `integration_blocked`, zero `cleanup_blocked`.
+- Protected recovery files remain present at `/private/tmp/repo-harness-quarantine-node-modules.txt` and `/private/tmp/repo-harness-terminal-issue-files.nul`.
 
 ## Remaining Before Delivery
 
-- Final `main` is pushed, the repair branch/worktree is removed, and the live release was reinstalled from `main`.
-- Final live release revision equals `main` short SHA; working tree is clean.
+- Pass the task-sync gate with this updated snapshot and complete the final independent Claude review.
+- Commit the final lifecycle/Worker corrections, fast-forward `main`, and push `origin/main`.
+- Install the immutable release from final `main`; confirm the live release revision matches `main`.
+- Run real repository-command twice, Local Job once, minimal Task lifecycle, drift-gate, cleanup, and orphan-Worker acceptance.

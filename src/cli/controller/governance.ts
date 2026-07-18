@@ -11,7 +11,7 @@ import {
 } from "./issue-store";
 import { clearCurrentIssue, loadControllerProjectState, saveControllerProjectState } from "./project-state";
 import type { ControllerIssue, ControllerTask } from "./types";
-import { taskExecutionPolicy } from "./execution-policy";
+import { completionEvidenceComplete, taskExecutionPolicy } from "./execution-policy";
 import { readIssueRunEvidence } from "./run-evidence";
 import { resolveEffectiveTaskState, resolveIssueTaskStates, resolveTaskDependencies, type EffectiveTaskState } from "./task-status-resolver";
 import { tryAppendControllerWorklogEvent } from "./worklog";
@@ -185,6 +185,7 @@ function hasGovernanceRetryBlocker(task: ControllerTask): boolean {
 
 function shouldAutoAcceptVerifiedTask(task: ControllerTask): boolean {
   if (task.status !== "verified" || !task.verification) return false;
+  if (!completionEvidenceComplete(task.verification)) return false;
   const policy = taskExecutionPolicy(task);
   return policy.autoCompleteAfterSuccessfulRun && !policy.requiresHumanAcceptance;
 }

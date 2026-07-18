@@ -86,7 +86,38 @@ describe("Controller V4 progress and worklog", () => {
         { title: "Ready task", objective: "Wait for execution.", allowedPaths: ["src/**"], checks: ["focused"], acceptanceCriteria: ["Ready"], risk: "low" },
       ],
     });
-    updateTask(root, issue.id, "T1", { status: "done", note: "Completed." });
+    updateTask(root, issue.id, "T1", {
+      status: "done",
+      verification: {
+        runId: "RUN-complete",
+        reviewer: "test",
+        verifiedAt: "2026-07-18T00:00:00.000Z",
+        checkResults: [],
+        acceptanceResults: [],
+        autoCompleted: true,
+        integrationEvidence: {
+          runId: "RUN-complete",
+          kind: "commit",
+          targetBranch: "main",
+          targetRevision: "abc123",
+          reachable: true,
+          recordedAt: "2026-07-18T00:00:00.000Z",
+          strategy: "already_integrated",
+        },
+        cleanupEvidence: {
+          runId: "RUN-complete",
+          worktreeRemovedOrNotCreated: true,
+          branchDeletedOrRetained: true,
+          leasesReleased: true,
+          runTerminal: true,
+          editSessionClosedOrNotCreated: true,
+          noActiveProcess: true,
+          noDirtyDiff: true,
+          recordedAt: "2026-07-18T00:00:00.000Z",
+        },
+      },
+      note: "Completed with durable closure evidence.",
+    });
     const runId = writeRunningRun(root, issue.id);
     updateTask(root, issue.id, "T2", { runId });
 

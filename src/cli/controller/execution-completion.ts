@@ -95,8 +95,10 @@ export function continueTaskAfterSuccessfulRun(
   }
   if (status === 'verified' && policy.autoCompleteAfterSuccessfulRun && !policy.requiresHumanAcceptance) {
     const closureComplete = run.closureState === 'completed'
-      && Boolean(run.integrationEvidence?.reachable)
-      && Boolean(run.cleanupEvidence?.worktreeRemovedOrNotCreated
+      && run.integrationEvidence?.runId === run.runId
+      && run.cleanupEvidence?.runId === run.runId
+      && Boolean(run.integrationEvidence.reachable)
+      && Boolean(run.cleanupEvidence.worktreeRemovedOrNotCreated
         && run.cleanupEvidence.branchDeletedOrRetained
         && run.cleanupEvidence.leasesReleased
         && run.cleanupEvidence.runTerminal

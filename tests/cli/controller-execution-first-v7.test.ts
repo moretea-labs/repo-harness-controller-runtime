@@ -3,7 +3,12 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs"
 import { tmpdir } from "os";
 import { join } from "path";
 import { getAgentJob, startTaskJob } from "../../src/cli/agent-jobs/job-manager";
-import { invalidateAgentWorker } from "../../src/cli/agent-jobs/worker-lifecycle";
+import type { AgentJobMeta } from "../../src/cli/agent-jobs/types";
+import {
+  invalidateAgentWorker,
+  matchesAgentWorkerCommand,
+  shouldTolerateOwnedFinalizationInvalidation,
+} from "../../src/cli/agent-jobs/worker-lifecycle";
 import {
   createIssue,
   inspectIssueReadiness,
@@ -608,6 +613,76 @@ describe("Controller v7 compatibility on the V8 execution bridge", () => {
     });
     expect(invalidation?.code).toBe("PARENT_DISCONNECTED");
     expect(invalidation?.message).toContain("PPID became 1");
+  });
+
+  test("hands a live owned finalizer across a Controller epoch change without weakening Worker fencing", () => {
+    const now = new Date().toISOString();
+    const finalizing = {
+      schemaVersion: 3,
+      runId: "RUN-finalizer-handoff",
+      issueId: "ISS-1",
+      taskId: "T1",
+      agent: "codex",
+      provider: "local",
+      executionMode: "worktree",
+      status: "running",
+      repoRoot: "/repo",
+      worktree: "/repo/worktree",
+      branch: "controller/finalizer",
+      baseRevision: "base",
+      promptPath: "prompt.md",
+      stdoutPath: "stdout.log",
+      stderrPath: "stderr.log",
+      resultPath: "result.json",
+      eventsPath: "events.jsonl",
+      workerPid: 321,
+      autoIntegrate: true,
+      progress: {
+        phase: "finalizing",
+        percent: 96,
+        currentActivity: "finalizing",
+        lastActivityAt: now,
+        activityCount: 1,
+      },
+      createdAt: now,
+    } satisfies AgentJobMeta;
+    const epochChanged = {
+      code: "CONTROLLER_EPOCH_STALE",
+      message: "Controller ownership epoch changed",
+    } as const;
+
+    expect(shouldTolerateOwnedFinalizationInvalidation(finalizing, epochChanged, {
+      workerPid: 321,
+      childExited: true,
+    })).toBe(true);
+    expect(shouldTolerateOwnedFinalizationInvalidation(finalizing, epochChanged, {
+      workerPid: 999,
+      childExited: true,
+    })).toBe(false);
+    expect(shouldTolerateOwnedFinalizationInvalidation(finalizing, {
+      code: "WORKER_REPLACED",
+      message: "Run belongs to another Worker",
+    }, {
+      workerPid: 321,
+      childExited: true,
+    })).toBe(false);
+  });
+
+  test("does not confuse a PID-reused process with the expected Agent Worker command", () => {
+    const configPath = "/repo/.ai/harness/jobs/RUN-1/worker-config.json";
+    expect(matchesAgentWorkerCommand(
+      `/usr/bin/node /repo/src/cli/agent-jobs/job-worker.ts ${configPath}`,
+      configPath,
+    )).toBe(true);
+    expect(matchesAgentWorkerCommand("/usr/bin/node unrelated-server.js", configPath)).toBe(false);
+    expect(matchesAgentWorkerCommand(
+      "/usr/bin/node /repo/src/cli/agent-jobs/job-worker.ts /repo/.ai/harness/jobs/RUN-2/worker-config.json",
+      configPath,
+    )).toBe(false);
+    expect(matchesAgentWorkerCommand(
+      `/usr/bin/node unrelated.js --log=job-worker.ts ${configPath}`,
+      configPath,
+    )).toBe(false);
   });
 
 });

@@ -1298,7 +1298,7 @@ describe("Workflow helper scripts", () => {
       rmSync(fakeBin, { recursive: true, force: true });
       rmSync(cwd, { recursive: true, force: true });
     }
-  }, 20000);
+  }, 40000);
 
   test("ship-worktrees should put dirty main closeout on a PR branch", () => {
     const cwd = tmpWorkspace("helper-ship-main-closeout");

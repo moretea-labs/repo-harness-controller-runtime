@@ -43,6 +43,39 @@ export interface AgentWorkerInvalidation {
   message: string;
 }
 
+const FINALIZATION_HANDOFF_INVALIDATIONS = new Set<AgentWorkerInvalidation["code"]>([
+  "PARENT_DISCONNECTED",
+  "CONTROLLER_UNAVAILABLE",
+  "CONTROLLER_EPOCH_STALE",
+]);
+
+/**
+ * The live Worker remains the only completion writer after its agent child
+ * exits. A launcher or Controller restart may invalidate the old ancestry or
+ * epoch, but the replacement Controller deliberately leaves this exact live
+ * finalizer alone. Never tolerate a replaced Worker or a non-active Run.
+ */
+export function shouldTolerateOwnedFinalizationInvalidation(
+  meta: AgentJobMeta,
+  invalidation: AgentWorkerInvalidation | undefined,
+  options: { workerPid: number; childExited: boolean },
+): boolean {
+  return options.childExited
+    && meta.status === "running"
+    && meta.autoIntegrate === true
+    && meta.executionMode === "worktree"
+    && meta.progress?.phase === "finalizing"
+    && meta.workerPid === options.workerPid
+    && Boolean(invalidation && FINALIZATION_HANDOFF_INVALIDATIONS.has(invalidation.code));
+}
+
+export function matchesAgentWorkerCommand(command: string, expectedConfigPath: string): boolean {
+  const escapedConfig = expectedConfigPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(
+    `(?:^|\\s)["']?(?!-)[^\\s"']*job-worker\\.(?:ts|js)["']?\\s+["']?${escapedConfig}["']?(?:\\s|$)`,
+  ).test(command);
+}
+
 function randomEpoch(): string {
   return `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
 }

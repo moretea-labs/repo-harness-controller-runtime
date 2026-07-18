@@ -1067,7 +1067,7 @@ describe("MCP controller profile", () => {
     });
   });
 
-  test("searches code, manages Issue tasks, and unlocks dependencies after acceptance", async () => {
+  test("searches code and refuses to unlock dependencies without completion evidence", async () => {
     await withController(async (_repoRoot, ctx) => {
       const searched = await jsonTool(ctx, "search_repository", {
         query: "value = 1",
@@ -1117,14 +1117,16 @@ describe("MCP controller profile", () => {
         issue_id: created.value.id,
         task_id: "T1",
       });
-      expect(
-        accepted.value.tasks.map((task: { status: string }) => task.status),
-      ).toEqual(["done", "ready"]);
-      const board = await jsonTool(ctx, "get_project_board");
-      expect(board.value.readyTasks[0]).toMatchObject({
-        issueId: created.value.id,
-        taskId: "T2",
+      expect(accepted.raw.isError).toBe(true);
+      expect(accepted.value.error.message).toContain("integration evidence");
+      const unchanged = await jsonTool(ctx, "get_issue", {
+        issue_id: created.value.id,
       });
+      expect(
+        unchanged.value.tasks.map((task: { status: string }) => task.status),
+      ).toEqual(["verified", "planned"]);
+      const board = await jsonTool(ctx, "get_project_board");
+      expect(board.value.readyTasks).toEqual([]);
     });
   });
 
@@ -1190,7 +1192,7 @@ describe("MCP controller profile", () => {
           job_id: submitted.value.job.jobId,
         })
       ).value.job;
-      const runDeadline = Date.now() + 30_000;
+      const runDeadline = Date.now() + 10_000;
       for (let attempt = 0; Date.now() < runDeadline && finished.status === "running"; attempt += 1) {
         await Bun.sleep(20);
         finished = (
@@ -2317,6 +2319,7 @@ process.exit(2);
         "export const value = 1;\n",
       );
       writeFileSync(join(repoRoot, "tasks/current.md"), "# Current\n");
+      writeFileSync(join(repoRoot, ".gitignore"), ".ai/harness/\n");
       expect(spawnSync("git", ["init"], { cwd: repoRoot }).status).toBe(0);
       expect(
         spawnSync("git", ["config", "user.email", "test@example.com"], {
@@ -2380,7 +2383,19 @@ process.exit(2);
       const runDeadline = Date.now() + 30_000;
       for (
         let attempt = 0;
-        Date.now() < runDeadline && !["succeeded", "failed"].includes(run.status);
+        Date.now() < runDeadline && !["succeeded", "failed", "waiting_for_user"].includes(run.status);
+        attempt += 1
+      ) {
+        await Bun.sleep(25);
+        run = (
+          await jsonTool(ctx, "get_task_run", {
+            run_id: dispatched.value.runId,
+          })
+        ).value;
+      }
+      for (
+        let attempt = 0;
+        attempt < 400 && !run.worktreeCleanedAt && !run.autoIntegrationError;
         attempt += 1
       ) {
         await Bun.sleep(25);
@@ -2405,18 +2420,6 @@ process.exit(2);
         preservationDetails: undefined,
         changedFiles: ["src/example.ts"],
       });
-      for (
-        let attempt = 0;
-        attempt < 120 && !run.worktreeCleanedAt && !run.autoIntegrationError;
-        attempt += 1
-      ) {
-        await Bun.sleep(25);
-        run = (
-          await jsonTool(ctx, "get_task_run", {
-            run_id: dispatched.value.runId,
-          })
-        ).value;
-      }
       expect(run.autoIntegrationError).toBeUndefined();
       expect(run.integratedSessionId).toBeTruthy();
       expect(run.worktreeCleanedAt).toBeTruthy();
@@ -2432,51 +2435,24 @@ process.exit(2);
       );
       const diff = await jsonTool(ctx, "get_task_diff", { run_id: run.runId });
       expect(diff.value.status).toContain("src/example.ts");
-      const premature = await jsonTool(ctx, "accept_task", {
-        issue_id: created.value.id,
-        task_id: "T1",
-      });
-      expect(premature.value.error.code).toBe("TASK_NOT_VERIFIED");
-
-      const integrated = await jsonTool(ctx, "integrate_task_run", {
-        run_id: run.runId,
-      });
-      expect(integrated.value.session.status).toBe("dirty");
-      const integratedIssue = await jsonTool(ctx, "get_issue", {
-        issue_id: created.value.id,
-      });
-      expect(integratedIssue.value.tasks[0].status).toBe("integrated");
-      let currentIssue = integratedIssue;
-      if (currentIssue.value.tasks[0].status !== "done") {
-        const verified = await jsonTool(ctx, "verify_task", {
-          issue_id: created.value.id,
-          task_id: "T1",
-          run_id: run.runId,
-          reviewer: "test-controller",
-          check_results: [{ check_id: "focused", ok: true }],
-          acceptance_results: [{
-            criterion: "The example value is 2.",
-            ok: true,
-            evidence: "src/example.ts contains value = 2",
-          }],
-        });
-        if (verified.value.error) {
-          currentIssue = await jsonTool(ctx, "get_issue", { issue_id: created.value.id });
-          expect(currentIssue.value.tasks[0].status).toBe("done");
-        } else {
-          expect(["verified", "done"]).toContain(verified.value.tasks[0].status);
-          currentIssue = verified.value.tasks[0].status === "verified"
-            ? await jsonTool(ctx, "accept_task", { issue_id: created.value.id, task_id: "T1" })
-            : verified;
-        }
+      let currentIssue = await jsonTool(ctx, "get_issue", { issue_id: created.value.id });
+      for (let attempt = 0; attempt < 80 && currentIssue.value.tasks[0].status !== "done"; attempt += 1) {
+        await Bun.sleep(25);
+        currentIssue = await jsonTool(ctx, "get_issue", { issue_id: created.value.id });
       }
       expect(currentIssue.value.tasks[0].status).toBe("done");
+      const persistedRun = JSON.parse(readFileSync(
+        join(repoRoot, ".ai/harness/jobs", run.runId, "meta.json"),
+        "utf-8",
+      ));
+      expect(persistedRun.integrationEvidence.reachable).toBe(true);
+      expect(persistedRun.cleanupEvidence.noDirtyDiff).toBe(true);
     } finally {
       process.env.PATH = originalPath;
       rmSync(repoRoot, { recursive: true, force: true });
       rmSync(binRoot, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 
   test("previews launch readiness and supports dynamic Task graph changes", async () => {
     await withController(async (_repoRoot, ctx) => {
@@ -2633,8 +2609,9 @@ process.exit(2);
         const completedIssue = await jsonTool(ctx, "get_issue", {
           issue_id: created.value.id,
         });
-        expect(completedIssue.value.tasks[0].status).toBe("done");
+        expect(completedIssue.value.tasks[0].status).toBe("verified");
         expect(completedIssue.value.tasks[0].verification).toBeTruthy();
+        expect(completedIssue.value.tasks[0].verification.integrationEvidence).toBeUndefined();
       } finally {
         process.env.PATH = originalPath;
         if (originalState === undefined) delete process.env.GH_FAKE_STATE;
