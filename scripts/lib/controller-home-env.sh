@@ -20,6 +20,11 @@ repo_harness_prepare_runtime_path() {
 
   for candidate in \
     "${HOME:-}/.bun/bin" \
+    "${HOME:-}/.volta/bin" \
+    "${NVM_BIN:-}" \
+    "${HOME:-}/.local/share/mise/shims" \
+    "${HOME:-}/.asdf/shims" \
+    "${HOME:-}/.local/bin" \
     "/opt/homebrew/bin" \
     "/usr/local/bin" \
     "/usr/bin" \

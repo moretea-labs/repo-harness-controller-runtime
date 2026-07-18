@@ -57,9 +57,24 @@ function systemdQuote(value: string): string {
   return JSON.stringify(value);
 }
 
-function supervisorServicePath(bunPath: string): string {
+function supervisorServicePath(
+  bunPath: string,
+  homeDir = process.env.HOME,
+  nvmBin = process.env.NVM_BIN,
+): string {
+  const userRuntimePaths = homeDir
+    ? [
+        join(homeDir, '.bun', 'bin'),
+        join(homeDir, '.volta', 'bin'),
+        ...(nvmBin ? [nvmBin] : []),
+        join(homeDir, '.local', 'share', 'mise', 'shims'),
+        join(homeDir, '.asdf', 'shims'),
+        join(homeDir, '.local', 'bin'),
+      ]
+    : [];
   return Array.from(new Set([
     dirname(bunPath),
+    ...userRuntimePaths,
     '/opt/homebrew/bin',
     '/usr/local/bin',
     '/usr/bin',
@@ -78,11 +93,13 @@ export function renderLaunchdSupervisorPlist(input: {
   runtimeSourceRoot: string;
   releaseRevision?: string;
   logPath: string;
+  homeDir?: string;
+  nvmBin?: string;
 }): string {
   const args = [input.bunPath, input.supervisorPath, '--repo', input.repoRoot, '--controller-home', input.controllerHome, '--runtime-source-root', input.runtimeSourceRoot];
   if (input.releaseRevision) args.push('--release-revision', input.releaseRevision);
   const xml = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n  <key>Label</key><string>${xml(input.label)}</string>\n  <key>ProgramArguments</key><array>${args.map((arg) => `<string>${xml(arg)}</string>`).join('')}</array>\n  <key>EnvironmentVariables</key><dict><key>PATH</key><string>${xml(supervisorServicePath(input.bunPath))}</string></dict>\n  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n  <key>ThrottleInterval</key><integer>2</integer>\n  <key>ProcessType</key><string>Interactive</string>\n  <key>StandardOutPath</key><string>${xml(input.logPath)}</string>\n  <key>StandardErrorPath</key><string>${xml(input.logPath)}</string>\n</dict></plist>\n`;
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n  <key>Label</key><string>${xml(input.label)}</string>\n  <key>ProgramArguments</key><array>${args.map((arg) => `<string>${xml(arg)}</string>`).join('')}</array>\n  <key>EnvironmentVariables</key><dict><key>PATH</key><string>${xml(supervisorServicePath(input.bunPath, input.homeDir, input.nvmBin))}</string></dict>\n  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n  <key>ThrottleInterval</key><integer>2</integer>\n  <key>ProcessType</key><string>Interactive</string>\n  <key>StandardOutPath</key><string>${xml(input.logPath)}</string>\n  <key>StandardErrorPath</key><string>${xml(input.logPath)}</string>\n</dict></plist>\n`;
 }
 
 export function renderSystemdSupervisorUnit(input: {
@@ -91,9 +108,11 @@ export function renderSystemdSupervisorUnit(input: {
   repoRoot: string;
   controllerHome: string;
   runtimeSourceRoot: string;
+  homeDir?: string;
+  nvmBin?: string;
 }): string {
   const args = [input.bunPath, input.supervisorPath, '--repo', input.repoRoot, '--controller-home', input.controllerHome, '--runtime-source-root', input.runtimeSourceRoot];
-  return `[Unit]\nDescription=repo-harness Stable External Runtime Supervisor\nAfter=default.target\n\n[Service]\nType=simple\nEnvironment=${systemdQuote(`PATH=${supervisorServicePath(input.bunPath)}`)}\nExecStart=${args.map(systemdQuote).join(' ')}\nRestart=on-failure\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n`;
+  return `[Unit]\nDescription=repo-harness Stable External Runtime Supervisor\nAfter=default.target\n\n[Service]\nType=simple\nEnvironment=${systemdQuote(`PATH=${supervisorServicePath(input.bunPath, input.homeDir, input.nvmBin)}`)}\nExecStart=${args.map(systemdQuote).join(' ')}\nRestart=on-failure\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n`;
 }
 
 export function installSupervisorRelease(input: { controllerHome: string; repoRoot: string; sourceRoot?: string }): SupervisorInstallResult {

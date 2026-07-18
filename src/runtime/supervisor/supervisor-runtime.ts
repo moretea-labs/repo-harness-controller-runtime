@@ -21,7 +21,7 @@ import { readRuntimeGeneration } from '../control-plane/runtime-generation';
 import { createSupervisorControlServer, type SupervisorControlServerHandle, type SupervisorControlHandlers } from './control-server';
 import { createStableIngressRouter, type StableIngressRouterHandle } from './ingress-router';
 import { createSupervisorOperation, listSupervisorOperations, readSupervisorOperation, updateSupervisorOperation } from './operation-store';
-import { decideRestart, lockout, newRestartBudgetRecord, recordFailure, recordRestart, recordStable } from './restart-policy';
+import { DEFAULT_RESTART_POLICY, decideRestart, lockout, newRestartBudgetRecord, recordFailure, recordRestart, recordStable } from './restart-policy';
 import { SupervisorProcessManager, type SpawnedSupervisorProcess, type SupervisorProcessManagerOptions } from './process-manager';
 import { createSupervisorState, readSupervisorState, writeSupervisorState } from './state-store';
 import { readCurrentSupervisorRelease, readPreviousSupervisorRelease, readSupervisorRelease, supervisorControlSocketPath, type SupervisorReleaseDescriptor } from './paths';
@@ -37,6 +37,65 @@ export interface StableSupervisorRuntimeOptions extends SupervisorProcessManager
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+}
+
+export const SUPERVISOR_GATEWAY_HEALTH_FAILURE_THRESHOLD = Math.max(
+  1,
+  Math.ceil(DEFAULT_RESTART_POLICY.unhealthyWindowMs / DEFAULT_RESTART_POLICY.probeIntervalMs),
+);
+
+export interface SupervisorGatewayHealthProbeResult {
+  healthy: boolean;
+  detail: string;
+  statusCode?: number;
+}
+
+export function supervisorGatewayHealthDecision(
+  previousFailures: number,
+  healthy: boolean,
+): { consecutiveFailures: number; shouldRecover: boolean } {
+  const consecutiveFailures = healthy ? 0 : Math.max(0, previousFailures) + 1;
+  return {
+    consecutiveFailures,
+    shouldRecover: !healthy && consecutiveFailures >= SUPERVISOR_GATEWAY_HEALTH_FAILURE_THRESHOLD,
+  };
+}
+
+export async function probeSupervisorGatewayHealth(
+  endpoint: string,
+  timeoutMs = 2_000,
+): Promise<SupervisorGatewayHealthProbeResult> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(endpoint, {
+      signal: controller.signal,
+      headers: { accept: 'application/json' },
+    });
+    let healthStatus: unknown;
+    try {
+      const payload = await response.json() as { status?: unknown };
+      healthStatus = payload?.status;
+    } catch {
+      healthStatus = undefined;
+    }
+    if (!response.ok) {
+      return {
+        healthy: false,
+        statusCode: response.status,
+        detail: `status=${response.status}${healthStatus === undefined ? '' : ` health=${String(healthStatus)}`}`,
+      };
+    }
+    if (healthStatus !== 'ok') {
+      return { healthy: false, statusCode: response.status, detail: `health=${String(healthStatus)}` };
+    }
+    return { healthy: true, statusCode: response.status, detail: 'ok' };
+  } catch (error) {
+    const detail = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 200);
+    return { healthy: false, detail: detail || 'health probe failed' };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function processState(spawned: SpawnedSupervisorProcess, previous?: SupervisorManagedProcess): SupervisorManagedProcess {
@@ -987,7 +1046,7 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
     await this.executionPromise;
   }
 
-  private async recoverComponent(component: SupervisorComponentName): Promise<void> {
+  private async recoverComponent(component: SupervisorComponentName, failureReason = `${component} liveness failed`): Promise<void> {
     const managed = this.componentState(component);
     if (!managed) return;
     const authority = readActiveSlotAuthority(this.options.controllerHome);
@@ -1007,10 +1066,10 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
         kind: 'rollback',
         requestedBy: 'supervisor',
         actor: 'supervisor',
-        reason: `${component} failed within the rollback window`,
+        reason: `${failureReason} within the rollback window`,
       });
       this.persist({
-        lastIncident: { at: new Date().toISOString(), component, reason: `${component} failed; automatic rollback accepted`, operationId: accepted.operation.operationId },
+        lastIncident: { at: new Date().toISOString(), component, reason: `${failureReason}; automatic rollback accepted`, operationId: accepted.operation.operationId },
       });
       await this.runPendingOperations();
       return;
@@ -1042,11 +1101,11 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
       kind: operationKindForComponent(component),
       requestedBy: 'supervisor',
       actor: 'supervisor',
-      reason: `${component} liveness failed`,
+      reason: failureReason,
     });
     this.persist({
-      restartBudget: { ...this.state.restartBudget, [key]: recordRestart(recordFailure(budget, `${component} liveness failed`)) },
-      lastIncident: { at: new Date().toISOString(), component, reason: `${component} liveness failed`, operationId: accepted.operation.operationId },
+      restartBudget: { ...this.state.restartBudget, [key]: recordRestart(recordFailure(budget, failureReason)) },
+      lastIncident: { at: new Date().toISOString(), component, reason: failureReason, operationId: accepted.operation.operationId },
     });
     await this.runPendingOperations();
   }
@@ -1058,11 +1117,40 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
       const managed = this.componentState(component);
       const observation = this.manager.observe(managed);
       if (observation === 'alive' && managed) {
+        if (component === 'gatewayHost') {
+          const slot = managed.slot ?? this.state.activeSlot;
+          const binding = this.managerForManaged(managed, slot).gatewayBinding(slot);
+          const health = await probeSupervisorGatewayHealth(`http://${binding.host}:${binding.port}/health`);
+          if (!health.healthy) {
+            degraded = true;
+            const decision = supervisorGatewayHealthDecision(managed.consecutiveFailures, false);
+            const consecutiveFailures = decision.consecutiveFailures;
+            const failureReason = `gatewayHost health probe failed ${consecutiveFailures}/${SUPERVISOR_GATEWAY_HEALTH_FAILURE_THRESHOLD}: ${health.detail}`;
+            this.setComponent('gatewayHost', {
+              ...managed,
+              state: 'running',
+              lastLivenessAt: new Date().toISOString(),
+              consecutiveFailures,
+            });
+            if (decision.shouldRecover) {
+              await this.recoverComponent('gatewayHost', failureReason);
+            } else {
+              this.persist({ lastIncident: { at: new Date().toISOString(), component, reason: failureReason } });
+            }
+            continue;
+          }
+        }
         const key = managedKey(component, managed.generation ?? this.state.activeGeneration);
         const budget = this.state.restartBudget[key];
+        const healthyManaged = {
+          ...managed,
+          state: 'running' as const,
+          lastLivenessAt: new Date().toISOString(),
+          consecutiveFailures: 0,
+        };
         this.persist({
           ...(budget ? { restartBudget: { ...this.state.restartBudget, [key]: recordStable(budget) } } : {}),
-          ...(component === 'controllerDaemon' ? { controllerDaemon: { ...managed, lastLivenessAt: new Date().toISOString() } } : { gatewayHost: { ...managed, lastLivenessAt: new Date().toISOString() } }),
+          ...(component === 'controllerDaemon' ? { controllerDaemon: healthyManaged } : { gatewayHost: healthyManaged }),
         });
       } else if (observation === 'dead') {
         degraded = true;
@@ -1073,12 +1161,16 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
       }
     }
     if (this.state.observedState !== 'locked_out') {
+      const gatewayAlive = this.manager.observe(this.state.gatewayHost) === 'alive';
+      const gatewayHealthy = gatewayAlive
+        && this.state.gatewayHost?.state === 'running'
+        && this.state.gatewayHost.consecutiveFailures === 0;
       this.persist({
         observedState: degraded || Boolean(this.state.currentOperationId) ? 'degraded' : 'healthy',
         ingress: {
           ...this.state.ingress,
-          state: this.manager.observe(this.state.gatewayHost) === 'alive' ? 'running' : 'degraded',
-          ...(this.manager.observe(this.state.gatewayHost) === 'alive' ? { lastHealthyAt: new Date().toISOString() } : {}),
+          state: gatewayHealthy ? 'running' : 'degraded',
+          ...(gatewayHealthy ? { lastHealthyAt: new Date().toISOString() } : {}),
         },
       });
     }

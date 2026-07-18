@@ -9,7 +9,7 @@ import { installSupervisorRelease, renderLaunchdSupervisorPlist, renderSystemdSu
 import { createStableIngressRouter } from '../../src/runtime/supervisor/ingress-router';
 import { controllerDaemonMaxLifetimeMs } from '../../src/runtime/control-plane/daemon-entry';
 import { createSupervisorOperation, readSupervisorOperation, updateSupervisorOperation } from '../../src/runtime/supervisor/operation-store';
-import { automaticRecoveryRequestId, managedProcessNeedsReleaseRefresh, reconcileActiveManagedGenerations, reconcileSupervisorStateWithAuthority, terminalizeInterruptedSupervisorOperations } from '../../src/runtime/supervisor/supervisor-runtime';
+import { SUPERVISOR_GATEWAY_HEALTH_FAILURE_THRESHOLD, automaticRecoveryRequestId, managedProcessNeedsReleaseRefresh, probeSupervisorGatewayHealth, reconcileActiveManagedGenerations, reconcileSupervisorStateWithAuthority, supervisorGatewayHealthDecision, terminalizeInterruptedSupervisorOperations } from '../../src/runtime/supervisor/supervisor-runtime';
 import { decideRestart, newRestartBudgetRecord, recordFailure, recordRestart, recordStable } from '../../src/runtime/supervisor/restart-policy';
 import { SupervisorProcessManager } from '../../src/runtime/supervisor/process-manager';
 import { writeMcpServiceLocalConfig } from '../../src/cli/mcp/auth';
@@ -75,12 +75,14 @@ describe('Stable Supervisor production hardening', () => {
       runtimeSourceRoot: '/tmp/repo',
       releaseRevision: 'revision-a',
       logPath: '/tmp/supervisor.log',
+      homeDir: '/Users/example',
+      nvmBin: '/Users/example/.nvm/versions/node/current/bin',
     });
     expect(plist).toContain('<key>SuccessfulExit</key><false/>');
     expect(plist).toContain('--release-revision');
     expect(plist).toContain('revision-a');
     expect(plist).toContain('<key>EnvironmentVariables</key>');
-    expect(plist).toContain('<key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>');
+    expect(plist).toContain('<key>PATH</key><string>/usr/local/bin:/Users/example/.bun/bin:/Users/example/.volta/bin:/Users/example/.nvm/versions/node/current/bin:/Users/example/.local/share/mise/shims:/Users/example/.asdf/shims:/Users/example/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>');
     expect(plist).not.toContain('<key>KeepAlive</key><true/>');
     const unit = renderSystemdSupervisorUnit({
       bunPath: '/usr/local/bin/bun',
@@ -88,8 +90,10 @@ describe('Stable Supervisor production hardening', () => {
       repoRoot: '/tmp/repo',
       controllerHome: '/tmp/home',
       runtimeSourceRoot: '/tmp/repo',
+      homeDir: '/Users/example',
+      nvmBin: '/Users/example/.nvm/versions/node/current/bin',
     });
-    expect(unit).toContain('Environment="PATH=/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"');
+    expect(unit).toContain('Environment="PATH=/usr/local/bin:/Users/example/.bun/bin:/Users/example/.volta/bin:/Users/example/.nvm/versions/node/current/bin:/Users/example/.local/share/mise/shims:/Users/example/.asdf/shims:/Users/example/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"');
     expect(unit).toContain('Restart=on-failure');
     expect(unit).not.toContain('Restart=always');
     const spaced = renderSystemdSupervisorUnit({
@@ -98,11 +102,48 @@ describe('Stable Supervisor production hardening', () => {
       repoRoot: '/Users/example/Repo Harness',
       controllerHome: '/Users/example/Controller Home',
       runtimeSourceRoot: '/Users/example/Repo Harness',
+      homeDir: '/Users/example',
+      nvmBin: '/Users/example/.nvm/versions/node/current/bin',
     });
-    expect(spaced).toContain('Environment="PATH=/Users/example/My Tools:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"');
+    expect(spaced).toContain('Environment="PATH=/Users/example/My Tools:/Users/example/.bun/bin:/Users/example/.volta/bin:/Users/example/.nvm/versions/node/current/bin:/Users/example/.local/share/mise/shims:/Users/example/.asdf/shims:/Users/example/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"');
     expect(spaced).toContain('ExecStart="/Users/example/My Tools/bun"');
     expect(supervisorSystemdUnitName('/tmp/a/controller-home')).not.toBe(supervisorSystemdUnitName('/tmp/b/controller-home'));
     expect(supervisorServiceLabel('/tmp/a/controller-home')).not.toBe(supervisorServiceLabel('/tmp/b/controller-home'));
+  });
+
+  test('Gateway health probe distinguishes live process state from MCP readiness', async () => {
+    const healthy = await listen((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ status: 'ok' }));
+    });
+    const degraded = await listen((_request, response) => {
+      response.writeHead(503, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ status: 'degraded' }));
+    });
+
+    expect(await probeSupervisorGatewayHealth(`http://127.0.0.1:${healthy.port}/health`)).toEqual({
+      healthy: true,
+      statusCode: 200,
+      detail: 'ok',
+    });
+    const unhealthy = await probeSupervisorGatewayHealth(`http://127.0.0.1:${degraded.port}/health`);
+    expect(unhealthy.healthy).toBe(false);
+    expect(unhealthy.statusCode).toBe(503);
+    expect(unhealthy.detail).toContain('status=503');
+    expect(SUPERVISOR_GATEWAY_HEALTH_FAILURE_THRESHOLD).toBe(9);
+    let failures = 0;
+    for (let attempt = 1; attempt < SUPERVISOR_GATEWAY_HEALTH_FAILURE_THRESHOLD; attempt += 1) {
+      const decision = supervisorGatewayHealthDecision(failures, false);
+      failures = decision.consecutiveFailures;
+      expect(decision.shouldRecover).toBe(false);
+    }
+    const threshold = supervisorGatewayHealthDecision(failures, false);
+    expect(threshold.consecutiveFailures).toBe(SUPERVISOR_GATEWAY_HEALTH_FAILURE_THRESHOLD);
+    expect(threshold.shouldRecover).toBe(true);
+    expect(supervisorGatewayHealthDecision(threshold.consecutiveFailures, true)).toEqual({
+      consecutiveFailures: 0,
+      shouldRecover: false,
+    });
   });
 
   test('temporary harness daemons self-expire while production homes do not', () => {
