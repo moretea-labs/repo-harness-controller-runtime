@@ -736,6 +736,9 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
     daemon: {
       status: daemon.status,
       error: daemon.error,
+      // The durable scheduler loop runs inside the Controller Daemon process.
+      // Its last tick is the authoritative live daemon heartbeat.
+      heartbeatAgeMs: schedulerHeartbeatAgeMs,
     },
     scheduler: {
       status: daemon.degraded ? "degraded" : daemon.status,

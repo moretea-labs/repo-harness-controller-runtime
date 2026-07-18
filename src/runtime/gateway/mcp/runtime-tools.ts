@@ -1150,7 +1150,13 @@ async function controllerReadiness(ctx: MultiRepositoryMcpToolContext, repositor
     error: localBridge?.error,
   };
   const runtimeHealth = evaluateRuntimeHealth({
-    daemon: { status: daemon.status, error: daemon.error },
+    daemon: {
+      status: daemon.status,
+      error: daemon.error,
+      // Scheduler ticks are emitted by the Controller Daemon process and provide
+      // its continuously refreshed heartbeat without introducing a second timer.
+      heartbeatAgeMs: schedulerHeartbeatAgeMs,
+    },
     scheduler: {
       status: daemon.degraded ? 'degraded' : daemon.status,
       heartbeatAgeMs: schedulerHeartbeatAgeMs,
@@ -2378,7 +2384,11 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         const schedulerDispatchHeartbeatAgeMs = ageMs(scheduler.lastDispatchAt);
         const runtimeStorage = ensureRepositoryRuntimeStorage(repository, ctx.controllerHome);
         const health = evaluateRuntimeHealth({
-          daemon: { status: daemon.status, error: daemon.error },
+          daemon: {
+            status: daemon.status,
+            error: daemon.error,
+            heartbeatAgeMs: schedulerHeartbeatAgeMs,
+          },
           scheduler: {
             status: daemon.degraded ? 'degraded' : daemon.status,
             heartbeatAgeMs: schedulerHeartbeatAgeMs,
