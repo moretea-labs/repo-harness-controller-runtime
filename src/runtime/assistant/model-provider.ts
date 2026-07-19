@@ -95,10 +95,6 @@ const ANALYSIS_SCHEMA: Record<string, unknown> = {
   },
 };
 
-function positiveInteger(value: unknown, fallback: number, max: number): number {
-  return Number.isInteger(value) && Number(value) > 0 ? Math.min(max, Number(value)) : fallback;
-}
-
 function envInteger(env: NodeJS.ProcessEnv, name: string, fallback: number, max: number): number {
   const parsed = Number(env[name]);
   return Number.isFinite(parsed) && parsed > 0 ? Math.min(max, Math.trunc(parsed)) : fallback;
@@ -123,12 +119,15 @@ function endpointIsAllowed(endpoint: string): boolean {
 }
 
 function configuredCredential(env: NodeJS.ProcessEnv, endpoint?: string): { value?: string; source?: string } {
-  const deepSeekEndpoint = endpoint?.includes('api.deepseek.com') === true;
+  let host: string | undefined;
+  try { host = endpoint ? new URL(endpoint).hostname.toLowerCase() : undefined; } catch { host = undefined; }
   const candidates: Array<[string, string | undefined]> = [
     ['REPO_HARNESS_ASSISTANT_MODEL_API_KEY', env.REPO_HARNESS_ASSISTANT_MODEL_API_KEY],
-    ...(deepSeekEndpoint
-      ? [['REPO_HARNESS_DEEPSEEK_API_KEY', env.REPO_HARNESS_DEEPSEEK_API_KEY], ['DEEPSEEK_API_KEY', env.DEEPSEEK_API_KEY], ['OPENAI_API_KEY', env.OPENAI_API_KEY]]
-      : [['OPENAI_API_KEY', env.OPENAI_API_KEY], ['REPO_HARNESS_DEEPSEEK_API_KEY', env.REPO_HARNESS_DEEPSEEK_API_KEY], ['DEEPSEEK_API_KEY', env.DEEPSEEK_API_KEY]]) as Array<[string, string | undefined]>,
+    ...(host === 'api.openai.com'
+      ? [['OPENAI_API_KEY', env.OPENAI_API_KEY]]
+      : host === 'api.deepseek.com'
+        ? [['REPO_HARNESS_DEEPSEEK_API_KEY', env.REPO_HARNESS_DEEPSEEK_API_KEY], ['DEEPSEEK_API_KEY', env.DEEPSEEK_API_KEY]]
+        : []) as Array<[string, string | undefined]>,
   ];
   const found = candidates.find(([, value]) => value?.trim());
   return found ? { value: found[1]!.trim(), source: `env:${found[0]}` } : {};
@@ -355,7 +354,7 @@ function mapModelActions(output: RawModelOutput, messages: AssistantAnalysisMess
   return output.actions.flatMap((action): AssistantActionProposalInput[] => {
     const message = byId.get(action.messageId);
     if (!message) return [];
-    const context = { sender: senderAddress(message.from), subject: message.subject };
+    const context = { sender: senderAddress(message.from), subject: message.subject, protected: protectedMessage(message) };
     switch (action.action) {
       case 'create_draft': {
         const to = senderAddress(message.from);

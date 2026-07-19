@@ -93,7 +93,7 @@ function normalizeGrant(raw: unknown): AssistantStandingGrant | undefined {
   const pluginId = typeof value.pluginId === 'string' && value.pluginId.trim() ? value.pluginId.trim() : undefined;
   const actionId = typeof value.actionId === 'string' && value.actionId.trim() ? value.actionId.trim() : undefined;
   const expiresAt = typeof value.expiresAt === 'string' ? value.expiresAt : undefined;
-  if (!grantId || !pluginId || !actionId || !expiresAt) return undefined;
+  if (!grantId || !pluginId || !actionId || !expiresAt || !isStandingGrantEligibleAction(pluginId, actionId)) return undefined;
   const constraints = value.constraints && typeof value.constraints === 'object' && !Array.isArray(value.constraints)
     ? value.constraints as Record<string, unknown>
     : {};
@@ -182,6 +182,15 @@ export function createAssistantStandingGrant(
   if (!isStandingGrantEligibleAction(pluginId, actionId)) {
     throw new Error(`ASSISTANT_STANDING_GRANT_ACTION_NOT_ALLOWED: ${pluginId}/${actionId}`);
   }
+  const routineIds = uniqueStrings(input.routineIds, 100);
+  const senderAllowlist = uniqueStrings(input.senderAllowlist, 100).map(normalizeEmailRule);
+  const subjectContains = uniqueStrings(input.subjectContains, 50);
+  if (routineIds.length === 0 && senderAllowlist.length === 0 && subjectContains.length === 0) {
+    throw new Error('ASSISTANT_STANDING_GRANT_SCOPE_REQUIRED');
+  }
+  if (pluginId === 'gmail' && actionId === 'create_draft' && senderAllowlist.length === 0) {
+    throw new Error('ASSISTANT_STANDING_GRANT_SENDER_SCOPE_REQUIRED');
+  }
   return withControllerLock(controllerHome, { scope: 'repository', repoId: repository.repoId }, `assistant-standing-grant-create:${pluginId}:${actionId}`, () => {
     const store = readStore(repository.canonicalRoot);
     const at = now();
@@ -194,9 +203,9 @@ export function createAssistantStandingGrant(
       actionId,
       status: 'active',
       constraints: {
-        routineIds: uniqueStrings(input.routineIds, 100),
-        senderAllowlist: uniqueStrings(input.senderAllowlist, 100).map(normalizeEmailRule),
-        subjectContains: uniqueStrings(input.subjectContains, 50),
+        routineIds,
+        senderAllowlist,
+        subjectContains,
         minConfidence: Math.max(0, Math.min(1, input.minConfidence ?? 0.8)),
         maxPerRun: Math.max(1, Math.min(50, Math.trunc(input.maxPerRun ?? 1))),
       },
@@ -233,16 +242,10 @@ export function listAssistantStandingGrants(
   input: { status?: AssistantStandingGrantStatus; limit?: number } = {},
 ): { grants: AssistantStandingGrant[] } {
   const store = readStore(repository.canonicalRoot);
-  let changed = false;
-  store.grants = store.grants.map((grant) => {
-    const next = expireGrant(grant);
-    if (next.status !== grant.status) changed = true;
-    return next;
-  });
-  if (changed) writeStore(repository.canonicalRoot, store);
+  const grants = store.grants.map(expireGrant);
   const limit = Math.max(1, Math.min(500, Math.trunc(input.limit ?? 100)));
   return {
-    grants: store.grants
+    grants: grants
       .filter((grant) => !input.status || grant.status === input.status)
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
       .slice(0, limit),
@@ -310,10 +313,11 @@ function subjectMatches(subject: string | undefined, fragments: string[]): boole
 }
 
 function grantMatches(grant: AssistantStandingGrant, proposal: AssistantActionProposal, routineId: string): boolean {
-  if (grant.status !== 'active') return false;
+  if (grant.status !== 'active' || !isStandingGrantEligibleAction(grant.pluginId, grant.actionId)) return false;
   if (grant.pluginId !== proposal.pluginId || grant.actionId !== proposal.actionId) return false;
   if (proposal.status !== 'proposed' || !proposal.executable || proposal.executionJobId) return false;
   if (proposal.confidence < grant.constraints.minConfidence) return false;
+  if (proposal.context?.protected === true && proposal.actionId === 'archive_message') return false;
   if (grant.constraints.routineIds.length > 0 && !grant.constraints.routineIds.includes(routineId)) return false;
   const sender = normalizedSender(proposal.context?.sender);
   if (!senderMatches(sender, grant.constraints.senderAllowlist)) return false;
@@ -344,6 +348,7 @@ export function applyAssistantStandingGrants(
           standingGrantId: grant.grantId,
         });
         applied += 1;
+        byId.set(approved.proposalId, approved);
         results.push({
           grantId: grant.grantId,
           proposalId: proposal.proposalId,

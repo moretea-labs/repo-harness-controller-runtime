@@ -107,12 +107,20 @@ describe('Assistant model analysis and Standing Grants', () => {
     const { repoRoot, controllerHome } = createRoots();
     const repo = repository(repoRoot, 'repo_grant_safety');
     expect(() => createAssistantStandingGrant(controllerHome, repo, {
-      pluginId: 'gmail', actionId: 'archive_message', confirmAuthorization: false,
+      pluginId: 'gmail', actionId: 'archive_message', senderAllowlist: ['news@example.com'], confirmAuthorization: false,
       origin: { surface: 'mcp', actor: 'test' },
     })).toThrow('AUTHORIZATION_REQUIRED');
+    expect(() => createAssistantStandingGrant(controllerHome, repo, {
+      pluginId: 'gmail', actionId: 'archive_message', confirmAuthorization: true,
+      origin: { surface: 'mcp', actor: 'test' },
+    })).toThrow('SCOPE_REQUIRED');
+    expect(() => createAssistantStandingGrant(controllerHome, repo, {
+      pluginId: 'gmail', actionId: 'create_draft', routineIds: ['routine-1'], confirmAuthorization: true,
+      origin: { surface: 'mcp', actor: 'test' },
+    })).toThrow('SENDER_SCOPE_REQUIRED');
     for (const actionId of ['send_message', 'trash_message']) {
       expect(() => createAssistantStandingGrant(controllerHome, repo, {
-        pluginId: 'gmail', actionId, confirmAuthorization: true,
+        pluginId: 'gmail', actionId, senderAllowlist: ['news@example.com'], confirmAuthorization: true,
         origin: { surface: 'mcp', actor: 'test' },
       })).toThrow('ACTION_NOT_ALLOWED');
     }

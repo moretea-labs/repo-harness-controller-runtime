@@ -24,7 +24,7 @@ export interface AssistantActionProposal {
   actionId: string;
   arguments: Record<string, unknown>;
   evidenceMessageIds: string[];
-  context?: { sender?: string; subject?: string };
+  context?: { sender?: string; subject?: string; protected?: boolean };
   reason: string;
   confidence: number;
   risk: 'remote_write' | 'destructive';
@@ -44,7 +44,7 @@ export interface AssistantActionProposalInput {
   actionId: string;
   arguments?: Record<string, unknown>;
   evidenceMessageIds: string[];
-  context?: { sender?: string; subject?: string };
+  context?: { sender?: string; subject?: string; protected?: boolean };
   reason: string;
   confidence?: number;
   risk?: 'remote_write' | 'destructive';
@@ -124,6 +124,7 @@ export function createAssistantActionProposals(
       context: proposal.context ? {
         sender: typeof proposal.context.sender === 'string' ? proposal.context.sender.slice(0, 500) : undefined,
         subject: typeof proposal.context.subject === 'string' ? proposal.context.subject.slice(0, 1_000) : undefined,
+        protected: proposal.context.protected === true,
       } : undefined,
       reason: proposal.reason,
       confidence: Math.max(0, Math.min(1, proposal.confidence ?? 0.5)),

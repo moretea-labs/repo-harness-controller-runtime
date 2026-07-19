@@ -177,6 +177,11 @@ function senderAddress(value: string): string | undefined {
   return value.match(/<([^>]+@[^>]+)>/)?.[1] ?? value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0];
 }
 
+function protectedMessageSummary(message: GmailMessageSummary): boolean {
+  return /(security|authentication|password|login|billing|invoice|incident|production|quota|permission|dependabot|安全|登录|账单|故障|告警|权限)/i
+    .test(`${message.subject} ${message.snippet}`);
+}
+
 function proposalsFor(messages: GmailMessageSummary[]): AssistantActionProposalInput[] {
   const proposals: AssistantActionProposalInput[] = [];
   for (const message of messages) {
@@ -186,8 +191,8 @@ function proposalsFor(messages: GmailMessageSummary[]): AssistantActionProposalI
       proposals.push({
         pluginId: 'gmail', actionId: 'create_draft', evidenceMessageIds: [message.id],
         reason: `Prepare a reviewable reply draft for “${message.subject}”.`, confidence: 0.75,
-        executable: Boolean(to),
-        context: { sender: to ?? message.from, subject: message.subject },
+        executable: false,
+        context: { sender: to ?? message.from, subject: message.subject, protected: protectedMessageSummary(message) },
         arguments: to ? { to: [to], subject: message.subject.startsWith('Re:') ? message.subject : `Re: ${message.subject}`, body_text: '[Draft response pending review]' } : {},
       });
     }
@@ -195,15 +200,15 @@ function proposalsFor(messages: GmailMessageSummary[]): AssistantActionProposalI
       proposals.push({
         pluginId: 'google_tasks', actionId: 'create_task', evidenceMessageIds: [message.id],
         reason: `Create a task from “${message.subject}”.`, confidence: 0.8,
-        context: { sender: message.from, subject: message.subject },
+        context: { sender: message.from, subject: message.subject, protected: protectedMessageSummary(message) },
         arguments: { title: message.subject, notes: `${message.from}\n${message.snippet}`.slice(0, 2_000) },
       });
     }
-    if (/(newsletter|digest|marketing|unsubscribe|推广|营销|周报)/i.test(text)) {
+    if (/(newsletter|digest|marketing|unsubscribe|推广|营销|周报)/i.test(text) && !protectedMessageSummary(message)) {
       proposals.push({
         pluginId: 'gmail', actionId: 'archive_message', evidenceMessageIds: [message.id],
         reason: `Archive candidate: “${message.subject}”.`, confidence: 0.7,
-        context: { sender: message.from, subject: message.subject },
+        context: { sender: message.from, subject: message.subject, protected: false },
         arguments: { message_id: message.id },
       });
     }
