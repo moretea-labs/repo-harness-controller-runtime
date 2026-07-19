@@ -1,0 +1,181 @@
+{
+  "schemaVersion": 5,
+  "id": "ISS-20260719-65CFF4",
+  "title": "Harden completion evidence and execution ownership",
+  "slug": "harden-completion-evidence-and-execution-ownership",
+  "kind": "bug",
+  "status": "planned",
+  "summary": "Eliminate false task/work completion caused by untrusted acceptance evidence and weak WorkContract references, then harden operation receipts against stale execution ownership without changing external authorization semantics.",
+  "goals": [
+    "Successful Runs must not fabricate passed acceptance criteria.",
+    "Missing acceptance evidence must remain incomplete rather than become a failure or false success.",
+    "WorkContract finalization must require meaningful verification/execution evidence; worktree refs and patch proposals alone are insufficient.",
+    "Operation receipts must be bound to the current attempt and Worker ownership before recovery can trust them.",
+    "Task/Work completion must never elevate access mode or satisfy remote/destructive authorization."
+  ],
+  "nonGoals": [
+    "Do not replace all legacy ok:boolean fields in one migration.",
+    "Do not reopen all historical terminal tasks automatically.",
+    "Do not redesign plugin authorization or access-mode architecture without a confirmed bypass.",
+    "Do not refactor unrelated scheduler, projection, supervisor, or runtime GC code."
+  ],
+  "acceptanceCriteria": [
+    "All automatic completion producers record acceptance as not evaluated rather than passed.",
+    "Explicit reviewer/human acceptance remains backward compatible and trusted.",
+    "Incomplete acceptance maps to verifying/review, explicit failure maps to changes_requested, and passed maps to verified.",
+    "WorktreeRef, workerRef, patch proposal, or arbitrary checkRef alone cannot finalize WorkContract succeeded.",
+    "Stale receipt attempt/PID data is rejected or ignored during write and recovery.",
+    "Targeted tests and package checks pass; final code is merged to main and isolated resources are cleaned."
+  ],
+  "relatedArtifacts": [
+    "Fable completion-evidence review",
+    "src/cli/controller/execution-policy.ts",
+    "src/runtime/control-plane/facade/goal-workloop.ts",
+    "src/runtime/execution/jobs/receipt-store.ts"
+  ],
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Make acceptance evidence provenance-aware",
+      "objective": "Implement a backward-compatible acceptance evidence model. Preserve ok:boolean for callers and stored data, add optional outcome/source provenance, stop successful Run completion and legacy auto-completion paths from fabricating passed acceptance, normalize recognizable legacy auto-generated evidence as not_evaluated, and distinguish passed/failed/incomplete in verification gating. Map incomplete to verifying rather than changes_requested. Update progress projection and all directly affected tests. Do not reopen historical terminal Tasks automatically and do not weaken high/destructive human acceptance gates.",
+      "status": "blocked",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src/cli/controller/types.ts",
+        "src/cli/controller/execution-policy.ts",
+        "src/cli/controller/issue-store.ts",
+        "src/cli/controller/execution-completion.ts",
+        "src/cli/controller/completion-orchestrator.ts",
+        "src/cli/controller/progress.ts",
+        "src/cli/local-controller/server.ts",
+        "src/cli/mcp/legacy-tool-service.ts",
+        "tests/cli/task-execution-policy.test.ts",
+        "tests/cli/automatic-completion.test.ts",
+        "tests/cli/completion-orchestrator.test.ts",
+        "tests/cli/controller-lifecycle.test.ts",
+        "tests/cli/local-controller.test.ts",
+        "tests/cli/tool-service.test.ts"
+      ],
+      "forbiddenPaths": [
+        "_ops/**",
+        ".ai/**",
+        "node_modules/**",
+        "dist/**"
+      ],
+      "checks": [
+        "package:check:type",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "Automatic Run completion cannot create trusted acceptance pass.",
+        "Legacy manual/reviewer ok:true remains compatible.",
+        "Recognizable legacy auto-generated pass is treated as incomplete.",
+        "Missing/not_evaluated acceptance produces verifying or review, not changes_requested.",
+        "Explicit failed acceptance still produces changes_requested.",
+        "High/destructive acceptance rules remain unchanged."
+      ],
+      "risk": "high",
+      "recommendedAgent": "codex",
+      "notes": [
+        "Accepted RUN-iss-20260719-65cff4-t1-1784430023426-f6d406b4 for asynchronous launch.",
+        "RUN-iss-20260719-65cff4-t1-1784430023426-f6d406b4 ended as unknown; explicit retry is required. worker did not start before the startup deadline"
+      ],
+      "runIds": [
+        "RUN-iss-20260719-65cff4-t1-1784430023426-f6d406b4"
+      ],
+      "createdAt": "2026-07-19T03:00:02.352Z",
+      "updatedAt": "2026-07-19T03:00:59.352Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    },
+    {
+      "id": "T2",
+      "title": "Require meaningful WorkContract completion evidence",
+      "objective": "Replace weak boolean completion evidence in goal-workloop with a bounded evaluator. WorktreeRef alone, workerRef alone, any arbitrary checkRef, or a Codex/Claude patch proposal must never be sufficient for WorkContract succeeded. Require all declared checks to have valid_pass; classify valid_fail as failed and infrastructure/invalid/skipped/missing as incomplete. Preserve read-only/no-check compatibility conservatively, retain explicit waiting_for_review with actionable reasons when mutating completion evidence is absent, and add regression tests. Do not redesign all WorkContract schema or introduce broad migrations.",
+      "status": "planned",
+      "dependsOn": [
+        "T1"
+      ],
+      "allowedPaths": [
+        "src/runtime/control-plane/facade/types.ts",
+        "src/runtime/control-plane/facade/goal-workloop.ts",
+        "src/runtime/control-plane/facade/codex-delegation.ts",
+        "src/runtime/control-plane/facade/work-contract-store.ts",
+        "tests/runtime/goal-workloop.test.ts",
+        "tests/runtime/codex-delegation.test.ts"
+      ],
+      "forbiddenPaths": [
+        "_ops/**",
+        ".ai/**",
+        "node_modules/**",
+        "dist/**"
+      ],
+      "checks": [
+        "package:check:type",
+        "package:check:runtime-architecture",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "Patch proposal does not create finalizable execution evidence.",
+        "WorktreeRef or workerRef alone cannot finalize success.",
+        "All declared checks must have valid_pass before success.",
+        "Acceptance failure remains failed; infrastructure/missing evidence remains waiting_for_review.",
+        "Existing accessMode and approvalPolicy fields cannot be elevated by finalize."
+      ],
+      "risk": "high",
+      "recommendedAgent": "codex",
+      "notes": [],
+      "runIds": [],
+      "createdAt": "2026-07-19T03:00:02.352Z",
+      "updatedAt": "2026-07-19T03:00:02.352Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    },
+    {
+      "id": "T3",
+      "title": "Fence operation receipts and verify authorization isolation",
+      "objective": "Harden OperationReceipt writes and recovery with current attempt and Worker ownership validation. Preserve schema compatibility through additive metadata only where needed. Ignore stale receipts from replacement attempts/PIDs; keep terminal Job transition fencing intact. Add race/recovery tests and focused regression tests proving Task/Work success does not satisfy access, remote-write, destructive, or strong-confirmation authorization. Avoid broad plugin changes unless a concrete bypass is demonstrated.",
+      "status": "planned",
+      "dependsOn": [
+        "T2"
+      ],
+      "allowedPaths": [
+        "src/runtime/execution/jobs/receipt-store.ts",
+        "src/runtime/execution/jobs/child-reference.ts",
+        "src/runtime/execution/workers/worker-entry.ts",
+        "src/runtime/control-plane/global-scheduler/reconciliation.ts",
+        "src/runtime/control-plane/facade/goal-workloop-access.ts",
+        "tests/runtime/agent-delegation-lifecycle.test.ts",
+        "tests/runtime/goal-workloop.test.ts",
+        "tests/runtime/target-architecture.test.ts"
+      ],
+      "forbiddenPaths": [
+        "_ops/**",
+        ".ai/**",
+        "node_modules/**",
+        "dist/**"
+      ],
+      "checks": [
+        "package:check:type",
+        "package:check:mcp-compatibility",
+        "package:check:runtime-architecture",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "Stale attempt/PID cannot overwrite or supply a trusted completion receipt.",
+        "Recovery ignores receipt ownership that does not match the current Job.",
+        "Valid delegated child recovery still works.",
+        "Work/Task success does not alter access mode or confirmation state.",
+        "No broad plugin authorization behavior changes without confirmed evidence."
+      ],
+      "risk": "high",
+      "recommendedAgent": "codex",
+      "notes": [],
+      "runIds": [],
+      "createdAt": "2026-07-19T03:00:02.352Z",
+      "updatedAt": "2026-07-19T03:00:02.352Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    }
+  ],
+  "createdAt": "2026-07-19T03:00:02.352Z",
+  "updatedAt": "2026-07-19T03:00:59.352Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+}
