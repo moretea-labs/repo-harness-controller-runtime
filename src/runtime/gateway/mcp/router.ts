@@ -304,7 +304,7 @@ export async function routeDurableMcpCall(
   if (name === 'repository_command_execute' || name === 'repository_command_preview') {
     workerArgs.command = commandValue(normalizeRepositoryCommand(workerArgs.command));
   }
-  validateDurableArguments(name, definition, workerArgs);
+  validateDurableArguments(name, injectDurableCommandFields(definition), workerArgs);
   delete workerArgs.request_id;
   delete workerArgs.apply_mode;
   delete workerArgs.wait;
