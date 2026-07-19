@@ -71,6 +71,7 @@ Read the architecture in this order:
 17. `session-aware-execution-and-authorization.md` — Session Context, Work Handle, Goal delegation, and resumable approval boundaries.
 18. `runtime-health-and-resource-lifecycle.md` — shared health evaluation, projection freshness, capability status, attention/history, and bounded ownership-aware cleanup.
 19. `stable-external-runtime-supervisor.md` — immutable external lifecycle ownership, recovery MCP, fencing, and slot cutover.
+20. `human-interaction-plane.md` — foreground provider sessions, durable human handoff, profile fencing, and safe resumption.
 
 
 ## Architecture Layers
@@ -152,3 +153,4 @@ See [Architecture Governance Contract](governance.md).
 - [Approved target architecture (zh-CN)](approved-target-architecture.zh-CN.md)
 - [Personal assistant/plugin baseline](personal-assistant-plugin-baseline.md)
 - [Target requirements traceability](target-requirements-traceability.md)
+- [Human interaction plane](human-interaction-plane.md)

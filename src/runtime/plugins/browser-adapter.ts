@@ -11,6 +11,15 @@ import type {
   AssistantPluginPermissionScope,
 } from './types';
 import { AssistantPluginError, toAssistantPluginError } from './errors';
+import {
+  assertBrowserProfileAvailable,
+  assertBrowserSessionAvailable,
+  cancelBrowserHandoff,
+  getBrowserHandoff,
+  listBrowserHandoffs,
+  resumeBrowserHandoff,
+  startBrowserHandoff,
+} from './browser-handoff';
 
 const BROWSER_PLUGIN_ID = 'browser';
 const CONFIG_ROOT = '.repo-harness/plugins';
@@ -550,6 +559,7 @@ async function withPage<T>(
 ): Promise<T> {
   assertUrlAllowed(url, config);
   const profile = selectedProfile(config, repoRoot);
+  assertBrowserProfileAvailable(repoRoot, profile.selectedProfilePath);
   mkdirSync(profile.profileDir, { recursive: true });
   const launchOptions: Record<string, unknown> = {
     headless: false,
@@ -732,6 +742,13 @@ function capabilities(): AssistantPluginCapability[] {
       actions: ['create_session', 'list_sessions', 'close_session', 'close_page', 'clear_session'],
     },
     {
+      capabilityId: 'browser-human-handoff',
+      title: 'Browser Human Handoff',
+      description: 'Present the persistent browser in the foreground, keep it open for manual verification, and resume safely.',
+      scopes: ['browser.read', 'browser.profile'],
+      actions: ['request_human_handoff', 'get_handoff_status', 'resolve_handoff'],
+    },
+    {
       capabilityId: 'browser-readonly',
       title: 'Read-only Browser',
       description: 'Navigate allowed pages, extract DOM/text, capture screenshots, and collect diagnostics.',
@@ -852,6 +869,42 @@ function actions(): AssistantPluginActionDescriptor[] {
       readOnly: false, risk: 'workspace_write', confirmation: 'authorization', defaultTimeoutMs: 15_000, cancellable: true, idempotent: true,
       scopes: ['browser.profile'], resourceClaims: [{ resource: 'repo-state', mode: 'write' }],
       argumentsSchema: { type: 'object', properties: {}, additionalProperties: false },
+    },
+    {
+      actionId: 'request_human_handoff',
+      title: 'Request human browser handoff',
+      description: 'Keep a saved browser session open for CAPTCHA, login, two-factor authentication, or another manual step.',
+      readOnly: false, risk: 'workspace_write', confirmation: 'authorization', defaultTimeoutMs: 30_000, cancellable: true, idempotent: false,
+      scopes: ['browser.read', 'browser.profile'], resourceClaims: readRemote,
+      argumentsSchema: sessionTargetSchema({
+        reason: { type: 'string', enum: ['captcha', 'login', 'two_factor', 'manual_review', 'sensitive_confirmation'] },
+        instructions: { type: 'string' },
+        handoff_timeout_ms: { type: 'number' },
+      }, ['session_id']),
+    },
+    {
+      actionId: 'get_handoff_status',
+      title: 'Get browser handoff status',
+      description: 'Read durable browser handoff status and reconcile a stale or crashed host.',
+      readOnly: true, risk: 'readonly', confirmation: 'none', defaultTimeoutMs: 10_000, cancellable: true, idempotent: true,
+      scopes: ['browser.read', 'browser.profile'], resourceClaims: [{ resource: 'repo-state', mode: 'read' }],
+      argumentsSchema: { type: 'object', properties: { interaction_id: { type: 'string' } }, required: ['interaction_id'], additionalProperties: false },
+    },
+    {
+      actionId: 'resolve_handoff',
+      title: 'Resolve browser handoff',
+      description: 'Resume or cancel a foreground browser handoff.',
+      readOnly: false, risk: 'workspace_write', confirmation: 'authorization', defaultTimeoutMs: 15_000, cancellable: true, idempotent: true,
+      scopes: ['browser.read', 'browser.profile'], resourceClaims: [{ resource: 'repo-state', mode: 'write' }],
+      argumentsSchema: {
+        type: 'object',
+        properties: {
+          interaction_id: { type: 'string' },
+          resolution: { type: 'string', enum: ['resume', 'cancel'] },
+        },
+        required: ['interaction_id', 'resolution'],
+        additionalProperties: false,
+      },
     },
     {
       actionId: 'open_page',
@@ -1128,6 +1181,9 @@ function health(config: BrowserPluginConfig, repoRoot?: string): AssistantPlugin
   const configErrors = validateConfig(config);
   const warnings = configWarnings(config);
   const sessionCount = repoRoot ? listSavedSessions(repoRoot).length : 0;
+  const activeHandoffCount = repoRoot
+    ? listBrowserHandoffs(repoRoot).filter((entry) => ['starting', 'waiting_for_user', 'closing'].includes(entry.status)).length
+    : 0;
   const baseDetails = {
     dependencyReady,
     profileMode: config.profileMode,
@@ -1137,6 +1193,8 @@ function health(config: BrowserPluginConfig, repoRoot?: string): AssistantPlugin
     executablePath: config.executablePath,
     windowMode: 'visible' as const,
     sessionCount,
+    activeHandoffCount,
+    humanHandoffSupported: true,
     artifactsAvailable: true,
     artifactRoots: {
       screenshots: '.repo-harness/browser/screenshots',
@@ -1286,13 +1344,61 @@ export async function executeBrowserPluginAction(input: AssistantPluginActionExe
       case 'close_session':
       case 'close_page': {
         const sessionId = requiredString(input.args.session_id, 'session_id');
+        assertBrowserSessionAvailable(input.repoRoot, sessionId);
         rmSync(sessionPath(input.repoRoot, sessionId), { force: true });
         return { closed: true, sessionId };
       }
       case 'clear_session': {
+        assertBrowserSessionAvailable(input.repoRoot);
         const sessions = listSavedSessions(input.repoRoot);
         for (const session of sessions) rmSync(sessionPath(input.repoRoot, session.sessionId), { force: true });
         return { cleared: true, count: sessions.length };
+      }
+      case 'request_human_handoff': {
+        const target = resolveActionTarget(input.repoRoot, input.args);
+        assertUrlAllowed(target.url, current);
+        const profile = selectedProfile(current, input.repoRoot);
+        mkdirSync(profile.profileDir, { recursive: true });
+        const handoff = startBrowserHandoff({
+          repoRoot: input.repoRoot,
+          repoId: input.repoId,
+          requestId: input.requestId,
+          jobId: input.jobId,
+          sessionId: target.sessionId,
+          sessionPath: sessionPath(input.repoRoot, target.sessionId),
+          url: target.url,
+          profileDir: profile.profileDir,
+          selectedProfilePath: profile.selectedProfilePath,
+          profileDirectory: profile.profileDirectory,
+          browserChannel: current.browserChannel,
+          executablePath: current.executablePath ? resolveConfiguredPath(input.repoRoot, current.executablePath) : undefined,
+          allowedDomains: current.allowedDomains,
+          defaultTimeoutMs: current.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS,
+          reason: stringValue(input.args.reason) ?? 'manual_review',
+          instructions: stringValue(input.args.instructions),
+          timeoutMs: typeof input.args.handoff_timeout_ms === 'number' ? input.args.handoff_timeout_ms : undefined,
+        });
+        return {
+          provider: 'playwright-handoff-host',
+          handoff,
+          session: target.existingSession,
+          nextAction: 'Complete the manual step, call resolve_handoff with resolution=resume, then poll get_handoff_status.',
+        };
+      }
+      case 'get_handoff_status': {
+        const interactionId = requiredString(input.args.interaction_id, 'interaction_id');
+        return { provider: 'playwright-handoff-host', handoff: getBrowserHandoff(input.repoRoot, interactionId) };
+      }
+      case 'resolve_handoff': {
+        const interactionId = requiredString(input.args.interaction_id, 'interaction_id');
+        const resolution = requiredString(input.args.resolution, 'resolution');
+        if (resolution !== 'resume' && resolution !== 'cancel') {
+          throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', 'resolution must be resume or cancel', { retryable: false });
+        }
+        const handoff = resolution === 'resume'
+          ? resumeBrowserHandoff(input.repoRoot, interactionId, input.requestId)
+          : cancelBrowserHandoff(input.repoRoot, interactionId, input.requestId);
+        return { provider: 'playwright-handoff-host', resolutionRequested: resolution, handoff };
       }
       case 'create_session':
       case 'open_page':
