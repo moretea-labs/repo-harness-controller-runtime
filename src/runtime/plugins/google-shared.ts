@@ -291,7 +291,7 @@ export function resolveGoogleAuth(
   if (token) {
     return {
       provider: 'google-workspace',
-      ready: probed,
+      ready: true,
       authenticated: true,
       probed,
       credentialSource: cached?.source ?? `env:${configured?.name}`,

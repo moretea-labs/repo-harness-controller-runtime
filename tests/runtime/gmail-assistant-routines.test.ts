@@ -57,6 +57,11 @@ describe('Gmail assistant routines', () => {
       return new Response(JSON.stringify({ labels: [{ id: 'INBOX' }] }), { status: 200 });
     }) as typeof fetch;
 
+    const configured: GmailPluginConfig = { schemaVersion: 1, enabled: true, provider: 'google-workspace' };
+    const beforeProbe = resolveGoogleAuth('gmail', configured);
+    expect(beforeProbe.ready).toBe(true);
+    expect(beforeProbe.probed).toBe(false);
+
     const result = await googleApiRequest<{ labels: Array<{ id: string }> }>({
       service: 'gmail',
       path: '/gmail/v1/users/me/labels',
@@ -65,8 +70,7 @@ describe('Gmail assistant routines', () => {
     });
     expect(result.labels[0]?.id).toBe('INBOX');
     expect(calls).toHaveLength(3);
-    const config: GmailPluginConfig = { schemaVersion: 1, enabled: true, provider: 'google-workspace' };
-    const auth = resolveGoogleAuth('gmail', config);
+    const auth = resolveGoogleAuth('gmail', configured);
     expect(auth.ready).toBe(true);
     expect(auth.probed).toBe(true);
     expect(auth.credentialSource).toContain('refresh:');
