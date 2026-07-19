@@ -210,7 +210,7 @@ export function rejectAssistantActionProposal(
 export function approveAssistantActionProposal(
   controllerHome: string,
   repository: RepositoryRecord,
-  input: { proposalId: string; requestId: string; confirmationText?: string },
+  input: { proposalId: string; requestId: string; confirmationText?: string; origin?: { surface: 'mcp' | 'local-ui'; actor: string } },
 ): AssistantActionProposal {
   return withControllerLock(controllerHome, { scope: 'repository', repoId: repository.repoId }, `assistant-proposal-approve:${input.proposalId}`, () => {
     const store = readStore(repository.canonicalRoot);
@@ -234,7 +234,11 @@ export function approveAssistantActionProposal(
       args: proposal.arguments,
       confirmAuthorization: true,
       confirmationText: input.confirmationText,
-      origin: { surface: 'local-ui', actor: 'assistant-action-approval', correlationId: proposal.proposalId },
+      origin: {
+        surface: input.origin?.surface ?? 'local-ui',
+        actor: input.origin?.actor ?? 'assistant-action-approval',
+        correlationId: proposal.proposalId,
+      },
     });
     proposal.status = 'approved';
     proposal.executionJobId = submitted.job.jobId;

@@ -98,17 +98,29 @@ function refreshTokenEnvNames(service: GoogleService): string[] {
   return [
     `REPO_HARNESS_${service.toUpperCase()}_REFRESH_TOKEN`,
     service === 'gmail' ? 'REPO_HARNESS_GMAIL_REFRESH_TOKEN' : '',
+    service === 'calendar' ? 'REPO_HARNESS_GOOGLE_CALENDAR_REFRESH_TOKEN' : '',
+    service === 'tasks' ? 'REPO_HARNESS_GOOGLE_TASKS_REFRESH_TOKEN' : '',
     'REPO_HARNESS_GOOGLE_WORKSPACE_REFRESH_TOKEN',
     'REPO_HARNESS_GOOGLE_REFRESH_TOKEN',
   ].filter(Boolean);
 }
 
 function clientIdEnvNames(service: GoogleService): string[] {
-  return [`REPO_HARNESS_${service.toUpperCase()}_CLIENT_ID`, 'REPO_HARNESS_GOOGLE_WORKSPACE_CLIENT_ID', 'REPO_HARNESS_GOOGLE_CLIENT_ID'];
+  return [
+    `REPO_HARNESS_${service.toUpperCase()}_CLIENT_ID`,
+    service === 'calendar' ? 'REPO_HARNESS_GOOGLE_CALENDAR_CLIENT_ID' : '',
+    service === 'tasks' ? 'REPO_HARNESS_GOOGLE_TASKS_CLIENT_ID' : '',
+    'REPO_HARNESS_GOOGLE_WORKSPACE_CLIENT_ID', 'REPO_HARNESS_GOOGLE_CLIENT_ID',
+  ].filter(Boolean);
 }
 
 function clientSecretEnvNames(service: GoogleService): string[] {
-  return [`REPO_HARNESS_${service.toUpperCase()}_CLIENT_SECRET`, 'REPO_HARNESS_GOOGLE_WORKSPACE_CLIENT_SECRET', 'REPO_HARNESS_GOOGLE_CLIENT_SECRET'];
+  return [
+    `REPO_HARNESS_${service.toUpperCase()}_CLIENT_SECRET`,
+    service === 'calendar' ? 'REPO_HARNESS_GOOGLE_CALENDAR_CLIENT_SECRET' : '',
+    service === 'tasks' ? 'REPO_HARNESS_GOOGLE_TASKS_CLIENT_SECRET' : '',
+    'REPO_HARNESS_GOOGLE_WORKSPACE_CLIENT_SECRET', 'REPO_HARNESS_GOOGLE_CLIENT_SECRET',
+  ].filter(Boolean);
 }
 
 function refreshCredential(service: GoogleService): { name: string; value: string } | undefined {

@@ -2154,6 +2154,7 @@ export async function startLocalBridgeServer(
         proposalId: request.params.proposalId,
         requestId: queryString(request.body?.requestId) ?? `proposal-approval-${request.params.proposalId}`,
         confirmationText: queryString(request.body?.confirmationText),
+        origin: { surface: 'local-ui', actor: 'assistant-proposal-api' },
       }) });
     } catch (error) { response.status(400).json({ error: errorMessage(error) }); }
   });

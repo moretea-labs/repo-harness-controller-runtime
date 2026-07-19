@@ -3230,6 +3230,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           proposalId,
           requestId,
           confirmationText: typeof args.confirmation_text === 'string' ? args.confirmation_text : undefined,
+          origin: { surface: 'mcp', actor: 'assistant_action_proposal_resolve' },
         }) });
       }
       case 'external_filesystem_targets_list': {

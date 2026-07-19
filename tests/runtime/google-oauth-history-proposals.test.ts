@@ -61,6 +61,15 @@ describe('Google OAuth, Gmail History, and Assistant proposals', () => {
       }), { status: 200 });
     }) as typeof fetch;
 
+    expect(() => prepareGoogleOAuthLogin(controllerHome, {
+      service: 'gmail', scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+      redirectUri: 'https://example.com/oauth/google/callback',
+    })).toThrow('NOT_LOCAL');
+    expect(() => prepareGoogleOAuthLogin(controllerHome, {
+      service: 'gmail', scopes: ['https://www.googleapis.com/auth/drive'],
+      redirectUri: 'http://127.0.0.1:8766/oauth/google/callback',
+    })).toThrow('SCOPE_NOT_ALLOWED');
+
     const prepared = prepareGoogleOAuthLogin(controllerHome, {
       service: 'gmail',
       scopes: ['gmail.readonly', 'gmail.modify'],
@@ -138,6 +147,54 @@ describe('Google OAuth, Gmail History, and Assistant proposals', () => {
     expect(proposals).toHaveLength(1);
     expect(proposals[0]?.actionId).toBe('archive_message');
     expect(proposals[0]?.evidenceMessageIds).toEqual(['message-1']);
+  });
+
+  test('continues Gmail History after the five-page cap without advancing the history cursor early', async () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), 'repo-harness-history-pages-'));
+    const controllerHome = mkdtempSync(join(tmpdir(), 'repo-harness-controller-'));
+    tempRoots.push(repoRoot, controllerHome);
+    mkdirSync(join(repoRoot, '.repo-harness', 'plugins'), { recursive: true });
+    mkdirSync(join(repoRoot, '.repo-harness', 'assistant'), { recursive: true });
+    writeFileSync(join(repoRoot, '.repo-harness', 'plugins', 'gmail.json'), JSON.stringify({ schemaVersion: 1, enabled: true, provider: 'google-workspace' }));
+    process.env.REPO_HARNESS_GMAIL_ACCESS_TOKEN = 'valid-token';
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith('/profile')) return new Response(JSON.stringify({ emailAddress: 'me@example.com', historyId: '106' }), { status: 200 });
+      if (url.pathname.endsWith('/history')) {
+        const token = url.searchParams.get('pageToken');
+        const page = token ? Number(token.slice(1)) : 1;
+        return new Response(JSON.stringify({
+          history: [{ id: String(100 + page), messagesAdded: [{ message: { id: `message-${page}`, threadId: `thread-${page}`, labelIds: ['INBOX'] } }] }],
+          historyId: '106',
+          ...(page < 6 ? { nextPageToken: `p${page + 1}` } : {}),
+        }), { status: 200 });
+      }
+      const id = decodeURIComponent(url.pathname.split('/').pop() ?? 'unknown');
+      return new Response(JSON.stringify({
+        id, threadId: `${id}-thread`, snippet: `Message ${id}`, labelIds: ['INBOX'],
+        payload: { headers: [{ name: 'From', value: 'sender@example.com' }, { name: 'Subject', value: `Subject ${id}` }], body: {} },
+      }), { status: 200 });
+    }) as typeof fetch;
+    const routine = createAssistantRoutine(repoRoot, {
+      name: 'Paged History Routine', naturalLanguageGoal: 'drain history pages', scheduleText: '每天 09:00', timezone: 'UTC',
+      dataSources: ['gmail'], output: 'assistant_inbox', allowedActions: ['gmail.list_messages', 'gmail.get_message'],
+      forbiddenActions: ['gmail.send_message', 'gmail.trash_message'],
+    });
+    writeFileSync(join(repoRoot, '.repo-harness', 'assistant', 'gmail-cursors.json'), JSON.stringify({
+      schemaVersion: 1, updatedAt: new Date().toISOString(), cursors: [{ schemaVersion: 1, routineId: routine.routineId,
+        lastSuccessfulAt: new Date(Date.now() - 60_000).toISOString(), historyId: '100', processedMessageIds: [], updatedAt: new Date().toISOString() }],
+    }));
+    const repository = repo(repoRoot, 'repo_history_pages');
+    const first = await executeAssistantRoutineRuntime({ controllerHome, repository, routineId: routine.routineId, requestId: 'pages-1', origin: { surface: 'assistant-routine' } });
+    expect(first.messages).toHaveLength(5);
+    let cursor = JSON.parse(readFileSync(join(repoRoot, '.repo-harness', 'assistant', 'gmail-cursors.json'), 'utf-8')).cursors[0];
+    expect(cursor.historyId).toBe('100');
+    expect(cursor.continuation).toEqual({ mode: 'history', pageToken: 'p6' });
+    const second = await executeAssistantRoutineRuntime({ controllerHome, repository, routineId: routine.routineId, requestId: 'pages-2', origin: { surface: 'assistant-routine' } });
+    expect(second.messages).toHaveLength(1);
+    cursor = JSON.parse(readFileSync(join(repoRoot, '.repo-harness', 'assistant', 'gmail-cursors.json'), 'utf-8')).cursors[0];
+    expect(cursor.historyId).toBe('106');
+    expect(cursor.continuation).toBeUndefined();
   });
 
   test('approves proposals idempotently through a separate authorized plugin Job and supports rejection', () => {

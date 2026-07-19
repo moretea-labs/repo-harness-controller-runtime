@@ -29,6 +29,19 @@ const SERVICE_SCOPES: Record<WorkspaceAuthService, string[]> = {
   ],
 };
 
+const SCOPE_ALIASES: Record<string, string> = {
+  'gmail.readonly': 'https://www.googleapis.com/auth/gmail.readonly',
+  'gmail.compose': 'https://www.googleapis.com/auth/gmail.compose',
+  'gmail.modify': 'https://www.googleapis.com/auth/gmail.modify',
+  'gmail.send': 'https://www.googleapis.com/auth/gmail.send',
+  'calendar.events.readonly': 'https://www.googleapis.com/auth/calendar',
+  'calendar.events.write': 'https://www.googleapis.com/auth/calendar',
+  'calendar.events.delete': 'https://www.googleapis.com/auth/calendar',
+  'tasks.readonly': 'https://www.googleapis.com/auth/tasks',
+  'tasks.write': 'https://www.googleapis.com/auth/tasks',
+  'tasks.delete': 'https://www.googleapis.com/auth/tasks',
+};
+
 function normalizeService(value: unknown): WorkspaceAuthService {
   const raw = String(value ?? 'google-workspace').trim().toLowerCase().replace(/^google_/, 'google-');
   if (raw === 'gmail' || raw === 'calendar' || raw === 'tasks' || raw === 'google-workspace') return raw;
@@ -83,11 +96,21 @@ export function prepareWorkspaceAuthLogin(
   const service = normalizeService(input.service);
   const redirectUri = input.redirectUri || process.env.REPO_HARNESS_GOOGLE_REDIRECT_URI || 'http://127.0.0.1:8766/oauth/google/callback';
   const requestedScopes = Array.isArray(input.scopes) && input.scopes.length > 0
-    ? input.scopes.map(String).filter(Boolean)
+    ? input.scopes.map((scope) => SCOPE_ALIASES[String(scope)] ?? String(scope)).filter(Boolean)
     : SERVICE_SCOPES[service];
-  return prepareGoogleOAuthLogin(controllerHome, {
-    service,
-    scopes: requestedScopes,
-    redirectUri,
-  });
+  const prepared = prepareGoogleOAuthLogin(controllerHome, { service, scopes: requestedScopes, redirectUri });
+  const priorSafety = prepared.safety && typeof prepared.safety === 'object' && !Array.isArray(prepared.safety)
+    ? prepared.safety as Record<string, unknown>
+    : {};
+  return {
+    ...prepared,
+    tokenEnvironmentVariables: service === 'gmail'
+      ? ['REPO_HARNESS_GMAIL_ACCESS_TOKEN', 'REPO_HARNESS_GMAIL_REFRESH_TOKEN']
+      : ['REPO_HARNESS_GOOGLE_WORKSPACE_ACCESS_TOKEN', 'REPO_HARNESS_GOOGLE_WORKSPACE_REFRESH_TOKEN'],
+    safety: {
+      ...priorSafety,
+      credentialMaterialPersisted: false,
+      credentialMaterialPersistedInRepository: false,
+    },
+  };
 }

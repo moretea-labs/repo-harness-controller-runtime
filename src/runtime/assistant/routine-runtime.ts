@@ -36,6 +36,7 @@ interface GmailRoutineCursor {
   routineId: string;
   lastSuccessfulAt?: string;
   historyId?: string;
+  continuation?: { mode: 'history' | 'query'; pageToken: string };
   processedMessageIds: string[];
   updatedAt: string;
 }
@@ -272,10 +273,13 @@ export async function executeAssistantRoutineRuntime(input: {
     const profile = await gmailAction(input.controllerHome, input.repository, input.origin, `${input.requestId}:profile`, 'get_profile', {});
     const known = new Set(cursor.processedMessageIds);
     const messageIds: string[] = [];
+    const startingContinuation = cursor.continuation;
+    let nextContinuation: GmailRoutineCursor['continuation'];
     let historyFallback = !cursor.historyId;
+    let historyInvalid = false;
     if (cursor.historyId) {
       try {
-        let historyPageToken: string | undefined;
+        let historyPageToken = startingContinuation?.mode === 'history' ? startingContinuation.pageToken : undefined;
         for (let page = 0; page < 5 && messageIds.length < 100; page += 1) {
           const history = await gmailAction(input.controllerHome, input.repository, input.origin, `${input.requestId}:history:${page}`, 'list_history', {
             start_history_id: cursor.historyId, max_results: 100, label_id: 'INBOX', history_type: 'messageAdded',
@@ -290,16 +294,19 @@ export async function executeAssistantRoutineRuntime(input: {
           historyPageToken = stringValue(history.nextPageToken);
           if (!historyPageToken) break;
         }
+        if (historyPageToken) nextContinuation = { mode: 'history', pageToken: historyPageToken };
       } catch (error) {
         const status = isAssistantPluginError(error) ? Number(error.details?.status) : undefined;
         if (status !== 404) throw error;
         historyFallback = true;
+        historyInvalid = true;
+        nextContinuation = undefined;
       }
     }
     if (historyFallback) {
       const overlapStart = Math.max(0, Date.parse(windowStart) - 5 * 60_000);
       const query = `in:inbox -in:spam -in:trash after:${Math.floor(overlapStart / 1000)}`;
-      let pageToken: string | undefined;
+      let pageToken = startingContinuation?.mode === 'query' ? startingContinuation.pageToken : undefined;
       for (let page = 0; page < 5 && messageIds.length < 100; page += 1) {
         const listed = await gmailAction(input.controllerHome, input.repository, input.origin, `${input.requestId}:list:${page}`, 'list_messages', {
           query, max_results: 25, ...(pageToken ? { page_token: pageToken } : {}),
@@ -311,6 +318,7 @@ export async function executeAssistantRoutineRuntime(input: {
         pageToken = stringValue(listed.nextPageToken);
         if (!pageToken) break;
       }
+      nextContinuation = pageToken ? { mode: 'query', pageToken } : undefined;
     }
     const messages: GmailMessageSummary[] = [];
     for (const messageId of messageIds.slice(0, 50)) {
@@ -323,7 +331,12 @@ export async function executeAssistantRoutineRuntime(input: {
     }
     const proposalInputs = proposalsFor(messages);
     const proposals = createAssistantActionProposals(input.controllerHome, input.repository, { routineId: routine.routineId, runId, proposals: proposalInputs });
-    const truncated = messageIds.length > messages.length;
+    const hydrationTruncated = messageIds.length > messages.length;
+    const paginationIncomplete = Boolean(nextContinuation);
+    const truncated = hydrationTruncated || paginationIncomplete;
+    const savedContinuation = truncated
+      ? hydrationTruncated ? startingContinuation : nextContinuation
+      : undefined;
     const report = renderReport(messages, proposals, windowStart, windowEnd);
     run = saveRun(input.repository.canonicalRoot, {
       ...run,
@@ -355,7 +368,8 @@ export async function executeAssistantRoutineRuntime(input: {
       schemaVersion: 1,
       routineId: routine.routineId,
       lastSuccessfulAt: truncated ? windowStart : windowEnd,
-      historyId: truncated ? cursor.historyId : stringValue(profile.historyId) ?? cursor.historyId,
+      historyId: truncated ? historyInvalid ? undefined : cursor.historyId : stringValue(profile.historyId) ?? cursor.historyId,
+      continuation: savedContinuation,
       processedMessageIds: [...messages.map((message) => message.id), ...cursor.processedMessageIds].slice(0, 1_000),
       updatedAt: now(),
     });

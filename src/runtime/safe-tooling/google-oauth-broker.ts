@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { URLSearchParams } from 'url';
 import { installGoogleAccessToken } from '../plugins/google-shared';
@@ -34,6 +34,73 @@ interface GoogleOAuthRequestRecord {
 const GOOGLE_AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 const REQUEST_TTL_MS = 10 * 60_000;
+const RETAIN_CONSUMED_REQUEST_MS = 24 * 60 * 60_000;
+const ALLOWED_SCOPES: Record<GoogleOAuthService, Set<string>> = {
+  gmail: new Set([
+    'https://www.googleapis.com/auth/gmail.readonly',
+    'https://www.googleapis.com/auth/gmail.compose',
+    'https://www.googleapis.com/auth/gmail.modify',
+    'https://www.googleapis.com/auth/gmail.send',
+  ]),
+  calendar: new Set(['https://www.googleapis.com/auth/calendar']),
+  tasks: new Set(['https://www.googleapis.com/auth/tasks']),
+  'google-workspace': new Set([
+    'https://www.googleapis.com/auth/gmail.readonly',
+    'https://www.googleapis.com/auth/gmail.compose',
+    'https://www.googleapis.com/auth/gmail.modify',
+    'https://www.googleapis.com/auth/gmail.send',
+    'https://www.googleapis.com/auth/calendar',
+    'https://www.googleapis.com/auth/tasks',
+  ]),
+};
+
+function validateRedirectUri(value: string): string {
+  let parsed: URL;
+  try { parsed = new URL(value); } catch { throw new Error('GOOGLE_OAUTH_REDIRECT_INVALID: redirect URI must be a URL'); }
+  if (parsed.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(parsed.hostname)) {
+    throw new Error('GOOGLE_OAUTH_REDIRECT_NOT_LOCAL: redirect URI must use loopback HTTP');
+  }
+  if (parsed.pathname !== '/oauth/google/callback' || parsed.username || parsed.password || parsed.hash) {
+    throw new Error('GOOGLE_OAUTH_REDIRECT_INVALID: use the local /oauth/google/callback endpoint');
+  }
+  return parsed.toString();
+}
+
+const OAUTH_SCOPE_ALIASES: Record<string, string> = {
+  'gmail.readonly': 'https://www.googleapis.com/auth/gmail.readonly',
+  'gmail.compose': 'https://www.googleapis.com/auth/gmail.compose',
+  'gmail.modify': 'https://www.googleapis.com/auth/gmail.modify',
+  'gmail.send': 'https://www.googleapis.com/auth/gmail.send',
+  'calendar.events.readonly': 'https://www.googleapis.com/auth/calendar',
+  'calendar.events.write': 'https://www.googleapis.com/auth/calendar',
+  'calendar.events.delete': 'https://www.googleapis.com/auth/calendar',
+  'tasks.readonly': 'https://www.googleapis.com/auth/tasks',
+  'tasks.write': 'https://www.googleapis.com/auth/tasks',
+  'tasks.delete': 'https://www.googleapis.com/auth/tasks',
+};
+
+function validateScopes(service: GoogleOAuthService, scopes: string[]): string[] {
+  const normalized = [...new Set(scopes.map((scope) => OAUTH_SCOPE_ALIASES[scope.trim()] ?? scope.trim()).filter(Boolean))];
+  const invalid = normalized.filter((scope) => !ALLOWED_SCOPES[service].has(scope));
+  if (invalid.length > 0) throw new Error(`GOOGLE_OAUTH_SCOPE_NOT_ALLOWED: ${invalid.join(', ')}`);
+  if (normalized.length === 0) throw new Error('GOOGLE_OAUTH_SCOPE_REQUIRED');
+  return normalized;
+}
+
+function pruneOAuthRequests(controllerHome: string): void {
+  const root = join(oauthRoot(controllerHome), 'requests');
+  try {
+    for (const name of readdirSync(root).filter((entry) => entry.endsWith('.json')).slice(0, 2_000)) {
+      const path = join(root, name);
+      try {
+        const record = JSON.parse(readFileSync(path, 'utf-8')) as Partial<GoogleOAuthRequestRecord>;
+        const expired = Date.parse(String(record.expiresAt ?? '')) <= Date.now();
+        const consumedOld = record.consumedAt && Date.now() - Date.parse(record.consumedAt) > RETAIN_CONSUMED_REQUEST_MS;
+        if (expired || consumedOld) unlinkSync(path);
+      } catch { unlinkSync(path); }
+    }
+  } catch { /* no request store yet */ }
+}
 
 function oauthRoot(controllerHome: string): string {
   return join(controllerHome, 'auth', 'google-oauth');
@@ -87,6 +154,9 @@ export function prepareGoogleOAuthLogin(
   controllerHome: string,
   input: GoogleOAuthPrepareInput,
 ): Record<string, unknown> {
+  pruneOAuthRequests(controllerHome);
+  const redirectUri = validateRedirectUri(input.redirectUri);
+  const scopes = validateScopes(input.service, input.scopes);
   const configuredClientId = clientId();
   if (!configuredClientId) {
     return {
@@ -109,8 +179,8 @@ export function prepareGoogleOAuthLogin(
     stateHash: createHash('sha256').update(state).digest('hex'),
     service: input.service,
     clientId: configuredClientId,
-    redirectUri: input.redirectUri,
-    scopes: [...new Set(input.scopes)],
+    redirectUri,
+    scopes,
     codeVerifier,
     createdAt: createdAt.toISOString(),
     expiresAt: expiresAt.toISOString(),
@@ -156,6 +226,9 @@ export async function completeGoogleOAuthLogin(
   const state = input.state?.trim();
   if (!state) throw new Error('GOOGLE_OAUTH_STATE_REQUIRED');
   const selected = readRecord(controllerHome, state);
+  const codeVerifier = selected.record.codeVerifier;
+  if (!codeVerifier) throw new Error('GOOGLE_OAUTH_STATE_INVALID: PKCE verifier is missing');
+  selected.record.codeVerifier = '';
   selected.record.consumedAt = new Date().toISOString();
   writeRecord(selected.path, selected.record);
   if (input.error) {
@@ -171,7 +244,7 @@ export async function completeGoogleOAuthLogin(
     client_id: selected.record.clientId,
     client_secret: configuredSecret,
     redirect_uri: selected.record.redirectUri,
-    code_verifier: selected.record.codeVerifier,
+    code_verifier: codeVerifier,
   });
   const response = await fetch(GOOGLE_TOKEN_ENDPOINT, {
     method: 'POST',
