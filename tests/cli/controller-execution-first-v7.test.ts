@@ -202,6 +202,96 @@ describe("Controller v7 compatibility on the V8 execution bridge", () => {
     expect(changed.tasks[0]?.status).toBe("changes_requested");
   });
 
+  test("successful Run acceptance templates remain pending until independently evaluated", () => {
+    const root = repo();
+    const issue = createIssue(root, {
+      title: "Pending Run acceptance",
+      tasks: [{
+        title: "Medium change",
+        objective: "Update a bounded source file.",
+        allowedPaths: ["src/pending.ts"],
+        acceptanceCriteria: ["The change behaves correctly."],
+        risk: "medium",
+      }],
+    });
+    updateTask(root, issue.id, "T1", { status: "review" });
+    const pending = recordTaskVerification(root, issue.id, "T1", {
+      runId: "RUN-pending-acceptance",
+      reviewer: "controller",
+      reviewedDiffHash: "sha256:pending-diff",
+      checkResults: [],
+      commandEvidence: [{ command: ["true"], ok: true, source: "controller" }],
+      acceptanceResults: [{
+        criterion: "The change behaves correctly.",
+        ok: false,
+        outcome: "not_evaluated",
+        source: "run_completion",
+        evidence: "Successful Run RUN-pending-acceptance; acceptance was not independently evaluated.",
+      }],
+      verifiedAt: new Date().toISOString(),
+    });
+    expect(pending.tasks[0]?.status).toBe("verifying");
+  });
+
+  test("legacy automatic successful-Run acceptance is not trusted as a pass", () => {
+    const root = repo();
+    const issue = createIssue(root, {
+      title: "Legacy Run acceptance",
+      tasks: [{
+        title: "Medium legacy change",
+        objective: "Update a bounded source file.",
+        allowedPaths: ["src/legacy.ts"],
+        acceptanceCriteria: ["The legacy change behaves correctly."],
+        risk: "medium",
+      }],
+    });
+    updateTask(root, issue.id, "T1", { status: "review" });
+    const pending = recordTaskVerification(root, issue.id, "T1", {
+      runId: "RUN-legacy",
+      reviewer: "legacy-controller",
+      reviewedDiffHash: "sha256:legacy-diff",
+      checkResults: [],
+      commandEvidence: [{ command: ["true"], ok: true, source: "controller" }],
+      acceptanceResults: [{
+        criterion: "The legacy change behaves correctly.",
+        ok: true,
+        evidence: "Successful Run RUN-legacy.",
+      }],
+      verifiedAt: new Date().toISOString(),
+    });
+    expect(pending.tasks[0]?.status).toBe("verifying");
+  });
+
+  test("explicit acceptance failure still requests changes", () => {
+    const root = repo();
+    const issue = createIssue(root, {
+      title: "Failed acceptance",
+      tasks: [{
+        title: "Medium rejected change",
+        objective: "Update a bounded source file.",
+        allowedPaths: ["src/rejected.ts"],
+        acceptanceCriteria: ["The change behaves correctly."],
+        risk: "medium",
+      }],
+    });
+    updateTask(root, issue.id, "T1", { status: "review" });
+    const rejected = recordTaskVerification(root, issue.id, "T1", {
+      reviewer: "human-reviewer",
+      reviewedDiffHash: "sha256:rejected-diff",
+      checkResults: [],
+      commandEvidence: [{ command: ["true"], ok: true, source: "reported" }],
+      acceptanceResults: [{
+        criterion: "The change behaves correctly.",
+        ok: false,
+        outcome: "failed",
+        source: "reported",
+        evidence: "The observed behavior does not match the criterion.",
+      }],
+      verifiedAt: new Date().toISOString(),
+    });
+    expect(rejected.tasks[0]?.status).toBe("changes_requested");
+  });
+
   test("high-risk Tasks accept reported command evidence but retain human acceptance", () => {
     const root = repo();
     const issue = createIssue(root, {

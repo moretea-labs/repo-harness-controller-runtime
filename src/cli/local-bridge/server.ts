@@ -2441,6 +2441,8 @@ export async function startLocalBridgeServer(
         return;
       }
       const policy = taskExecutionPolicy(task);
+      const confirmAcceptance = request.body?.confirmAcceptance === true;
+      const reviewer = queryString(request.body?.reviewer) ?? "local-controller-human";
       const latestRunId = task.runIds.at(-1);
       if (latestRunId) {
         const run = getAgentJob(repoRoot, latestRunId);
@@ -2448,7 +2450,26 @@ export async function startLocalBridgeServer(
         if (run.provider === "local" && run.worktree !== repoRoot && !run.integratedSessionId) throw new Error("integrate the isolated local Run before verification");
         if (run.provider === "github" && run.github?.createPullRequest !== false && !run.github?.pullRequestUrl) throw new Error("GitHub verification requires the linked pull request");
         continueTaskAfterSuccessfulRun(repoRoot, run);
-        response.json(getIssue(repoRoot, issue.id));
+        if (!confirmAcceptance) {
+          response.json(getIssue(repoRoot, issue.id));
+          return;
+        }
+        const refreshedIssue = getIssue(repoRoot, issue.id);
+        const refreshedTask = refreshedIssue.tasks.find((entry) => entry.id === task.id);
+        if (!refreshedTask?.verification) throw new Error("successful Run did not produce verification evidence");
+        const at = new Date().toISOString();
+        response.json(recordTaskVerification(repoRoot, issue.id, task.id, {
+          ...refreshedTask.verification,
+          reviewer,
+          acceptanceResults: task.acceptanceCriteria.map((criterion) => ({
+            criterion,
+            ok: true,
+            outcome: "passed" as const,
+            source: "human_review" as const,
+            evidence: `Explicitly confirmed in the local Controller at ${at}.`,
+          })),
+          verifiedAt: at,
+        }));
         return;
       }
 
@@ -2466,18 +2487,23 @@ export async function startLocalBridgeServer(
           return { checkId, ok: false, summary: errorMessage(error) };
         }
       }));
-      const confirmAcceptance = request.body?.confirmAcceptance === true;
       if (policy.requiresAcceptanceEvidence && !confirmAcceptance) {
         throw new Error(`${policy.executionClass} requires explicit acceptance evidence when no successful Run is linked`);
       }
       const at = new Date().toISOString();
       response.json(recordTaskVerification(repoRoot, issue.id, task.id, {
         reviewedDiffHash: typeof request.body?.reviewedDiffHash === "string" ? request.body.reviewedDiffHash : undefined,
-        reviewer: queryString(request.body?.reviewer) ?? "local-controller-human",
+        reviewer,
         checkResults,
         commandEvidence: [],
         acceptanceResults: confirmAcceptance
-          ? task.acceptanceCriteria.map((criterion) => ({ criterion, ok: true, evidence: `Explicitly confirmed in the local Controller at ${at}.` }))
+          ? task.acceptanceCriteria.map((criterion) => ({
+            criterion,
+            ok: true,
+            outcome: "passed" as const,
+            source: "human_review" as const,
+            evidence: `Explicitly confirmed in the local Controller at ${at}.`,
+          }))
           : [],
         verifiedAt: at,
       }));

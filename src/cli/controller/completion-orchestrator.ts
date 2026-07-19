@@ -127,14 +127,24 @@ function verificationForRun(
   run: AgentJobMeta,
   task: ControllerTask,
   reviewer: string,
-  evidence: { integrationEvidence?: IntegrationEvidence; cleanupEvidence?: CleanupEvidence } = {},
+  evidence: { integrationEvidence?: IntegrationEvidence; cleanupEvidence?: CleanupEvidence; acceptanceConfirmed?: boolean } = {},
 ): TaskVerification {
   const policy = taskExecutionPolicy(task);
-  const acceptanceResults = task.acceptanceCriteria.map((criterion) => ({
-    criterion,
-    ok: true,
-    evidence: `Accepted from successful Run ${run.runId}${run.integratedSessionId ? ` integrated by ${run.integratedSessionId}` : ''}.`,
-  }));
+  const acceptanceResults = task.acceptanceCriteria.map((criterion) => evidence.acceptanceConfirmed
+    ? {
+      criterion,
+      ok: true,
+      outcome: 'passed' as const,
+      source: 'human_review' as const,
+      evidence: `Explicitly accepted by ${reviewer} for successful Run ${run.runId}.`,
+    }
+    : {
+      criterion,
+      ok: false,
+      outcome: 'not_evaluated' as const,
+      source: 'run_completion' as const,
+      evidence: `Successful Run ${run.runId}${run.integratedSessionId ? ` integrated by ${run.integratedSessionId}` : ''}; acceptance was not independently evaluated.`,
+    });
   return {
     runId: run.runId,
     integratedRevision: evidence.integrationEvidence?.targetRevision,
@@ -198,7 +208,9 @@ function verifyAndMaybeAccept(input: {
   const currentTask = taskForRun(current, run.taskId);
   const verified = currentTask.status === 'verified' || currentTask.status === 'done'
     ? current
-    : recordTaskVerification(repoRoot, run.issueId, run.taskId, verificationForRun(repoRoot, run, currentTask, reviewer));
+    : recordTaskVerification(repoRoot, run.issueId, run.taskId, verificationForRun(repoRoot, run, currentTask, reviewer, {
+      acceptanceConfirmed: allowHumanAcceptance,
+    }));
   const verifiedTask = taskForRun(verified, run.taskId);
   if (verifiedTask.status === 'done') return { issue: verified, taskStatus: 'done' };
   if (input.allowCompletion !== false && verifiedTask.status === 'verified' && (allowHumanAcceptance || canAutoFinish(verifiedTask))) {

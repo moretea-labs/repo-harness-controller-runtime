@@ -1,4 +1,4 @@
-import type { CleanupEvidence, ControllerTask, IntegrationEvidence, TaskRisk, TaskVerification } from './types';
+import type { CleanupEvidence, ControllerTask, IntegrationEvidence, TaskAcceptanceOutcome, TaskAcceptanceResult, TaskRisk, TaskVerification } from './types';
 
 export type TaskExecutionClass =
   | 'read_only'
@@ -236,7 +236,18 @@ export function taskWriteScopesConflict(
   );
 }
 
+const LEGACY_AUTOMATIC_ACCEPTANCE = /(?:^successful run [^;]+(?: integrated by [^;]+)?\.?$|successful run .*acceptance evidence|accepted from successful run)/i;
+
+export function taskAcceptanceOutcome(result: TaskAcceptanceResult | undefined): TaskAcceptanceOutcome | 'missing' {
+  if (!result) return 'missing';
+  if (result.outcome) return result.outcome;
+  if (result.source === 'run_completion') return 'not_evaluated';
+  if (result.evidence && LEGACY_AUTOMATIC_ACCEPTANCE.test(result.evidence)) return 'not_evaluated';
+  return result.ok ? 'passed' : 'failed';
+}
+
 export function verificationEvidencePassed(task: Pick<ControllerTask, 'checks' | 'acceptanceCriteria'>, verification: TaskVerification | undefined, policy: TaskExecutionPolicy): {
+  status: 'passed' | 'failed' | 'incomplete';
   ok: boolean;
   checksOk: boolean;
   acceptanceOk: boolean;
@@ -244,35 +255,48 @@ export function verificationEvidencePassed(task: Pick<ControllerTask, 'checks' |
   reasons: string[];
 } {
   if (!verification) {
+    const ok = !policy.requiresAnyVerificationEvidence && !policy.requiresAcceptanceEvidence && !policy.requiresDiffEvidence;
     return {
-      ok: !policy.requiresAnyVerificationEvidence && !policy.requiresAcceptanceEvidence,
+      status: ok ? 'passed' : 'incomplete',
+      ok,
       checksOk: !policy.requiresAnyVerificationEvidence,
       acceptanceOk: !policy.requiresAcceptanceEvidence,
       hasEvidence: false,
-      reasons: ['No persisted verification evidence.'],
+      reasons: ok ? [] : ['No persisted verification evidence.'],
     };
   }
-  const namedChecksOk = task.checks.length === 0 || task.checks.every((checkId) =>
+  const reportedCommands = verification.commandEvidence ?? [];
+  const hasEvidence = verification.checkResults.length > 0 || reportedCommands.length > 0 || Boolean(verification.runId);
+  const evidenceFailed = verification.checkResults.some((entry) => !entry.ok)
+    || reportedCommands.some((entry) => !entry.ok);
+  const namedChecksComplete = task.checks.length === 0 || task.checks.every((checkId) =>
     verification.checkResults.some((entry) => entry.checkId === checkId && entry.ok),
   );
-  const reportedCommands = verification.commandEvidence ?? [];
-  const actualEvidenceOk = verification.checkResults.every((entry) => entry.ok)
-    && reportedCommands.every((entry) => entry.ok);
-  const hasEvidence = verification.checkResults.length > 0 || reportedCommands.length > 0 || Boolean(verification.runId);
   const declaredChecksRequired = policy.autoRunDeclaredChecks && task.checks.length > 0;
-  const checksOk = declaredChecksRequired
-    ? namedChecksOk && actualEvidenceOk
+  const checksOk = !evidenceFailed && (declaredChecksRequired
+    ? namedChecksComplete
     : policy.requiresAnyVerificationEvidence
-      ? hasEvidence && actualEvidenceOk
-      : actualEvidenceOk;
-  const acceptanceOk = !policy.requiresAcceptanceEvidence || task.acceptanceCriteria.length === 0 || task.acceptanceCriteria.every((criterion) =>
-    verification.acceptanceResults.some((entry) => entry.criterion === criterion && entry.ok),
-  );
+      ? hasEvidence
+      : true);
+
+  const acceptanceOutcomes = task.acceptanceCriteria.map((criterion) => taskAcceptanceOutcome(
+    verification.acceptanceResults.find((entry) => entry.criterion === criterion),
+  ));
+  const acceptanceFailed = policy.requiresAcceptanceEvidence && acceptanceOutcomes.some((outcome) => outcome === 'failed');
+  const acceptanceComplete = !policy.requiresAcceptanceEvidence
+    || task.acceptanceCriteria.length === 0
+    || acceptanceOutcomes.every((outcome) => outcome === 'passed');
+  const acceptanceOk = acceptanceComplete && !acceptanceFailed;
   const diffOk = !policy.requiresDiffEvidence || Boolean(verification.reviewedDiffHash || verification.integratedRevision);
+  const failed = evidenceFailed || acceptanceFailed;
+  const complete = checksOk && acceptanceOk && diffOk;
+  const status = failed ? 'failed' : complete ? 'passed' : 'incomplete';
   const reasons: string[] = [];
-  if (!checksOk) reasons.push('Required named checks or equivalent command evidence are missing or failed.');
-  if (!acceptanceOk) reasons.push('One or more acceptance criteria are missing or failed.');
+  if (evidenceFailed) reasons.push('One or more executed checks or reported commands failed.');
+  else if (!checksOk) reasons.push('Required named checks or equivalent command evidence are missing.');
+  if (acceptanceFailed) reasons.push('One or more acceptance criteria explicitly failed.');
+  else if (!acceptanceOk) reasons.push('One or more acceptance criteria are missing or not evaluated.');
   if (policy.requiresAnyVerificationEvidence && !hasEvidence) reasons.push('This risk class requires persisted verification evidence.');
   if (!diffOk) reasons.push('This risk class requires reviewed Diff or integrated revision evidence.');
-  return { ok: checksOk && acceptanceOk && diffOk, checksOk, acceptanceOk, hasEvidence, reasons };
+  return { status, ok: status === 'passed', checksOk, acceptanceOk, hasEvidence, reasons };
 }

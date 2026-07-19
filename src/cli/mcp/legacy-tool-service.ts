@@ -4623,13 +4623,21 @@ export async function callMcpTool(
           });
         }
 
-        let acceptanceResults = taskObjects(args.acceptance_results).map((entry) => ({
+        let acceptanceResults: TaskVerification["acceptanceResults"] = taskObjects(args.acceptance_results).map((entry) => ({
           criterion: String(entry.criterion ?? ""),
           ok: entry.ok === true,
+          outcome: entry.ok === true ? "passed" as const : "failed" as const,
+          source: "reported" as const,
           evidence: typeof entry.evidence === "string" ? entry.evidence : undefined,
         }));
         if (acceptanceResults.length === 0 && evidenceRun && task.acceptanceCriteria.length > 0) {
-          acceptanceResults = task.acceptanceCriteria.map((criterion) => ({ criterion, ok: true, evidence: `Successful Run ${evidenceRun!.runId}.` }));
+          acceptanceResults = task.acceptanceCriteria.map((criterion) => ({
+            criterion,
+            ok: false,
+            outcome: "not_evaluated" as const,
+            source: "run_completion" as const,
+            evidence: `Successful Run ${evidenceRun!.runId}; acceptance was not independently evaluated.`,
+          }));
         }
         const verification: TaskVerification = {
           runId: evidenceRunId,

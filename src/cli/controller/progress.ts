@@ -151,6 +151,8 @@ function summarizeVerification(verification?: TaskVerification) {
     acceptanceResults: verification.acceptanceResults.map((result) => ({
       criterion: result.criterion,
       ok: result.ok,
+      outcome: result.outcome,
+      source: result.source,
     })),
     acceptanceResultCount: verification.acceptanceResults.length,
     commandEvidenceCount: verification.commandEvidence?.length ?? 0,
@@ -272,14 +274,18 @@ function completionEvidence(task: ControllerTask, run?: AgentJobMeta): TaskCompl
       ? gate("Verification Evidence", "pending")
       : verificationOutcome?.checksOk && verificationOutcome.hasEvidence
         ? gate("Verification Evidence", "passed", `${verification.checkResults.length} named check(s), ${(verification.commandEvidence ?? []).length} command evidence item(s).`)
-        : gate("Verification Evidence", "failed", verificationOutcome?.reasons.join(" "));
+        : verificationOutcome?.status === "failed"
+          ? gate("Verification Evidence", "failed", verificationOutcome.reasons.join(" "))
+          : gate("Verification Evidence", "pending", verificationOutcome?.reasons.join(" "));
   const acceptance = !policy.requiresAcceptanceEvidence || task.acceptanceCriteria.length === 0
     ? gate("Acceptance Evidence", "not_required", "No acceptance evidence gate is required for this Task class.")
     : !verification
       ? gate("Acceptance Evidence", "pending")
       : verificationOutcome?.acceptanceOk
         ? gate("Acceptance Evidence", "passed", `${verification.acceptanceResults.length} criterion result(s) recorded.`)
-        : gate("Acceptance Evidence", "failed", "One or more declared acceptance criteria are missing or failed.");
+        : verificationOutcome?.status === "failed"
+          ? gate("Acceptance Evidence", "failed", "One or more declared acceptance criteria explicitly failed.")
+          : gate("Acceptance Evidence", "pending", "One or more declared acceptance criteria are missing or not evaluated.");
   const closure = !policy.requiresHumanAcceptance
     ? gate("Human Acceptance", "not_required", "This Task class auto-completes after required evidence passes.")
     : task.status === "done"

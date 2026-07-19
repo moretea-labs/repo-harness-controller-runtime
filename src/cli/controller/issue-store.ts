@@ -248,6 +248,8 @@ function summarizeVerification(verification?: TaskVerification) {
     acceptanceResults: verification.acceptanceResults.map((result) => ({
       criterion: result.criterion,
       ok: result.ok,
+      outcome: result.outcome,
+      source: result.source,
     })),
     acceptanceResultCount: verification.acceptanceResults.length,
     commandEvidenceCount: verification.commandEvidence?.length ?? 0,
@@ -943,7 +945,12 @@ export function recordTaskVerification(
   const normalizedDeclaredChecks = normalizeCheckIds(task.checks, listControllerChecks(repoRoot));
   const verificationTask = { ...task, checks: normalizedDeclaredChecks.validCheckIds };
   const outcome = verificationEvidencePassed(verificationTask, verification, policy);
-  const successful = outcome.ok;
+  const successful = outcome.status === 'passed';
+  const verificationStatus = successful
+    ? 'verified'
+    : outcome.status === 'failed'
+      ? 'changes_requested'
+      : 'verifying';
   // Run-backed verification must stop at verified. Integration and cleanup
   // evidence are finalized by the completion orchestrator before Task done.
   const autoComplete = false;
@@ -952,11 +959,13 @@ export function recordTaskVerification(
     : '';
   verification.autoCompleted = autoComplete;
   return updateTask(repoRoot, issueIdValue, taskId, {
-    status: successful ? 'verified' : 'changes_requested',
+    status: verificationStatus,
     verification,
     note: successful
       ? `Required verification evidence passed; integration and cleanup evidence remain required before completion.${invalidCheckNote}`
-      : `Verification evidence is incomplete or failed: ${outcome.reasons.join(' ')}${invalidCheckNote}`,
+      : outcome.status === 'failed'
+        ? `Verification evidence failed: ${outcome.reasons.join(' ')}${invalidCheckNote}`
+        : `Verification evidence is incomplete: ${outcome.reasons.join(' ')}${invalidCheckNote}`,
   });
 }
 

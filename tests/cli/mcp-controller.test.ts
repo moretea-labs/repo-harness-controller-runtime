@@ -1515,7 +1515,7 @@ describe("MCP controller profile", () => {
     });
   });
 
-  test("dispatches one short persistent agent run and moves the task to review", async () => {
+  test("dispatches one short persistent agent run and leaves acceptance pending", async () => {
     await withController(async (repoRoot, baseCtx) => {
       const binRoot = mkdtempSync(
         join(tmpdir(), "repo-harness-controller-bin-"),
@@ -1597,6 +1597,7 @@ describe("MCP controller profile", () => {
           });
         }
         expect(issue.value.tasks[0].status).toBe("review");
+        expect(issue.value.tasks[0].verification).toBeUndefined();
       } finally {
         process.env.PATH = originalPath;
         rmSync(binRoot, { recursive: true, force: true });
@@ -2436,11 +2437,16 @@ process.exit(2);
       const diff = await jsonTool(ctx, "get_task_diff", { run_id: run.runId });
       expect(diff.value.status).toContain("src/example.ts");
       let currentIssue = await jsonTool(ctx, "get_issue", { issue_id: created.value.id });
-      for (let attempt = 0; attempt < 80 && currentIssue.value.tasks[0].status !== "done"; attempt += 1) {
+      for (let attempt = 0; attempt < 80 && currentIssue.value.tasks[0].status !== "verifying"; attempt += 1) {
         await Bun.sleep(25);
         currentIssue = await jsonTool(ctx, "get_issue", { issue_id: created.value.id });
       }
-      expect(currentIssue.value.tasks[0].status).toBe("done");
+      expect(currentIssue.value.tasks[0].status).toBe("verifying");
+      expect(currentIssue.value.tasks[0].verification.acceptanceResults[0]).toMatchObject({
+        ok: false,
+        outcome: "not_evaluated",
+        source: "run_completion",
+      });
       const persistedRun = JSON.parse(readFileSync(
         join(repoRoot, ".ai/harness/jobs", run.runId, "meta.json"),
         "utf-8",
@@ -2609,8 +2615,13 @@ process.exit(2);
         const completedIssue = await jsonTool(ctx, "get_issue", {
           issue_id: created.value.id,
         });
-        expect(completedIssue.value.tasks[0].status).toBe("verified");
+        expect(completedIssue.value.tasks[0].status).toBe("verifying");
         expect(completedIssue.value.tasks[0].verification).toBeTruthy();
+        expect(completedIssue.value.tasks[0].verification.acceptanceResults[0]).toMatchObject({
+          ok: false,
+          outcome: "not_evaluated",
+          source: "run_completion",
+        });
         expect(completedIssue.value.tasks[0].verification.integrationEvidence).toBeUndefined();
       } finally {
         process.env.PATH = originalPath;

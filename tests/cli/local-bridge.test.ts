@@ -1048,7 +1048,14 @@ printf '%s\n' '{"type":"turn.completed"}'
       body: JSON.stringify({ confirmAcceptance: true, reviewer: "test-human" }),
     }).then((response) => response.json());
     expect(verified.error).toBeUndefined();
-    expect(getIssue(root, issue.id).tasks[0]?.status).toBe("verified");
+    const verifiedTask = getIssue(root, issue.id).tasks[0];
+    expect(verifiedTask?.status).toBe("verified");
+    expect(verifiedTask?.verification?.acceptanceResults[0]).toMatchObject({
+      criterion: "Visible",
+      ok: true,
+      outcome: "passed",
+      source: "human_review",
+    });
     expect(existsSync(join(root, ".ai/harness/checks/controller/latest-focused.json"))).toBe(true);
     const accepted = await fetch(new URL(`/api/issues/${issue.id}/tasks/T1/accept`, handle.url), {
       method: "POST",

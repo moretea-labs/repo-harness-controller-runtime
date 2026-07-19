@@ -55,6 +55,18 @@ export interface CleanupEvidence {
   recordedAt: string;
 }
 
+export type TaskAcceptanceOutcome = 'passed' | 'failed' | 'not_evaluated';
+export type TaskAcceptanceSource = 'human_review' | 'controller_check' | 'run_completion' | 'reported' | 'legacy';
+
+export interface TaskAcceptanceResult {
+  criterion: string;
+  /** Backward-compatible projection. New decision code must prefer outcome/source. */
+  ok: boolean;
+  outcome?: TaskAcceptanceOutcome;
+  source?: TaskAcceptanceSource;
+  evidence?: string;
+}
+
 export interface TaskVerification {
   repoId?: string;
   runId?: string;
@@ -62,7 +74,7 @@ export interface TaskVerification {
   reviewedDiffHash?: string;
   checkResults: Array<{ checkId: string; ok: boolean; summary?: string }>;
   commandEvidence?: TaskCommandEvidence[];
-  acceptanceResults: Array<{ criterion: string; ok: boolean; evidence?: string }>;
+  acceptanceResults: TaskAcceptanceResult[];
   reviewer: string;
   verifiedAt: string;
   autoCompleted?: boolean;

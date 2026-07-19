@@ -68,8 +68,10 @@ export function continueTaskAfterSuccessfulRun(
   }];
   const acceptanceResults = task.acceptanceCriteria.map((criterion) => ({
     criterion,
-    ok: true,
-    evidence: `Successful Run ${run.runId}${run.integratedSessionId ? ` integrated by ${run.integratedSessionId}` : ''}.`,
+    ok: false,
+    outcome: 'not_evaluated' as const,
+    source: 'run_completion' as const,
+    evidence: `Successful Run ${run.runId}${run.integratedSessionId ? ` integrated by ${run.integratedSessionId}` : ''}; acceptance was not independently evaluated.`,
   }));
   const verification: TaskVerification = {
     runId: run.runId,
