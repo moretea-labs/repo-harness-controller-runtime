@@ -23,7 +23,9 @@ jobs:
 
       - run: bun install --frozen-lockfile
       - name: Apply review hardening
-        run: python3 scripts/harden-oauth-history-proposals.py
+        run: |
+          python3 scripts/harden-oauth-history-proposals.py
+          python3 scripts/fix-google-oauth-scope-aliases.py
 
       - name: Type check
         shell: bash
