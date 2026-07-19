@@ -30,6 +30,7 @@ import { writeExecutionArtifact } from '../../evidence/artifact-store';
 import { existsSync } from 'fs';
 import { isAbsolute, relative, resolve, sep } from 'path';
 import { isAssistantPluginError } from '../../plugins/errors';
+import { executeAssistantRoutineRuntime } from '../../assistant/routine-runtime';
 
 function childReferenceFromLocalJob(
   localJob: LocalBridgeJob,
@@ -435,6 +436,20 @@ export async function executeExecutionJob(controllerHome: string, job: Execution
       throw new Error(`RUNTIME_STORAGE_NOT_READY: ${runtimeStorage.warnings.join('; ') || repository.activeCheckoutId}`);
     }
     bindRepositoryEntities(repository);
+
+    if (job.payload.target === 'runtime' && job.payload.operation === 'assistant_routine_execute') {
+      const routineId = String(job.payload.arguments?.routineId ?? job.payload.arguments?.routine_id ?? '').trim();
+      if (!routineId) throw new Error('ASSISTANT_ROUTINE_ID_REQUIRED');
+      const routineResult = await executeAssistantRoutineRuntime({
+        controllerHome,
+        repository,
+        routineId,
+        requestId: job.requestId,
+        origin: job.origin,
+        occurrenceId: typeof job.payload.occurrenceId === 'string' ? job.payload.occurrenceId : undefined,
+      });
+      return { ok: true, result: { assistantRoutine: routineResult }, repoRoot };
+    }
 
     if (job.payload.target === 'runtime' && job.payload.operation === 'legacy-local-job') {
       const localJobId = String(job.payload.arguments?.localJobId ?? '').trim();

@@ -31,10 +31,63 @@ function normalizedWindow(minutes: number, at = Date.now()): string {
   return String(Math.floor(at / (Math.max(1, minutes) * 60_000)));
 }
 
+interface ZonedDateParts {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  weekday: number;
+}
+
+function zonedDateParts(at: number, timezone = 'UTC'): ZonedDateParts {
+  let formatter: Intl.DateTimeFormat;
+  try {
+    formatter = new Intl.DateTimeFormat('en-US-u-ca-iso8601', {
+      timeZone: timezone,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', weekday: 'short',
+      hourCycle: 'h23',
+    });
+  } catch {
+    throw new Error(`SCHEDULE_TIMEZONE_INVALID: ${timezone}`);
+  }
+  const values = Object.fromEntries(formatter.formatToParts(new Date(at)).map((entry) => [entry.type, entry.value]));
+  const weekdays: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  return {
+    year: Number(values.year),
+    month: Number(values.month),
+    day: Number(values.day),
+    hour: Number(values.hour),
+    minute: Number(values.minute),
+    weekday: weekdays[String(values.weekday)] ?? 0,
+  };
+}
+
+function fixedCronTime(expression: string | undefined): { minute: number; hour: number; day: string; month: string; weekday: string } | undefined {
+  if (!expression) return undefined;
+  const fields = expression.trim().split(/\s+/);
+  if (fields.length !== 5 || !/^\d+$/.test(fields[0]) || !/^\d+$/.test(fields[1])) return undefined;
+  const minute = Number(fields[0]);
+  const hour = Number(fields[1]);
+  if (minute < 0 || minute > 59 || hour < 0 || hour > 23) return undefined;
+  return { minute, hour, day: fields[2], month: fields[3], weekday: fields[4] };
+}
+
+function cronWindowKey(schedule: RepositorySchedule, at = Date.now()): string {
+  const timezone = schedule.trigger.timezone ?? 'UTC';
+  const parts = zonedDateParts(at, timezone);
+  const fixed = fixedCronTime(schedule.trigger.cronExpression);
+  if (fixed) {
+    return `${parts.year}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}@${String(fixed.hour).padStart(2, '0')}:${String(fixed.minute).padStart(2, '0')}[${timezone}]`;
+  }
+  return `${parts.year}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}T${String(parts.hour).padStart(2, '0')}:${String(parts.minute).padStart(2, '0')}[${timezone}]`;
+}
+
 function triggerWindowKey(schedule: RepositorySchedule, context: ScheduleTriggerContext | undefined, at = Date.now()): string {
   switch (schedule.trigger.type) {
     case 'cron':
-      return new Date(at).toISOString().slice(0, 16);
+      return cronWindowKey(schedule, at);
     case 'calendar':
       return schedule.trigger.calendarAt ?? new Date(at).toISOString().slice(0, 16);
     case 'repository-event':
@@ -68,16 +121,26 @@ function cronFieldMatches(value: number, field: string, min: number, max: number
   });
 }
 
-function cronDue(expression: string | undefined, at = Date.now()): boolean {
+export function cronDue(
+  expression: string | undefined,
+  at = Date.now(),
+  timezone = 'UTC',
+  catchUpMinutes = 0,
+): boolean {
   if (!expression) return false;
   const fields = expression.trim().split(/\s+/);
   if (fields.length !== 5) throw new Error(`SCHEDULE_CRON_INVALID: expected five fields, received ${fields.length}`);
-  const date = new Date(at);
-  return cronFieldMatches(date.getUTCMinutes(), fields[0], 0, 59)
-    && cronFieldMatches(date.getUTCHours(), fields[1], 0, 23)
-    && cronFieldMatches(date.getUTCDate(), fields[2], 1, 31)
-    && cronFieldMatches(date.getUTCMonth() + 1, fields[3], 1, 12)
-    && cronFieldMatches(date.getUTCDay(), fields[4], 0, 6);
+  const parts = zonedDateParts(at, timezone);
+  const calendarMatches = cronFieldMatches(parts.day, fields[2], 1, 31)
+    && cronFieldMatches(parts.month, fields[3], 1, 12)
+    && cronFieldMatches(parts.weekday, fields[4], 0, 6);
+  if (!calendarMatches) return false;
+  if (cronFieldMatches(parts.minute, fields[0], 0, 59) && cronFieldMatches(parts.hour, fields[1], 0, 23)) return true;
+  const fixed = fixedCronTime(expression);
+  if (!fixed || catchUpMinutes <= 0) return false;
+  const scheduledMinute = fixed.hour * 60 + fixed.minute;
+  const currentMinute = parts.hour * 60 + parts.minute;
+  return currentMinute >= scheduledMinute && currentMinute - scheduledMinute <= Math.min(24 * 60, catchUpMinutes);
 }
 
 async function workspaceDirty(controllerHome: string, repoId: string): Promise<boolean> {
@@ -105,7 +168,10 @@ async function triggerDue(
     case 'interval':
       return { due: true };
     case 'cron':
-      return { due: cronDue(schedule.trigger.cronExpression), reason: 'Cron expression is not due in the current UTC minute.' };
+      return {
+        due: cronDue(schedule.trigger.cronExpression, Date.now(), schedule.trigger.timezone ?? 'UTC', schedule.trigger.catchUpMinutes ?? 0),
+        reason: `Cron expression is not due in the current ${schedule.trigger.timezone ?? 'UTC'} minute or catch-up window.`,
+      };
     case 'calendar': {
       const at = Date.parse(schedule.trigger.calendarAt ?? '');
       if (!Number.isFinite(at)) throw new Error('SCHEDULE_CALENDAR_INVALID: calendarAt must be an ISO-8601 timestamp');
@@ -411,7 +477,7 @@ export async function evaluateSchedule(
       arguments: schedule.action.arguments,
       scheduleId: schedule.scheduleId,
       occurrenceId,
-      target: 'mcp-tool',
+      target: schedule.action.target ?? 'mcp-tool',
     },
     resourceClaims: schedule.action.resourceClaims,
     timeoutMs: Math.max(60_000, schedule.policy.dailyBudgetMinutes * 60_000),

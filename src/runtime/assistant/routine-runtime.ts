@@ -3,7 +3,7 @@ import { dirname, join } from 'path';
 import type { RepositoryRecord } from '../../cli/repositories/types';
 import type { ExecutionJobOrigin } from '../execution/jobs/types';
 import { executeAssistantPluginAction } from '../plugins/store';
-import { addAssistantInboxItem, getAssistantRoutine } from './store';
+import { addAssistantInboxItem, getAssistantRoutine, touchAssistantRoutineRun } from './store';
 
 export type AssistantRoutineRunStatus = 'collecting' | 'completed' | 'failed' | 'auth_required';
 
@@ -206,7 +206,7 @@ async function gmailAction(
   actionId: string,
   args: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
-  return executeAssistantPluginAction({
+  const executed = await executeAssistantPluginAction({
     controllerHome,
     repoId: repository.repoId,
     repoRoot: repository.canonicalRoot,
@@ -216,6 +216,7 @@ async function gmailAction(
     args,
     origin,
   });
+  return recordValue(executed.result);
 }
 
 export async function executeAssistantRoutineRuntime(input: {
@@ -299,6 +300,7 @@ export async function executeAssistantRoutineRuntime(input: {
       summary: report,
       completedAt: now(),
     });
+    touchAssistantRoutineRun(input.repository.canonicalRoot, routine.routineId);
     addAssistantInboxItem(input.repository.canonicalRoot, {
       kind: 'routine_result',
       title: `Routine 已完成：${routine.name}`,
