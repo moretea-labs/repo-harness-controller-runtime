@@ -23,8 +23,37 @@ jobs:
 
       - run: bun install --frozen-lockfile
       - run: python3 scripts/apply-google-oauth-history-proposals.py
-      - run: bun x tsc --noEmit
-      - run: bun test tests/runtime/gmail-assistant-routines.test.ts tests/runtime/google-oauth-history-proposals.test.ts
+
+      - name: Type check
+        shell: bash
+        run: |
+          set +e
+          bun x tsc --noEmit 2>&1 | tee oauth-history-tsc.log
+          echo "${PIPESTATUS[0]}" > oauth-history-tsc.status
+          exit 0
+
+      - name: Focused tests
+        shell: bash
+        run: |
+          set +e
+          bun test tests/runtime/gmail-assistant-routines.test.ts tests/runtime/google-oauth-history-proposals.test.ts 2>&1 | tee oauth-history-tests.log
+          echo "${PIPESTATUS[0]}" > oauth-history-tests.status
+          exit 0
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: oauth-history-proposal-diagnostics
+          path: |
+            oauth-history-tsc.log
+            oauth-history-tsc.status
+            oauth-history-tests.log
+            oauth-history-tests.status
+
+      - name: Enforce verification
+        run: |
+          test "$(cat oauth-history-tsc.status)" = "0"
+          test "$(cat oauth-history-tests.status)" = "0"
 
       - name: Commit verified implementation
         run: |
