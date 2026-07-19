@@ -92,7 +92,7 @@ describe('Assistant model analysis and Standing Grants', () => {
     process.env.REPO_HARNESS_ASSISTANT_MODEL_ENDPOINT = 'https://model.example.test/v1/chat/completions';
     process.env.REPO_HARNESS_ASSISTANT_MODEL = 'mail-model';
     process.env.REPO_HARNESS_ASSISTANT_MODEL_API_KEY = 'model-secret';
-    globalThis.fetch = (async () => new Response(JSON.stringify({ choices: [{ message: { content: 'not-json' } }] }), { status: 200 })) as typeof fetch;
+    globalThis.fetch = (async () => new Response(JSON.stringify({ choices: [{ message: { content: 'not-json' } }] }), { status: 200 })) as unknown as typeof fetch;
     const analysis = await analyzeAssistantMessages({
       routineGoal: 'Summarize mail.',
       messages: [{ id: 'm1', from: 'a@example.com', subject: 'Hello', snippet: 'Hi', labelIds: ['INBOX'] }],

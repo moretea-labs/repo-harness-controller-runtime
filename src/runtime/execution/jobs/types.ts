@@ -41,7 +41,7 @@ export interface ResourceClaimSpec {
 }
 
 export interface ExecutionJobOrigin {
-  surface: 'mcp' | 'local-ui' | 'mobile-intent' | 'chatgpt-action' | 'assistant-routine' | 'cli' | 'schedule' | 'reconciliation' | 'system';
+  surface: 'mcp' | 'local-ui' | 'mobile-intent' | 'chatgpt-action' | 'assistant-routine' | 'standing-grant' | 'cli' | 'schedule' | 'reconciliation' | 'system';
   actor?: string;
   correlationId?: string;
   causationId?: string;

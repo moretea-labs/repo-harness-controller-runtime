@@ -331,7 +331,7 @@ export function applyAssistantStandingGrants(
   const results: StandingGrantExecutionResult[] = [];
   const warnings: string[] = [];
   for (const grant of active) {
-    let applied = 0;
+    let applied = current.filter((proposal) => proposal.runId === input.runId && proposal.standingGrantId === grant.grantId).length;
     for (const supplied of input.proposals) {
       if (applied >= grant.constraints.maxPerRun) break;
       const proposal = byId.get(supplied.proposalId) ?? supplied;

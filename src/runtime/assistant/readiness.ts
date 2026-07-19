@@ -1,6 +1,8 @@
 import type { RepositoryRecord } from '../../cli/repositories/types';
 import { listAssistantPluginManifests } from '../plugins/store';
 import { listAssistantInbox, listAssistantMemory, listAssistantRoutines } from './store';
+import { assistantModelReadiness } from './model-provider';
+import { listAssistantStandingGrants } from './standing-grants';
 
 export interface AssistantCapabilitySummary {
   capabilityId: string;
@@ -36,7 +38,9 @@ export interface AssistantReadinessReport {
     inboxItems: number;
     unreadInboxItems: number;
     memoryEntries: number;
+    activeStandingGrants: number;
   };
+  model: Record<string, unknown>;
   recommendations: string[];
 }
 
@@ -180,6 +184,8 @@ export function buildAssistantReadinessReport(controllerHome: string, repository
   const routines = listAssistantRoutines(repository.canonicalRoot).routines;
   const inbox = listAssistantInbox(repository.canonicalRoot, 200).items;
   const memory = listAssistantMemory(repository.canonicalRoot).entries;
+  const model = assistantModelReadiness();
+  const standingGrants = listAssistantStandingGrants(controllerHome, repository, { status: 'active', limit: 500 }).grants;
   const byId = new Map(plugins.map((plugin) => [plugin.pluginId, plugin]));
   const capabilities = [
     googleCapability('gmail_read', 'Gmail read', byId.get('gmail')),
@@ -208,6 +214,7 @@ export function buildAssistantReadinessReport(controllerHome: string, repository
     ...(capabilities.some((capability) => capability.state === 'disabled') ? ['Enable Gmail, Calendar, and Tasks plugins before expecting natural-language routines to collect real data.'] : []),
     ...(routines.length === 0 ? ['Create one routine such as: 每天早上 9 点整理过去 24 小时重要邮件。'] : []),
     ...(memory.length === 0 ? ['Seed assistant memory with communication tone, work keywords, and default safety preferences.'] : []),
+    ...(model.configured !== true ? ['Configure the optional Assistant model provider for richer mail analysis; deterministic rules remain available.'] : []),
   ];
   return {
     schemaVersion: 1,
@@ -243,7 +250,9 @@ export function buildAssistantReadinessReport(controllerHome: string, repository
       inboxItems: inbox.length,
       unreadInboxItems: inbox.filter((item) => item.status === 'unread').length,
       memoryEntries: memory.length,
+      activeStandingGrants: standingGrants.length,
     },
+    model,
     recommendations,
   };
 }

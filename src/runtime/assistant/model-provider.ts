@@ -122,12 +122,13 @@ function endpointIsAllowed(endpoint: string): boolean {
   }
 }
 
-function configuredCredential(env: NodeJS.ProcessEnv): { value?: string; source?: string } {
+function configuredCredential(env: NodeJS.ProcessEnv, endpoint?: string): { value?: string; source?: string } {
+  const deepSeekEndpoint = endpoint?.includes('api.deepseek.com') === true;
   const candidates: Array<[string, string | undefined]> = [
     ['REPO_HARNESS_ASSISTANT_MODEL_API_KEY', env.REPO_HARNESS_ASSISTANT_MODEL_API_KEY],
-    ['OPENAI_API_KEY', env.OPENAI_API_KEY],
-    ['REPO_HARNESS_DEEPSEEK_API_KEY', env.REPO_HARNESS_DEEPSEEK_API_KEY],
-    ['DEEPSEEK_API_KEY', env.DEEPSEEK_API_KEY],
+    ...(deepSeekEndpoint
+      ? [['REPO_HARNESS_DEEPSEEK_API_KEY', env.REPO_HARNESS_DEEPSEEK_API_KEY], ['DEEPSEEK_API_KEY', env.DEEPSEEK_API_KEY], ['OPENAI_API_KEY', env.OPENAI_API_KEY]]
+      : [['OPENAI_API_KEY', env.OPENAI_API_KEY], ['REPO_HARNESS_DEEPSEEK_API_KEY', env.REPO_HARNESS_DEEPSEEK_API_KEY], ['DEEPSEEK_API_KEY', env.DEEPSEEK_API_KEY]]) as Array<[string, string | undefined]>,
   ];
   const found = candidates.find(([, value]) => value?.trim());
   return found ? { value: found[1]!.trim(), source: `env:${found[0]}` } : {};
@@ -137,7 +138,6 @@ export function resolveAssistantModelConfig(env: NodeJS.ProcessEnv = process.env
   const requested = String(env.REPO_HARNESS_ASSISTANT_MODEL_PROVIDER ?? '').trim().toLowerCase();
   const endpointOverride = env.REPO_HARNESS_ASSISTANT_MODEL_ENDPOINT?.trim();
   const modelOverride = env.REPO_HARNESS_ASSISTANT_MODEL?.trim();
-  const credential = configuredCredential(env);
   const timeoutMs = envInteger(env, 'REPO_HARNESS_ASSISTANT_MODEL_TIMEOUT_MS', DEFAULT_TIMEOUT_MS, 5 * 60_000);
   const maxMessages = envInteger(env, 'REPO_HARNESS_ASSISTANT_MODEL_MAX_MESSAGES', DEFAULT_MAX_MESSAGES, 50);
   const maxInputChars = envInteger(env, 'REPO_HARNESS_ASSISTANT_MODEL_MAX_INPUT_CHARS', DEFAULT_MAX_INPUT_CHARS, 200_000);
@@ -153,6 +153,7 @@ export function resolveAssistantModelConfig(env: NodeJS.ProcessEnv = process.env
   const endpoint = endpointOverride
     || (openAiConfigured ? OPENAI_CHAT_COMPLETIONS_ENDPOINT : deepSeekConfigured ? DEEPSEEK_CHAT_COMPLETIONS_ENDPOINT : undefined);
   const model = modelOverride || (deepSeekConfigured ? env.REPO_HARNESS_DEEPSEEK_MODEL?.trim() || 'deepseek-chat' : undefined);
+  const credential = configuredCredential(env, endpoint);
   if (!endpoint || !model) {
     return {
       provider: 'disabled', configured: false, timeoutMs, maxMessages, maxInputChars, maxOutputTokens,
@@ -426,7 +427,7 @@ export async function analyzeAssistantMessages(input: {
     if (config.provider === 'mock') {
       result = { parsed: mockAnalysis(messages) as unknown as Record<string, unknown> };
     } else {
-      const credential = configuredCredential(env);
+      const credential = configuredCredential(env, config.endpoint);
       try {
         result = await requestModel(config, credential.value, messages, input.routineGoal, true);
       } catch (error) {
