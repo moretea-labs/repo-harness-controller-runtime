@@ -27,8 +27,6 @@ const GATEWAY_ISOLATED_TOOLS = new Set([
   'ios_review_packet', 'ios_xcode_status', 'ios_simulators_list', 'ios_project_discover',
   'ios_schemes_list', 'ios_simulator_boot', 'ios_app_build', 'ios_app_install',
   'ios_app_launch', 'ios_simulator_screenshot', 'ios_simulator_log_tail', 'ios_ui_smoke_test',
-  // Plugin actions may drive browsers, provider CLIs, filesystem transfers, or remote APIs.
-  'plugin_action_execute',
   // Diagnostics and maintenance perform process-table and recursive filesystem scans.
   'workflow_watchdog_report', 'runtime_cleanup_preview', 'runtime_cleanup_apply',
   'runtime_maintenance_status', 'runtime_maintenance_apply',
@@ -38,6 +36,13 @@ const GATEWAY_ISOLATED_TOOLS = new Set([
 
 export function isGatewayIsolatedTool(name: string): boolean {
   return GATEWAY_ISOLATED_TOOLS.has(name);
+}
+
+/** Tools that already own their direct-read versus durable-write boundary. */
+const SELF_MANAGED_DURABLE_TOOLS = new Set(['plugin_action_execute']);
+
+export function isSelfManagedDurableTool(name: string): boolean {
+  return SELF_MANAGED_DURABLE_TOOLS.has(name);
 }
 /** High-frequency bounded reads execute in the current MCP request. */
 const DIRECT_HOT_READ_TOOLS = new Set([
@@ -118,6 +123,7 @@ function shouldCreateDurableJob(
 ): boolean {
   const definition = toolDefinition(ctx, name);
   if (!definition) return false;
+  if (isSelfManagedDurableTool(name)) return false;
   if (opts.forceDurable === true || isGatewayIsolatedTool(name)) return true;
   if (name.startsWith('repository_') && DIRECT_REPOSITORY_TOOLS.has(name)) return false;
   if (definition.annotations?.readOnlyHint === true && opts.allowReadOnly !== true) return false;

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { isDirectHotReadTool, isGatewayIsolatedTool, waitTimeoutMs, wantsWaitForResult } from '../../src/runtime/gateway/mcp/router';
+import { isDirectHotReadTool, isGatewayIsolatedTool, isSelfManagedDurableTool, waitTimeoutMs, wantsWaitForResult } from '../../src/runtime/gateway/mcp/router';
 
 describe('MCP durable routing hot path', () => {
   test('wait_ms configures but never enables waiting', () => {
@@ -25,12 +25,18 @@ describe('MCP durable routing hot path', () => {
   test('host-blocking runtime tools are isolated from the Gateway event loop', () => {
     for (const name of [
       'ios_xcode_status', 'ios_simulators_list', 'ios_app_build', 'ios_simulator_screenshot',
-      'plugin_action_execute', 'workflow_watchdog_report', 'runtime_cleanup_apply',
+      'workflow_watchdog_report', 'runtime_cleanup_apply',
       'runtime_maintenance_apply', 'release_gate', 'runtime_recovery',
     ]) {
       expect(isGatewayIsolatedTool(name)).toBe(true);
     }
+    expect(isGatewayIsolatedTool('plugin_action_execute')).toBe(false);
     expect(isGatewayIsolatedTool('rh_status')).toBe(false);
     expect(isGatewayIsolatedTool('repository_git_status')).toBe(false);
+  });
+
+  test('plugin actions keep one durable owner and preserve the public request id', () => {
+    expect(isSelfManagedDurableTool('plugin_action_execute')).toBe(true);
+    expect(isSelfManagedDurableTool('run_check')).toBe(false);
   });
 });
