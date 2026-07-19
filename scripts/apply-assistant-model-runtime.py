@@ -25,13 +25,13 @@ replace_once(
 )
 replace_once(
     'src/runtime/assistant/routine-runtime.ts',
-    "        confidence: 0.8,\n        arguments: { title:",
-    "        confidence: 0.8,\n        context: { sender: message.from, subject: message.subject },\n        arguments: { title:",
+    "        reason: `Create a task from “${message.subject}”.`, confidence: 0.8,\n        arguments:",
+    "        reason: `Create a task from “${message.subject}”.`, confidence: 0.8,\n        context: { sender: message.from, subject: message.subject },\n        arguments:",
 )
 replace_once(
     'src/runtime/assistant/routine-runtime.ts',
-    "        confidence: 0.7,\n        arguments: { message_id: message.id },",
-    "        confidence: 0.7,\n        context: { sender: message.from, subject: message.subject },\n        arguments: { message_id: message.id },",
+    "        reason: `Archive candidate: “${message.subject}”.`, confidence: 0.7,\n        arguments:",
+    "        reason: `Archive candidate: “${message.subject}”.`, confidence: 0.7,\n        context: { sender: message.from, subject: message.subject },\n        arguments:",
 )
 replace_once(
     'src/runtime/assistant/routine-runtime.ts',
@@ -51,7 +51,7 @@ replace_once(
 replace_once(
     'src/runtime/assistant/routine-runtime.ts',
     "    const proposalInputs = proposalsFor(messages);\n    const proposals = createAssistantActionProposals(input.controllerHome, input.repository, { routineId: routine.routineId, runId, proposals: proposalInputs });",
-    "    const modelAnalysis = await analyzeAssistantMessages({\n      messages,\n      routineGoal: routine.naturalLanguageGoal,\n    });\n    const proposalInputs = modelAnalysis.usedModel ? modelAnalysis.proposals : proposalsFor(messages);\n    const proposals = createAssistantActionProposals(input.controllerHome, input.repository, { routineId: routine.routineId, runId, proposals: proposalInputs });\n    const standingGrantApplication = applyAssistantStandingGrants(input.controllerHome, input.repository, {\n      routineId: routine.routineId, runId, proposals,\n    });\n    const analysis: AssistantModelAnalysis = {\n      ...modelAnalysis,\n      warnings: [...modelAnalysis.warnings, ...standingGrantApplication.warnings],\n    };",
+    "    const modelAnalysis = await analyzeAssistantMessages({ messages, routineGoal: routine.naturalLanguageGoal });\n    const proposalInputs = modelAnalysis.usedModel ? modelAnalysis.proposals : proposalsFor(messages);\n    const proposals = createAssistantActionProposals(input.controllerHome, input.repository, { routineId: routine.routineId, runId, proposals: proposalInputs });\n    const standingGrantApplication = applyAssistantStandingGrants(input.controllerHome, input.repository, { routineId: routine.routineId, runId, proposals });\n    const analysis: AssistantModelAnalysis = {\n      ...modelAnalysis,\n      warnings: [...modelAnalysis.warnings, ...standingGrantApplication.warnings],\n    };",
 )
 replace_once(
     'src/runtime/assistant/routine-runtime.ts',
