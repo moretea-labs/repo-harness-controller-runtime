@@ -10,6 +10,11 @@ def replace_once(path: str, old: str, new: str) -> None:
 
 replace_once(
     'src/runtime/assistant/routine-runtime.ts',
+    "  createAssistantActionProposals,\n  type AssistantActionProposal,",
+    "  createAssistantActionProposals,\n  listAssistantActionProposals,\n  type AssistantActionProposal,",
+)
+replace_once(
+    'src/runtime/assistant/routine-runtime.ts',
     "import { addAssistantInboxItem, getAssistantRoutine, touchAssistantRoutineRun } from './store';",
     "import { addAssistantInboxItem, getAssistantRoutine, touchAssistantRoutineRun } from './store';\nimport { analyzeAssistantMessages, type AssistantModelAnalysis } from './model-provider';\nimport { applyAssistantStandingGrants, type StandingGrantExecutionResult } from './standing-grants';",
 )
@@ -51,7 +56,7 @@ replace_once(
 replace_once(
     'src/runtime/assistant/routine-runtime.ts',
     "    const proposalInputs = proposalsFor(messages);\n    const proposals = createAssistantActionProposals(input.controllerHome, input.repository, { routineId: routine.routineId, runId, proposals: proposalInputs });",
-    "    const modelAnalysis = await analyzeAssistantMessages({ messages, routineGoal: routine.naturalLanguageGoal });\n    const proposalInputs = modelAnalysis.usedModel ? modelAnalysis.proposals : proposalsFor(messages);\n    const proposals = createAssistantActionProposals(input.controllerHome, input.repository, { routineId: routine.routineId, runId, proposals: proposalInputs });\n    const standingGrantApplication = applyAssistantStandingGrants(input.controllerHome, input.repository, { routineId: routine.routineId, runId, proposals });\n    const analysis: AssistantModelAnalysis = {\n      ...modelAnalysis,\n      warnings: [...modelAnalysis.warnings, ...standingGrantApplication.warnings],\n    };",
+    "    const modelAnalysis = await analyzeAssistantMessages({ messages, routineGoal: routine.naturalLanguageGoal });\n    const proposalInputs = modelAnalysis.usedModel ? modelAnalysis.proposals : proposalsFor(messages);\n    const proposals = createAssistantActionProposals(input.controllerHome, input.repository, { routineId: routine.routineId, runId, proposals: proposalInputs });\n    const standingGrantApplication = applyAssistantStandingGrants(input.controllerHome, input.repository, { routineId: routine.routineId, runId, proposals });\n    const persistedProposals = listAssistantActionProposals(input.controllerHome, input.repository, { limit: 500 }).proposals\n      .filter((proposal) => proposal.runId === runId);\n    const analysis: AssistantModelAnalysis = {\n      ...modelAnalysis,\n      warnings: [...modelAnalysis.warnings, ...standingGrantApplication.warnings],\n    };",
 )
 replace_once(
     'src/runtime/assistant/routine-runtime.ts',
@@ -61,12 +66,12 @@ replace_once(
 replace_once(
     'src/runtime/assistant/routine-runtime.ts',
     "      proposedActions: proposals.length,\n      summary: report,",
-    "      proposedActions: proposals.length,\n      autoSubmittedActions: standingGrantApplication.results.filter((entry) => entry.status === 'submitted').length,\n      analysis: {\n        usedModel: analysis.usedModel,\n        provider: analysis.provider,\n        model: analysis.model,\n        promptVersion: analysis.promptVersion,\n        fallbackReason: analysis.fallbackReason,\n        warnings: analysis.warnings,\n      },\n      summary: report,",
+    "      proposedActions: persistedProposals.length,\n      autoSubmittedActions: standingGrantApplication.results.filter((entry) => entry.status === 'submitted').length,\n      analysis: {\n        usedModel: analysis.usedModel,\n        provider: analysis.provider,\n        model: analysis.model,\n        promptVersion: analysis.promptVersion,\n        fallbackReason: analysis.fallbackReason,\n        warnings: analysis.warnings,\n      },\n      summary: report,",
 )
 replace_once(
     'src/runtime/assistant/routine-runtime.ts',
     "      summary: `读取 ${messages.length} 封新邮件，生成 ${proposals.length} 项只读行动建议。`,",
-    "      summary: `读取 ${messages.length} 封新邮件，生成 ${proposals.length} 项行动建议，自动提交 ${standingGrantApplication.results.filter((entry) => entry.status === 'submitted').length} 项。`,",
+    "      summary: `读取 ${messages.length} 封新邮件，生成 ${persistedProposals.length} 项行动建议，自动提交 ${standingGrantApplication.results.filter((entry) => entry.status === 'submitted').length} 项。`,",
 )
 replace_once(
     'src/runtime/assistant/routine-runtime.ts',
@@ -76,7 +81,7 @@ replace_once(
 replace_once(
     'src/runtime/assistant/routine-runtime.ts',
     "        '可基于行动建议创建草稿、任务或归档审批。',\n      ],\n      data: { run, messages, proposals, truncated },",
-    "        '可基于行动建议创建草稿、任务或归档审批。',\n        ...(analysis.fallbackReason ? ['模型分析不可用，本次已安全回退到规则引擎。'] : []),\n      ],\n      data: { run, messages, proposals, truncated, analysis, standingGrantResults: standingGrantApplication.results },",
+    "        '可基于行动建议创建草稿、任务或归档审批。',\n        ...(analysis.fallbackReason ? ['模型分析不可用，本次已安全回退到规则引擎。'] : []),\n      ],\n      data: { run, messages, proposals: persistedProposals, truncated, analysis, standingGrantResults: standingGrantApplication.results },",
 )
 replace_once(
     'src/runtime/assistant/routine-runtime.ts',
@@ -86,6 +91,6 @@ replace_once(
 replace_once(
     'src/runtime/assistant/routine-runtime.ts',
     "    return { run, messages, proposals };",
-    "    return { run, messages, proposals, analysis, standingGrantResults: standingGrantApplication.results };",
+    "    return { run, messages, proposals: persistedProposals, analysis, standingGrantResults: standingGrantApplication.results };",
 )
 print('Applied Assistant model and Standing Grant Routine Runtime integration.')
