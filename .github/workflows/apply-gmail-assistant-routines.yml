@@ -1,0 +1,46 @@
+name: Apply Gmail Assistant Routines
+
+on:
+  push:
+    branches:
+      - feat/gmail-assistant-routines
+    paths:
+      - scripts/apply-gmail-assistant-routines.py
+      - .github/workflows/apply-gmail-assistant-routines.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/gmail-assistant-routines
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.10
+
+      - run: bun install --frozen-lockfile
+
+      - name: Apply integration patch
+        run: python3 scripts/apply-gmail-assistant-routines.py
+
+      - name: Type check
+        run: bun x tsc --noEmit
+
+      - name: Focused tests
+        run: bun test tests/runtime/gmail-assistant-routines.test.ts
+
+      - name: Commit generated implementation
+        run: |
+          git config user.name "repo-harness automation"
+          git config user.email "actions@users.noreply.github.com"
+          git rm scripts/apply-gmail-assistant-routines.py .github/workflows/apply-gmail-assistant-routines.yml
+          git add src tests docs
+          git diff --cached --quiet && exit 0
+          git commit -m "feat(assistant): implement durable Gmail routines"
+          git push origin HEAD:feat/gmail-assistant-routines
