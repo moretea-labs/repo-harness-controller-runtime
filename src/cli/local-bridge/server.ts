@@ -162,6 +162,7 @@ import {
 } from "./mobile-intents";
 import { controllerExposureSnapshot } from "../mcp/toolset";
 import { submitAssistantIntent, runAssistantRoutineNow } from "../../runtime/assistant/intent";
+import { updateAssistantRoutineLifecycle } from "../../runtime/assistant/schedule-binding";
 import { assistantOpenApiSchema } from "../../runtime/assistant/openapi";
 import { buildAssistantReadinessReport } from "../../runtime/assistant/readiness";
 import { listWebTargets, previewBrowserDomainAccess, summarizePluginForLowInterception } from "../../runtime/safe-tooling";
@@ -173,7 +174,6 @@ import {
   listAssistantMemory,
   listAssistantRoutines,
   updateAssistantInboxStatus,
-  updateAssistantRoutineStatus,
   upsertAssistantMemory,
 } from "../../runtime/assistant/store";
 
@@ -2164,7 +2164,8 @@ export async function startLocalBridgeServer(
 
   app.post("/api/assistant/routines/:routineId/pause", (request, response) => {
     try {
-      response.json({ routine: updateAssistantRoutineStatus(requestRepositoryRoot(request, options, controllerHome), request.params.routineId, "paused") });
+      const repository = requestRepositorySelection(request, options, controllerHome);
+      response.json(updateAssistantRoutineLifecycle(controllerHome, repository, request.params.routineId, "paused"));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
@@ -2172,7 +2173,8 @@ export async function startLocalBridgeServer(
 
   app.post("/api/assistant/routines/:routineId/resume", (request, response) => {
     try {
-      response.json({ routine: updateAssistantRoutineStatus(requestRepositoryRoot(request, options, controllerHome), request.params.routineId, "enabled") });
+      const repository = requestRepositorySelection(request, options, controllerHome);
+      response.json(updateAssistantRoutineLifecycle(controllerHome, repository, request.params.routineId, "enabled"));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
@@ -2180,7 +2182,8 @@ export async function startLocalBridgeServer(
 
   app.post("/api/assistant/routines/:routineId/delete", (request, response) => {
     try {
-      response.json({ routine: updateAssistantRoutineStatus(requestRepositoryRoot(request, options, controllerHome), request.params.routineId, "deleted") });
+      const repository = requestRepositorySelection(request, options, controllerHome);
+      response.json(updateAssistantRoutineLifecycle(controllerHome, repository, request.params.routineId, "deleted"));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }

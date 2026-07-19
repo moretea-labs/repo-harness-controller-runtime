@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'crypto';
 import type { RepositoryRecord } from '../../cli/repositories/types';
 import { getAssistantPluginManifest, submitAssistantPluginAction } from '../plugins/store';
+import { createExecutionJob } from '../execution/jobs/store';
+import { bindAssistantRoutineSchedule } from './schedule-binding';
 import type { AssistantIntentResult, AssistantIntentInput, AssistantIntentMode, AssistantIntentSource, AssistantPlanStepInput, AssistantPlanStepResult, AssistantRoutine, AssistantRoutineDraft } from './types';
 import { addAssistantInboxItem, createAssistantRoutine, getAssistantRoutine, touchAssistantRoutineRun } from './store';
 import { defaultRoutineAllowedActions, defaultRoutineForbiddenActions, evaluateAssistantActionPolicy } from './policy';
@@ -271,6 +273,7 @@ export function submitAssistantIntent(
       };
     }
     const routine = createAssistantRoutine(repository.canonicalRoot, routineDraft);
+    const binding = bindAssistantRoutineSchedule(controllerHome, repository, routine);
     const inboxItem = addAssistantInboxItem(repository.canonicalRoot, {
       kind: 'system_note',
       title: `已创建 Routine：${routine.name}`,
@@ -280,14 +283,14 @@ export function submitAssistantIntent(
       relatedRequestId: id,
       jobIds: [],
       recommendations: ['你可以在 ChatGPT 里说“暂停这个 routine”或调用 /api/assistant/routines/:id/pause。'],
-      data: { routine },
+      data: { routine, binding },
     });
     return {
       ...base,
       accepted: true,
       understoodIntent: 'create_routine',
       displayTitle: 'Routine 已保存',
-      displayText: `已保存「${routine.name}」，计划：${routine.scheduleText}。`,
+      displayText: `已保存「${routine.name}」，并绑定到持久化 Schedule：${binding.normalizedSchedule}。`,
       requiresConfirmation: false,
       routine,
       inboxItem,
@@ -355,48 +358,58 @@ export function runAssistantRoutineNow(
   const routine = getAssistantRoutine(repository.canonicalRoot, routineId);
   if (routine.status !== 'enabled') throw new Error(`ASSISTANT_ROUTINE_NOT_ENABLED: ${routineId}`);
   const requestId = `routine-run-${routine.routineId}-${Date.now()}`;
-  const plan: AssistantPlanStepInput[] = [];
-  if (routine.dataSources.includes('gmail') && !routine.forbiddenActions.includes('gmail.list_messages')) {
-    plan.push({ pluginId: 'gmail', actionId: 'list_messages', arguments: { query: 'newer_than:1d', max_results: 30 } });
-  }
-  if (routine.dataSources.includes('calendar') && !routine.forbiddenActions.includes('google_calendar.list_events')) {
-    const start = new Date();
-    const end = new Date(start.getTime() + 24 * 60 * 60_000);
-    plan.push({ pluginId: 'google_calendar', actionId: 'list_events', arguments: { time_min: start.toISOString(), time_max: end.toISOString(), max_results: 20 } });
-  }
-  if (routine.dataSources.includes('tasks') && !routine.forbiddenActions.includes('google_tasks.list_tasks')) {
-    plan.push({ pluginId: 'google_tasks', actionId: 'list_tasks', arguments: { max_results: 50, include_completed: false } });
-  }
-  const submitted = submitPlanSteps(controllerHome, repository, {
+  const created = createExecutionJob(controllerHome, {
+    repoId: repository.repoId,
+    checkoutId: repository.activeCheckoutId,
+    type: 'mcp-tool',
     requestId,
-    source: 'system',
-    mode: 'execute',
-  }, plan, 'system', requestId, { automatedRoutine: true });
+    semanticKey: `assistant-routine:${routine.routineId}:${requestId}`,
+    priority: 'P2',
+    origin: { surface: 'assistant-routine', actor: routine.routineId, correlationId: requestId },
+    payload: {
+      operation: 'assistant_routine_execute',
+      target: 'runtime',
+      arguments: { routineId: routine.routineId },
+      timeoutMs: 30 * 60_000,
+    },
+    resourceClaims: [{ resourceKey: `assistant-routine:${repository.repoId}:${routine.routineId}`, mode: 'exclusive' }],
+    timeoutMs: 30 * 60_000,
+    maxAttempts: 1,
+  });
   const touched = touchAssistantRoutineRun(repository.canonicalRoot, routineId);
-  const jobIds = submitted.flatMap((step) => step.job?.jobId ? [step.job.jobId] : []);
+  const plan: AssistantPlanStepResult[] = [{
+    stepId: 'routine-runtime',
+    pluginId: 'assistant',
+    actionId: 'assistant_routine_execute',
+    status: 'submitted',
+    risk: 'readonly',
+    decision: 'allow',
+    reason: 'A durable read-only Routine Runtime Job was queued.',
+    job: created.job,
+  }];
   const inboxItem = addAssistantInboxItem(repository.canonicalRoot, {
     kind: 'routine_result',
-    title: `Routine 已启动：${routine.name}`,
-    summary: `已按目标提交 ${jobIds.length} 个只读数据收集步骤；模型摘要层可读取这些 Job 结果继续生成中文摘要。`,
+    title: `Routine 已排队：${routine.name}`,
+    summary: '已提交持久化 Routine Runtime Job；完成后会生成最终邮件报告。',
     body: routine.naturalLanguageGoal,
     source: 'routine',
     relatedRoutineId: routine.routineId,
     relatedRequestId: requestId,
-    jobIds,
-    recommendations: ['下一步由 ChatGPT / OpenAI API 读取 Job 结果并生成自然语言摘要。', '发送邮件、删除邮件、取消会议等动作仍需要单独确认。'],
-    data: { routine: touched, plan: submitted },
+    jobIds: [created.job.jobId],
+    recommendations: ['等待最终 Routine 报告；发送邮件和移入垃圾箱仍需单独确认。'],
+    data: { routine: touched, jobId: created.job.jobId },
   });
   return {
     schemaVersion: 1,
-    accepted: submitted.every((step) => step.status === 'submitted'),
+    accepted: true,
     mode: 'execute',
     source: 'system',
     requestId,
     understoodIntent: 'run_routine',
-    displayTitle: `Routine 已启动：${routine.name}`,
-    displayText: `已为「${routine.name}」提交 ${jobIds.length} 个数据收集步骤，结果进入 Assistant Inbox。`,
-    requiresConfirmation: submitted.some((step) => step.status === 'blocked'),
-    plan: submitted,
+    displayTitle: `Routine 已排队：${routine.name}`,
+    displayText: `已为「${routine.name}」提交持久化执行 Job ${created.job.jobId}。`,
+    requiresConfirmation: false,
+    plan,
     routine: touched,
     inboxItem,
     clarifyingQuestions: [],

@@ -43,6 +43,7 @@ export interface GoogleAuthState {
   probed: boolean;
   credentialSource?: string;
   accessToken?: string;
+  refreshReady?: boolean;
   errors: string[];
   warnings: string[];
 }
@@ -58,6 +59,59 @@ export interface GoogleApiRequestOptions {
 }
 
 const CONFIG_ROOT = '.repo-harness/plugins';
+
+interface CachedGoogleCredential {
+  accessToken: string;
+  expiresAt: number;
+  source: string;
+}
+
+const GOOGLE_ACCESS_TOKEN_CACHE = new Map<GoogleService, CachedGoogleCredential>();
+const VERIFIED_GOOGLE_TOKEN_FINGERPRINTS = new Map<string, number>();
+
+function tokenFingerprint(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}
+
+function verifiedToken(token: string): boolean {
+  const verifiedAt = VERIFIED_GOOGLE_TOKEN_FINGERPRINTS.get(tokenFingerprint(token));
+  return Boolean(verifiedAt && Date.now() - verifiedAt < 24 * 60 * 60_000);
+}
+
+function cachedGoogleToken(service: GoogleService): CachedGoogleCredential | undefined {
+  const cached = GOOGLE_ACCESS_TOKEN_CACHE.get(service);
+  if (!cached || cached.expiresAt <= Date.now() + 30_000) return undefined;
+  return cached;
+}
+
+function firstEnv(names: string[]): { name: string; value: string } | undefined {
+  for (const name of names) {
+    const value = process.env[name]?.trim();
+    if (value) return { name, value };
+  }
+  return undefined;
+}
+
+function refreshTokenEnvNames(service: GoogleService): string[] {
+  return [
+    `REPO_HARNESS_${service.toUpperCase()}_REFRESH_TOKEN`,
+    service === 'gmail' ? 'REPO_HARNESS_GMAIL_REFRESH_TOKEN' : '',
+    'REPO_HARNESS_GOOGLE_WORKSPACE_REFRESH_TOKEN',
+    'REPO_HARNESS_GOOGLE_REFRESH_TOKEN',
+  ].filter(Boolean);
+}
+
+function clientIdEnvNames(service: GoogleService): string[] {
+  return [`REPO_HARNESS_${service.toUpperCase()}_CLIENT_ID`, 'REPO_HARNESS_GOOGLE_WORKSPACE_CLIENT_ID', 'REPO_HARNESS_GOOGLE_CLIENT_ID'];
+}
+
+function clientSecretEnvNames(service: GoogleService): string[] {
+  return [`REPO_HARNESS_${service.toUpperCase()}_CLIENT_SECRET`, 'REPO_HARNESS_GOOGLE_WORKSPACE_CLIENT_SECRET', 'REPO_HARNESS_GOOGLE_CLIENT_SECRET'];
+}
+
+function refreshCredentialsReady(service: GoogleService): boolean {
+  return Boolean(firstEnv(refreshTokenEnvNames(service)) && firstEnv(clientIdEnvNames(service)) && firstEnv(clientSecretEnvNames(service)));
+}
 
 function repoPluginConfigPath(repoRoot: string, pluginId: string): string {
   return join(repoRoot, CONFIG_ROOT, `${pluginId}.json`);
@@ -224,55 +278,49 @@ export function resolveGoogleAuth(
   bootstrapManagedRuntimeEnv({ repoRoot: options.repoRoot });
   if (config.provider === 'mock') {
     return {
-      provider: 'mock',
-      ready: true,
-      authenticated: true,
-      probed: true,
-      credentialSource: 'mock',
-      errors: [],
+      provider: 'mock', ready: true, authenticated: true, probed: true,
+      credentialSource: 'mock', refreshReady: false, errors: [],
       warnings: ['Mock provider enabled. No external credentials are persisted or required.'],
     };
   }
-
-  for (const envName of tokenEnvNames(service)) {
-    const token = process.env[envName]?.trim();
-    if (token) {
-      return {
-        provider: 'google-workspace',
-        ready: true,
-        authenticated: true,
-        probed: true,
-        credentialSource: `env:${envName}`,
-        accessToken: token,
-        errors: [],
-        warnings: [],
-      };
-    }
+  const cached = cachedGoogleToken(service);
+  const configured = firstEnv(tokenEnvNames(service));
+  const token = cached?.accessToken ?? configured?.value;
+  const probed = Boolean(token && verifiedToken(token));
+  const refreshReady = refreshCredentialsReady(service);
+  if (token) {
+    return {
+      provider: 'google-workspace',
+      ready: true,
+      authenticated: true,
+      probed,
+      credentialSource: cached?.source ?? `env:${configured?.name}`,
+      accessToken: token,
+      refreshReady,
+      errors: [],
+      warnings: probed ? [] : ['Google access token is configured but has not passed a live provider probe yet.'],
+    };
   }
-
   return {
-    provider: 'google-workspace',
-    ready: false,
-    authenticated: false,
-    probed: true,
+    provider: 'google-workspace', ready: false, authenticated: false, probed: false, refreshReady,
     errors: [`Set one of ${tokenEnvNames(service).join(', ')} before invoking ${service} Google Workspace actions.`],
-    warnings: [],
+    warnings: refreshReady ? ['Refresh credentials are configured but an initial access token or authorization handoff is still required.'] : [],
   };
 }
 
 export type GoogleReadinessMode =
   | 'disabled'
   | 'missing_token'
-  | 'missing_scopes'
+  | 'live_token_unverified'
   | 'mock_provider_ready'
   | 'live_provider_ready';
 
 export function resolveGoogleReadinessMode(config: GooglePluginConfig, auth: GoogleAuthState): GoogleReadinessMode {
   if (!config.enabled) return 'disabled';
   if (config.provider === 'mock' && auth.ready) return 'mock_provider_ready';
-  if (config.provider === 'google-workspace' && auth.ready) return 'live_provider_ready';
-  if (config.provider === 'google-workspace' && !auth.authenticated) return 'missing_token';
-  return 'missing_scopes';
+  if (config.provider === 'google-workspace' && auth.ready && auth.probed) return 'live_provider_ready';
+  if (config.provider === 'google-workspace' && auth.authenticated) return 'live_token_unverified';
+  return 'missing_token';
 }
 
 export function pluginStateFromGoogleAuth(config: GooglePluginConfig, auth: GoogleAuthState): {
@@ -280,53 +328,34 @@ export function pluginStateFromGoogleAuth(config: GooglePluginConfig, auth: Goog
   health: AssistantPluginHealth;
 } {
   const readinessMode = resolveGoogleReadinessMode(config, auth);
-  // Missing live credentials is a setup state, not a broken plugin, when mock is not selected.
-  const lifecycleState: AssistantPluginLifecycleState = !config.enabled
-    ? 'disabled'
-    : auth.ready
-      ? 'enabled'
-      : readinessMode === 'missing_token' || readinessMode === 'missing_scopes'
-        ? 'degraded'
-        : 'error';
-  const healthState = !config.enabled
-    ? 'disabled'
-    : auth.ready
-      ? 'ready'
-      : readinessMode === 'missing_token' || readinessMode === 'missing_scopes'
-        ? 'degraded'
-        : 'error';
+  const ready = readinessMode === 'mock_provider_ready' || readinessMode === 'live_provider_ready';
+  const lifecycleState: AssistantPluginLifecycleState = !config.enabled ? 'disabled' : ready ? 'enabled' : 'degraded';
   const userFacingStatus = readinessMode === 'disabled'
     ? 'disabled'
     : readinessMode === 'mock_provider_ready'
       ? 'mock ready'
       : readinessMode === 'live_provider_ready'
         ? 'ready'
-        : readinessMode === 'missing_token'
-          ? 'live token missing'
-          : 'missing scopes';
+        : readinessMode === 'live_token_unverified'
+          ? 'live token unverified'
+          : 'live token missing';
   return {
     lifecycleState,
     health: {
-      state: healthState,
+      state: !config.enabled ? 'disabled' : ready ? 'ready' : 'degraded',
       checkedAt: new Date().toISOString(),
-      ready: config.enabled && auth.ready,
+      ready: config.enabled && ready,
       probed: config.enabled ? auth.probed : false,
-      // Keep auth setup messages in warnings when only the token is missing so UIs
-      // classify the plugin as authorization_required instead of generically failed.
-      errors: config.enabled && readinessMode !== 'missing_token' && readinessMode !== 'missing_scopes'
-        ? [...auth.errors]
-        : [],
+      errors: [],
       warnings: !config.enabled
         ? ['Plugin is disabled. Enable it before using Google provider actions.']
-        : [
-            ...auth.warnings,
-            ...(readinessMode === 'missing_token' || readinessMode === 'missing_scopes' ? auth.errors : []),
-          ],
+        : [...auth.warnings, ...(!auth.authenticated ? auth.errors : [])],
       details: {
         provider: config.provider,
         accountEmail: config.accountEmail,
         credentialSource: auth.credentialSource,
-        credentialPersistence: 'credentials are never persisted by repo-harness',
+        credentialPersistence: 'tokens are loaded from managed process secrets and are never written to repository state',
+        refreshReady: auth.refreshReady === true,
         readinessMode,
         userFacingStatus,
       },
@@ -370,7 +399,49 @@ function serviceBaseUrl(service: GoogleService): string {
   }
 }
 
-export async function googleApiRequest<T>(options: GoogleApiRequestOptions): Promise<T> {
+async function refreshGoogleAccessToken(service: GoogleService, timeoutMs: number): Promise<string | undefined> {
+  const refreshToken = firstEnv(refreshTokenEnvNames(service));
+  const clientId = firstEnv(clientIdEnvNames(service));
+  const clientSecret = firstEnv(clientSecretEnvNames(service));
+  if (!refreshToken || !clientId || !clientSecret) return undefined;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const body = new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken.value,
+      client_id: clientId.value,
+      client_secret: clientSecret.value,
+    });
+    const response = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
+      body: body.toString(),
+      signal: controller.signal,
+    });
+    const raw = await response.text();
+    let parsed: Record<string, unknown> = {};
+    try { parsed = raw ? JSON.parse(raw) as Record<string, unknown> : {}; } catch { parsed = { raw }; }
+    const accessToken = typeof parsed.access_token === 'string' ? parsed.access_token.trim() : '';
+    if (!response.ok || !accessToken) {
+      throw new AssistantPluginError('PLUGIN_AUTH_FAILED', 'Google refresh token exchange failed.', {
+        retryable: false,
+        details: { service, status: response.status, providerError: parsed },
+      });
+    }
+    const expiresIn = typeof parsed.expires_in === 'number' ? Math.max(60, parsed.expires_in) : 3600;
+    GOOGLE_ACCESS_TOKEN_CACHE.set(service, {
+      accessToken,
+      expiresAt: Date.now() + expiresIn * 1000,
+      source: `refresh:${refreshToken.name}`,
+    });
+    return accessToken;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function googleFetch(options: GoogleApiRequestOptions, accessToken: string): Promise<{ response: Response; parsed: Record<string, unknown> }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 60_000);
   const url = `${serviceBaseUrl(options.service)}${options.path}${buildQueryString(options.query ?? {})}`;
@@ -378,7 +449,7 @@ export async function googleApiRequest<T>(options: GoogleApiRequestOptions): Pro
     const response = await fetch(url, {
       method: options.method ?? 'GET',
       headers: {
-        authorization: `Bearer ${options.accessToken}`,
+        authorization: `Bearer ${accessToken}`,
         accept: 'application/json',
         ...(options.body === undefined ? {} : { 'content-type': 'application/json' }),
       },
@@ -386,49 +457,60 @@ export async function googleApiRequest<T>(options: GoogleApiRequestOptions): Pro
       signal: controller.signal,
     });
     const raw = await response.text();
-    const parsed = raw ? JSON.parse(raw) as Record<string, unknown> : undefined;
+    let parsed: Record<string, unknown> = {};
+    try { parsed = raw ? JSON.parse(raw) as Record<string, unknown> : {}; } catch { parsed = { raw }; }
+    return { response, parsed };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export function clearGoogleAuthCachesForTest(): void {
+  GOOGLE_ACCESS_TOKEN_CACHE.clear();
+  VERIFIED_GOOGLE_TOKEN_FINGERPRINTS.clear();
+}
+
+export async function googleApiRequest<T>(options: GoogleApiRequestOptions): Promise<T> {
+  try {
+    const cached = cachedGoogleToken(options.service);
+    let accessToken = cached?.accessToken ?? options.accessToken;
+    let attempt = await googleFetch(options, accessToken);
+    if ((attempt.response.status === 401 || attempt.response.status === 403) && refreshCredentialsReady(options.service)) {
+      const refreshed = await refreshGoogleAccessToken(options.service, options.timeoutMs ?? 60_000);
+      if (refreshed) {
+        accessToken = refreshed;
+        attempt = await googleFetch(options, accessToken);
+      }
+    }
+    const { response, parsed } = attempt;
     if (response.status === 401 || response.status === 403) {
       throw new AssistantPluginError('PLUGIN_AUTH_FAILED', 'Google provider rejected the access token.', {
         retryable: false,
-        details: {
-          service: options.service,
-          status: response.status,
-          providerError: parsed,
-        },
+        details: { service: options.service, status: response.status, providerError: parsed, refreshReady: refreshCredentialsReady(options.service) },
       });
     }
     if (response.status === 429) {
       throw new AssistantPluginError('PLUGIN_RATE_LIMITED', 'Google provider rate limited the request.', {
         retryable: true,
-        details: {
-          service: options.service,
-          status: response.status,
-          retryAfter: response.headers.get('retry-after') ?? undefined,
-          providerError: parsed,
-        },
+        details: { service: options.service, status: response.status, retryAfter: response.headers.get('retry-after') ?? undefined, providerError: parsed },
       });
     }
     if (response.status >= 500) {
       throw new AssistantPluginError('PLUGIN_PROVIDER_UNAVAILABLE', 'Google provider is temporarily unavailable.', {
         retryable: true,
-        details: {
-          service: options.service,
-          status: response.status,
-          providerError: parsed,
-        },
+        details: { service: options.service, status: response.status, providerError: parsed },
       });
     }
     if (!response.ok) {
       throw new AssistantPluginError('PLUGIN_PROVIDER_ERROR', `Google provider returned HTTP ${response.status}.`, {
         retryable: false,
-        details: {
-          service: options.service,
-          status: response.status,
-          providerError: parsed,
-        },
+        details: { service: options.service, status: response.status, providerError: parsed },
       });
     }
-    return (parsed ?? {}) as T;
+    VERIFIED_GOOGLE_TOKEN_FINGERPRINTS.set(tokenFingerprint(accessToken), Date.now());
+    const current = cachedGoogleToken(options.service);
+    if (current?.accessToken === accessToken) GOOGLE_ACCESS_TOKEN_CACHE.set(options.service, { ...current, expiresAt: Math.max(current.expiresAt, Date.now() + 60_000) });
+    return parsed as T;
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
       throw new AssistantPluginError('PLUGIN_PROVIDER_TIMEOUT', 'Google provider request timed out.', {
@@ -437,13 +519,8 @@ export async function googleApiRequest<T>(options: GoogleApiRequestOptions): Pro
       });
     }
     throw toAssistantPluginError(error, {
-      code: 'PLUGIN_PROVIDER_ERROR',
-      message: 'Google provider request failed.',
-      retryable: true,
-      details: { service: options.service },
+      code: 'PLUGIN_PROVIDER_ERROR', message: 'Google provider request failed.', retryable: true, details: { service: options.service },
     });
-  } finally {
-    clearTimeout(timeout);
   }
 }
 

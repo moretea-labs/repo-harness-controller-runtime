@@ -20,6 +20,8 @@ export interface ScheduleTrigger {
   type: ScheduleTriggerType;
   everyMinutes?: number;
   cronExpression?: string;
+  timezone?: string;
+  catchUpMinutes?: number;
   calendarAt?: string;
   condition?: ScheduleCondition;
   eventName?: string;
@@ -45,6 +47,7 @@ export interface SchedulePolicy {
 
 export interface ScheduleAction {
   operation: string;
+  target?: 'repository-tool' | 'mcp-tool' | 'runtime' | 'workspace-agent';
   arguments?: Record<string, unknown>;
   priority?: ExecutionJobPriority;
   resourceClaims?: ResourceClaimSpec[];
