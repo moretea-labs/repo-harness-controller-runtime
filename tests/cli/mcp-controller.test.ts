@@ -700,7 +700,7 @@ describe("MCP controller profile", () => {
       expect(coreNames).toContain("create_campaign");
       expect(coreNames.length).toBeGreaterThanOrEqual(100);
       // Keep the public controller surface explicit and bounded; intentional additions must update this contract.
-      expect(coreNames.length).toBe(130);
+      expect(coreNames.length).toBe(134);
       expect(exposedControllerToolDefinitions(advanced).map((tool) => tool.name)).toEqual(coreNames);
       expect(exposedControllerToolDefinitions(advanced).map((tool) => tool.name)).toContain("create_campaign");
       expect(exposedControllerToolDefinitions(advanced).map((tool) => tool.name)).toContain("submit_campaign_review");
