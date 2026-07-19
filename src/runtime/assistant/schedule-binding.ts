@@ -126,7 +126,7 @@ export function bindAssistantRoutineSchedule(
       priority: 'P3',
       resourceClaims: [{ resourceKey: `assistant-routine:${repository.repoId}:${routine.routineId}`, mode: 'exclusive' }],
     },
-    stopConditions: ['external_blocker'],
+    stopConditions: [],
   });
   const at = now();
   const binding: AssistantRoutineScheduleBinding = {
@@ -167,5 +167,5 @@ export function updateAssistantRoutineLifecycle(
     store.bindings = [binding, ...store.bindings.filter((entry) => entry.routineId !== routineId)];
     writeBindings(repository.canonicalRoot, store);
   }
-  return { routine: getAssistantRoutine(repository.canonicalRoot, routineId), binding };
+  return { routine, binding };
 }

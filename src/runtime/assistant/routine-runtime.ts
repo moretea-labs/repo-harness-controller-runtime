@@ -282,15 +282,8 @@ export async function executeAssistantRoutineRuntime(input: {
       messages.push(summarizeMessage(raw));
     }
     const proposals = proposalsFor(messages);
+    const truncated = messageIds.length > messages.length;
     const report = renderReport(messages, proposals, windowStart, windowEnd);
-    saveCursor(input.repository.canonicalRoot, {
-      schemaVersion: 1,
-      routineId: routine.routineId,
-      lastSuccessfulAt: windowEnd,
-      historyId: stringValue(profile.historyId),
-      processedMessageIds: [...messageIds, ...cursor.processedMessageIds].slice(0, 1_000),
-      updatedAt: now(),
-    });
     run = saveRun(input.repository.canonicalRoot, {
       ...run,
       status: 'completed',
@@ -311,10 +304,19 @@ export async function executeAssistantRoutineRuntime(input: {
       relatedRequestId: input.requestId,
       jobIds: [],
       recommendations: [
+        ...(truncated ? ['本次达到正文读取上限，下一次将从相同时间窗口继续处理剩余邮件。'] : []),
         '发送邮件和移入垃圾箱仍需单独明确确认。',
         '可基于行动建议创建草稿、任务或归档审批。',
       ],
-      data: { run, messages, proposals },
+      data: { run, messages, proposals, truncated },
+    });
+    saveCursor(input.repository.canonicalRoot, {
+      schemaVersion: 1,
+      routineId: routine.routineId,
+      lastSuccessfulAt: truncated ? windowStart : windowEnd,
+      historyId: stringValue(profile.historyId),
+      processedMessageIds: [...messages.map((message) => message.id), ...cursor.processedMessageIds].slice(0, 1_000),
+      updatedAt: now(),
     });
     return { run, messages, proposals };
   } catch (error) {
