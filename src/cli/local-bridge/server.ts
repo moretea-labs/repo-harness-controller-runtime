@@ -166,6 +166,8 @@ import { updateAssistantRoutineLifecycle } from "../../runtime/assistant/schedul
 import { assistantOpenApiSchema } from "../../runtime/assistant/openapi";
 import { completeGoogleOAuthLogin } from "../../runtime/safe-tooling/google-oauth-broker";
 import { approveAssistantActionProposal, listAssistantActionProposals, rejectAssistantActionProposal } from "../../runtime/assistant/action-proposals";
+import { assistantModelReadiness } from "../../runtime/assistant/model-provider";
+import { createAssistantStandingGrant, listAssistantStandingGrants, revokeAssistantStandingGrant } from "../../runtime/assistant/standing-grants";
 import { buildAssistantReadinessReport } from "../../runtime/assistant/readiness";
 import { listWebTargets, previewBrowserDomainAccess, summarizePluginForLowInterception } from "../../runtime/safe-tooling";
 import { buildModelClientSummary, buildModelControlPlaneSummary, deepSeekControllerManifest, deepSeekFunctionToolManifest, prepareDeepSeekControllerHandoff, prepareDeepSeekControllerRequest, prepareDeepSeekToolCall } from "../../runtime/model-clients";
@@ -2135,6 +2137,51 @@ export async function startLocalBridgeServer(
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
+  });
+
+  app.get("/api/assistant/model", (_request, response) => {
+    response.json(assistantModelReadiness());
+  });
+
+  app.get("/api/assistant/standing-grants", (request, response) => {
+    try {
+      const repository = requestRepositorySelection(request, options, controllerHome);
+      response.json(listAssistantStandingGrants(controllerHome, repository, {
+        status: typeof request.query.status === "string" ? request.query.status as any : undefined,
+        limit: Number(request.query.limit) || undefined,
+      }));
+    } catch (error) { response.status(400).json({ error: errorMessage(error) }); }
+  });
+
+  app.post("/api/assistant/standing-grants", (request, response) => {
+    try {
+      const repository = requestRepositorySelection(request, options, controllerHome);
+      response.status(201).json({ grant: createAssistantStandingGrant(controllerHome, repository, {
+        name: queryString(request.body?.name),
+        pluginId: queryString(request.body?.pluginId) ?? "",
+        actionId: queryString(request.body?.actionId) ?? "",
+        routineIds: Array.isArray(request.body?.routineIds) ? request.body.routineIds : undefined,
+        senderAllowlist: Array.isArray(request.body?.senderAllowlist) ? request.body.senderAllowlist : undefined,
+        subjectContains: Array.isArray(request.body?.subjectContains) ? request.body.subjectContains : undefined,
+        minConfidence: typeof request.body?.minConfidence === "number" ? request.body.minConfidence : undefined,
+        maxPerRun: typeof request.body?.maxPerRun === "number" ? request.body.maxPerRun : undefined,
+        expiresInDays: typeof request.body?.expiresInDays === "number" ? request.body.expiresInDays : undefined,
+        confirmAuthorization: request.body?.confirmAuthorization === true,
+        origin: { surface: "local-ui", actor: "assistant-standing-grant-api" },
+      }) });
+    } catch (error) { response.status(400).json({ error: errorMessage(error) }); }
+  });
+
+  app.post("/api/assistant/standing-grants/:grantId/revoke", (request, response) => {
+    try {
+      const repository = requestRepositorySelection(request, options, controllerHome);
+      response.json({ grant: revokeAssistantStandingGrant(controllerHome, repository, {
+        grantId: request.params.grantId,
+        reason: queryString(request.body?.reason),
+        confirmAuthorization: request.body?.confirmAuthorization === true,
+        origin: { surface: "local-ui", actor: "assistant-standing-grant-api" },
+      }) });
+    } catch (error) { response.status(400).json({ error: errorMessage(error) }); }
   });
 
   app.get("/api/assistant/proposals", (request, response) => {

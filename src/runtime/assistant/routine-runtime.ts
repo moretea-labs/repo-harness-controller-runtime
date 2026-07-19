@@ -6,10 +6,13 @@ import { executeAssistantPluginAction } from '../plugins/store';
 import { isAssistantPluginError } from '../plugins/errors';
 import {
   createAssistantActionProposals,
+  listAssistantActionProposals,
   type AssistantActionProposal,
   type AssistantActionProposalInput,
 } from './action-proposals';
 import { addAssistantInboxItem, getAssistantRoutine, touchAssistantRoutineRun } from './store';
+import { analyzeAssistantMessages, type AssistantModelAnalysis } from './model-provider';
+import { applyAssistantStandingGrants, type StandingGrantExecutionResult } from './standing-grants';
 
 export type AssistantRoutineRunStatus = 'collecting' | 'completed' | 'failed' | 'auth_required';
 
@@ -25,6 +28,15 @@ export interface AssistantRoutineRun {
   collectedItems: number;
   processedItems: number;
   proposedActions: number;
+  autoSubmittedActions?: number;
+  analysis?: {
+    usedModel: boolean;
+    provider: AssistantModelAnalysis['provider'];
+    model?: string;
+    promptVersion: string;
+    fallbackReason?: string;
+    warnings: string[];
+  };
   summary?: string;
   error?: string;
   createdAt: string;
@@ -165,6 +177,11 @@ function senderAddress(value: string): string | undefined {
   return value.match(/<([^>]+@[^>]+)>/)?.[1] ?? value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0];
 }
 
+function protectedMessageSummary(message: GmailMessageSummary): boolean {
+  return /(security|authentication|password|login|billing|invoice|incident|production|quota|permission|dependabot|安全|登录|账单|故障|告警|权限)/i
+    .test(`${message.subject} ${message.snippet}`);
+}
+
 function proposalsFor(messages: GmailMessageSummary[]): AssistantActionProposalInput[] {
   const proposals: AssistantActionProposalInput[] = [];
   for (const message of messages) {
@@ -174,7 +191,8 @@ function proposalsFor(messages: GmailMessageSummary[]): AssistantActionProposalI
       proposals.push({
         pluginId: 'gmail', actionId: 'create_draft', evidenceMessageIds: [message.id],
         reason: `Prepare a reviewable reply draft for “${message.subject}”.`, confidence: 0.75,
-        executable: Boolean(to),
+        executable: false,
+        context: { sender: to ?? message.from, subject: message.subject, protected: protectedMessageSummary(message) },
         arguments: to ? { to: [to], subject: message.subject.startsWith('Re:') ? message.subject : `Re: ${message.subject}`, body_text: '[Draft response pending review]' } : {},
       });
     }
@@ -182,13 +200,15 @@ function proposalsFor(messages: GmailMessageSummary[]): AssistantActionProposalI
       proposals.push({
         pluginId: 'google_tasks', actionId: 'create_task', evidenceMessageIds: [message.id],
         reason: `Create a task from “${message.subject}”.`, confidence: 0.8,
+        context: { sender: message.from, subject: message.subject, protected: protectedMessageSummary(message) },
         arguments: { title: message.subject, notes: `${message.from}\n${message.snippet}`.slice(0, 2_000) },
       });
     }
-    if (/(newsletter|digest|marketing|unsubscribe|推广|营销|周报)/i.test(text)) {
+    if (/(newsletter|digest|marketing|unsubscribe|推广|营销|周报)/i.test(text) && !protectedMessageSummary(message)) {
       proposals.push({
         pluginId: 'gmail', actionId: 'archive_message', evidenceMessageIds: [message.id],
         reason: `Archive candidate: “${message.subject}”.`, confidence: 0.7,
+        context: { sender: message.from, subject: message.subject, protected: false },
         arguments: { message_id: message.id },
       });
     }
@@ -196,11 +216,20 @@ function proposalsFor(messages: GmailMessageSummary[]): AssistantActionProposalI
   return proposals.slice(0, 50);
 }
 
-function renderReport(messages: GmailMessageSummary[], proposals: AssistantActionProposalInput[], windowStart: string, windowEnd: string): string {
+function renderReport(
+  messages: GmailMessageSummary[],
+  proposals: AssistantActionProposalInput[],
+  windowStart: string,
+  windowEnd: string,
+  analysis: AssistantModelAnalysis,
+  standingGrantResults: StandingGrantExecutionResult[],
+): string {
   const important = messages.filter((message) => /(security|alert|billing|invoice|jira|github|production|incident|安全|账单|故障|告警)/i.test(`${message.subject} ${message.snippet}`));
   const lines = [
     `窗口：${windowStart} — ${windowEnd}`,
-    `读取邮件：${messages.length} 封；重要候选：${important.length} 封；行动建议：${proposals.length} 项。`,
+    `读取邮件：${messages.length} 封；重要候选：${important.length} 封；行动建议：${proposals.length} 项；自动提交：${standingGrantResults.filter((entry) => entry.status === 'submitted').length} 项。`,
+    `分析方式：${analysis.usedModel ? `${analysis.provider}${analysis.model ? ` (${analysis.model})` : ''}` : 'deterministic rules'}.`,
+    ...(analysis.summary ? ['', '模型摘要：', analysis.summary] : []),
     '',
     '重要邮件候选：',
     ...(important.length > 0
@@ -212,6 +241,12 @@ function renderReport(messages: GmailMessageSummary[], proposals: AssistantActio
     '',
     '行动建议（仅提议，不会自动发送或删除）：',
     ...(proposals.length > 0 ? proposals.slice(0, 20).map((proposal) => `- ${proposal.reason}`) : ['- 暂无。']),
+    '',
+    '自动执行结果：',
+    ...(standingGrantResults.length > 0
+      ? standingGrantResults.slice(0, 20).map((entry) => `- ${entry.status}: ${entry.proposalId}${entry.reason ? ` — ${entry.reason}` : ''}`)
+      : ['- 没有匹配 Standing Grant。']),
+    ...(analysis.warnings.length > 0 ? ['', '分析警告：', ...analysis.warnings.map((warning) => `- ${warning}`)] : []),
   ];
   return lines.join('\n');
 }
@@ -244,7 +279,13 @@ export async function executeAssistantRoutineRuntime(input: {
   requestId: string;
   origin: ExecutionJobOrigin;
   occurrenceId?: string;
-}): Promise<{ run: AssistantRoutineRun; messages: GmailMessageSummary[]; proposals: AssistantActionProposal[] }> {
+}): Promise<{
+  run: AssistantRoutineRun;
+  messages: GmailMessageSummary[];
+  proposals: AssistantActionProposal[];
+  analysis?: AssistantModelAnalysis;
+  standingGrantResults?: StandingGrantExecutionResult[];
+}> {
   const routine = getAssistantRoutine(input.repository.canonicalRoot, input.routineId);
   if (routine.status !== 'enabled') throw new Error(`ASSISTANT_ROUTINE_NOT_ENABLED: ${routine.routineId}`);
   const cursor = readCursor(input.repository.canonicalRoot, routine.routineId);
@@ -329,21 +370,38 @@ export async function executeAssistantRoutineRuntime(input: {
       const raw = recordValue(fetched.message && typeof fetched.message === 'object' ? fetched.message : fetched);
       messages.push(summarizeMessage(raw));
     }
-    const proposalInputs = proposalsFor(messages);
+    const modelAnalysis = await analyzeAssistantMessages({ messages, routineGoal: routine.naturalLanguageGoal });
+    const proposalInputs = modelAnalysis.usedModel ? modelAnalysis.proposals : proposalsFor(messages);
     const proposals = createAssistantActionProposals(input.controllerHome, input.repository, { routineId: routine.routineId, runId, proposals: proposalInputs });
+    const standingGrantApplication = applyAssistantStandingGrants(input.controllerHome, input.repository, { routineId: routine.routineId, runId, proposals });
+    const persistedProposals = listAssistantActionProposals(input.controllerHome, input.repository, { limit: 500 }).proposals
+      .filter((proposal) => proposal.runId === runId);
+    const analysis: AssistantModelAnalysis = {
+      ...modelAnalysis,
+      warnings: [...modelAnalysis.warnings, ...standingGrantApplication.warnings],
+    };
     const hydrationTruncated = messageIds.length > messages.length;
     const paginationIncomplete = Boolean(nextContinuation);
     const truncated = hydrationTruncated || paginationIncomplete;
     const savedContinuation = truncated
       ? hydrationTruncated ? startingContinuation : nextContinuation
       : undefined;
-    const report = renderReport(messages, proposals, windowStart, windowEnd);
+    const report = renderReport(messages, proposalInputs, windowStart, windowEnd, analysis, standingGrantApplication.results);
     run = saveRun(input.repository.canonicalRoot, {
       ...run,
       status: 'completed',
       collectedItems: messageIds.length,
       processedItems: messages.length,
-      proposedActions: proposals.length,
+      proposedActions: persistedProposals.length,
+      autoSubmittedActions: standingGrantApplication.results.filter((entry) => entry.status === 'submitted').length,
+      analysis: {
+        usedModel: analysis.usedModel,
+        provider: analysis.provider,
+        model: analysis.model,
+        promptVersion: analysis.promptVersion,
+        fallbackReason: analysis.fallbackReason,
+        warnings: analysis.warnings,
+      },
       summary: report,
       completedAt: now(),
     });
@@ -351,18 +409,19 @@ export async function executeAssistantRoutineRuntime(input: {
     addAssistantInboxItem(input.repository.canonicalRoot, {
       kind: 'routine_result',
       title: `Routine 已完成：${routine.name}`,
-      summary: `读取 ${messages.length} 封新邮件，生成 ${proposals.length} 项只读行动建议。`,
+      summary: `读取 ${messages.length} 封新邮件，生成 ${persistedProposals.length} 项行动建议，自动提交 ${standingGrantApplication.results.filter((entry) => entry.status === 'submitted').length} 项。`,
       body: report,
       source: 'routine',
       relatedRoutineId: routine.routineId,
       relatedRequestId: input.requestId,
-      jobIds: [],
+      jobIds: standingGrantApplication.results.flatMap((entry) => entry.executionJobId ? [entry.executionJobId] : []),
       recommendations: [
         ...(truncated ? ['本次达到正文读取上限，下一次将从相同时间窗口继续处理剩余邮件。'] : []),
         '发送邮件和移入垃圾箱仍需单独明确确认。',
         '可基于行动建议创建草稿、任务或归档审批。',
+        ...(analysis.fallbackReason ? ['模型分析不可用，本次已安全回退到规则引擎。'] : []),
       ],
-      data: { run, messages, proposals, truncated },
+      data: { run, messages, proposals: persistedProposals, truncated, analysis, standingGrantResults: standingGrantApplication.results },
     });
     saveCursor(input.repository.canonicalRoot, {
       schemaVersion: 1,
@@ -373,7 +432,7 @@ export async function executeAssistantRoutineRuntime(input: {
       processedMessageIds: [...messages.map((message) => message.id), ...cursor.processedMessageIds].slice(0, 1_000),
       updatedAt: now(),
     });
-    return { run, messages, proposals };
+    return { run, messages, proposals: persistedProposals, analysis, standingGrantResults: standingGrantApplication.results };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const authRequired = /PLUGIN_AUTH|UNAUTHENTICATED|invalid credentials/i.test(message);

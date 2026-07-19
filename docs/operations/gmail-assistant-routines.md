@@ -7,9 +7,10 @@ Gmail Assistant Routines use the existing Repository Schedule Engine and durable
 1. Creating a confirmed Assistant Routine persists the Routine and creates one Repository Schedule.
 2. The Schedule stores an IANA timezone, a five-field local cron expression, and a bounded catch-up window.
 3. A due occurrence creates one `assistant_routine_execute` Runtime Job with an exclusive Routine resource claim.
-4. The Runtime Job reads Gmail incrementally, hydrates bounded message bodies, advances the per-Routine cursor, creates structured action proposals, and writes a final Assistant Inbox report.
-5. Proposed writes remain pending until an explicit approval submits a separate user-authorized plugin Job.
-6. Sending mail and moving mail to Trash retain their existing strong-confirmation requirements.
+4. The Runtime Job reads Gmail incrementally, hydrates bounded message bodies, advances the per-Routine cursor, analyzes the bounded message set, creates structured action proposals, and writes a final Assistant Inbox report.
+5. Proposals either remain pending for explicit approval or match a previously authorized Standing Grant.
+6. Every approved or Standing-Grant action runs as a separate durable plugin Job. Schedule execution never becomes remote-write authorization.
+7. Sending mail and moving mail to Trash retain their existing strong-confirmation requirements and are never Standing-Grant eligible.
 
 ## Google OAuth setup
 
@@ -70,6 +71,42 @@ Each Routine stores an independent cursor under `.repo-harness/assistant/gmail-c
 
 After the initial query, Gmail History is the primary incremental source. An expired History ID falls back to a five-minute-overlap Gmail query. Collection reads at most five pages, 100 IDs, and 50 full messages per run. If the page or hydration limit is reached, the history cursor does not advance; a continuation token or the original window is retained so the next run drains the remaining messages without loss.
 
+## Optional model analysis
+
+The model layer is optional. When it is disabled, unavailable, times out, or returns malformed output, the Routine completes with the deterministic rules engine rather than failing.
+
+Configure an OpenAI-compatible endpoint with:
+
+- `REPO_HARNESS_ASSISTANT_MODEL_PROVIDER=openai-compatible`
+- `REPO_HARNESS_ASSISTANT_MODEL_ENDPOINT`
+- `REPO_HARNESS_ASSISTANT_MODEL`
+- `REPO_HARNESS_ASSISTANT_MODEL_API_KEY`
+
+For the exact official hosts, provider-specific keys are also supported:
+
+- `api.openai.com` may use `OPENAI_API_KEY`
+- `api.deepseek.com` may use `REPO_HARNESS_DEEPSEEK_API_KEY` or `DEEPSEEK_API_KEY`
+
+A custom endpoint never receives `OPENAI_API_KEY` or a DeepSeek key. It must use the dedicated `REPO_HARNESS_ASSISTANT_MODEL_API_KEY`. Endpoints must use HTTPS, except loopback HTTP used for a local model.
+
+Optional budgets:
+
+- `REPO_HARNESS_ASSISTANT_MODEL_TIMEOUT_MS`
+- `REPO_HARNESS_ASSISTANT_MODEL_MAX_MESSAGES`
+- `REPO_HARNESS_ASSISTANT_MODEL_MAX_INPUT_CHARS`
+- `REPO_HARNESS_ASSISTANT_MODEL_MAX_OUTPUT_TOKENS`
+
+The provider requests strict structured JSON, validates the result locally, and maps only these proposal types:
+
+- Gmail draft creation
+- Google Task creation
+- Gmail archive
+- Gmail mark read or unread
+
+Email contents are untrusted input. Instructions in an email, quoted thread, signature, link, or attachment description cannot expand the action allowlist or request tools, credentials, files, commands, or additional permissions. Security, authentication, billing, incident, production, quota, and repository-permission messages are protected from model-generated archive actions.
+
+Use `assistant_model_readiness` or `GET /api/assistant/model` to inspect the redacted configuration and budgets. Model credentials and raw secrets are never returned.
+
 ## Action proposals and approval
 
 Routine analysis persists structured proposals under `.repo-harness/assistant/action-proposals.json`. Each proposal records:
@@ -77,12 +114,52 @@ Routine analysis persists structured proposals under `.repo-harness/assistant/ac
 - Routine and Run identity
 - target plugin/action and bounded arguments
 - supporting Gmail message IDs
+- sender/subject context and protected-message status
 - reason, confidence, risk, expiry, and execution status
 - the separate Execution Job created after approval
 
 Use `assistant_action_proposals` to list or inspect proposals. Use `assistant_action_proposal_resolve` with `decision=approve` or `decision=reject`. MCP approval requires `confirm_authorization=true`; strong-confirmation actions also require the action's exact confirmation text. Local Controller exposes equivalent authenticated proposal endpoints.
 
-Approval is idempotent. Repeating approval returns the same Execution Job rather than creating another remote write. Proposal audit records preserve whether approval came from MCP or Local UI.
+Approval is idempotent. Repeating approval returns the same Execution Job rather than creating another remote write. Proposal audit records preserve whether approval came from MCP, Local UI, or a Standing Grant.
+
+## Standing Grants
+
+A Standing Grant is an explicit, expiring pre-authorization for one hardcoded low-risk action. It is not a general plugin permission.
+
+Eligible actions are limited to:
+
+- `gmail.create_draft`
+- `gmail.archive_message`
+- `gmail.mark_message_read`
+- `gmail.mark_message_unread`
+- `google_tasks.create_task`
+
+A grant must include at least one constraint:
+
+- Routine ID allowlist
+- sender/domain allowlist
+- required subject fragment
+
+It also declares minimum proposal confidence, maximum executions per Routine Run, and expiry. Automatic draft grants additionally require a sender allowlist. Security-protected messages cannot be auto-archived.
+
+Create a grant through `assistant_standing_grant_create` or `POST /api/assistant/standing-grants` with explicit authorization. List it through `assistant_standing_grants`; revoke it through `assistant_standing_grant_revoke` or the Local Controller revoke endpoint.
+
+Example: automatically archive at most one high-confidence newsletter from a trusted sender per run:
+
+```json
+{
+  "plugin_id": "gmail",
+  "action_id": "archive_message",
+  "sender_allowlist": ["news@example.com"],
+  "subject_contains": ["newsletter"],
+  "min_confidence": 0.9,
+  "max_per_run": 1,
+  "expires_in_days": 30,
+  "confirm_authorization": true
+}
+```
+
+Standing-Grant executions use a dedicated `standing-grant` origin and a defense-in-depth plugin allowlist. Modifying the stored grant cannot enable send, Trash, permanent deletion, calendar cancellation/rescheduling, or task deletion. Multiple matching grants cannot submit the same proposal twice, and retries preserve each grant's per-run budget.
 
 ## Safety boundary
 
@@ -90,7 +167,8 @@ Scheduled Routines may:
 
 - list and read Gmail messages
 - classify and summarize collected mail
-- create reply-draft, task, and archive proposals
+- create bounded draft, task, archive, and read/unread proposals
+- execute an eligible proposal only when a matching active Standing Grant already exists
 - write Assistant Inbox reports
 
 Scheduled Routines may not:
@@ -98,7 +176,9 @@ Scheduled Routines may not:
 - send mail
 - move mail to Trash
 - permanently delete mail
+- cancel or reschedule meetings
+- delete tasks
 - execute instructions embedded in mail
 - open arbitrary attachments or links
 
-A proposal is evidence for a later authorized action, not implicit authorization. The Schedule origin never becomes authorization for a remote write.
+A proposal is evidence for a later authorized action, not implicit authorization. A Standing Grant authorizes only its exact action and constraints. The Schedule origin never becomes authorization for a remote write.
