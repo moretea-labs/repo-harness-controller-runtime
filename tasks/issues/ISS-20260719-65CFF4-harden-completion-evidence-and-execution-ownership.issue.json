@@ -4,8 +4,8 @@
   "title": "Harden completion evidence and execution ownership",
   "slug": "harden-completion-evidence-and-execution-ownership",
   "kind": "bug",
-  "status": "planned",
-  "summary": "Eliminate false task/work completion caused by untrusted acceptance evidence and weak WorkContract references, then harden operation receipts against stale execution ownership without changing external authorization semantics.",
+  "status": "done",
+  "summary": "Completed compatibility-preserving hardening of acceptance provenance, WorkContract completion evidence, and operation receipt ownership fencing. Full package:test passed. Release Readiness reaches the pre-existing open-source audit blocker in stable-supervisor-hardening.test.ts personal macOS path fixtures; no blocker was introduced by this issue.",
   "goals": [
     "Successful Runs must not fabricate passed acceptance criteria.",
     "Missing acceptance evidence must remain incomplete rather than become a failure or false success.",
@@ -28,17 +28,18 @@
     "Targeted tests and package checks pass; final code is merged to main and isolated resources are cleaned."
   ],
   "relatedArtifacts": [
-    "Fable completion-evidence review",
-    "src/cli/controller/execution-policy.ts",
-    "src/runtime/control-plane/facade/goal-workloop.ts",
-    "src/runtime/execution/jobs/receipt-store.ts"
+    "ea856e1b acceptance provenance",
+    "f4ca6063 meaningful WorkContract evidence",
+    "7cedea46 receipt ownership fencing",
+    "package:test succeeded EVD-1784433805346-0e12ae9b",
+    "release-readiness pre-existing audit blocker EVD-1784433170746-d946fbdf"
   ],
   "tasks": [
     {
       "id": "T1",
       "title": "Make acceptance evidence provenance-aware",
       "objective": "Implement a backward-compatible acceptance evidence model. Preserve ok:boolean for callers and stored data, add optional outcome/source provenance, stop successful Run completion and legacy auto-completion paths from fabricating passed acceptance, normalize recognizable legacy auto-generated evidence as not_evaluated, and distinguish passed/failed/incomplete in verification gating. Map incomplete to verifying rather than changes_requested. Update progress projection and all directly affected tests. Do not reopen historical terminal Tasks automatically and do not weaken high/destructive human acceptance gates.",
-      "status": "blocked",
+      "status": "done",
       "dependsOn": [],
       "allowedPaths": [
         "src/cli/controller/types.ts",
@@ -78,20 +79,21 @@
       "recommendedAgent": "codex",
       "notes": [
         "Accepted RUN-iss-20260719-65cff4-t1-1784430023426-f6d406b4 for asynchronous launch.",
-        "RUN-iss-20260719-65cff4-t1-1784430023426-f6d406b4 ended as unknown; explicit retry is required. worker did not start before the startup deadline"
+        "RUN-iss-20260719-65cff4-t1-1784430023426-f6d406b4 ended as unknown; explicit retry is required. worker did not start before the startup deadline",
+        "Implemented directly after isolated Codex Worker startup timeout. Acceptance evidence is provenance-aware and backward compatible; automatic Run completion records not_evaluated, explicit human review remains passed. package:check:type, package:check:controller-v8, targeted regressions, and package:test passed. Commit ea856e1b."
       ],
       "runIds": [
         "RUN-iss-20260719-65cff4-t1-1784430023426-f6d406b4"
       ],
       "createdAt": "2026-07-19T03:00:02.352Z",
-      "updatedAt": "2026-07-19T03:00:59.352Z",
+      "updatedAt": "2026-07-19T04:04:18.033Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     },
     {
       "id": "T2",
       "title": "Require meaningful WorkContract completion evidence",
       "objective": "Replace weak boolean completion evidence in goal-workloop with a bounded evaluator. WorktreeRef alone, workerRef alone, any arbitrary checkRef, or a Codex/Claude patch proposal must never be sufficient for WorkContract succeeded. Require all declared checks to have valid_pass; classify valid_fail as failed and infrastructure/invalid/skipped/missing as incomplete. Preserve read-only/no-check compatibility conservatively, retain explicit waiting_for_review with actionable reasons when mutating completion evidence is absent, and add regression tests. Do not redesign all WorkContract schema or introduce broad migrations.",
-      "status": "planned",
+      "status": "done",
       "dependsOn": [
         "T1"
       ],
@@ -123,17 +125,19 @@
       ],
       "risk": "high",
       "recommendedAgent": "codex",
-      "notes": [],
+      "notes": [
+        "WorkContract completion now requires all declared checks to have valid_pass or, for no-check result work, durable artifact/evidence IDs. workerRef, worktreeRef, partial checks, and patch proposals cannot unlock success. Targeted tests and package architecture/controller gates passed. Commit f4ca6063."
+      ],
       "runIds": [],
       "createdAt": "2026-07-19T03:00:02.352Z",
-      "updatedAt": "2026-07-19T03:00:02.352Z",
+      "updatedAt": "2026-07-19T04:04:32.073Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     },
     {
       "id": "T3",
       "title": "Fence operation receipts and verify authorization isolation",
       "objective": "Harden OperationReceipt writes and recovery with current attempt and Worker ownership validation. Preserve schema compatibility through additive metadata only where needed. Ignore stale receipts from replacement attempts/PIDs; keep terminal Job transition fencing intact. Add race/recovery tests and focused regression tests proving Task/Work success does not satisfy access, remote-write, destructive, or strong-confirmation authorization. Avoid broad plugin changes unless a concrete bypass is demonstrated.",
-      "status": "planned",
+      "status": "done",
       "dependsOn": [
         "T2"
       ],
@@ -168,14 +172,16 @@
       ],
       "risk": "high",
       "recommendedAgent": "codex",
-      "notes": [],
+      "notes": [
+        "Operation receipts now bind to authoritative attempt, Worker PID/epoch, and Lease fencing snapshot where available; stale receipt writes are rejected and recovery ignores replaced ownership. Authorization snapshots remain unchanged by Work completion. All targeted and package gates passed; package:test passed. Commit 7cedea46."
+      ],
       "runIds": [],
       "createdAt": "2026-07-19T03:00:02.352Z",
-      "updatedAt": "2026-07-19T03:00:02.352Z",
+      "updatedAt": "2026-07-19T04:04:44.804Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     }
   ],
   "createdAt": "2026-07-19T03:00:02.352Z",
-  "updatedAt": "2026-07-19T03:00:59.352Z",
+  "updatedAt": "2026-07-19T04:04:58.954Z",
   "repoId": "repo_123b7cf58b6b17b5cbe46a56"
 }
