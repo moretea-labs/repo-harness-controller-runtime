@@ -1,0 +1,71 @@
+name: Verify Assistant Model Standing Grants
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/assistant-model-standing-grants
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.10
+
+      - run: bun install --frozen-lockfile
+
+      - name: Apply integration patches
+        run: |
+          python3 scripts/apply-standing-grant-core.py
+          python3 scripts/apply-assistant-model-runtime.py
+          python3 scripts/apply-assistant-model-apis.py
+          python3 scripts/apply-assistant-model-openapi.py
+
+      - name: Type check
+        shell: bash
+        run: |
+          set +e
+          bun x tsc --noEmit 2>&1 | tee assistant-model-tsc.log
+          echo "${PIPESTATUS[0]}" > assistant-model-tsc.status
+          exit 0
+
+      - name: Focused tests
+        shell: bash
+        run: |
+          set +e
+          bun test tests/runtime/assistant-model-standing-grants.test.ts tests/runtime/gmail-assistant-routines.test.ts tests/runtime/google-oauth-history-proposals.test.ts tests/runtime/capability-recovery.test.ts 2>&1 | tee assistant-model-tests.log
+          echo "${PIPESTATUS[0]}" > assistant-model-tests.status
+          exit 0
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: assistant-model-standing-grant-diagnostics
+          path: |
+            assistant-model-tsc.log
+            assistant-model-tsc.status
+            assistant-model-tests.log
+            assistant-model-tests.status
+
+      - name: Enforce verification
+        run: |
+          test "$(cat assistant-model-tsc.status)" = "0"
+          test "$(cat assistant-model-tests.status)" = "0"
+
+      - name: Commit verified implementation
+        run: |
+          git config user.name "repo-harness automation"
+          git config user.email "actions@users.noreply.github.com"
+          git add src tests docs
+          git diff --cached --quiet && exit 0
+          git commit -m "feat(assistant): add model analysis and Standing Grants"
+          git push origin HEAD:feat/assistant-model-standing-grants
