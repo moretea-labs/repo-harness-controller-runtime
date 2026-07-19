@@ -8,6 +8,7 @@ import type {
 } from './types';
 import { AssistantPluginError, toAssistantPluginError } from './errors';
 import { bootstrapManagedRuntimeEnv } from '../shared/managed-env';
+import { readStoredGoogleRefreshToken } from '../safe-tooling/google-credential-store';
 
 export type GoogleProviderKind = 'mock' | 'google-workspace';
 export type GoogleService = 'gmail' | 'calendar' | 'tasks';
@@ -59,6 +60,7 @@ export interface GoogleApiRequestOptions {
 }
 
 const CONFIG_ROOT = '.repo-harness/plugins';
+const REFRESH_REQUIRED_ACCESS_TOKEN = '__repo_harness_refresh_required__';
 
 interface CachedGoogleCredential {
   accessToken: string;
@@ -109,8 +111,25 @@ function clientSecretEnvNames(service: GoogleService): string[] {
   return [`REPO_HARNESS_${service.toUpperCase()}_CLIENT_SECRET`, 'REPO_HARNESS_GOOGLE_WORKSPACE_CLIENT_SECRET', 'REPO_HARNESS_GOOGLE_CLIENT_SECRET'];
 }
 
+function refreshCredential(service: GoogleService): { name: string; value: string } | undefined {
+  const fromEnv = firstEnv(refreshTokenEnvNames(service));
+  if (fromEnv) return fromEnv;
+  const stored = readStoredGoogleRefreshToken(service);
+  return stored ? { name: stored.source, value: stored.token } : undefined;
+}
+
 function refreshCredentialsReady(service: GoogleService): boolean {
-  return Boolean(firstEnv(refreshTokenEnvNames(service)) && firstEnv(clientIdEnvNames(service)) && firstEnv(clientSecretEnvNames(service)));
+  return Boolean(refreshCredential(service) && firstEnv(clientIdEnvNames(service)) && firstEnv(clientSecretEnvNames(service)));
+}
+
+export function installGoogleAccessToken(service: GoogleService, accessToken: string, expiresInSeconds = 3600, source = 'oauth'): void {
+  const token = accessToken.trim();
+  if (!token) throw new Error('GOOGLE_ACCESS_TOKEN_REQUIRED');
+  GOOGLE_ACCESS_TOKEN_CACHE.set(service, {
+    accessToken: token,
+    expiresAt: Date.now() + Math.max(60, expiresInSeconds) * 1000,
+    source,
+  });
 }
 
 function repoPluginConfigPath(repoRoot: string, pluginId: string): string {
@@ -301,10 +320,20 @@ export function resolveGoogleAuth(
       warnings: probed ? [] : ['Google access token is configured but has not passed a live provider probe yet.'],
     };
   }
+  if (refreshReady) {
+    const refresh = refreshCredential(service);
+    return {
+      provider: 'google-workspace', ready: true, authenticated: true, probed: false, refreshReady: true,
+      credentialSource: refresh?.name,
+      accessToken: REFRESH_REQUIRED_ACCESS_TOKEN,
+      errors: [],
+      warnings: ['A stored refresh credential is available; the next provider request will refresh and verify an access token.'],
+    };
+  }
   return {
-    provider: 'google-workspace', ready: false, authenticated: false, probed: false, refreshReady,
-    errors: [`Set one of ${tokenEnvNames(service).join(', ')} before invoking ${service} Google Workspace actions.`],
-    warnings: refreshReady ? ['Refresh credentials are configured but an initial access token or authorization handoff is still required.'] : [],
+    provider: 'google-workspace', ready: false, authenticated: false, probed: false, refreshReady: false,
+    errors: [`Complete workspace_auth_login_prepare or set one of ${tokenEnvNames(service).join(', ')}.`],
+    warnings: [],
   };
 }
 
@@ -400,7 +429,7 @@ function serviceBaseUrl(service: GoogleService): string {
 }
 
 async function refreshGoogleAccessToken(service: GoogleService, timeoutMs: number): Promise<string | undefined> {
-  const refreshToken = firstEnv(refreshTokenEnvNames(service));
+  const refreshToken = refreshCredential(service);
   const clientId = firstEnv(clientIdEnvNames(service));
   const clientSecret = firstEnv(clientSecretEnvNames(service));
   if (!refreshToken || !clientId || !clientSecret) return undefined;
@@ -430,11 +459,7 @@ async function refreshGoogleAccessToken(service: GoogleService, timeoutMs: numbe
       });
     }
     const expiresIn = typeof parsed.expires_in === 'number' ? Math.max(60, parsed.expires_in) : 3600;
-    GOOGLE_ACCESS_TOKEN_CACHE.set(service, {
-      accessToken,
-      expiresAt: Date.now() + expiresIn * 1000,
-      source: `refresh:${refreshToken.name}`,
-    });
+    installGoogleAccessToken(service, accessToken, expiresIn, `refresh:${refreshToken.name}`);
     return accessToken;
   } finally {
     clearTimeout(timeout);
@@ -474,6 +499,9 @@ export async function googleApiRequest<T>(options: GoogleApiRequestOptions): Pro
   try {
     const cached = cachedGoogleToken(options.service);
     let accessToken = cached?.accessToken ?? options.accessToken;
+    if (accessToken === REFRESH_REQUIRED_ACCESS_TOKEN && refreshCredentialsReady(options.service)) {
+      accessToken = await refreshGoogleAccessToken(options.service, options.timeoutMs ?? 60_000) ?? accessToken;
+    }
     let attempt = await googleFetch(options, accessToken);
     if ((attempt.response.status === 401 || attempt.response.status === 403) && refreshCredentialsReady(options.service)) {
       const refreshed = await refreshGoogleAccessToken(options.service, options.timeoutMs ?? 60_000);

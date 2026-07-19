@@ -114,6 +114,7 @@ import {
 } from '../../safe-tooling';
 import { buildModelClientSummary, buildModelControlPlaneSummary, deepSeekControllerManifest, deepSeekFunctionToolManifest, prepareDeepSeekControllerHandoff, prepareDeepSeekControllerRequest, prepareDeepSeekToolCall } from '../../model-clients';
 import { buildAssistantReadinessReport } from '../../assistant/readiness';
+import { approveAssistantActionProposal, getAssistantActionProposal, listAssistantActionProposals, rejectAssistantActionProposal } from '../../assistant/action-proposals';
 import { buildGmailTriagePlan, readGmailTriageRules, upsertGmailTriageRule } from '../../personal-assistant/gmail-triage-manager';
 import { gitSnapshot } from '../../../cli/repository/inspector';
 import { buildWorkflowWatchdogReport } from '../../watchdog/workflow-watchdog';
@@ -548,12 +549,27 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
   definition('workspace_auth_status', 'Summarize Workspace/Gmail auth readiness without returning or persisting secrets.', {
     repo_id: repoId,
   }),
-  definition('workspace_auth_login_prepare', 'Prepare a local Google Workspace/Gmail OAuth login handoff without receiving or storing secrets.', {
+  definition('workspace_auth_login_prepare', 'Prepare a state-protected local Google Workspace/Gmail OAuth login with PKCE and Keychain persistence.', {
     repo_id: repoId,
     service: { type: 'string', enum: ['gmail', 'calendar', 'tasks', 'google-workspace'] },
     scopes: { type: 'array', items: { type: 'string' } },
     redirect_uri: { type: 'string' },
   }),
+  definition('assistant_action_proposals', 'List or get structured Assistant action proposals and execution status.', {
+    repo_id: repoId,
+    proposal_id: { type: 'string' },
+    status: { type: 'string', enum: ['proposed', 'approved', 'rejected', 'executed', 'failed', 'expired'] },
+    limit: { type: 'number' },
+  }),
+  definition('assistant_action_proposal_resolve', 'Approve or reject one Assistant action proposal. Approval submits a separate user-authorized plugin Job.', {
+    repo_id: repoId,
+    proposal_id: { type: 'string' },
+    decision: { type: 'string', enum: ['approve', 'reject'] },
+    request_id: { type: 'string' },
+    reason: { type: 'string' },
+    confirm_authorization: { type: 'boolean' },
+    confirmation_text: { type: 'string' },
+  }, ['proposal_id', 'decision'], false),
   definition('external_filesystem_targets_list', 'List pre-authorized external filesystem targets. Does not expose arbitrary absolute-path access.', {
     repo_id: repoId,
   }),
@@ -3186,11 +3202,35 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
       }
       case 'workspace_auth_login_prepare': {
         selected(ctx, args);
-        return result(prepareWorkspaceAuthLogin({
+        return result(prepareWorkspaceAuthLogin(ctx.controllerHome, {
           service: typeof args.service === 'string' ? args.service : undefined,
           scopes: Array.isArray(args.scopes) ? args.scopes.map(String) : undefined,
           redirectUri: typeof args.redirect_uri === 'string' ? args.redirect_uri : undefined,
         }));
+      }
+      case 'assistant_action_proposals': {
+        const repository = selected(ctx, args);
+        const proposalId = typeof args.proposal_id === 'string' ? args.proposal_id.trim() : '';
+        return result(proposalId
+          ? { proposal: getAssistantActionProposal(ctx.controllerHome, repository, proposalId) }
+          : listAssistantActionProposals(ctx.controllerHome, repository, {
+              status: typeof args.status === 'string' ? args.status as any : undefined,
+              limit: typeof args.limit === 'number' ? args.limit : undefined,
+            }));
+      }
+      case 'assistant_action_proposal_resolve': {
+        const repository = selected(ctx, args);
+        const proposalId = String(args.proposal_id ?? '').trim();
+        if (args.decision === 'reject') {
+          return result({ proposal: rejectAssistantActionProposal(ctx.controllerHome, repository, proposalId, typeof args.reason === 'string' ? args.reason : undefined) });
+        }
+        if (args.confirm_authorization !== true) throw new Error('ASSISTANT_ACTION_APPROVAL_REQUIRED: confirm_authorization=true');
+        const requestId = String(args.request_id ?? `assistant-proposal:${proposalId}`).trim();
+        return result({ proposal: approveAssistantActionProposal(ctx.controllerHome, repository, {
+          proposalId,
+          requestId,
+          confirmationText: typeof args.confirmation_text === 'string' ? args.confirmation_text : undefined,
+        }) });
       }
       case 'external_filesystem_targets_list': {
         const repository = selected(ctx, args);

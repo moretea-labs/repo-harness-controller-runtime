@@ -72,10 +72,14 @@ export function buildWorkspaceAuthStatus(manifests: AssistantPluginManifest[]): 
 }
 
 export function prepareWorkspaceAuthLogin(
-  controllerHome: string,
-  input: WorkspaceAuthLoginInput = {},
+  controllerHomeOrInput: string | WorkspaceAuthLoginInput = {},
+  maybeInput: WorkspaceAuthLoginInput = {},
 ): Record<string, unknown> {
   bootstrapManagedRuntimeEnv();
+  const controllerHome = typeof controllerHomeOrInput === 'string'
+    ? controllerHomeOrInput
+    : process.env.REPO_HARNESS_CONTROLLER_HOME?.trim() || process.cwd();
+  const input = typeof controllerHomeOrInput === 'string' ? maybeInput : controllerHomeOrInput;
   const service = normalizeService(input.service);
   const redirectUri = input.redirectUri || process.env.REPO_HARNESS_GOOGLE_REDIRECT_URI || 'http://127.0.0.1:8766/oauth/google/callback';
   const requestedScopes = Array.isArray(input.scopes) && input.scopes.length > 0
