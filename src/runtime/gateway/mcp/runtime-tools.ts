@@ -115,6 +115,8 @@ import {
 import { buildModelClientSummary, buildModelControlPlaneSummary, deepSeekControllerManifest, deepSeekFunctionToolManifest, prepareDeepSeekControllerHandoff, prepareDeepSeekControllerRequest, prepareDeepSeekToolCall } from '../../model-clients';
 import { buildAssistantReadinessReport } from '../../assistant/readiness';
 import { approveAssistantActionProposal, getAssistantActionProposal, listAssistantActionProposals, rejectAssistantActionProposal } from '../../assistant/action-proposals';
+import { assistantModelReadiness } from '../../assistant/model-provider';
+import { createAssistantStandingGrant, listAssistantStandingGrants, revokeAssistantStandingGrant } from '../../assistant/standing-grants';
 import { buildGmailTriagePlan, readGmailTriageRules, upsertGmailTriageRule } from '../../personal-assistant/gmail-triage-manager';
 import { gitSnapshot } from '../../../cli/repository/inspector';
 import { buildWorkflowWatchdogReport } from '../../watchdog/workflow-watchdog';
@@ -555,6 +557,33 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
     scopes: { type: 'array', items: { type: 'string' } },
     redirect_uri: { type: 'string' },
   }),
+  definition('assistant_model_readiness', 'Read the optional bounded Assistant model provider configuration without returning secrets.', {
+    repo_id: repoId,
+  }),
+  definition('assistant_standing_grants', 'List scoped, expiring Assistant Standing Grants.', {
+    repo_id: repoId,
+    status: { type: 'string', enum: ['active', 'revoked', 'expired'] },
+    limit: { type: 'number' },
+  }),
+  definition('assistant_standing_grant_create', 'Create an explicitly authorized Standing Grant for a hardcoded low-risk action.', {
+    repo_id: repoId,
+    name: { type: 'string' },
+    plugin_id: { type: 'string' },
+    action_id: { type: 'string' },
+    routine_ids: { type: 'array', items: { type: 'string' } },
+    sender_allowlist: { type: 'array', items: { type: 'string' } },
+    subject_contains: { type: 'array', items: { type: 'string' } },
+    min_confidence: { type: 'number' },
+    max_per_run: { type: 'number' },
+    expires_in_days: { type: 'number' },
+    confirm_authorization: { type: 'boolean' },
+  }, ['plugin_id', 'action_id', 'confirm_authorization'], false),
+  definition('assistant_standing_grant_revoke', 'Revoke a Standing Grant with explicit authorization.', {
+    repo_id: repoId,
+    grant_id: { type: 'string' },
+    reason: { type: 'string' },
+    confirm_authorization: { type: 'boolean' },
+  }, ['grant_id', 'confirm_authorization'], false),
   definition('assistant_action_proposals', 'List or get structured Assistant action proposals and execution status.', {
     repo_id: repoId,
     proposal_id: { type: 'string' },
@@ -3207,6 +3236,41 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           scopes: Array.isArray(args.scopes) ? args.scopes.map(String) : undefined,
           redirectUri: typeof args.redirect_uri === 'string' ? args.redirect_uri : undefined,
         }));
+      }
+      case 'assistant_model_readiness': {
+        return result(assistantModelReadiness());
+      }
+      case 'assistant_standing_grants': {
+        const repository = selected(ctx, args);
+        return result(listAssistantStandingGrants(ctx.controllerHome, repository, {
+          status: typeof args.status === 'string' ? args.status as any : undefined,
+          limit: typeof args.limit === 'number' ? args.limit : undefined,
+        }));
+      }
+      case 'assistant_standing_grant_create': {
+        const repository = selected(ctx, args);
+        return result({ grant: createAssistantStandingGrant(ctx.controllerHome, repository, {
+          name: typeof args.name === 'string' ? args.name : undefined,
+          pluginId: String(args.plugin_id ?? '').trim(),
+          actionId: String(args.action_id ?? '').trim(),
+          routineIds: Array.isArray(args.routine_ids) ? args.routine_ids.map(String) : undefined,
+          senderAllowlist: Array.isArray(args.sender_allowlist) ? args.sender_allowlist.map(String) : undefined,
+          subjectContains: Array.isArray(args.subject_contains) ? args.subject_contains.map(String) : undefined,
+          minConfidence: typeof args.min_confidence === 'number' ? args.min_confidence : undefined,
+          maxPerRun: typeof args.max_per_run === 'number' ? args.max_per_run : undefined,
+          expiresInDays: typeof args.expires_in_days === 'number' ? args.expires_in_days : undefined,
+          confirmAuthorization: args.confirm_authorization === true,
+          origin: { surface: 'mcp', actor: 'assistant_standing_grant_create' },
+        }) });
+      }
+      case 'assistant_standing_grant_revoke': {
+        const repository = selected(ctx, args);
+        return result({ grant: revokeAssistantStandingGrant(ctx.controllerHome, repository, {
+          grantId: String(args.grant_id ?? '').trim(),
+          reason: typeof args.reason === 'string' ? args.reason : undefined,
+          confirmAuthorization: args.confirm_authorization === true,
+          origin: { surface: 'mcp', actor: 'assistant_standing_grant_revoke' },
+        }) });
       }
       case 'assistant_action_proposals': {
         const repository = selected(ctx, args);

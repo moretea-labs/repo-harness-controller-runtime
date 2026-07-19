@@ -24,6 +24,7 @@ export interface AssistantActionProposal {
   actionId: string;
   arguments: Record<string, unknown>;
   evidenceMessageIds: string[];
+  context?: { sender?: string; subject?: string; protected?: boolean };
   reason: string;
   confidence: number;
   risk: 'remote_write' | 'destructive';
@@ -31,6 +32,7 @@ export interface AssistantActionProposal {
   status: AssistantActionProposalStatus;
   expiresAt: string;
   executionJobId?: string;
+  standingGrantId?: string;
   rejectionReason?: string;
   error?: string;
   createdAt: string;
@@ -42,6 +44,7 @@ export interface AssistantActionProposalInput {
   actionId: string;
   arguments?: Record<string, unknown>;
   evidenceMessageIds: string[];
+  context?: { sender?: string; subject?: string; protected?: boolean };
   reason: string;
   confidence?: number;
   risk?: 'remote_write' | 'destructive';
@@ -118,6 +121,11 @@ export function createAssistantActionProposals(
       actionId: proposal.actionId,
       arguments: proposal.arguments ?? {},
       evidenceMessageIds: [...new Set(proposal.evidenceMessageIds)].slice(0, 50),
+      context: proposal.context ? {
+        sender: typeof proposal.context.sender === 'string' ? proposal.context.sender.slice(0, 500) : undefined,
+        subject: typeof proposal.context.subject === 'string' ? proposal.context.subject.slice(0, 1_000) : undefined,
+        protected: proposal.context.protected === true,
+      } : undefined,
       reason: proposal.reason,
       confidence: Math.max(0, Math.min(1, proposal.confidence ?? 0.5)),
       risk: proposal.risk ?? 'remote_write',
@@ -210,7 +218,13 @@ export function rejectAssistantActionProposal(
 export function approveAssistantActionProposal(
   controllerHome: string,
   repository: RepositoryRecord,
-  input: { proposalId: string; requestId: string; confirmationText?: string; origin?: { surface: 'mcp' | 'local-ui'; actor: string } },
+  input: {
+    proposalId: string;
+    requestId: string;
+    confirmationText?: string;
+    origin?: { surface: 'mcp' | 'local-ui' | 'standing-grant'; actor: string };
+    standingGrantId?: string;
+  },
 ): AssistantActionProposal {
   return withControllerLock(controllerHome, { scope: 'repository', repoId: repository.repoId }, `assistant-proposal-approve:${input.proposalId}`, () => {
     const store = readStore(repository.canonicalRoot);
@@ -242,6 +256,7 @@ export function approveAssistantActionProposal(
     });
     proposal.status = 'approved';
     proposal.executionJobId = submitted.job.jobId;
+    proposal.standingGrantId = input.standingGrantId;
     proposal.updatedAt = now();
     writeStore(repository.canonicalRoot, store);
     appendRuntimeEvent(controllerHome, {
@@ -251,7 +266,13 @@ export function approveAssistantActionProposal(
       eventType: 'assistant_action_approved',
       requestId: input.requestId,
       revision: 1,
-      data: { executionJobId: proposal.executionJobId, pluginId: proposal.pluginId, actionId: proposal.actionId },
+      data: {
+        executionJobId: proposal.executionJobId,
+        pluginId: proposal.pluginId,
+        actionId: proposal.actionId,
+        standingGrantId: proposal.standingGrantId,
+        surface: input.origin?.surface ?? 'local-ui',
+      },
     });
     return proposal;
   }, 10_000);
