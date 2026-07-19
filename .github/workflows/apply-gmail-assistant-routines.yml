@@ -44,3 +44,5 @@ jobs:
           git diff --cached --quiet && exit 0
           git commit -m "feat(assistant): implement durable Gmail routines"
           git push origin HEAD:feat/gmail-assistant-routines
+
+# Existing-workflow trigger commit.
