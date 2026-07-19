@@ -304,13 +304,13 @@ export async function routeDurableMcpCall(
   if (name === 'repository_command_execute' || name === 'repository_command_preview') {
     workerArgs.command = commandValue(normalizeRepositoryCommand(workerArgs.command));
   }
+  validateDurableArguments(name, definition, workerArgs);
   delete workerArgs.request_id;
   delete workerArgs.apply_mode;
   delete workerArgs.wait;
   delete workerArgs.wait_ms;
   delete workerArgs.await_result;
   delete workerArgs.wait_for_result;
-  validateDurableArguments(name, definition, workerArgs);
   const semanticKey = `${isRepositoryTool ? 'repository-tool' : 'mcp-tool'}:${name}:${repoId}:${hashArguments(workerArgs)}`;
   const claims = claimsForMcpOperation(name, workerArgs, repoId, checkoutId);
   const agentDelegation = ['dispatch_task', 'launch_issue', 'dispatch_ready_tasks', 'retry_task_run', 'quick_agent_session'].includes(name);
