@@ -23,6 +23,13 @@ import type {
   AssistantPluginPermissionScope,
 } from './types';
 import { AssistantPluginError } from './errors';
+import {
+  executeIosAgentDeviceAction,
+  iosAgentDeviceActions,
+  iosAgentDeviceCapabilities,
+  iosAgentDeviceStatus,
+  isIosAgentDeviceAction,
+} from './ios-agent-device';
 
 const IOS_PLUGIN_ID = 'ios';
 const CONFIG_ROOT = '.repo-harness/plugins';
@@ -106,6 +113,7 @@ function health(repoRoot: string): AssistantPluginHealth {
         xcodebuildVersion: 'xcodebuildVersion' in xcode ? xcode.xcodebuildVersion : undefined,
         simctlAvailable: 'simctlAvailable' in xcode ? xcode.simctlAvailable : undefined,
       } : xcode,
+      agentDevice: iosAgentDeviceStatus(),
       artifactRoots: {
         repoLocal: '.repo-harness/ios/',
         controller: 'controller-home/repositories/<repoId>/artifacts/ios/',
@@ -147,6 +155,7 @@ function capabilities(): AssistantPluginCapability[] {
       scopes: ['ios.build', 'ios.simulator'],
       actions: ['smoke_review', 'build', 'launch_simulator', 'capture_screenshot'],
     },
+    ...iosAgentDeviceCapabilities(),
   ];
 }
 
@@ -329,6 +338,7 @@ function actions(): AssistantPluginActionDescriptor[] {
         additionalProperties: false,
       },
     },
+    ...iosAgentDeviceActions(),
   ];
 }
 
@@ -346,7 +356,7 @@ export function buildIosPluginManifest(previousRevision = 0, previousUpdatedAt?:
     authority: {
       strategy: 'derived',
       duplicateStateAllowed: false,
-      sourceOfTruth: ['local:xcodebuild', 'local:simctl', `repo-local:${CONFIG_ROOT}/ios.json`],
+      sourceOfTruth: ['local:xcodebuild', 'local:simctl', 'local:agent-device@0.19.3', `repo-local:${CONFIG_ROOT}/ios.json`],
     },
     enabled,
     lifecycle: {
@@ -366,6 +376,7 @@ export function buildIosPluginManifest(previousRevision = 0, previousUpdatedAt?:
 }
 
 export async function executeIosPluginAction(input: AssistantPluginActionExecutionInput): Promise<Record<string, unknown>> {
+  if (isIosAgentDeviceAction(input.actionId)) return executeIosAgentDeviceAction(input);
   const currentPlatform = iosDevelopmentPlatform();
   if (currentPlatform !== 'darwin' && input.actionId !== 'discover_project' && input.actionId !== 'xcode_status') {
     throw new AssistantPluginError('PLUGIN_DEPENDENCY_MISSING', 'iOS plugin actions require macOS with Xcode/Simulator.', {

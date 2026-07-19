@@ -52,6 +52,15 @@ The browser plugin exposes three actions:
 
 The small surface limits additional plugin schema growth and avoids alias actions with overlapping semantics.
 
-## iOS Extension Boundary
+## Optional iOS Simulator Provider
 
-A future `agent-device` integration must remain an optional provider under the existing `ios` plugin and reuse this interaction lifecycle. It must be version-pinned, reject physical devices by default, preserve current Xcode/simulator readiness when absent, and never start a nested MCP service. Physical iPhone mutation requires a separate device-authorization and safety review.
+The existing `ios` plugin includes an optional `agent-device` provider with these boundaries:
+
+- The local CLI must report exactly version `0.19.3`; Repo Harness never downloads it at runtime or adds it as a required package dependency.
+- CLI absence or version mismatch degrades only the optional provider. Existing Xcode, `simctl`, build, launch, screenshot, and smoke-review readiness remains unchanged.
+- Device inventory comes from typed `agent-device devices --platform ios --json` output. Selection must resolve to exactly one already-booted simulator; physical devices, shutdown simulators, and ambiguous names are rejected before app actions.
+- Each interaction receives an isolated `AGENT_DEVICE_STATE_DIR` and explicit session name. Stateful actions are serialized through repository resource claims and only a fixed argv allowlist is exposed; the provider never invokes `agent-device mcp` or arbitrary commands.
+- Screenshots stay in Controller-owned artifact storage. JSON responses are capped before entering evidence; event payload fields and direct fill results are redacted.
+- Open accepts only an app name or bundle identifier, not a URL or token-bearing deep link. `fill` is limited to non-sensitive text; passwords and verification codes must be entered manually.
+- Command failure, explicit close, or the next access after expiry attempts to close the provider session. Terminal state is written only after close succeeds; cleanup failure remains `closing`, keeps simulator ownership fenced, and can be retried through the idempotent close action. Fill arguments and diagnostics are redacted from failure evidence. Provider daemons use a five-second idle timeout and zero iOS runner retention after close.
+- Physical iPhone mutation remains outside this provider and requires a separate device-authorization and safety review.
