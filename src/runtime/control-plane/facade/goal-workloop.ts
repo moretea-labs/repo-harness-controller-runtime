@@ -145,12 +145,54 @@ function initialEvidence(objective: string): EvidenceRef {
   };
 }
 
-function hasExecutionEvidence(work: WorkContract): boolean {
-  return Boolean(
-    work.workerRef
-    || work.worktreeRef
-    || work.checkRefs.length > 0,
-  );
+type ReconciledVerificationHistory = ReturnType<typeof reconcileVerificationHistory>;
+
+interface WorkCompletionEvidenceEvaluation {
+  status: 'complete' | 'failed' | 'incomplete';
+  history: ReconciledVerificationHistory;
+  missingChecks: string[];
+  durableResultEvidence: boolean;
+  reasons: string[];
+}
+
+function evaluateWorkCompletionEvidence(
+  work: WorkContract,
+  history: ReconciledVerificationHistory = reconcileVerificationHistory(
+    work.checkRefs.map((record) => ({ checkId: record.checkId, outcome: record.outcome, recordedAt: record.recordedAt })),
+  ),
+): WorkCompletionEvidenceEvaluation {
+  const missingChecks = work.checks.filter((checkId) => !history.validPasses.includes(checkId));
+  const durableResultEvidence = work.evidenceRefs.some((evidence) => Boolean(evidence.evidenceId || evidence.artifactId));
+  const reasons: string[] = [];
+
+  if (history.acceptanceFailures.length > 0) {
+    reasons.push(`Acceptance checks failed: ${history.acceptanceFailures.join(', ')}.`);
+    return { status: 'failed', history, missingChecks, durableResultEvidence, reasons };
+  }
+  if (history.infrastructureIssues.length > 0) {
+    reasons.push(`Infrastructure issues remain: ${history.infrastructureIssues.join(', ')}.`);
+  }
+  if (history.invalidCheckIds.length > 0) {
+    reasons.push(`Invalid check ids remain: ${history.invalidCheckIds.join(', ')}.`);
+  }
+  if (missingChecks.length > 0) {
+    reasons.push(`Declared checks are missing valid_pass evidence: ${missingChecks.join(', ')}.`);
+  }
+  if (work.checks.length === 0 && !durableResultEvidence) {
+    reasons.push('No durable result evidence (evidenceId or artifactId) was recorded for this no-check WorkContract.');
+  }
+
+  const complete = history.infrastructureIssues.length === 0
+    && history.invalidCheckIds.length === 0
+    && missingChecks.length === 0
+    && (work.checks.length > 0 || durableResultEvidence);
+  return {
+    status: complete ? 'complete' : 'incomplete',
+    history,
+    missingChecks,
+    durableResultEvidence,
+    reasons,
+  };
 }
 
 /**
@@ -586,7 +628,8 @@ export function continueGoalWorkloop(ctx: GoalWorkloopContext, input: GoalWorklo
     });
   }
 
-  if (!hasExecutionEvidence(work)) {
+  const completionEvidence = evaluateWorkCompletionEvidence(work, history);
+  if (completionEvidence.status !== 'complete') {
     const suggested = validateSuggestedNextActions([
       {
         label: 'Read repository context before executing',
@@ -604,12 +647,18 @@ export function continueGoalWorkloop(ctx: GoalWorkloopContext, input: GoalWorklo
     });
     return buildFacadeResult({
       status: 'blocked',
-      summary: 'Continue requires execution evidence. The work contract exists, but no edit, worker, worktree, or verification result has been recorded.',
+      summary: `Continue requires meaningful completion evidence. ${completionEvidence.reasons.join(' ')}`,
       data: {
         work: summarizeWorkContract(updated),
         backgroundCompleted: false,
         nextStep: 'execute',
         executionEvidencePresent: false,
+        missingChecks: completionEvidence.missingChecks,
+        durableResultEvidence: completionEvidence.durableResultEvidence,
+        ignoredWeakReferences: {
+          workerRef: Boolean(work.workerRef),
+          worktreeRef: Boolean(work.worktreeRef),
+        },
       },
       suggestedNextActions: suggested,
     });
@@ -767,32 +816,10 @@ export function finalizeGoalWorkloop(ctx: GoalWorkloopContext, input: GoalWorklo
     });
   }
 
-  if (!input.forceFailed && !hasExecutionEvidence(work)) {
-    const updated = updateWorkContract(ctx.workStore, work.workId, { status: 'waiting_for_review' });
-    return buildFacadeResult({
-      status: 'blocked',
-      summary: 'Finalize refused: no execution evidence was recorded. Creating a WorkContract alone cannot be reported as successful work.',
-      data: {
-        work: summarizeWorkContract(updated),
-        finalStatus: 'waiting_for_review',
-        executionEvidencePresent: false,
-        hiddenFailure: false,
-      },
-      suggestedNextActions: [{
-        label: 'Inspect work context',
-        tool: 'rh_context',
-        operation: 'get',
-        payload: { work_id: work.workId },
-        risk: 'readonly',
-      }],
-    });
-  }
+  const completionEvidence = evaluateWorkCompletionEvidence(work);
+  const history = completionEvidence.history;
 
-  const history = reconcileVerificationHistory(
-    work.checkRefs.map((record) => ({ checkId: record.checkId, outcome: record.outcome, recordedAt: record.recordedAt })),
-  );
-
-  if (input.forceFailed || history.acceptanceFailures.length > 0) {
+  if (input.forceFailed || completionEvidence.status === 'failed') {
     const updated = updateWorkContract(ctx.workStore, work.workId, { status: 'failed' });
     return buildFacadeResult({
       status: 'failed',
@@ -817,18 +844,24 @@ export function finalizeGoalWorkloop(ctx: GoalWorkloopContext, input: GoalWorklo
     });
   }
 
-  // Invalid check ids and infrastructure issues do not force failure, but may require review.
-  if (history.infrastructureIssues.length > 0 || (work.checks.length > 0 && history.validPasses.length === 0 && work.acceptanceCriteria.length > 0)) {
+  // Weak refs, partial checks, invalid ids, and infrastructure issues never imply successful completion.
+  if (completionEvidence.status === 'incomplete') {
     const updated = updateWorkContract(ctx.workStore, work.workId, { status: 'waiting_for_review' });
     return buildFacadeResult({
       status: 'blocked',
-      summary: 'Finalize result: waiting_for_review. Evidence is incomplete or infrastructure issues remain; failure is not hidden.',
+      summary: `Finalize result: waiting_for_review. ${completionEvidence.reasons.join(' ')}`,
       data: {
         work: summarizeWorkContract(updated),
         finalStatus: 'waiting_for_review',
         infrastructureIssues: history.infrastructureIssues,
         invalidCheckIds: history.invalidCheckIds,
         validPasses: history.validPasses,
+        missingChecks: completionEvidence.missingChecks,
+        durableResultEvidence: completionEvidence.durableResultEvidence,
+        ignoredWeakReferences: {
+          workerRef: Boolean(work.workerRef),
+          worktreeRef: Boolean(work.worktreeRef),
+        },
         hiddenFailure: false,
       },
       suggestedNextActions: [

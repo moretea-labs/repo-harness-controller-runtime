@@ -159,6 +159,6 @@ describe('codex cerebellum delegation', () => {
     expect(outputs.evidenceArtifact).toBeTruthy();
     expect(outputs.patchProposal.present).toBe(true);
     expect(result.suggestedNextActions.every((action) => action.operation !== 'finalize' || action.tool === 'rh_work')).toBe(true);
-    expect(getWorkContract(ctx.workStore, work.workId)?.workerRef).toStartWith('codex:');
+    expect(getWorkContract(ctx.workStore, work.workId)?.workerRef).toBeUndefined();
   });
 });

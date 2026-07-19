@@ -466,7 +466,6 @@ export function delegateToCodexCerebellum(
     updateWorkContract(ctx.workStore, work.workId, {
       status: patchProposal.present ? 'running' : 'waiting_for_review',
       suggestedNextActions: suggested,
-      ...(patchProposal.present ? { workerRef: `${target}:${randomUUID().slice(0, 8)}` } : {}),
       ...(!patchProposal.present
         ? { continuationPrompt: `${target} returned bounded evidence but no patch proposal. Request implementation output or continue with direct edits before verification/finalize.` }
         : {}),

@@ -10,7 +10,7 @@ import {
   stopGoalWorkloop,
   verifyGoalWorkloop,
 } from '../../src/runtime/control-plane/facade/goal-workloop';
-import { appendWorkEvidence, getWorkContract, listWorkContracts, reconcileStaleWorkContracts } from '../../src/runtime/control-plane/facade/work-contract-store';
+import { appendWorkEvidence, getWorkContract, listWorkContracts, reconcileStaleWorkContracts, updateWorkContract } from '../../src/runtime/control-plane/facade/work-contract-store';
 import { listHandoffItems } from '../../src/runtime/control-plane/facade/handoff-inbox-store';
 
 const roots: string[] = [];
@@ -235,6 +235,61 @@ describe('goal workloop engine', () => {
     const finalized = finalizeGoalWorkloop(ctx, { workId });
     expect(finalized.status).toBe('blocked');
     expect((finalized.data as { finalStatus: string }).finalStatus).toBe('waiting_for_review');
+  });
+
+  test('workerRef and worktreeRef alone cannot unlock completion', () => {
+    const { ctx } = fixture();
+    const started = startGoalWorkloop(ctx, {
+      objective: 'Weak reference only',
+      modeInput: { scopeClear: true, expectedFiles: 5, expectedChangedLines: 250 },
+    });
+    const workId = (started.data as { work: { workId: string } }).work.workId;
+    updateWorkContract(ctx.workStore, workId, {
+      workerRef: 'codex:proposal-only',
+      worktreeRef: '/tmp/proposal-worktree',
+    });
+
+    const finalized = finalizeGoalWorkloop(ctx, { workId });
+    expect(finalized.status).toBe('blocked');
+    expect((finalized.data as { finalStatus: string }).finalStatus).toBe('waiting_for_review');
+    expect((finalized.data as { ignoredWeakReferences: { workerRef: boolean; worktreeRef: boolean } }).ignoredWeakReferences).toEqual({
+      workerRef: true,
+      worktreeRef: true,
+    });
+  });
+
+  test('partial declared check success cannot finalize', () => {
+    const { ctx } = fixture();
+    const started = startGoalWorkloop(ctx, {
+      objective: 'Partial checks',
+      checks: ['package:check:type', 'package:test'],
+      modeInput: { scopeClear: true, expectedFiles: 5, expectedChangedLines: 250 },
+    });
+    const workId = (started.data as { work: { workId: string } }).work.workId;
+    verifyGoalWorkloop(ctx, { workId, checkId: 'package:check:type' });
+
+    const finalized = finalizeGoalWorkloop(ctx, { workId });
+    expect(finalized.status).toBe('blocked');
+    expect((finalized.data as { missingChecks: string[] }).missingChecks).toEqual(['package:test']);
+  });
+
+  test('no-check result work requires durable artifact evidence', () => {
+    const { ctx } = fixture();
+    const started = startGoalWorkloop(ctx, {
+      objective: 'Durable read-only result',
+      modeInput: { scopeClear: true, expectedFiles: 5, expectedChangedLines: 250, requiresInvestigation: true },
+    });
+    const workId = (started.data as { work: { workId: string } }).work.workId;
+    appendWorkEvidence(ctx.workStore, workId, {
+      artifactId: 'ART-investigation-result',
+      title: 'investigation result',
+      summary: 'Bounded investigation conclusion persisted as an artifact.',
+      detailLevel: 'summary',
+    });
+
+    const finalized = finalizeGoalWorkloop(ctx, { workId });
+    expect(finalized.status).toBe('ok');
+    expect((finalized.data as { finalStatus: string }).finalStatus).toBe('succeeded');
   });
 
   test('reconciles stale running work only when no execution owner remains', () => {
