@@ -27,7 +27,10 @@ jobs:
         shell: bash
         run: |
           set +e
-          python3 scripts/harden-assistant-model-standing-grants.py 2>&1 | tee assistant-model-patch.log
+          {
+            python3 scripts/harden-assistant-model-standing-grants.py || exit $?
+            python3 scripts/fix-standing-grant-list-syntax.py || exit $?
+          } 2>&1 | tee assistant-model-patch.log
           echo "${PIPESTATUS[0]}" > assistant-model-patch.status
           exit 0
 
