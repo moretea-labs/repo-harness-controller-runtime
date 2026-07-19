@@ -164,6 +164,8 @@ import { controllerExposureSnapshot } from "../mcp/toolset";
 import { submitAssistantIntent, runAssistantRoutineNow } from "../../runtime/assistant/intent";
 import { updateAssistantRoutineLifecycle } from "../../runtime/assistant/schedule-binding";
 import { assistantOpenApiSchema } from "../../runtime/assistant/openapi";
+import { completeGoogleOAuthLogin } from "../../runtime/safe-tooling/google-oauth-broker";
+import { approveAssistantActionProposal, listAssistantActionProposals, rejectAssistantActionProposal } from "../../runtime/assistant/action-proposals";
 import { buildAssistantReadinessReport } from "../../runtime/assistant/readiness";
 import { listWebTargets, previewBrowserDomainAccess, summarizePluginForLowInterception } from "../../runtime/safe-tooling";
 import { buildModelClientSummary, buildModelControlPlaneSummary, deepSeekControllerManifest, deepSeekFunctionToolManifest, prepareDeepSeekControllerHandoff, prepareDeepSeekControllerRequest, prepareDeepSeekToolCall } from "../../runtime/model-clients";
@@ -1114,6 +1116,22 @@ export async function startLocalBridgeServer(
           : message.includes("TOKEN") || message.includes("SIGNATURE") || message.includes("REPLAY") || message.includes("TIMESTAMP") || message.includes("NONCE") || message.includes("DEVICE") ? 401
             : 400;
       response.status(status).json({ error: message });
+    }
+  });
+
+  app.get("/oauth/google/callback", async (request, response) => {
+    response.setHeader("Cache-Control", "no-store");
+    response.setHeader("Referrer-Policy", "no-referrer");
+    try {
+      const result = await completeGoogleOAuthLogin(controllerHome, {
+        state: queryString(request.query.state),
+        code: queryString(request.query.code),
+        error: queryString(request.query.error),
+        errorDescription: queryString(request.query.error_description),
+      });
+      response.status(200).type("html").send(`<!doctype html><meta charset="utf-8"><title>Google authorization complete</title><h1>Google authorization complete</h1><p>${String(result.service)} is connected. You can close this window.</p>`);
+    } catch (error) {
+      response.status(400).type("html").send(`<!doctype html><meta charset="utf-8"><title>Google authorization failed</title><h1>Google authorization failed</h1><p>${errorMessage(error).replace(/[<>&]/g, "")}</p>`);
     }
   });
 
@@ -2117,6 +2135,35 @@ export async function startLocalBridgeServer(
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }
+  });
+
+  app.get("/api/assistant/proposals", (request, response) => {
+    try {
+      const repository = requestRepositorySelection(request, options, controllerHome);
+      response.json(listAssistantActionProposals(controllerHome, repository, {
+        status: typeof request.query.status === "string" ? request.query.status as any : undefined,
+        limit: Number(request.query.limit) || undefined,
+      }));
+    } catch (error) { response.status(400).json({ error: errorMessage(error) }); }
+  });
+
+  app.post("/api/assistant/proposals/:proposalId/approve", (request, response) => {
+    try {
+      const repository = requestRepositorySelection(request, options, controllerHome);
+      response.status(202).json({ proposal: approveAssistantActionProposal(controllerHome, repository, {
+        proposalId: request.params.proposalId,
+        requestId: queryString(request.body?.requestId) ?? `proposal-approval-${request.params.proposalId}`,
+        confirmationText: queryString(request.body?.confirmationText),
+        origin: { surface: 'local-ui', actor: 'assistant-proposal-api' },
+      }) });
+    } catch (error) { response.status(400).json({ error: errorMessage(error) }); }
+  });
+
+  app.post("/api/assistant/proposals/:proposalId/reject", (request, response) => {
+    try {
+      const repository = requestRepositorySelection(request, options, controllerHome);
+      response.json({ proposal: rejectAssistantActionProposal(controllerHome, repository, request.params.proposalId, queryString(request.body?.reason)) });
+    } catch (error) { response.status(400).json({ error: errorMessage(error) }); }
   });
 
   app.get("/api/assistant/routines", (request, response) => {

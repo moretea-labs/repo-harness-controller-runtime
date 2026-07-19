@@ -3,8 +3,8 @@ export function assistantOpenApiSchema(baseUrl = 'http://127.0.0.1:8766'): Recor
     openapi: '3.1.0',
     info: {
       title: 'Repo Harness Local Personal Assistant API',
-      version: '0.1.0',
-      description: 'High-level ChatGPT Action surface for natural-language intents, routines, inbox, and guarded local execution.',
+      version: '0.2.0',
+      description: 'High-level ChatGPT Action surface for natural-language intents, routines, inbox, guarded proposals, and local execution.',
     },
     servers: [{ url: baseUrl }],
     components: {
@@ -77,6 +77,55 @@ export function assistantOpenApiSchema(baseUrl = 'http://127.0.0.1:8766'): Recor
           summary: 'Run a routine immediately using safe read-only collection steps.',
           parameters: [{ name: 'routineId', in: 'path', required: true, schema: { type: 'string' } }],
           responses: { '202': { description: 'Routine run submitted.' } },
+        },
+      },
+      '/api/assistant/proposals': {
+        get: {
+          operationId: 'listAssistantActionProposals',
+          summary: 'List structured assistant action proposals and their execution status.',
+          parameters: [
+            { name: 'status', in: 'query', required: false, schema: { type: 'string', enum: ['proposed', 'approved', 'rejected', 'executed', 'failed', 'expired'] } },
+            { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 500 } },
+          ],
+          responses: { '200': { description: 'Action proposals.' } },
+        },
+      },
+      '/api/assistant/proposals/{proposalId}/approve': {
+        post: {
+          operationId: 'approveAssistantActionProposal',
+          summary: 'Explicitly approve a proposal and submit a separate user-authorized plugin Job.',
+          parameters: [{ name: 'proposalId', in: 'path', required: true, schema: { type: 'string' } }],
+          requestBody: {
+            required: false,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    requestId: { type: 'string' },
+                    confirmationText: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+          responses: { '202': { description: 'Proposal approved and execution submitted.' } },
+        },
+      },
+      '/api/assistant/proposals/{proposalId}/reject': {
+        post: {
+          operationId: 'rejectAssistantActionProposal',
+          summary: 'Reject a pending proposal without executing its remote action.',
+          parameters: [{ name: 'proposalId', in: 'path', required: true, schema: { type: 'string' } }],
+          requestBody: {
+            required: false,
+            content: {
+              'application/json': {
+                schema: { type: 'object', properties: { reason: { type: 'string' } } },
+              },
+            },
+          },
+          responses: { '200': { description: 'Proposal rejected.' } },
         },
       },
       '/api/assistant/inbox': {

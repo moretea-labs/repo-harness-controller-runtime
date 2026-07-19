@@ -142,6 +142,8 @@ export const STABLE_CONTROLLER_TOOL_NAMES = [
   'toolchain_plugin_summary',
   'workspace_auth_status',
   'workspace_auth_login_prepare',
+  'assistant_action_proposals',
+  'assistant_action_proposal_resolve',
   'web_targets_list',
   'web_target_snapshot',
   'web_domain_access_preview',

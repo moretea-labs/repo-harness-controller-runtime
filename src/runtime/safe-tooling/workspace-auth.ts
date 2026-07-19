@@ -1,16 +1,14 @@
-import { URLSearchParams } from 'url';
 import type { AssistantPluginManifest } from '../plugins/types';
 import { bootstrapManagedRuntimeEnv } from '../shared/managed-env';
+import { prepareGoogleOAuthLogin, type GoogleOAuthService } from './google-oauth-broker';
 
-export type WorkspaceAuthService = 'gmail' | 'calendar' | 'tasks' | 'google-workspace';
+export type WorkspaceAuthService = GoogleOAuthService;
 
 interface WorkspaceAuthLoginInput {
   service?: string;
   scopes?: string[];
   redirectUri?: string;
 }
-
-const GOOGLE_AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth';
 
 const SERVICE_SCOPES: Record<WorkspaceAuthService, string[]> = {
   gmail: [
@@ -31,11 +29,17 @@ const SERVICE_SCOPES: Record<WorkspaceAuthService, string[]> = {
   ],
 };
 
-const TOKEN_ENV: Record<WorkspaceAuthService, string[]> = {
-  gmail: ['REPO_HARNESS_GMAIL_ACCESS_TOKEN', 'REPO_HARNESS_GOOGLE_WORKSPACE_ACCESS_TOKEN', 'REPO_HARNESS_GOOGLE_ACCESS_TOKEN'],
-  calendar: ['REPO_HARNESS_GOOGLE_CALENDAR_ACCESS_TOKEN', 'REPO_HARNESS_GOOGLE_WORKSPACE_ACCESS_TOKEN', 'REPO_HARNESS_GOOGLE_ACCESS_TOKEN'],
-  tasks: ['REPO_HARNESS_GOOGLE_TASKS_ACCESS_TOKEN', 'REPO_HARNESS_GOOGLE_WORKSPACE_ACCESS_TOKEN', 'REPO_HARNESS_GOOGLE_ACCESS_TOKEN'],
-  'google-workspace': ['REPO_HARNESS_GOOGLE_WORKSPACE_ACCESS_TOKEN', 'REPO_HARNESS_GOOGLE_ACCESS_TOKEN'],
+const SCOPE_ALIASES: Record<string, string> = {
+  'gmail.readonly': 'https://www.googleapis.com/auth/gmail.readonly',
+  'gmail.compose': 'https://www.googleapis.com/auth/gmail.compose',
+  'gmail.modify': 'https://www.googleapis.com/auth/gmail.modify',
+  'gmail.send': 'https://www.googleapis.com/auth/gmail.send',
+  'calendar.events.readonly': 'https://www.googleapis.com/auth/calendar',
+  'calendar.events.write': 'https://www.googleapis.com/auth/calendar',
+  'calendar.events.delete': 'https://www.googleapis.com/auth/calendar',
+  'tasks.readonly': 'https://www.googleapis.com/auth/tasks',
+  'tasks.write': 'https://www.googleapis.com/auth/tasks',
+  'tasks.delete': 'https://www.googleapis.com/auth/tasks',
 };
 
 function normalizeService(value: unknown): WorkspaceAuthService {
@@ -70,58 +74,43 @@ export function buildWorkspaceAuthStatus(manifests: AssistantPluginManifest[]): 
     actionRequired: summaries.filter((entry) => entry.authRequired === true || entry.ready !== true).map((entry) => ({
       pluginId: entry.pluginId,
       reason: entry.lifecycleReason,
-      next: 'Call workspace_auth_login_prepare for a scoped local login handoff. Tokens are not stored in repository files.',
+      next: 'Call workspace_auth_login_prepare and open the returned local OAuth URL. The callback stores the refresh token in macOS Keychain.',
     })),
     safety: {
       credentialMaterialReturned: false,
-      credentialMaterialPersisted: false,
+      credentialMaterialPersistedInRepository: false,
       repositoryMutation: false,
     },
   };
 }
 
-export function prepareWorkspaceAuthLogin(input: WorkspaceAuthLoginInput = {}): Record<string, unknown> {
+export function prepareWorkspaceAuthLogin(
+  controllerHomeOrInput: string | WorkspaceAuthLoginInput = {},
+  maybeInput: WorkspaceAuthLoginInput = {},
+): Record<string, unknown> {
   bootstrapManagedRuntimeEnv();
+  const controllerHome = typeof controllerHomeOrInput === 'string'
+    ? controllerHomeOrInput
+    : process.env.REPO_HARNESS_CONTROLLER_HOME?.trim() || process.cwd();
+  const input = typeof controllerHomeOrInput === 'string' ? maybeInput : controllerHomeOrInput;
   const service = normalizeService(input.service);
-  const clientId = process.env.REPO_HARNESS_GOOGLE_CLIENT_ID?.trim() || process.env.GOOGLE_CLIENT_ID?.trim();
   const redirectUri = input.redirectUri || process.env.REPO_HARNESS_GOOGLE_REDIRECT_URI || 'http://127.0.0.1:8766/oauth/google/callback';
   const requestedScopes = Array.isArray(input.scopes) && input.scopes.length > 0
-    ? input.scopes.map(String).filter(Boolean)
+    ? input.scopes.map((scope) => SCOPE_ALIASES[String(scope)] ?? String(scope)).filter(Boolean)
     : SERVICE_SCOPES[service];
-  const params = new URLSearchParams({
-    response_type: 'code',
-    access_type: 'offline',
-    prompt: 'consent',
-    include_granted_scopes: 'true',
-    redirect_uri: redirectUri,
-    scope: requestedScopes.join(' '),
-  });
-  if (clientId) params.set('client_id', clientId);
+  const prepared = prepareGoogleOAuthLogin(controllerHome, { service, scopes: requestedScopes, redirectUri });
+  const priorSafety = prepared.safety && typeof prepared.safety === 'object' && !Array.isArray(prepared.safety)
+    ? prepared.safety as Record<string, unknown>
+    : {};
   return {
-    schemaVersion: 1,
-    provider: 'google-workspace',
-    service,
-    readyToOpenBrowser: Boolean(clientId),
-    authorizationUrl: clientId ? `${GOOGLE_AUTH_ENDPOINT}?${params.toString()}` : undefined,
-    missingConfiguration: clientId ? [] : ['Set REPO_HARNESS_GOOGLE_CLIENT_ID before generating an OAuth URL.'],
-    redirectUri,
-    scopes: requestedScopes,
-    tokenEnvironmentVariables: TOKEN_ENV[service],
-    exchangeGuidance: {
-      implementedAs: 'handoff',
-      reason: 'The MCP tool must not receive or persist Google credential material. Exchange the code in a local CLI/browser flow and expose the access token through environment variables or a future OS-keychain backend.',
-      localNextSteps: [
-        'Open the authorizationUrl locally when readyToOpenBrowser=true.',
-        'Exchange the returned code in a local trusted process using your Google OAuth client credentials.',
-        `Export one of: ${TOKEN_ENV[service].join(', ')}.`,
-        'Restart repo-harness controller so plugin health can re-probe the environment.',
-      ],
-    },
+    ...prepared,
+    tokenEnvironmentVariables: service === 'gmail'
+      ? ['REPO_HARNESS_GMAIL_ACCESS_TOKEN', 'REPO_HARNESS_GMAIL_REFRESH_TOKEN']
+      : ['REPO_HARNESS_GOOGLE_WORKSPACE_ACCESS_TOKEN', 'REPO_HARNESS_GOOGLE_WORKSPACE_REFRESH_TOKEN'],
     safety: {
-      credentialMaterialReturned: false,
+      ...priorSafety,
       credentialMaterialPersisted: false,
-      opensBrowserAutomatically: false,
-      requiresLocalTrustedProcess: true,
+      credentialMaterialPersistedInRepository: false,
     },
   };
 }

@@ -25,6 +25,8 @@ interface GmailProvider {
   listMessages(args: Record<string, unknown>, config: GmailPluginConfig): Promise<Record<string, unknown>>;
   getMessage(args: Record<string, unknown>, config: GmailPluginConfig): Promise<Record<string, unknown>>;
   listLabels(args: Record<string, unknown>, config: GmailPluginConfig): Promise<Record<string, unknown>>;
+  getProfile(args: Record<string, unknown>, config: GmailPluginConfig): Promise<Record<string, unknown>>;
+  listHistory(args: Record<string, unknown>, config: GmailPluginConfig): Promise<Record<string, unknown>>;
   createDraft(args: Record<string, unknown>, config: GmailPluginConfig): Promise<Record<string, unknown>>;
   sendMessage(args: Record<string, unknown>, config: GmailPluginConfig): Promise<Record<string, unknown>>;
   modifyMessageLabels(args: Record<string, unknown>, config: GmailPluginConfig): Promise<Record<string, unknown>>;
@@ -78,7 +80,7 @@ function gmailCapabilities(): AssistantPluginCapability[] {
       title: 'Inbox Read',
       description: 'Search Gmail messages, read structured message details, and inspect mailbox labels.',
       scopes: ['gmail.readonly'],
-      actions: ['list_messages', 'get_message', 'list_labels'],
+      actions: ['list_messages', 'get_message', 'list_labels', 'get_profile', 'list_history'],
     },
     {
       capabilityId: 'mail-compose',
@@ -183,6 +185,45 @@ function gmailActions(): AssistantPluginActionDescriptor[] {
       scopes: ['gmail.readonly'],
       resourceClaims: [{ resource: 'remote', mode: 'read' }],
       argumentsSchema: { type: 'object', properties: {}, additionalProperties: false },
+    },
+    {
+      actionId: 'get_profile',
+      title: 'Get Gmail profile',
+      description: 'Read mailbox identity and the current Gmail history ID.',
+      readOnly: true,
+      risk: 'readonly',
+      confirmation: 'none',
+      defaultTimeoutMs: 30_000,
+      cancellable: true,
+      idempotent: true,
+      scopes: ['gmail.readonly'],
+      resourceClaims: [{ resource: 'remote', mode: 'read' }],
+      argumentsSchema: { type: 'object', properties: {}, additionalProperties: false },
+    },
+    {
+      actionId: 'list_history',
+      title: 'List Gmail history',
+      description: 'List incremental Gmail mailbox changes after a history ID.',
+      readOnly: true,
+      risk: 'readonly',
+      confirmation: 'none',
+      defaultTimeoutMs: 30_000,
+      cancellable: true,
+      idempotent: true,
+      scopes: ['gmail.readonly'],
+      resourceClaims: [{ resource: 'remote', mode: 'read' }],
+      argumentsSchema: {
+        type: 'object',
+        properties: {
+          start_history_id: { type: 'string' },
+          page_token: { type: 'string' },
+          max_results: { type: 'number' },
+          label_id: { type: 'string' },
+          history_type: { type: 'string', enum: ['messageAdded', 'messageDeleted', 'labelAdded', 'labelRemoved'] },
+        },
+        required: ['start_history_id'],
+        additionalProperties: false,
+      },
     },
     {
       actionId: 'create_draft',
@@ -406,6 +447,13 @@ function mockGmailProvider(): GmailProvider {
         ],
       };
     },
+    async getProfile(_args, config) {
+      return { provider: 'mock', emailAddress: config.accountEmail ?? 'mock-user@example.com', messagesTotal: 1, threadsTotal: 1, historyId: '1000' };
+    },
+    async listHistory(args) {
+      const messageId = stableMockId('gmail_history_msg', { startHistoryId: args.start_history_id });
+      return { history: [{ id: '1001', messagesAdded: [{ message: { id: messageId, threadId: `${messageId}_thread`, labelIds: ['INBOX'] } }] }], historyId: '1001' };
+    },
     async createDraft(args, config) {
       const draftId = stableMockId('gmail_draft', args);
       return {
@@ -514,6 +562,26 @@ function liveGmailProvider(config: GmailPluginConfig, repoRoot?: string): GmailP
         service: 'gmail',
         path: '/gmail/v1/users/me/labels',
         accessToken,
+        timeoutMs: config.defaultTimeoutMs,
+      });
+    },
+    async getProfile() {
+      return googleApiRequest<Record<string, unknown>>({
+        service: 'gmail', path: '/gmail/v1/users/me/profile', accessToken, timeoutMs: config.defaultTimeoutMs,
+      });
+    },
+    async listHistory(args) {
+      return googleApiRequest<Record<string, unknown>>({
+        service: 'gmail',
+        path: '/gmail/v1/users/me/history',
+        accessToken,
+        query: {
+          startHistoryId: requiredString(args.start_history_id, 'start_history_id'),
+          pageToken: stringValue(args.page_token),
+          maxResults: positiveNumber(args.max_results, 100),
+          labelId: stringValue(args.label_id),
+          historyTypes: stringValue(args.history_type) ?? 'messageAdded',
+        },
         timeoutMs: config.defaultTimeoutMs,
       });
     },
@@ -629,6 +697,10 @@ export async function executeGmailPluginAction(input: AssistantPluginActionExecu
       return gmailProvider(current, input.repoRoot).getMessage(input.args, current);
     case 'list_labels':
       return gmailProvider(current, input.repoRoot).listLabels(input.args, current);
+    case 'get_profile':
+      return gmailProvider(current, input.repoRoot).getProfile(input.args, current);
+    case 'list_history':
+      return gmailProvider(current, input.repoRoot).listHistory(input.args, current);
     case 'create_draft':
       return gmailProvider(current, input.repoRoot).createDraft(input.args, current);
     case 'send_message':

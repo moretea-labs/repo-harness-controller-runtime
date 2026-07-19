@@ -3,6 +3,12 @@ import { dirname, join } from 'path';
 import type { RepositoryRecord } from '../../cli/repositories/types';
 import type { ExecutionJobOrigin } from '../execution/jobs/types';
 import { executeAssistantPluginAction } from '../plugins/store';
+import { isAssistantPluginError } from '../plugins/errors';
+import {
+  createAssistantActionProposals,
+  type AssistantActionProposal,
+  type AssistantActionProposalInput,
+} from './action-proposals';
 import { addAssistantInboxItem, getAssistantRoutine, touchAssistantRoutineRun } from './store';
 
 export type AssistantRoutineRunStatus = 'collecting' | 'completed' | 'failed' | 'auth_required';
@@ -30,6 +36,7 @@ interface GmailRoutineCursor {
   routineId: string;
   lastSuccessfulAt?: string;
   historyId?: string;
+  continuation?: { mode: 'history' | 'query'; pageToken: string };
   processedMessageIds: string[];
   updatedAt: string;
 }
@@ -43,13 +50,6 @@ interface GmailMessageSummary {
   snippet: string;
   bodyPreview?: string;
   labelIds: string[];
-}
-
-interface AssistantActionProposal {
-  type: 'reply_candidate' | 'task_candidate' | 'archive_candidate';
-  messageId: string;
-  summary: string;
-  risk: 'proposal_only';
 }
 
 function now(): string { return new Date().toISOString(); }
@@ -161,24 +161,42 @@ function summarizeMessage(raw: Record<string, unknown>): GmailMessageSummary {
   };
 }
 
-function proposalsFor(messages: GmailMessageSummary[]): AssistantActionProposal[] {
-  const proposals: AssistantActionProposal[] = [];
+function senderAddress(value: string): string | undefined {
+  return value.match(/<([^>]+@[^>]+)>/)?.[1] ?? value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0];
+}
+
+function proposalsFor(messages: GmailMessageSummary[]): AssistantActionProposalInput[] {
+  const proposals: AssistantActionProposalInput[] = [];
   for (const message of messages) {
     const text = `${message.subject} ${message.snippet} ${message.bodyPreview ?? ''}`.toLowerCase();
     if (/(please reply|reply requested|请回复|需要回复|your response)/i.test(text)) {
-      proposals.push({ type: 'reply_candidate', messageId: message.id, summary: `Prepare a reviewable reply draft for “${message.subject}”.`, risk: 'proposal_only' });
+      const to = senderAddress(message.from);
+      proposals.push({
+        pluginId: 'gmail', actionId: 'create_draft', evidenceMessageIds: [message.id],
+        reason: `Prepare a reviewable reply draft for “${message.subject}”.`, confidence: 0.75,
+        executable: Boolean(to),
+        arguments: to ? { to: [to], subject: message.subject.startsWith('Re:') ? message.subject : `Re: ${message.subject}`, body_text: '[Draft response pending review]' } : {},
+      });
     }
     if (/(action required|todo|deadline|due date|需要处理|截止|待办)/i.test(text)) {
-      proposals.push({ type: 'task_candidate', messageId: message.id, summary: `Create a task candidate from “${message.subject}”.`, risk: 'proposal_only' });
+      proposals.push({
+        pluginId: 'google_tasks', actionId: 'create_task', evidenceMessageIds: [message.id],
+        reason: `Create a task from “${message.subject}”.`, confidence: 0.8,
+        arguments: { title: message.subject, notes: `${message.from}\n${message.snippet}`.slice(0, 2_000) },
+      });
     }
     if (/(newsletter|digest|marketing|unsubscribe|推广|营销|周报)/i.test(text)) {
-      proposals.push({ type: 'archive_candidate', messageId: message.id, summary: `Review “${message.subject}” as an archive candidate.`, risk: 'proposal_only' });
+      proposals.push({
+        pluginId: 'gmail', actionId: 'archive_message', evidenceMessageIds: [message.id],
+        reason: `Archive candidate: “${message.subject}”.`, confidence: 0.7,
+        arguments: { message_id: message.id },
+      });
     }
   }
   return proposals.slice(0, 50);
 }
 
-function renderReport(messages: GmailMessageSummary[], proposals: AssistantActionProposal[], windowStart: string, windowEnd: string): string {
+function renderReport(messages: GmailMessageSummary[], proposals: AssistantActionProposalInput[], windowStart: string, windowEnd: string): string {
   const important = messages.filter((message) => /(security|alert|billing|invoice|jira|github|production|incident|安全|账单|故障|告警)/i.test(`${message.subject} ${message.snippet}`));
   const lines = [
     `窗口：${windowStart} — ${windowEnd}`,
@@ -193,7 +211,7 @@ function renderReport(messages: GmailMessageSummary[], proposals: AssistantActio
     ...messages.slice(0, 20).map((message) => `- ${message.subject} — ${message.from}${message.snippet ? `：${message.snippet.slice(0, 160)}` : ''}`),
     '',
     '行动建议（仅提议，不会自动发送或删除）：',
-    ...(proposals.length > 0 ? proposals.slice(0, 20).map((proposal) => `- ${proposal.summary}`) : ['- 暂无。']),
+    ...(proposals.length > 0 ? proposals.slice(0, 20).map((proposal) => `- ${proposal.reason}`) : ['- 暂无。']),
   ];
   return lines.join('\n');
 }
@@ -252,25 +270,55 @@ export async function executeAssistantRoutineRuntime(input: {
     if (!routine.dataSources.includes('gmail')) {
       throw new Error('ASSISTANT_ROUTINE_GMAIL_REQUIRED: this runtime currently finalizes Gmail-backed routines');
     }
-    const profile = await gmailAction(input.controllerHome, input.repository, input.origin, `${input.requestId}:profile`, 'list_labels', {});
-    const overlapStart = Math.max(0, Date.parse(windowStart) - 5 * 60_000);
-    const query = `in:inbox -in:spam -in:trash after:${Math.floor(overlapStart / 1000)}`;
+    const profile = await gmailAction(input.controllerHome, input.repository, input.origin, `${input.requestId}:profile`, 'get_profile', {});
     const known = new Set(cursor.processedMessageIds);
     const messageIds: string[] = [];
-    let pageToken: string | undefined;
-    for (let page = 0; page < 5 && messageIds.length < 100; page += 1) {
-      const listed = await gmailAction(input.controllerHome, input.repository, input.origin, `${input.requestId}:list:${page}`, 'list_messages', {
-        query,
-        max_results: 25,
-        ...(pageToken ? { page_token: pageToken } : {}),
-      });
-      const listedMessages = Array.isArray(listed.messages) ? listed.messages.map(recordValue) : [];
-      for (const message of listedMessages) {
-        const id = stringValue(message.id);
-        if (id && !known.has(id) && !messageIds.includes(id)) messageIds.push(id);
+    const startingContinuation = cursor.continuation;
+    let nextContinuation: GmailRoutineCursor['continuation'];
+    let historyFallback = !cursor.historyId;
+    let historyInvalid = false;
+    if (cursor.historyId) {
+      try {
+        let historyPageToken = startingContinuation?.mode === 'history' ? startingContinuation.pageToken : undefined;
+        for (let page = 0; page < 5 && messageIds.length < 100; page += 1) {
+          const history = await gmailAction(input.controllerHome, input.repository, input.origin, `${input.requestId}:history:${page}`, 'list_history', {
+            start_history_id: cursor.historyId, max_results: 100, label_id: 'INBOX', history_type: 'messageAdded',
+            ...(historyPageToken ? { page_token: historyPageToken } : {}),
+          });
+          for (const entry of Array.isArray(history.history) ? history.history.map(recordValue) : []) {
+            for (const added of Array.isArray(entry.messagesAdded) ? entry.messagesAdded.map(recordValue) : []) {
+              const id = stringValue(recordValue(added.message).id);
+              if (id && !known.has(id) && !messageIds.includes(id)) messageIds.push(id);
+            }
+          }
+          historyPageToken = stringValue(history.nextPageToken);
+          if (!historyPageToken) break;
+        }
+        if (historyPageToken) nextContinuation = { mode: 'history', pageToken: historyPageToken };
+      } catch (error) {
+        const status = isAssistantPluginError(error) ? Number(error.details?.status) : undefined;
+        if (status !== 404) throw error;
+        historyFallback = true;
+        historyInvalid = true;
+        nextContinuation = undefined;
       }
-      pageToken = stringValue(listed.nextPageToken);
-      if (!pageToken) break;
+    }
+    if (historyFallback) {
+      const overlapStart = Math.max(0, Date.parse(windowStart) - 5 * 60_000);
+      const query = `in:inbox -in:spam -in:trash after:${Math.floor(overlapStart / 1000)}`;
+      let pageToken = startingContinuation?.mode === 'query' ? startingContinuation.pageToken : undefined;
+      for (let page = 0; page < 5 && messageIds.length < 100; page += 1) {
+        const listed = await gmailAction(input.controllerHome, input.repository, input.origin, `${input.requestId}:list:${page}`, 'list_messages', {
+          query, max_results: 25, ...(pageToken ? { page_token: pageToken } : {}),
+        });
+        for (const message of Array.isArray(listed.messages) ? listed.messages.map(recordValue) : []) {
+          const id = stringValue(message.id);
+          if (id && !known.has(id) && !messageIds.includes(id)) messageIds.push(id);
+        }
+        pageToken = stringValue(listed.nextPageToken);
+        if (!pageToken) break;
+      }
+      nextContinuation = pageToken ? { mode: 'query', pageToken } : undefined;
     }
     const messages: GmailMessageSummary[] = [];
     for (const messageId of messageIds.slice(0, 50)) {
@@ -281,8 +329,14 @@ export async function executeAssistantRoutineRuntime(input: {
       const raw = recordValue(fetched.message && typeof fetched.message === 'object' ? fetched.message : fetched);
       messages.push(summarizeMessage(raw));
     }
-    const proposals = proposalsFor(messages);
-    const truncated = messageIds.length > messages.length;
+    const proposalInputs = proposalsFor(messages);
+    const proposals = createAssistantActionProposals(input.controllerHome, input.repository, { routineId: routine.routineId, runId, proposals: proposalInputs });
+    const hydrationTruncated = messageIds.length > messages.length;
+    const paginationIncomplete = Boolean(nextContinuation);
+    const truncated = hydrationTruncated || paginationIncomplete;
+    const savedContinuation = truncated
+      ? hydrationTruncated ? startingContinuation : nextContinuation
+      : undefined;
     const report = renderReport(messages, proposals, windowStart, windowEnd);
     run = saveRun(input.repository.canonicalRoot, {
       ...run,
@@ -314,7 +368,8 @@ export async function executeAssistantRoutineRuntime(input: {
       schemaVersion: 1,
       routineId: routine.routineId,
       lastSuccessfulAt: truncated ? windowStart : windowEnd,
-      historyId: stringValue(profile.historyId),
+      historyId: truncated ? historyInvalid ? undefined : cursor.historyId : stringValue(profile.historyId) ?? cursor.historyId,
+      continuation: savedContinuation,
       processedMessageIds: [...messages.map((message) => message.id), ...cursor.processedMessageIds].slice(0, 1_000),
       updatedAt: now(),
     });
