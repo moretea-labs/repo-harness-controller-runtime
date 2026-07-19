@@ -1,14 +1,14 @@
 ---
 id: "ISS-20260719-8A4B9C"
 kind: "bug"
-status: "planned"
-updated_at: "2026-07-19T04:30:30.713Z"
+status: "done"
+updated_at: "2026-07-19T06:01:30.159Z"
 source: "repo-harness-controller-v8"
 ---
 
 # Keep blue-green rollout under one global Supervisor
 
-Fix controller rollout so candidate slots never start a second Stable Supervisor on the global ingress/rescue ports. Candidate slots must use slot-local lifecycle, while immutable release installation and activation remain owned by the root Controller Home.
+Resolved, merged, installed, and verified at main@86c75cd0ac4d9d9ffb9ba0c1e90a5a6dd9917c21. Single-root-Supervisor rollout and rollback, staged release publication, rollback release identity, slot-local lifecycle isolation, and active-slot status resolution are complete. Targeted process-level tests and all required named checks passed.
 
 ## Goals
 
@@ -41,7 +41,7 @@ Fix controller rollout so candidate slots never start a second Stable Supervisor
 
 ### T1 — Enforce single-Supervisor blue-green lifecycle
 
-- Status: `ready`
+- Status: `done`
 - Objective: Add an internal slot-local lifecycle mode to Controller service start/stop so blue-green candidate and rollback paths bypass installed Stable Supervisor artifacts. Remove candidate-home Supervisor installation. After candidate verification, install the immutable release only in root Controller Home; after successful cutover verification, schedule detached root Supervisor activation and return its metadata. Add regression coverage for preinstalled candidate release and no second global Supervisor. Validate and merge to main, then clean branch/worktree.
 - Depends on: none
 - Allowed paths: `src/cli/controller/lifecycle.ts`, `src/cli/controller/bluegreen-rollout.ts`, `src/cli/commands/supervisor.ts`, `tests/cli/controller-bluegreen-isolated.test.ts`, `tests/cli/controller-service.test.ts`, `tests/runtime/stable-supervisor-hardening.test.ts`, `docs/architecture/current/**`
@@ -50,4 +50,5 @@ Fix controller rollout so candidate slots never start a second Stable Supervisor
 
 ## Related Artifacts
 
-- None.
+- `commit:86c75cd0ac4d9d9ffb9ba0c1e90a5a6dd9917c21`
+- `edit-session:EDIT-1784436675051-d934d7de`
