@@ -36,6 +36,8 @@ jobs:
             python3 scripts/apply-assistant-model-apis.py || exit $?
             echo '--- openapi ---'
             python3 scripts/apply-assistant-model-openapi.py || exit $?
+            echo '--- verification fixes ---'
+            python3 scripts/fix-standing-grant-verification.py || exit $?
           } 2>&1 | tee assistant-model-patch.log
           echo "${PIPESTATUS[0]}" > assistant-model-patch.status
           exit 0
