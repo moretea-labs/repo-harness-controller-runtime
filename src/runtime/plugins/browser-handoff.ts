@@ -1,5 +1,7 @@
 import { randomUUID } from 'crypto';
 import { spawn } from 'child_process';
+import { closeSync, existsSync, openSync, readFileSync } from 'fs';
+import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { writeJsonAtomic } from '../shared/json-files';
 import { AssistantPluginError } from './errors';
@@ -19,6 +21,8 @@ const PROVIDER = 'browser' as const;
 const DEFAULT_HANDOFF_TIMEOUT_MS = 10 * 60_000;
 const MAX_HANDOFF_TIMEOUT_MS = 60 * 60_000;
 const STARTUP_GRACE_MS = 15_000;
+const STARTUP_POLL_MS = 50;
+const MAX_STARTUP_LOG_CHARS = 4_000;
 
 export interface BrowserHandoffLaunchSpec {
   schemaVersion: 1;
@@ -62,6 +66,7 @@ export interface BrowserHandoffRuntimeHooks {
   pidAlive(pid: number | undefined): boolean;
   spawnHost(specPath: string): { pid?: number };
   signal(pid: number, signal: NodeJS.Signals): void;
+  wait(ms: number): Promise<void>;
 }
 
 function defaultPidAlive(pid: number | undefined): boolean {
@@ -78,20 +83,29 @@ const defaultHooks: BrowserHandoffRuntimeHooks = {
   now: () => new Date().toISOString(),
   pidAlive: defaultPidAlive,
   spawnHost: (specPath) => {
-    const entry = fileURLToPath(new URL('./browser-handoff-host.ts', import.meta.url));
+    const releaseEntry = process.argv[1] ? join(dirname(process.argv[1]), 'browser-handoff-host.js') : undefined;
+    const sourceEntry = fileURLToPath(new URL('./browser-handoff-host.ts', import.meta.url));
     const loader = fileURLToPath(new URL('../shared/node-ts-loader.mjs', import.meta.url));
-    const args = process.versions.bun ? [entry, specPath] : ['--loader', loader, entry, specPath];
-    const child = spawn(process.execPath, args, {
-      detached: true,
-      stdio: 'ignore',
-      cwd: process.cwd(),
-      env: { ...process.env },
-    });
-    child.once('error', () => undefined);
-    child.unref();
-    return { pid: child.pid };
+    const entry = releaseEntry && existsSync(releaseEntry) ? releaseEntry : sourceEntry;
+    const args = entry === sourceEntry && !process.versions.bun ? ['--loader', loader, entry, specPath] : [entry, specPath];
+    const logPath = specPath.replace(/\.json$/u, '.log');
+    const logFd = openSync(logPath, 'a');
+    try {
+      const child = spawn(process.execPath, args, {
+        detached: true,
+        stdio: ['ignore', logFd, logFd],
+        cwd: process.cwd(),
+        env: { ...process.env },
+      });
+      child.once('error', () => undefined);
+      child.unref();
+      return { pid: child.pid };
+    } finally {
+      closeSync(logFd);
+    }
   },
   signal: (pid, signal) => process.kill(pid, signal),
+  wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 };
 
 let hooks: BrowserHandoffRuntimeHooks = { ...defaultHooks };
@@ -194,7 +208,62 @@ export function assertBrowserSessionAvailable(repoRoot: string, sessionId?: stri
   });
 }
 
-export function startBrowserHandoff(input: BrowserHandoffStartInput): InteractionSessionRecord {
+function startupDiagnostic(specPath: string): string | undefined {
+  const logPath = specPath.replace(/\.json$/u, '.log');
+  if (!existsSync(logPath)) return undefined;
+  try {
+    const text = readFileSync(logPath, 'utf8').trim();
+    return text ? text.slice(-MAX_STARTUP_LOG_CHARS) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function waitForBrowserHandoffStartup(
+  repoRoot: string,
+  interactionId: string,
+  specPath: string,
+  pid: number | undefined,
+): Promise<InteractionSessionRecord> {
+  const deadline = Date.now() + STARTUP_GRACE_MS;
+  while (Date.now() < deadline) {
+    const current = readInteractionSession(repoRoot, PROVIDER, interactionId);
+    if (!current) break;
+    if (current.status !== 'starting') {
+      if (current.status === 'waiting_for_user') return current;
+      throw new AssistantPluginError('PLUGIN_ACTION_FAILED', current.error?.message ?? `Browser handoff entered ${current.status}.`, {
+        retryable: current.status === 'failed',
+        details: { interactionId, status: current.status, error: current.error },
+      });
+    }
+    if (!hooks.pidAlive(pid)) {
+      const diagnostic = startupDiagnostic(specPath);
+      const message = diagnostic
+        ? `The browser handoff host exited during startup: ${diagnostic}`
+        : 'The browser handoff host exited during startup.';
+      const failed = patchInteractionSession(repoRoot, PROVIDER, interactionId, {
+        status: 'failed',
+        error: { code: 'HANDOFF_HOST_START_FAILED', message },
+      });
+      throw new AssistantPluginError('PLUGIN_ACTION_FAILED', message, {
+        retryable: true,
+        details: { interactionId, status: failed?.status ?? 'failed' },
+      });
+    }
+    await hooks.wait(STARTUP_POLL_MS);
+  }
+  if (pid && hooks.pidAlive(pid)) {
+    try { hooks.signal(pid, 'SIGTERM'); } catch { /* host may exit concurrently */ }
+  }
+  const message = 'The browser handoff host did not become ready before the startup deadline.';
+  patchInteractionSession(repoRoot, PROVIDER, interactionId, {
+    status: 'failed',
+    error: { code: 'HANDOFF_HOST_START_TIMEOUT', message },
+  });
+  throw new AssistantPluginError('PLUGIN_ACTION_FAILED', message, { retryable: true, details: { interactionId } });
+}
+
+export async function startBrowserHandoff(input: BrowserHandoffStartInput): Promise<InteractionSessionRecord> {
   persistDeadBrowserHandoffs(input.repoRoot);
   assertBrowserProfileAvailable(input.repoRoot, input.selectedProfilePath);
   const timestamp = hooks.now();
@@ -239,9 +308,10 @@ export function startBrowserHandoff(input: BrowserHandoffStartInput): Interactio
   writeJsonAtomic(specPath, spec);
   try {
     const child = hooks.spawnHost(specPath);
-    return patchInteractionSession(input.repoRoot, PROVIDER, interactionId, {
+    patchInteractionSession(input.repoRoot, PROVIDER, interactionId, {
       host: { pid: child.pid, startedAt: timestamp },
-    }) ?? record;
+    });
+    return await waitForBrowserHandoffStartup(input.repoRoot, interactionId, specPath, child.pid);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     patchInteractionSession(input.repoRoot, PROVIDER, interactionId, {

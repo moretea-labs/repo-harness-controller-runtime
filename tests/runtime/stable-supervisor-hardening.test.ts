@@ -59,9 +59,16 @@ describe('Stable Supervisor production hardening', () => {
     try {
       const release = installSupervisorRelease({ controllerHome, repoRoot: process.cwd(), sourceRoot: process.cwd() });
       expect(existsSync(join(release.releasePath, 'worker.js'))).toBe(true);
-      const manifest = JSON.parse(readFileSync(join(release.releasePath, 'manifest.json'), 'utf8')) as { workerEntrypoint?: string; capabilities?: string[] };
+      expect(existsSync(join(release.releasePath, 'browser-handoff-host.js'))).toBe(true);
+      const manifest = JSON.parse(readFileSync(join(release.releasePath, 'manifest.json'), 'utf8')) as {
+        workerEntrypoint?: string;
+        browserHandoffHostEntrypoint?: string;
+        capabilities?: string[];
+      };
       expect(manifest.workerEntrypoint).toBe('worker.js');
+      expect(manifest.browserHandoffHostEntrypoint).toBe('browser-handoff-host.js');
       expect(manifest.capabilities).toContain('staged_rollout_release');
+      expect(manifest.capabilities).toContain('browser_handoff_host');
     } finally {
       rmSync(controllerHome, { recursive: true, force: true });
     }
@@ -74,6 +81,7 @@ describe('Stable Supervisor production hardening', () => {
       expect(readCurrentRelease(controllerHome)).toBeUndefined();
       expect(readCurrentSupervisorRelease(controllerHome)).toBeUndefined();
       expect(existsSync(join(staged.releasePath, 'worker.js'))).toBe(true);
+      expect(existsSync(join(staged.releasePath, 'browser-handoff-host.js'))).toBe(true);
 
       const published = publishSupervisorRelease({
         controllerHome,

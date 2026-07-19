@@ -1359,7 +1359,7 @@ export async function executeBrowserPluginAction(input: AssistantPluginActionExe
         assertUrlAllowed(target.url, current);
         const profile = selectedProfile(current, input.repoRoot);
         mkdirSync(profile.profileDir, { recursive: true });
-        const handoff = startBrowserHandoff({
+        const handoff = await startBrowserHandoff({
           repoRoot: input.repoRoot,
           repoId: input.repoId,
           requestId: input.requestId,

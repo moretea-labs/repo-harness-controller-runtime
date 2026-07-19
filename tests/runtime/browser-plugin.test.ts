@@ -11,7 +11,7 @@ import {
   resetBrowserPluginRuntimeHooksForTest,
   setBrowserPluginRuntimeHooksForTest,
 } from '../../src/runtime/plugins/browser-adapter';
-import { resetBrowserHandoffRuntimeHooksForTest, setBrowserHandoffRuntimeHooksForTest } from '../../src/runtime/plugins/browser-handoff';
+import { listBrowserHandoffs, resetBrowserHandoffRuntimeHooksForTest, setBrowserHandoffRuntimeHooksForTest } from '../../src/runtime/plugins/browser-handoff';
 import { interactionCommandPath, patchInteractionSession } from '../../src/runtime/plugins/interaction-session';
 import {
   clearAssistantPluginManifestCacheForTest,
@@ -581,7 +581,12 @@ describe('browser plugin', () => {
     const specs: string[] = [];
     setBrowserHandoffRuntimeHooksForTest({
       now: () => '2026-07-19T08:00:00.000Z', pidAlive: (pid) => pid === 4242,
-      spawnHost: (path) => { specs.push(path); return { pid: 4242 }; }, signal: () => undefined,
+      spawnHost: (path) => {
+        specs.push(path);
+        const spec = JSON.parse(readFileSync(path, 'utf8')) as { interactionId: string };
+        patchInteractionSession(repoRoot, 'browser', spec.interactionId, { status: 'waiting_for_user' });
+        return { pid: 4242 };
+      }, signal: () => undefined,
     });
     const requested = await executeBrowserPluginAction({
       controllerHome: repoRoot, repoId: 'repo', repoRoot, pluginId: 'browser', actionId: 'request_human_handoff',
@@ -620,7 +625,12 @@ describe('browser plugin', () => {
     let live = true;
     let signals = 0;
     setBrowserHandoffRuntimeHooksForTest({
-      now: () => now, pidAlive: () => live, spawnHost: () => ({ pid: 4343 }), signal: () => { signals += 1; },
+      now: () => now, pidAlive: () => live,
+      spawnHost: (path) => {
+        const spec = JSON.parse(readFileSync(path, 'utf8')) as { interactionId: string };
+        patchInteractionSession(repoRoot, 'browser', spec.interactionId, { status: 'waiting_for_user' });
+        return { pid: 4343 };
+      }, signal: () => { signals += 1; },
     });
     const requested = await executeBrowserPluginAction({
       controllerHome: repoRoot, repoId: 'repo', repoRoot, pluginId: 'browser', actionId: 'request_human_handoff',
@@ -649,6 +659,30 @@ describe('browser plugin', () => {
       requestId: 'expiry-released', args: { session_id: sessionId }, origin: { surface: 'local-ui', actor: 'test' },
     });
     expect(after.url).toBe('https://example.com/');
+  });
+
+  test('fails the request instead of returning a stale starting handoff when the host exits before ready', async () => {
+    const { repoRoot } = repoFixture();
+    writeBrowserConfig(repoRoot, { schemaVersion: 1, enabled: true, provider: 'playwright', allowedDomains: ['example.com'] });
+    setBrowserPluginRuntimeHooksForTest({ moduleAvailable: () => true, loadPlaywright: () => mockPlaywright() });
+    const opened = await executeBrowserPluginAction({
+      controllerHome: repoRoot, repoId: 'repo', repoRoot, pluginId: 'browser', actionId: 'create_session',
+      requestId: 'startup-failure-create', args: { url: 'https://example.com/' }, origin: { surface: 'local-ui', actor: 'test' },
+    });
+    const sessionId = String((opened.session as Record<string, unknown>).sessionId);
+    setBrowserHandoffRuntimeHooksForTest({
+      pidAlive: () => false,
+      spawnHost: (path) => {
+        writeFileSync(path.replace(/\.json$/u, '.log'), 'Cannot find browser-handoff-host.js');
+        return { pid: 4444 };
+      },
+      signal: () => undefined,
+    });
+    await expect(executeBrowserPluginAction({
+      controllerHome: repoRoot, repoId: 'repo', repoRoot, pluginId: 'browser', actionId: 'request_human_handoff',
+      requestId: 'startup-failure-request', args: { session_id: sessionId }, origin: { surface: 'local-ui', actor: 'test' },
+    })).rejects.toThrow('Cannot find browser-handoff-host.js');
+    expect(listBrowserHandoffs(repoRoot).at(-1)?.status).toBe('failed');
   });
 
   const liveSmokeMarker = join(process.cwd(), '.repo-harness', 'run-browser-handoff-live-smoke');
