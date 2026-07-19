@@ -36,7 +36,23 @@ jobs:
         run: bun x tsc --noEmit
 
       - name: Focused tests
-        run: bun test tests/runtime/gmail-assistant-routines.test.ts
+        shell: bash
+        run: |
+          set +e
+          bun test tests/runtime/gmail-assistant-routines.test.ts 2>&1 | tee gmail-routine-test.log
+          echo "${PIPESTATUS[0]}" > gmail-routine-test.status
+          exit 0
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gmail-routine-test-output
+          path: |
+            gmail-routine-test.log
+            gmail-routine-test.status
+
+      - name: Enforce focused test result
+        run: test "$(cat gmail-routine-test.status)" = "0"
 
       - name: Commit generated implementation
         if: github.event_name == 'push'
