@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { writeMcpServiceLocalConfig, loadMcpServiceLocalConfig, type McpLocalConfig } from '../mcp/auth';
 import { resolveMcpRepoRoot } from '../mcp/repo';
@@ -22,6 +22,7 @@ import {
   type SlotIdentity,
 } from './runtime-slots';
 import {
+  boundKeyOutput,
   compositeFailed,
   compositeSucceeded,
   type CompositeToolResult,
@@ -30,9 +31,13 @@ import { readRuntimeGeneration } from '../../runtime/control-plane/runtime-gener
 import { createExecutionJob, getExecutionJob } from '../../runtime/execution/jobs/store';
 import { CONTROLLER_SCOPE_REPO_ID } from '../repositories/controller-home';
 import { randomUUID } from 'crypto';
-import { isStableSupervisorInstalled } from '../../runtime/supervisor/paths';
-import { installSupervisorRelease } from '../../runtime/supervisor/installer';
+import { isStableSupervisorInstalled, readPreviousRelease } from '../../runtime/supervisor/paths';
+import { publishSupervisorRelease, stageSupervisorRelease } from '../../runtime/supervisor/installer';
 import { resolveControllerRuntimeSourceRoot } from '../../runtime/control-plane/runtime-generation';
+import { sendSupervisorCommand } from '../../runtime/supervisor/control-server';
+import { readStableSupervisorState } from '../../runtime/supervisor/bridge';
+import type { SupervisorOperation, SupervisorOperationKind } from '../../runtime/supervisor/types';
+import { scheduleServiceActivation } from '../commands/supervisor';
 
 export interface BlueGreenRolloutOptions {
   repo?: string;
@@ -44,6 +49,294 @@ export interface BlueGreenRolloutOptions {
   skipDurableJob?: boolean;
   skipRestartDurability?: boolean;
   reason?: string;
+}
+
+const TERMINAL_SUPERVISOR_PHASES = new Set(['succeeded', 'failed', 'locked_out']);
+
+function operationTimeoutMs(opts: BlueGreenRolloutOptions): number {
+  return Math.max(180_000, (opts.startTimeoutMs ?? 60_000) * 3);
+}
+
+async function submitAndWaitSupervisorOperation(input: {
+  rootHome: string;
+  kind: SupervisorOperationKind;
+  reason?: string;
+  candidateReleasePath?: string;
+  timeoutMs: number;
+}): Promise<SupervisorOperation> {
+  const requestId = `controller-${input.kind}-${Date.now()}-${randomUUID().slice(0, 10)}`;
+  const submitted = await sendSupervisorCommand(input.rootHome, {
+    command: 'operation_submit',
+    requestId,
+    kind: input.kind,
+    actor: 'controller-bluegreen-rollout',
+    reason: input.reason,
+    candidateReleasePath: input.candidateReleasePath,
+  });
+  if (!submitted.ok || !submitted.operation) {
+    throw new Error(submitted.error?.message ?? 'SUPERVISOR_OPERATION_REJECTED');
+  }
+  if (input.candidateReleasePath && submitted.operation.candidateReleasePath !== input.candidateReleasePath) {
+    throw new Error('SUPERVISOR_STAGED_ROLLOUT_CAPABILITY_MISMATCH');
+  }
+  let operation = submitted.operation;
+  const deadline = Date.now() + input.timeoutMs;
+  while (!TERMINAL_SUPERVISOR_PHASES.has(operation.phase)) {
+    if (Date.now() >= deadline) {
+      throw new Error(`SUPERVISOR_OPERATION_TIMEOUT: ${operation.operationId} phase=${operation.phase}`);
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+    const polled = await sendSupervisorCommand(input.rootHome, {
+      command: 'operation_get',
+      operationId: operation.operationId,
+    });
+    if (!polled.ok || !polled.operation) {
+      throw new Error(polled.error?.message ?? 'SUPERVISOR_OPERATION_READ_FAILED');
+    }
+    operation = polled.operation;
+  }
+  return operation;
+}
+
+function partialResult(input: {
+  phase: string;
+  summary: string;
+  keyOutput: string;
+  nextAction: string;
+  details?: Record<string, unknown>;
+}): CompositeToolResult {
+  return {
+    status: 'partial',
+    phase: input.phase,
+    summary: input.summary,
+    keyOutput: boundKeyOutput(input.keyOutput),
+    evidenceRefs: [],
+    retryable: true,
+    nextAction: input.nextAction,
+    details: input.details,
+  };
+}
+
+function supportsStagedRolloutRelease(rootHome: string): boolean {
+  const releasePath = readStableSupervisorState(rootHome)?.supervisor.releasePath;
+  if (!releasePath) return false;
+  try {
+    const manifest = JSON.parse(readFileSync(join(releasePath, 'manifest.json'), 'utf8')) as { capabilities?: unknown };
+    return Array.isArray(manifest.capabilities) && manifest.capabilities.includes('staged_rollout_release');
+  } catch {
+    return false;
+  }
+}
+
+async function stableSupervisorRollout(
+  repoRoot: string,
+  rootHome: string,
+  opts: BlueGreenRolloutOptions,
+): Promise<CompositeToolResult> {
+  if (!supportsStagedRolloutRelease(rootHome)) {
+    return compositeFailed({
+      phase: 'supervisor-capability',
+      summary: 'The running Stable Supervisor cannot safely consume an unpublished candidate release',
+      failedCheck: 'staged_rollout_release',
+      keyOutput: 'running Supervisor release lacks staged_rollout_release capability',
+      retryable: false,
+      nextAction: 'install and activate the current Supervisor release first, then retry rollout',
+    });
+  }
+  const source = resolveControllerRuntimeSourceRoot();
+  let staged;
+  try {
+    staged = stageSupervisorRelease({
+      controllerHome: rootHome,
+      repoRoot,
+      sourceRoot: source.root ?? repoRoot,
+    });
+  } catch (error) {
+    return compositeFailed({
+      phase: 'release-stage',
+      summary: 'Failed to build an isolated candidate Supervisor release',
+      failedCheck: 'candidate_release_build',
+      keyOutput: error instanceof Error ? error.message : String(error),
+      nextAction: 'fix the candidate build; active Supervisor and slot authority were not changed',
+    });
+  }
+
+  let operation: SupervisorOperation;
+  try {
+    operation = await submitAndWaitSupervisorOperation({
+      rootHome,
+      kind: 'rollout',
+      reason: opts.reason,
+      candidateReleasePath: staged.releasePath,
+      timeoutMs: operationTimeoutMs(opts),
+    });
+  } catch (error) {
+    return compositeFailed({
+      phase: 'supervisor-rollout',
+      summary: 'Root Stable Supervisor did not complete candidate rollout',
+      failedCheck: 'supervisor_operation',
+      keyOutput: error instanceof Error ? error.message : String(error),
+      nextAction: 'inspect the durable Supervisor operation; the staged release was never published',
+      details: { stagedRelease: staged },
+    });
+  }
+  if (operation.phase !== 'succeeded') {
+    return compositeFailed({
+      phase: operation.phase,
+      summary: 'Candidate verification or cutover failed; active release publication was skipped',
+      failedCheck: operation.failureClass ?? 'supervisor_rollout',
+      keyOutput: operation.error ?? `operation ${operation.operationId} ended in ${operation.phase}`,
+      nextAction: 'inspect candidate evidence and retry after fixing the release',
+      details: { operation, stagedRelease: staged },
+    });
+  }
+
+  let publication;
+  try {
+    publication = publishSupervisorRelease({
+      controllerHome: rootHome,
+      repoRoot,
+      releasePath: staged.releasePath,
+    });
+  } catch (error) {
+    let rollback: SupervisorOperation | undefined;
+    try {
+      rollback = await submitAndWaitSupervisorOperation({
+        rootHome,
+        kind: 'rollback',
+        reason: 'candidate cutover succeeded but release publication failed',
+        timeoutMs: operationTimeoutMs(opts),
+      });
+    } catch {
+      // Report both the publication failure and best-effort rollback uncertainty.
+    }
+    return compositeFailed({
+      phase: 'release-publish',
+      summary: 'Candidate cutover succeeded but root release publication failed',
+      failedCheck: 'release_publish',
+      keyOutput: error instanceof Error ? error.message : String(error),
+      nextAction: 'inspect Supervisor authority and rollback outcome before retrying',
+      details: { operation, rollback, stagedRelease: staged },
+    });
+  }
+
+  let activation: ReturnType<typeof scheduleServiceActivation> | { skipped: true };
+  try {
+    activation = opts.skipRestartDurability
+      ? { skipped: true }
+      : scheduleServiceActivation(repoRoot, rootHome, 3_000);
+  } catch (error) {
+    return partialResult({
+      phase: 'activation-schedule',
+      summary: 'Rollout and release publication succeeded, but Supervisor self-activation was not scheduled',
+      keyOutput: error instanceof Error ? error.message : String(error),
+      nextAction: 'run supervisor install --register-service for the published release; do not repeat rollout',
+      details: { operation, publication },
+    });
+  }
+
+  const authority = readActiveSlotAuthority(rootHome);
+  return compositeSucceeded({
+    phase: 'cutover',
+    summary: `Rollout complete under one Stable Supervisor: active slot is ${authority.activeSlot}`,
+    keyOutput: [
+      `operation=${operation.operationId}`,
+      `active=${authority.activeSlot}`,
+      `generation=${authority.generation ?? 'unknown'}`,
+      `release=${publication.releaseRevision}`,
+      `activation=${'skipped' in activation ? 'skipped' : activation.activationId}`,
+    ].join('\n'),
+    nextAction: 'retry the stable domain while detached Supervisor activation completes',
+    details: { authority, operation, publication, activation },
+  });
+}
+
+async function stableSupervisorRollback(
+  repoRoot: string,
+  rootHome: string,
+  opts: BlueGreenRolloutOptions,
+): Promise<CompositeToolResult> {
+  const supervisorState = readStableSupervisorState(rootHome);
+  const rollbackReleasePath = supervisorState?.standby?.controllerDaemon.releasePath
+    ?? readPreviousRelease(rootHome);
+  let operation: SupervisorOperation;
+  try {
+    operation = await submitAndWaitSupervisorOperation({
+      rootHome,
+      kind: 'rollback',
+      reason: opts.reason,
+      timeoutMs: operationTimeoutMs(opts),
+    });
+  } catch (error) {
+    return compositeFailed({
+      phase: 'supervisor-rollback',
+      summary: 'Root Stable Supervisor did not complete rollback',
+      failedCheck: 'supervisor_operation',
+      keyOutput: error instanceof Error ? error.message : String(error),
+      nextAction: 'inspect the durable Supervisor rollback operation',
+    });
+  }
+  if (operation.phase !== 'succeeded') {
+    return compositeFailed({
+      phase: operation.phase,
+      summary: 'Supervisor rollback failed',
+      failedCheck: operation.failureClass ?? 'supervisor_rollback',
+      keyOutput: operation.error ?? `operation ${operation.operationId} ended in ${operation.phase}`,
+      nextAction: 'inspect rollback evidence before retrying',
+      details: { operation },
+    });
+  }
+  if (!rollbackReleasePath) {
+    return partialResult({
+      phase: 'rollback-release',
+      summary: 'Slot rollback succeeded, but the previous immutable release could not be identified',
+      keyOutput: `operation=${operation.operationId}`,
+      nextAction: 'inspect slot identity and Supervisor release pointers before restarting',
+      details: { operation },
+    });
+  }
+
+  let publication;
+  try {
+    publication = publishSupervisorRelease({ controllerHome: rootHome, repoRoot, releasePath: rollbackReleasePath });
+  } catch (error) {
+    return partialResult({
+      phase: 'rollback-release',
+      summary: 'Slot rollback succeeded, but the previous release could not be republished',
+      keyOutput: error instanceof Error ? error.message : String(error),
+      nextAction: 'repair the current/previous release pointers before Supervisor restart',
+      details: { operation, rollbackReleasePath },
+    });
+  }
+
+  let activation: ReturnType<typeof scheduleServiceActivation> | { skipped: true };
+  try {
+    activation = opts.skipRestartDurability
+      ? { skipped: true }
+      : scheduleServiceActivation(repoRoot, rootHome, 3_000);
+  } catch (error) {
+    return partialResult({
+      phase: 'rollback-activation',
+      summary: 'Rollback and release publication succeeded, but Supervisor self-activation was not scheduled',
+      keyOutput: error instanceof Error ? error.message : String(error),
+      nextAction: 'activate the published previous release without repeating rollback',
+      details: { operation, publication },
+    });
+  }
+
+  const authority = readActiveSlotAuthority(rootHome);
+  return compositeSucceeded({
+    phase: 'rollback',
+    summary: `Rollback complete under one Stable Supervisor: active slot is ${authority.activeSlot}`,
+    keyOutput: [
+      `operation=${operation.operationId}`,
+      `active=${authority.activeSlot}`,
+      `release=${publication.releaseRevision}`,
+      `activation=${'skipped' in activation ? 'skipped' : activation.activationId}`,
+    ].join('\n'),
+    nextAction: 'retry the stable domain while detached Supervisor activation completes',
+    details: { authority, operation, publication, activation },
+  });
 }
 
 export interface SlotVerification {
@@ -94,7 +387,7 @@ export async function verifySlotHealth(
 ): Promise<SlotVerification> {
   const failures: string[] = [];
   let phase = 'status';
-  const status = await controllerServiceStatus({ repo: repoRoot, controllerHome: slotHome });
+  const status = await controllerServiceStatus({ repo: repoRoot, controllerHome: slotHome, slotLocalLifecycle: true });
   if (!status.supervisor.alive) failures.push('supervisor not alive');
   if (!status.health.mcp) failures.push('gateway health failed');
   if (!status.health.localController) failures.push('local controller health failed');
@@ -207,20 +500,6 @@ export async function startInactiveSlot(
   const ports = allocateSlotPorts(candidate, active, basePorts, opts.candidatePorts);
   writeSlotConfig(candidateHome, ports, loadMcpServiceLocalConfig(activeHome, repoRoot) ?? rootConfig);
 
-  // A Controller with an installed stable Supervisor must not bootstrap a
-  // candidate through the legacy detached KeepAlive. Candidate slots are
-  // isolated Controller Homes, so install the same immutable Supervisor
-  // release into the candidate home before using the existing slot authority
-  // and verification flow.
-  if (isStableSupervisorInstalled(rootHome) && !isStableSupervisorInstalled(candidateHome)) {
-    const runtimeSource = resolveControllerRuntimeSourceRoot();
-    installSupervisorRelease({
-      controllerHome: candidateHome,
-      repoRoot,
-      sourceRoot: runtimeSource.root ?? repoRoot,
-    });
-  }
-
   // Ensure active is not sharing candidate home.
   if (activeHome === candidateHome) {
     throw new Error('BLUEGREEN_SLOT_COLLISION: active and candidate share the same slot home');
@@ -267,6 +546,7 @@ export async function startInactiveSlot(
       controllerHome: candidateHome,
       startTimeoutMs: opts.startTimeoutMs,
       logFile: join(candidateHome, 'logs', 'controller.log'),
+      slotLocalLifecycle: true,
     });
   } catch (error) {
     startError = error instanceof Error ? error.message : String(error);
@@ -305,6 +585,7 @@ export async function startInactiveSlot(
         stopTimeoutMs: opts.stopTimeoutMs,
         protectCallerAncestry: false,
         requireFullStop: true,
+        slotLocalLifecycle: true,
       });
     } catch {
       // retain verification failure as primary
@@ -317,6 +598,9 @@ export async function startInactiveSlot(
 export async function controllerRollout(opts: BlueGreenRolloutOptions = {}): Promise<CompositeToolResult> {
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? '.');
   const rootHome = resolveRepoPreferredControllerHome(repoRoot, opts.controllerHome);
+  if (isStableSupervisorInstalled(rootHome)) {
+    return stableSupervisorRollout(repoRoot, rootHome, opts);
+  }
   const authority = readActiveSlotAuthority(rootHome);
   const active = authority.activeSlot;
   const activeHome = ensureSlotHome(rootHome, active);
@@ -331,7 +615,7 @@ export async function controllerRollout(opts: BlueGreenRolloutOptions = {}): Pro
     }, rootConfig);
   }
 
-  const activeBefore = await controllerServiceStatus({ repo: repoRoot, controllerHome: activeHome });
+  const activeBefore = await controllerServiceStatus({ repo: repoRoot, controllerHome: activeHome, slotLocalLifecycle: true });
   const activeReadyBefore = activeBefore.ready || activeBefore.running;
 
   let started;
@@ -402,6 +686,7 @@ export async function controllerRollout(opts: BlueGreenRolloutOptions = {}): Pro
         stopTimeoutMs: opts.stopTimeoutMs,
         protectCallerAncestry: false,
         requireFullStop: true,
+        slotLocalLifecycle: true,
       });
     } catch {
       // keep rollback primary
@@ -446,6 +731,9 @@ export async function controllerRollout(opts: BlueGreenRolloutOptions = {}): Pro
 export async function controllerRollback(opts: BlueGreenRolloutOptions = {}): Promise<CompositeToolResult> {
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? '.');
   const rootHome = resolveRepoPreferredControllerHome(repoRoot, opts.controllerHome);
+  if (isStableSupervisorInstalled(rootHome)) {
+    return stableSupervisorRollback(repoRoot, rootHome, opts);
+  }
   const authority = readActiveSlotAuthority(rootHome);
   if (!authority.previousSlot) {
     return compositeFailed({
@@ -463,7 +751,7 @@ export async function controllerRollback(opts: BlueGreenRolloutOptions = {}): Pr
 
   // Ensure restore slot is healthy BEFORE stopping the failed slot, so the
   // control plane never has zero healthy owners during rollback.
-  let restoreStatus = await controllerServiceStatus({ repo: repoRoot, controllerHome: restoreHome });
+  let restoreStatus = await controllerServiceStatus({ repo: repoRoot, controllerHome: restoreHome, slotLocalLifecycle: true });
   if (!restoreStatus.ready) {
     try {
       await startControllerService({
@@ -471,8 +759,9 @@ export async function controllerRollback(opts: BlueGreenRolloutOptions = {}): Pr
         controllerHome: restoreHome,
         startTimeoutMs: opts.startTimeoutMs,
         logFile: join(restoreHome, 'logs', 'controller.log'),
+        slotLocalLifecycle: true,
       });
-      restoreStatus = await controllerServiceStatus({ repo: repoRoot, controllerHome: restoreHome });
+      restoreStatus = await controllerServiceStatus({ repo: repoRoot, controllerHome: restoreHome, slotLocalLifecycle: true });
     } catch (error) {
       return compositeFailed({
         phase: 'rollback-start',
@@ -509,6 +798,7 @@ export async function controllerRollback(opts: BlueGreenRolloutOptions = {}): Pr
       stopTimeoutMs: opts.stopTimeoutMs,
       protectCallerAncestry: false,
       requireFullStop: true,
+      slotLocalLifecycle: true,
     });
   } catch (error) {
     // Keep evidence; still report partial success if restore is healthy.

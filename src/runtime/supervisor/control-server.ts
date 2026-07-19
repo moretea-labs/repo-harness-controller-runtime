@@ -14,7 +14,7 @@ export const DEFAULT_SUPERVISOR_CONTROL_PORT = 8770;
 
 export interface SupervisorControlHandlers extends RescueDispatchContext {
   stop(): Promise<void>;
-  submitCommand(input: { requestId: string; kind: SupervisorOperationKind; actor: string; reason?: string }): { operation: SupervisorOperation; deduplicated: boolean };
+  submitCommand(input: { requestId: string; kind: SupervisorOperationKind; actor: string; reason?: string; candidateReleasePath?: string }): { operation: SupervisorOperation; deduplicated: boolean };
 }
 
 export interface SupervisorControlServerOptions {
@@ -204,7 +204,13 @@ function commandResponse(request: SupervisorCommandRequest, handlers: Supervisor
   }
   if (request.command === 'operation_submit') {
     if (!request.requestId || !request.kind) return { ok: false, error: { code: 'OPERATION_INPUT_REQUIRED', message: 'requestId and kind are required.' } };
-    const accepted = handlers.submitCommand({ requestId: request.requestId, kind: request.kind, actor: request.actor ?? 'control-socket', reason: request.reason });
+    const accepted = handlers.submitCommand({
+      requestId: request.requestId,
+      kind: request.kind,
+      actor: request.actor ?? 'control-socket',
+      reason: request.reason,
+      candidateReleasePath: request.candidateReleasePath,
+    });
     return { ok: true, deduplicated: accepted.deduplicated, operation: accepted.operation };
   }
   if (request.command === 'stop') {

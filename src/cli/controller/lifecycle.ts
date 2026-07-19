@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
 import { listAgentJobs, reconcileAgentJobs } from "../agent-jobs/job-manager";
 import { bootoutRepoLaunchAgents, findRepoLaunchAgents } from "./launch-agents";
+import { ensureSlotHome, readActiveSlotAuthority } from "./runtime-slots";
 import { CONTROLLER_LIFECYCLE_OWNER_ENV } from "./lifecycle-authority";
 import { listLocalBridgeJobs, loadLocalBridgeConfig, reconcileLocalBridgeJobs } from "../local-bridge/job-store";
 import {
@@ -175,6 +176,8 @@ export interface ControllerServiceOptions {
   protectCallerAncestry?: boolean;
   /** Internal lifecycle control: require every managed stack process to be gone before startup continues. */
   requireFullStop?: boolean;
+  /** Internal blue/green control: manage only slot-local legacy processes, never the root Stable Supervisor. */
+  slotLocalLifecycle?: boolean;
 }
 
 function nowIso(): string {
@@ -665,29 +668,37 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? ".");
   const config = resolveServiceConfig(repoRoot, opts.logFile, opts.controllerHome);
   const state = loadControllerServiceState(repoRoot, config.controllerHome);
-  const stableInstalled = isStableSupervisorInstalled(config.controllerHome);
+  const stableInstalled = !opts.slotLocalLifecycle && isStableSupervisorInstalled(config.controllerHome);
   const stableState = stableInstalled ? readStableSupervisorState(config.controllerHome) : null;
+  // Stable Supervisor is controller-scoped, but its live Daemon/Gateway state is
+  // slot-local. Status must follow the managed active component home instead of
+  // reading stale or absent runtime files from the root Controller Home.
+  const runtimeHome = stableInstalled
+    ? stableState?.controllerDaemon?.controllerHome
+      ?? stableState?.gatewayHost?.controllerHome
+      ?? ensureSlotHome(config.controllerHome, readActiveSlotAuthority(config.controllerHome).activeSlot)
+    : config.controllerHome;
   // Never fall back to shared repo-local MCP runtime when a dedicated controllerHome
   // is in use — blue/green slots would otherwise claim each other's PIDs/health.
-  const serviceRuntime = loadMcpServiceRuntimeState(config.controllerHome, repoRoot);
+  const serviceRuntime = loadMcpServiceRuntimeState(runtimeHome, repoRoot);
   const runtime = serviceRuntime
     ?? (opts.controllerHome ? null : loadMcpRuntimeState(repoRoot));
   const authority = {
-    localConfig: resolveMcpRuntimeAuthority(config.controllerHome, repoRoot, "local-config"),
-    runtimeState: resolveMcpRuntimeAuthority(config.controllerHome, repoRoot, "runtime-state"),
+    localConfig: resolveMcpRuntimeAuthority(runtimeHome, repoRoot, "local-config"),
+    runtimeState: resolveMcpRuntimeAuthority(runtimeHome, repoRoot, "runtime-state"),
   };
-  const runtimeGeneration = readRuntimeGeneration(config.controllerHome);
+  const runtimeGeneration = readRuntimeGeneration(runtimeHome);
   // Drift compares startup Runtime Source against the Controller package authority.
   // opts.repo / execution repository root is never used as "current" runtime source.
   const sourceDrift = evaluateActiveRuntimeSourceDrift(runtimeGeneration?.source);
   const runtimeStatePath = serviceRuntime
-    ? mcpControllerHomeRuntimeStatePath(config.controllerHome)
+    ? mcpControllerHomeRuntimeStatePath(runtimeHome)
     : mcpRuntimeStatePath(repoRoot);
   const supervisorPid = stableState?.supervisor.pid ?? state?.supervisor.pid ?? runtime?.server.pid;
   const supervisorAlive = stableInstalled
     ? stableSupervisorIsAlive(config.controllerHome, stableState)
     : isPidAlive(supervisorPid);
-  const daemon = readControllerDaemonStatus(config.controllerHome);
+  const daemon = readControllerDaemonStatus(runtimeHome);
   const ports = await healthSummary(
     repoRoot,
     config.mcpHost,
@@ -696,11 +707,11 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
     config.localControllerPort,
     runtimeGeneration?.generation,
   );
-  const repositories = listRepositories(config.controllerHome)
+  const repositories = listRepositories(runtimeHome)
     .filter((repository) => repository.enabled && !repository.removedAt);
   const projectionSnapshots = repositories.map((repository) => ({
     repoId: repository.repoId,
-    snapshot: readRepositoryProjectionSnapshot(config.controllerHome, repository.repoId),
+    snapshot: readRepositoryProjectionSnapshot(runtimeHome, repository.repoId),
   }));
   const staleProjectionRepos = projectionSnapshots
     .filter(({ snapshot }) => snapshot.stale)
@@ -708,7 +719,7 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
   const blockingStaleProjectionRepos = projectionSnapshots
     .filter(({ snapshot }) => projectionBlocksReadiness(snapshot))
     .map(({ repoId }) => repoId);
-  const scheduler = readSchedulerHealthSnapshot(config.controllerHome);
+  const scheduler = readSchedulerHealthSnapshot(runtimeHome);
   const schedulerHeartbeatAgeMs = scheduler.lastTickAt
     ? Math.max(0, Date.now() - Date.parse(scheduler.lastTickAt))
     : undefined;
@@ -768,7 +779,7 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
     runtimeStorage: { readable: true, ready: true },
   });
   const processes = collectControllerServiceProcesses(repoRoot, state, config.controllerHome);
-  const trackedChildPids = trackedActiveChildProcessPids(repoRoot, config.controllerHome);
+  const trackedChildPids = trackedActiveChildProcessPids(repoRoot, runtimeHome);
   const orphanedProcesses = classifyDetachedControllerServiceProcesses(processes, {
     supervisorAlive,
     supervisorPid: state?.supervisor.pid,
@@ -871,13 +882,19 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
   };
 }
 
-async function waitForHealthyStart(repoRoot: string, timeoutMs: number, logPath: string, controllerHome: string): Promise<ControllerServiceStatus> {
+async function waitForHealthyStart(
+  repoRoot: string,
+  timeoutMs: number,
+  logPath: string,
+  controllerHome: string,
+  slotLocalLifecycle = false,
+): Promise<ControllerServiceStatus> {
   const deadline = Date.now() + Math.max(2_000, timeoutMs);
-  let latest = await controllerServiceStatus({ repo: repoRoot, logFile: logPath, controllerHome });
+  let latest = await controllerServiceStatus({ repo: repoRoot, logFile: logPath, controllerHome, slotLocalLifecycle });
   while (Date.now() < deadline) {
     if (latest.ready && latest.supervisor.alive) return latest;
     await sleep(HEALTH_POLL_INTERVAL_MS);
-    latest = await controllerServiceStatus({ repo: repoRoot, logFile: logPath, controllerHome });
+    latest = await controllerServiceStatus({ repo: repoRoot, logFile: logPath, controllerHome, slotLocalLifecycle });
   }
   const tail = readLogTail(logPath);
   const lines = [
@@ -947,12 +964,17 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
   if (!process.versions.bun) throw new Error("Bun is required to start the Controller stack.");
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? ".");
   const config = resolveServiceConfig(repoRoot, opts.logFile, opts.controllerHome);
-  let status = await controllerServiceStatus({ repo: repoRoot, logFile: config.logPath, controllerHome: config.controllerHome });
+  let status = await controllerServiceStatus({
+    repo: repoRoot,
+    logFile: config.logPath,
+    controllerHome: config.controllerHome,
+    slotLocalLifecycle: opts.slotLocalLifecycle,
+  });
   if (status.running && status.supervisor.alive) {
     return { action: "already_running", cleanedPids: [], status };
   }
 
-  if (isStableSupervisorInstalled(config.controllerHome)) {
+  if (!opts.slotLocalLifecycle && isStableSupervisorInstalled(config.controllerHome)) {
     let cleaned: number[] = [];
     const stableState = readStableSupervisorState(config.controllerHome);
     if (status.supervisor.alive || stableState?.desiredState === 'running' || status.orphanedProcesses.length > 0) {
@@ -963,8 +985,14 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
         stopTimeoutMs: opts.stopTimeoutMs,
         protectCallerAncestry: opts.protectCallerAncestry,
         requireFullStop: opts.requireFullStop,
+        slotLocalLifecycle: opts.slotLocalLifecycle,
       })).cleanedPids;
-      status = await controllerServiceStatus({ repo: repoRoot, logFile: config.logPath, controllerHome: config.controllerHome });
+      status = await controllerServiceStatus({
+        repo: repoRoot,
+        logFile: config.logPath,
+        controllerHome: config.controllerHome,
+        slotLocalLifecycle: opts.slotLocalLifecycle,
+      });
     }
     ensureStartableStatus(status);
     const launchAgents = findRepoLaunchAgents(repoRoot);
@@ -995,7 +1023,13 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
       },
     }, config.controllerHome);
     const startTimeoutMs = opts.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS;
-    status = await waitForHealthyStart(repoRoot, startTimeoutMs, supervisorLogPath(config.controllerHome), config.controllerHome);
+    status = await waitForHealthyStart(
+      repoRoot,
+      startTimeoutMs,
+      supervisorLogPath(config.controllerHome),
+      config.controllerHome,
+      opts.slotLocalLifecycle,
+    );
     return { action: "started", cleanedPids: cleaned, status };
   }
 
@@ -1119,7 +1153,7 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
   const configuredStartTimeout = Number(process.env.REPO_HARNESS_CONTROLLER_START_TIMEOUT_MS);
   const startTimeoutMs = opts.startTimeoutMs
     ?? (Number.isFinite(configuredStartTimeout) && configuredStartTimeout >= 2_000 ? Math.trunc(configuredStartTimeout) : DEFAULT_START_TIMEOUT_MS);
-  status = await waitForHealthyStart(repoRoot, startTimeoutMs, config.logPath, config.controllerHome);
+  status = await waitForHealthyStart(repoRoot, startTimeoutMs, config.logPath, config.controllerHome, opts.slotLocalLifecycle);
   return { action: "started", cleanedPids: cleaned, status };
 }
 
@@ -1127,8 +1161,13 @@ export async function stopControllerService(opts: ControllerServiceOptions = {})
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? ".");
   const config = resolveServiceConfig(repoRoot, opts.logFile, opts.controllerHome);
   const state = loadControllerServiceState(repoRoot, config.controllerHome);
-  const status = await controllerServiceStatus({ repo: repoRoot, logFile: config.logPath, controllerHome: config.controllerHome });
-  if (isStableSupervisorInstalled(config.controllerHome)) {
+  const status = await controllerServiceStatus({
+    repo: repoRoot,
+    logFile: config.logPath,
+    controllerHome: config.controllerHome,
+    slotLocalLifecycle: opts.slotLocalLifecycle,
+  });
+  if (!opts.slotLocalLifecycle && isStableSupervisorInstalled(config.controllerHome)) {
     const stableState = readStableSupervisorState(config.controllerHome);
     const stableAlive = stableSupervisorIsAlive(config.controllerHome, stableState);
     if (stableAlive || stableState?.desiredState === 'running') {
@@ -1155,7 +1194,12 @@ export async function stopControllerService(opts: ControllerServiceOptions = {})
       return {
         action: "stopped",
         cleanedPids: stableState?.supervisor.pid ? [stableState.supervisor.pid] : [],
-        status: await controllerServiceStatus({ repo: repoRoot, logFile: config.logPath, controllerHome: config.controllerHome }),
+        status: await controllerServiceStatus({
+          repo: repoRoot,
+          logFile: config.logPath,
+          controllerHome: config.controllerHome,
+          slotLocalLifecycle: opts.slotLocalLifecycle,
+        }),
       };
     }
     // A release may have just been installed while the legacy KeepAlive/Daemon
@@ -1226,7 +1270,12 @@ export async function stopControllerService(opts: ControllerServiceOptions = {})
   return {
     action: "stopped",
     cleanedPids: cleaned,
-    status: await controllerServiceStatus({ repo: repoRoot, logFile: config.logPath, controllerHome: config.controllerHome }),
+    status: await controllerServiceStatus({
+      repo: repoRoot,
+      logFile: config.logPath,
+      controllerHome: config.controllerHome,
+      slotLocalLifecycle: opts.slotLocalLifecycle,
+    }),
   };
 }
 

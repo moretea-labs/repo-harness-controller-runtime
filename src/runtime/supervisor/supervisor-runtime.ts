@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto';
-import { dirname, resolve } from 'path';
+import { realpathSync } from 'fs';
+import { dirname, resolve, sep } from 'path';
 import { loadMcpServiceLocalConfig, loadMcpServiceRuntimeState, writeMcpServiceLocalConfig } from '../../cli/mcp/auth';
 import {
   ensureSlotHome,
@@ -24,7 +25,7 @@ import { createSupervisorOperation, listSupervisorOperations, readSupervisorOper
 import { DEFAULT_RESTART_POLICY, decideRestart, lockout, newRestartBudgetRecord, recordFailure, recordRestart, recordStable } from './restart-policy';
 import { SupervisorProcessManager, type SpawnedSupervisorProcess, type SupervisorProcessManagerOptions } from './process-manager';
 import { createSupervisorState, readSupervisorState, writeSupervisorState } from './state-store';
-import { readCurrentSupervisorRelease, readPreviousSupervisorRelease, readSupervisorRelease, supervisorControlSocketPath, type SupervisorReleaseDescriptor } from './paths';
+import { readCurrentSupervisorRelease, readPreviousSupervisorRelease, readSupervisorRelease, supervisorControlSocketPath, supervisorReleasesRoot, type SupervisorReleaseDescriptor } from './paths';
 import type { RestartBudgetRecord, SupervisorComponentName, SupervisorManagedProcess, SupervisorOperation, SupervisorOperationKind, SupervisorState } from './types';
 
 export interface StableSupervisorRuntimeOptions extends SupervisorProcessManagerOptions {
@@ -372,11 +373,11 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
     return readSupervisorOperation(this.options.controllerHome, operationId);
   }
 
-  submitOperation(input: { requestId: string; kind: SupervisorOperationKind; actor: string; reason?: string }): { operation: SupervisorOperation; deduplicated: boolean } {
+  submitOperation(input: { requestId: string; kind: SupervisorOperationKind; actor: string; reason?: string; candidateReleasePath?: string }): { operation: SupervisorOperation; deduplicated: boolean } {
     return this.submitCommand(input);
   }
 
-  submitCommand(input: { requestId: string; kind: SupervisorOperationKind; actor: string; reason?: string }): { operation: SupervisorOperation; deduplicated: boolean } {
+  submitCommand(input: { requestId: string; kind: SupervisorOperationKind; actor: string; reason?: string; candidateReleasePath?: string }): { operation: SupervisorOperation; deduplicated: boolean } {
     const accepted = createSupervisorOperation({
       controllerHome: this.options.controllerHome,
       repoRoot: this.options.repoRoot,
@@ -385,6 +386,7 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
       requestedBy: input.actor,
       actor: input.actor,
       reason: input.reason,
+      candidateReleasePath: input.candidateReleasePath,
     });
     void this.runPendingOperations();
     return accepted;
@@ -667,20 +669,36 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
         type: 'mcp-tool',
         requestId,
         semanticKey: `supervisor-slot-smoke:${requestId}`,
-        payload: { operation: 'controller_ready', arguments: { repo: this.options.repoRoot }, target: 'runtime' },
+        payload: {
+          operation: 'plugin_action_execute',
+          arguments: {
+            pluginId: 'local_system',
+            actionId: 'system_snapshot',
+            actionArguments: {},
+          },
+          target: 'runtime',
+        },
         origin: { surface: 'system', actor: 'stable-supervisor-slot-verify' },
         timeoutMs: 30_000,
         maxAttempts: 1,
       });
       const durableJobId = created.job.jobId;
       const durableDeadline = Date.now() + 30_000;
-      let durableStatus = getExecutionJob(daemon.controllerHome, CONTROLLER_SCOPE_REPO_ID, durableJobId)?.status;
+      let durableJob = getExecutionJob(daemon.controllerHome, CONTROLLER_SCOPE_REPO_ID, durableJobId);
+      let durableStatus = durableJob?.status;
       while (Date.now() < durableDeadline && durableStatus && !['succeeded', 'failed', 'timed_out', 'cancelled', 'orphaned', 'stale', 'human_attention_required'].includes(durableStatus)) {
         await sleep(100);
-        durableStatus = getExecutionJob(daemon.controllerHome, CONTROLLER_SCOPE_REPO_ID, durableJobId)?.status;
+        durableJob = getExecutionJob(daemon.controllerHome, CONTROLLER_SCOPE_REPO_ID, durableJobId);
+        durableStatus = durableJob?.status;
       }
       if (!durableStatus) throw new Error('SUPERVISOR_CANDIDATE_DURABLE_JOB_UNREADABLE');
-      if (durableStatus !== 'succeeded') throw new Error(`SUPERVISOR_CANDIDATE_DURABLE_JOB_${durableStatus.toUpperCase()}`);
+      if (durableStatus !== 'succeeded') {
+        const detail = [durableJob?.error?.code, durableJob?.error?.message]
+          .filter((value): value is string => Boolean(value))
+          .join(': ')
+          .slice(0, 500);
+        throw new Error(`SUPERVISOR_CANDIDATE_DURABLE_JOB_${durableStatus.toUpperCase()}${detail ? `: ${detail}` : ''}`);
+      }
       writeSlotIdentity(this.options.controllerHome, {
         schemaVersion: 1,
         slot,
@@ -731,7 +749,8 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
     await this.managerForManaged(input.controllerDaemon, input.slot).stop(input.controllerDaemon).catch(() => undefined);
   }
 
-  private async rollout(operationId: string): Promise<void> {
+  private async rollout(operation: SupervisorOperation): Promise<void> {
+    const operationId = operation.operationId;
     const authority = readActiveSlotAuthority(this.options.controllerHome);
     const previousSlot = authority.activeSlot;
     const candidateSlot = oppositeSlot(previousSlot);
@@ -739,7 +758,22 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
     const previousGateway = this.state.gatewayHost;
     if (!previousDaemon || !previousGateway) throw new Error('SUPERVISOR_ACTIVE_RUNTIME_MISSING');
     updateSupervisorOperation(this.options.controllerHome, operationId, { phase: 'starting' });
-    const candidateRelease = readCurrentSupervisorRelease(this.options.controllerHome);
+    let candidateRelease = readCurrentSupervisorRelease(this.options.controllerHome);
+    if (operation.candidateReleasePath) {
+      const candidatePath = resolve(operation.candidateReleasePath);
+      try {
+        const releasesRootReal = realpathSync(resolve(supervisorReleasesRoot(this.options.controllerHome)));
+        const candidateReal = realpathSync(candidatePath);
+        if (!candidateReal.startsWith(`${releasesRootReal}${sep}`)) {
+          throw new Error('SUPERVISOR_RELEASE_PATH_OUTSIDE_CONTROLLER_HOME');
+        }
+      } catch (error) {
+        if (error instanceof Error && error.message === 'SUPERVISOR_RELEASE_PATH_OUTSIDE_CONTROLLER_HOME') throw error;
+        throw new Error('SUPERVISOR_RELEASE_PATH_OUTSIDE_CONTROLLER_HOME');
+      }
+      candidateRelease = readSupervisorRelease(candidatePath);
+      if (!candidateRelease) throw new Error('SUPERVISOR_STAGED_RELEASE_INVALID');
+    }
     const candidate = await this.startSlot(candidateSlot, candidateRelease);
     updateSupervisorOperation(this.options.controllerHome, operationId, {
       phase: 'verifying',
@@ -1038,7 +1072,7 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
         await this.waitForReady('controllerDaemon');
         await this.waitForReady('gatewayHost');
       } else if (current.kind === 'rollout') {
-        await this.rollout(current.operationId);
+        await this.rollout(current);
       } else {
         await this.rollback(current.operationId);
       }

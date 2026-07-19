@@ -125,6 +125,8 @@ export interface SupervisorOperation {
   requestedBy: string;
   actor: string;
   reason?: string;
+  /** Optional staged release consumed only by a rollout operation. */
+  candidateReleasePath?: string;
   phase: SupervisorOperationPhase;
   acceptedAt: string;
   scheduledAt?: string;
@@ -147,6 +149,7 @@ export interface SupervisorCommandRequest {
   operationId?: string;
   repoRoot?: string;
   reason?: string;
+  candidateReleasePath?: string;
 }
 
 export interface SupervisorCommandResponse {

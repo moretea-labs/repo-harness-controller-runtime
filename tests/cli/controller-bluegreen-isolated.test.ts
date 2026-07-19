@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import {
+  allocateFreePort,
   createIsolatedControllerFixture,
   destroyAllIsolatedControllerFixtures,
   isolatedControllerEnv,
@@ -20,6 +21,8 @@ import {
 } from '../../src/cli/controller/lifecycle';
 import { controllerRollback, controllerRollout, startInactiveSlot } from '../../src/cli/controller/bluegreen-rollout';
 import { findProcessesByCommand } from '../runtime/process-hygiene';
+import { installSupervisorRelease } from '../../src/runtime/supervisor/installer';
+import { readCurrentRelease } from '../../src/runtime/supervisor/paths';
 
 const ROOT = join(import.meta.dir, '../..');
 
@@ -192,6 +195,104 @@ describe('blue/green isolated lifecycle (level 2)', () => {
       else process.env.REPO_HARNESS_CONTROLLER_RUNTIME_SOURCE_ROOT = previousSource;
     }
   }, 180_000);
+
+  test('root Stable Supervisor owns staged rollout and rollback without a second global Supervisor', async () => {
+    const fixture = await createIsolatedControllerFixture();
+    const previousHome = process.env.REPO_HARNESS_CONTROLLER_HOME;
+    const previousSource = process.env.REPO_HARNESS_CONTROLLER_RUNTIME_SOURCE_ROOT;
+    const previousControlPort = process.env.REPO_HARNESS_SUPERVISOR_CONTROL_PORT;
+    const controlPort = await allocateFreePort();
+    Object.assign(process.env, isolatedControllerEnv(fixture, {
+      REPO_HARNESS_CONTROLLER_RUNTIME_SOURCE_ROOT: ROOT,
+      REPO_HARNESS_SUPERVISOR_CONTROL_PORT: String(controlPort),
+    }));
+
+    try {
+      writeActiveSlotAuthority(fixture.controllerHome, { activeSlot: 'blue', reason: 'test' });
+      writeMcpServiceLocalConfig(fixture.controllerHome, {
+        version: 1,
+        profile: 'controller',
+        auth: { mode: 'bearer' },
+        server: { host: '127.0.0.1', port: fixture.mcpPort },
+        localController: {
+          enabled: true,
+          host: '127.0.0.1',
+          port: fixture.localControllerPort,
+          autoOpen: false,
+        },
+      });
+
+      const initialRelease = installSupervisorRelease({
+        controllerHome: fixture.controllerHome,
+        repoRoot: fixture.repoRoot,
+        sourceRoot: ROOT,
+      });
+      const started = await startControllerService({
+        repo: fixture.repoRoot,
+        controllerHome: fixture.controllerHome,
+        startTimeoutMs: 60_000,
+      });
+      expect(started.status.ready).toBe(true);
+      const supervisorPid = started.status.supervisor.pid;
+      if (!supervisorPid) throw new Error('isolated Stable Supervisor PID missing');
+      expect(supervisorPid).toBeNumber();
+
+      const rollout = await controllerRollout({
+        repo: fixture.repoRoot,
+        controllerHome: fixture.controllerHome,
+        startTimeoutMs: 60_000,
+        skipDurableJob: false,
+        skipRestartDurability: true,
+      });
+      if (rollout.status !== 'succeeded') {
+        throw new Error(`stable rollout failed: ${rollout.phase} ${rollout.summary}\n${rollout.keyOutput}\n${JSON.stringify(rollout.details, null, 2)}`);
+      }
+      expect(readActiveSlotAuthority(fixture.controllerHome).activeSlot).toBe('green');
+      expect(readCurrentRelease(fixture.controllerHome)).not.toBe(initialRelease.releasePath);
+
+      const afterRollout = await controllerServiceStatus({
+        repo: fixture.repoRoot,
+        controllerHome: fixture.controllerHome,
+      });
+      expect(afterRollout.supervisor.pid).toBe(supervisorPid);
+      const rootSupervisors = findProcessesByCommand([fixture.controllerHome]).filter((process) =>
+        process.command.includes('/supervisor/releases/')
+        && process.command.includes('/supervisor.js')
+        && !process.command.includes('--ingress-child'));
+      expect(rootSupervisors.map((process) => process.pid)).toEqual([supervisorPid]);
+
+      const rollback = await controllerRollback({
+        repo: fixture.repoRoot,
+        controllerHome: fixture.controllerHome,
+        startTimeoutMs: 60_000,
+        skipRestartDurability: true,
+      });
+      if (rollback.status !== 'succeeded') {
+        throw new Error(`stable rollback failed: ${rollback.phase} ${rollback.summary}\n${rollback.keyOutput}\n${JSON.stringify(rollback.details, null, 2)}`);
+      }
+      expect(readActiveSlotAuthority(fixture.controllerHome).activeSlot).toBe('blue');
+      expect(realpathSync(readCurrentRelease(fixture.controllerHome)!)).toBe(realpathSync(initialRelease.releasePath));
+      const afterRollback = await controllerServiceStatus({
+        repo: fixture.repoRoot,
+        controllerHome: fixture.controllerHome,
+      });
+      expect(afterRollback.supervisor.pid).toBe(supervisorPid);
+
+      await stopControllerService({
+        repo: fixture.repoRoot,
+        controllerHome: fixture.controllerHome,
+        protectCallerAncestry: false,
+        requireFullStop: true,
+      });
+    } finally {
+      if (previousHome === undefined) delete process.env.REPO_HARNESS_CONTROLLER_HOME;
+      else process.env.REPO_HARNESS_CONTROLLER_HOME = previousHome;
+      if (previousSource === undefined) delete process.env.REPO_HARNESS_CONTROLLER_RUNTIME_SOURCE_ROOT;
+      else process.env.REPO_HARNESS_CONTROLLER_RUNTIME_SOURCE_ROOT = previousSource;
+      if (previousControlPort === undefined) delete process.env.REPO_HARNESS_SUPERVISOR_CONTROL_PORT;
+      else process.env.REPO_HARNESS_SUPERVISOR_CONTROL_PORT = previousControlPort;
+    }
+  }, 300_000);
 
   test('slot homes never share PID/state files with each other', async () => {
     const fixture = await createIsolatedControllerFixture();

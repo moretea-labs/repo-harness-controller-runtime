@@ -1,4 +1,4 @@
-import { closeSync, mkdirSync, openSync, readFileSync, rmSync } from 'fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync } from 'fs';
 import { spawn } from 'child_process';
 import { dirname, join, resolve } from 'path';
 import { Command } from 'commander';
@@ -61,16 +61,32 @@ export function supervisorActivationMatchesRelease(control: unknown, expectedRel
     && state.gatewayHost?.releaseRevision === expectedReleaseRevision;
 }
 
-function scheduleServiceActivation(repo: string, home: string): { activationId: string; pid: number; statePath: string; logPath: string } {
+export function scheduleServiceActivation(
+  repo: string,
+  home: string,
+  handoffDelayMs = 750,
+): { activationId: string; pid: number; statePath: string; logPath: string } {
   const activationId = `sup-activate-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-  const cliEntry = process.argv[1] ? resolve(process.argv[1]) : undefined;
+  const currentRelease = readCurrentRelease(home);
+  const installedCli = currentRelease ? join(currentRelease, 'repo-harness.js') : undefined;
+  const cliEntry = installedCli && existsSync(installedCli)
+    ? installedCli
+    : process.argv[1] ? resolve(process.argv[1]) : undefined;
   if (!cliEntry) throw new Error('SUPERVISOR_ACTIVATION_ENTRY_UNAVAILABLE');
   const logPath = join(supervisorRoot(home), 'logs', 'activation.log');
   mkdirSync(dirname(logPath), { recursive: true, mode: 0o700 });
   const logFd = openSync(logPath, 'a');
   let child;
   try {
-    child = spawn(process.execPath, [cliEntry, 'supervisor', '__activate', '--repo', repo, '--controller-home', home, '--activation-id', activationId], {
+    child = spawn(process.execPath, [
+      cliEntry,
+      'supervisor',
+      '__activate',
+      '--repo', repo,
+      '--controller-home', home,
+      '--activation-id', activationId,
+      '--handoff-delay-ms', String(Math.max(750, Math.min(Math.trunc(handoffDelayMs), 30_000))),
+    ], {
       cwd: repo,
       detached: true,
       stdio: ['ignore', logFd, logFd],
@@ -85,7 +101,12 @@ function scheduleServiceActivation(repo: string, home: string): { activationId: 
   return { activationId, pid: child.pid, statePath: activationStatePath(home), logPath };
 }
 
-async function activateInstalledService(repo: string, home: string, activationId: string): Promise<Record<string, unknown>> {
+async function activateInstalledService(
+  repo: string,
+  home: string,
+  activationId: string,
+  handoffDelayMs = 750,
+): Promise<Record<string, unknown>> {
   const update = (phase: string, extra: Record<string, unknown> = {}) => writeActivationState(home, { activationId, phase, repoRoot: repo, ...extra });
   const label = supervisorServiceLabel(home);
   const rollback: { previousReleasePath?: string; launchAgent: LaunchAgentFileSnapshot } = {
@@ -97,7 +118,10 @@ async function activateInstalledService(repo: string, home: string, activationId
   try {
     if (!expectedRelease || !expectedReleaseRevision) throw new Error('SUPERVISOR_ACTIVATION_EXPECTED_RELEASE_UNAVAILABLE');
     update('waiting_for_handoff');
-    await new Promise((resolveWait) => setTimeout(resolveWait, 750));
+    await new Promise((resolveWait) => setTimeout(
+      resolveWait,
+      Math.max(750, Math.min(Math.trunc(handoffDelayMs), 30_000)),
+    ));
     update('stopping_legacy');
     const stopped = await stopControllerService({
       repo,
@@ -236,10 +260,11 @@ export function buildSupervisorCommand(): Command {
     .requiredOption('--repo <path>')
     .requiredOption('--controller-home <path>')
     .requiredOption('--activation-id <id>')
-    .action(async (opts: { repo: string; controllerHome: string; activationId: string }) => {
+    .option('--handoff-delay-ms <ms>', 'Delay before replacing the active Supervisor', '750')
+    .action(async (opts: { repo: string; controllerHome: string; activationId: string; handoffDelayMs?: string }) => {
       const repo = repoRoot(opts.repo);
       const home = homeFor(repo, opts.controllerHome);
-      output(await activateInstalledService(repo, home, opts.activationId));
+      output(await activateInstalledService(repo, home, opts.activationId, Number(opts.handoffDelayMs ?? 750)));
     });
 
   command.command('install')

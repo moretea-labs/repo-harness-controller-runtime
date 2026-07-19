@@ -1,9 +1,9 @@
 import { createHash } from 'crypto';
-import { chmodSync, mkdirSync, writeFileSync } from 'fs';
-import { dirname, join, resolve } from 'path';
+import { chmodSync, mkdirSync, realpathSync, writeFileSync } from 'fs';
+import { dirname, join, resolve, sep } from 'path';
 import { runProcess } from '../../effects/process-runner';
 import { resolveControllerRuntimeSourceRoot } from '../control-plane/runtime-generation';
-import { readCurrentRelease, ensureStableSupervisorLayout, publishCurrentRelease, supervisorLogsRoot, supervisorReleasesRoot, supervisorRoot } from './paths';
+import { readCurrentRelease, readSupervisorRelease, ensureStableSupervisorLayout, publishCurrentRelease, supervisorLogsRoot, supervisorReleasesRoot, supervisorRoot } from './paths';
 
 export interface SupervisorInstallResult {
   controllerHome: string;
@@ -115,7 +115,29 @@ export function renderSystemdSupervisorUnit(input: {
   return `[Unit]\nDescription=repo-harness Stable External Runtime Supervisor\nAfter=default.target\n\n[Service]\nType=simple\nEnvironment=${systemdQuote(`PATH=${supervisorServicePath(input.bunPath, input.homeDir, input.nvmBin)}`)}\nExecStart=${args.map(systemdQuote).join(' ')}\nRestart=on-failure\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n`;
 }
 
-export function installSupervisorRelease(input: { controllerHome: string; repoRoot: string; sourceRoot?: string }): SupervisorInstallResult {
+export interface SupervisorStagedRelease {
+  controllerHome: string;
+  sourceRoot: string;
+  releaseRevision: string;
+  releasePath: string;
+}
+
+function assertOwnedReleasePath(controllerHome: string, releasePath: string): string {
+  const candidate = resolve(releasePath);
+  try {
+    const rootReal = realpathSync(resolve(supervisorReleasesRoot(controllerHome)));
+    const candidateReal = realpathSync(candidate);
+    if (!candidateReal.startsWith(`${rootReal}${sep}`)) {
+      throw new Error('SUPERVISOR_RELEASE_PATH_OUTSIDE_CONTROLLER_HOME');
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message === 'SUPERVISOR_RELEASE_PATH_OUTSIDE_CONTROLLER_HOME') throw error;
+    throw new Error('SUPERVISOR_RELEASE_PATH_OUTSIDE_CONTROLLER_HOME');
+  }
+  return candidate;
+}
+
+export function stageSupervisorRelease(input: { controllerHome: string; repoRoot: string; sourceRoot?: string }): SupervisorStagedRelease {
   const controllerHome = resolve(input.controllerHome);
   const sourceRoot = runtimeSourceRoot(input.sourceRoot ?? input.repoRoot);
   ensureStableSupervisorLayout(controllerHome);
@@ -126,13 +148,22 @@ export function installSupervisorRelease(input: { controllerHome: string; repoRo
   buildEntry(sourceRoot, 'src/cli/index.ts', join(releasePath, 'repo-harness.js'));
   buildEntry(sourceRoot, 'src/runtime/control-plane/daemon-entry.ts', join(releasePath, 'daemon.js'));
   buildEntry(sourceRoot, 'src/runtime/execution/workers/worker-entry.ts', join(releasePath, 'worker.js'));
-  writeFileSync(join(releasePath, 'manifest.json'), `${JSON.stringify({ schemaVersion: 1, releaseRevision: revision, sourceRoot, builtAt: new Date().toISOString(), entrypoint: 'supervisor.js', runtimeEntrypoint: 'repo-harness.js', daemonEntrypoint: 'daemon.js', workerEntrypoint: 'worker.js' }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  writeFileSync(join(releasePath, 'manifest.json'), `${JSON.stringify({ schemaVersion: 1, releaseRevision: revision, sourceRoot, builtAt: new Date().toISOString(), entrypoint: 'supervisor.js', runtimeEntrypoint: 'repo-harness.js', daemonEntrypoint: 'daemon.js', workerEntrypoint: 'worker.js', capabilities: ['staged_rollout_release'] }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
   try { chmodSync(join(releasePath, 'supervisor.js'), 0o700); } catch { /* best effort */ }
+  return { controllerHome, sourceRoot, releaseRevision: revision, releasePath };
+}
 
+export function publishSupervisorRelease(input: { controllerHome: string; repoRoot: string; releasePath: string }): SupervisorInstallResult {
+  const controllerHome = resolve(input.controllerHome);
+  const releasePath = assertOwnedReleasePath(controllerHome, input.releasePath);
+  const release = readSupervisorRelease(releasePath);
+  if (!release) throw new Error('SUPERVISOR_STAGED_RELEASE_INVALID');
+  const sourceRoot = runtimeSourceRoot(release.sourceRoot ?? input.repoRoot);
+  const revision = release.releaseRevision ?? `local-${Date.now()}`;
   const previous = readCurrentRelease(controllerHome);
   publishCurrentRelease(controllerHome, releasePath, previous);
   const bunPath = process.versions.bun ? process.execPath : 'bun';
-  const supervisorPath = join(releasePath, 'supervisor.js');
+  const supervisorPath = release.supervisorExecutable;
   const label = serviceLabel(controllerHome);
   const launchdDir = join(supervisorRoot(controllerHome), 'launchd');
   const systemdDir = join(supervisorRoot(controllerHome), 'systemd');
@@ -151,6 +182,11 @@ export function installSupervisorRelease(input: { controllerHome: string; repoRo
     launchdPlistPath,
     systemdUnitPath,
   };
+}
+
+export function installSupervisorRelease(input: { controllerHome: string; repoRoot: string; sourceRoot?: string }): SupervisorInstallResult {
+  const staged = stageSupervisorRelease(input);
+  return publishSupervisorRelease({ controllerHome: staged.controllerHome, repoRoot: input.repoRoot, releasePath: staged.releasePath });
 }
 
 export function supervisorServiceLabel(controllerHome: string): string {

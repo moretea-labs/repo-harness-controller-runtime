@@ -1,5 +1,6 @@
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'fs';
 import { randomUUID } from 'crypto';
+import { resolve, sep } from 'path';
 import { writeJsonAtomic } from '../shared/json-files';
 import { defaultProcessIdentityProbe, executableFingerprint, newProcessInstanceId, processIdentityMatches } from './identity';
 import {
@@ -7,6 +8,7 @@ import {
   supervisorOperationLockPath,
   supervisorOperationPath,
   supervisorOperationsRoot,
+  supervisorReleasesRoot,
 } from './paths';
 import type { ProcessIdentity, SupervisorOperation, SupervisorOperationKind, SupervisorOperationPhase } from './types';
 
@@ -22,6 +24,22 @@ function safeRequestId(value: string): string {
 
 function boundedText(value: string | undefined): string | undefined {
   return value?.replace(/\s+/g, ' ').slice(0, MAX_ERROR_LENGTH);
+}
+
+function safeCandidateReleasePath(controllerHome: string, value: string | undefined): string | undefined {
+  if (!value?.trim()) return undefined;
+  const candidate = resolve(value.trim());
+  try {
+    const rootReal = realpathSync(resolve(supervisorReleasesRoot(controllerHome)));
+    const candidateReal = realpathSync(candidate);
+    if (!candidateReal.startsWith(`${rootReal}${sep}`)) {
+      throw new Error('SUPERVISOR_RELEASE_PATH_OUTSIDE_CONTROLLER_HOME');
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message === 'SUPERVISOR_RELEASE_PATH_OUTSIDE_CONTROLLER_HOME') throw error;
+    throw new Error('SUPERVISOR_RELEASE_PATH_OUTSIDE_CONTROLLER_HOME');
+  }
+  return candidate;
 }
 
 function boundedResult(value: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
@@ -135,8 +153,13 @@ export function createSupervisorOperation(input: {
   requestedBy?: string;
   actor?: string;
   reason?: string;
+  candidateReleasePath?: string;
 }): { operation: SupervisorOperation; deduplicated: boolean } {
   const requestId = safeRequestId(input.requestId);
+  const candidateReleasePath = safeCandidateReleasePath(input.controllerHome, input.candidateReleasePath);
+  if (candidateReleasePath && input.kind !== 'rollout') {
+    throw new Error('SUPERVISOR_RELEASE_PATH_ONLY_VALID_FOR_ROLLOUT');
+  }
   return withOperationScheduleLock(input.controllerHome, () => {
     const existing = findSupervisorOperationByRequestId(input.controllerHome, requestId);
     if (existing) return { operation: existing, deduplicated: true };
@@ -151,6 +174,7 @@ export function createSupervisorOperation(input: {
       requestedBy: boundedText(input.requestedBy) ?? 'unknown',
       actor: boundedText(input.actor) ?? boundedText(input.requestedBy) ?? 'unknown',
       ...(input.reason ? { reason: boundedText(input.reason) } : {}),
+      ...(candidateReleasePath ? { candidateReleasePath } : {}),
       phase: 'accepted',
       acceptedAt,
       updatedAt: acceptedAt,

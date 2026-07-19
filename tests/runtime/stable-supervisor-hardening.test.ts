@@ -5,7 +5,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { bootstrapLaunchAgentWithRetry } from '../../src/cli/controller/launch-agents';
 import { supervisorActivationMatchesRelease } from '../../src/cli/commands/supervisor';
-import { installSupervisorRelease, renderLaunchdSupervisorPlist, renderSystemdSupervisorUnit, supervisorServiceLabel, supervisorSystemdUnitName } from '../../src/runtime/supervisor/installer';
+import { installSupervisorRelease, publishSupervisorRelease, renderLaunchdSupervisorPlist, renderSystemdSupervisorUnit, stageSupervisorRelease, supervisorServiceLabel, supervisorSystemdUnitName } from '../../src/runtime/supervisor/installer';
 import { createStableIngressRouter } from '../../src/runtime/supervisor/ingress-router';
 import { createStableIngressProcess } from '../../src/runtime/supervisor/ingress-process';
 import { controllerDaemonMaxLifetimeMs } from '../../src/runtime/control-plane/daemon-entry';
@@ -15,7 +15,7 @@ import { decideRestart, newRestartBudgetRecord, recordFailure, recordRestart, re
 import { SupervisorProcessManager } from '../../src/runtime/supervisor/process-manager';
 import { writeMcpServiceLocalConfig } from '../../src/cli/mcp/auth';
 import { writeActiveSlotAuthority } from '../../src/cli/controller/runtime-slots';
-import { readCurrentSupervisorRelease } from '../../src/runtime/supervisor/paths';
+import { readCurrentRelease, readCurrentSupervisorRelease, supervisorReleasesRoot } from '../../src/runtime/supervisor/paths';
 import { createSupervisorControlServer } from '../../src/runtime/supervisor/control-server';
 import type { SupervisorManagedProcess, SupervisorState } from '../../src/runtime/supervisor/types';
 
@@ -59,8 +59,30 @@ describe('Stable Supervisor production hardening', () => {
     try {
       const release = installSupervisorRelease({ controllerHome, repoRoot: process.cwd(), sourceRoot: process.cwd() });
       expect(existsSync(join(release.releasePath, 'worker.js'))).toBe(true);
-      const manifest = JSON.parse(readFileSync(join(release.releasePath, 'manifest.json'), 'utf8')) as { workerEntrypoint?: string };
+      const manifest = JSON.parse(readFileSync(join(release.releasePath, 'manifest.json'), 'utf8')) as { workerEntrypoint?: string; capabilities?: string[] };
       expect(manifest.workerEntrypoint).toBe('worker.js');
+      expect(manifest.capabilities).toContain('staged_rollout_release');
+    } finally {
+      rmSync(controllerHome, { recursive: true, force: true });
+    }
+  }, 180_000);
+
+  test('staged releases remain unpublished until candidate verification succeeds', () => {
+    const controllerHome = mkdtempSync(join(tmpdir(), 'repo-harness-staged-release-'));
+    try {
+      const staged = stageSupervisorRelease({ controllerHome, repoRoot: process.cwd(), sourceRoot: process.cwd() });
+      expect(readCurrentRelease(controllerHome)).toBeUndefined();
+      expect(readCurrentSupervisorRelease(controllerHome)).toBeUndefined();
+      expect(existsSync(join(staged.releasePath, 'worker.js'))).toBe(true);
+
+      const published = publishSupervisorRelease({
+        controllerHome,
+        repoRoot: process.cwd(),
+        releasePath: staged.releasePath,
+      });
+      expect(readCurrentRelease(controllerHome)).toBe(staged.releasePath);
+      expect(published.releasePath).toBe(staged.releasePath);
+      expect(readCurrentSupervisorRelease(controllerHome)?.releaseRevision).toBe(staged.releaseRevision);
     } finally {
       rmSync(controllerHome, { recursive: true, force: true });
     }
@@ -561,6 +583,45 @@ describe('Stable Supervisor production hardening', () => {
     expect(synchronized.state.controllerDaemon?.generation).toBe('generation-new');
     expect(synchronized.state.gatewayHost?.generation).toBe('generation-new');
     expect(synchronized.state.activeGeneration).toBe('generation-new');
+  });
+
+  test('rollout operation persists only controller-owned staged release paths', () => {
+    const home = mkdtempSync(join(tmpdir(), 'repo-harness-supervisor-candidate-release-'));
+    try {
+      const candidate = join(supervisorReleasesRoot(home), 'candidate-release');
+      mkdirSync(candidate, { recursive: true });
+      const created = createSupervisorOperation({
+        controllerHome: home,
+        repoRoot: process.cwd(),
+        requestId: 'candidate-release-1',
+        kind: 'rollout',
+        requestedBy: 'test',
+        actor: 'test',
+        candidateReleasePath: candidate,
+      });
+      expect(created.operation.candidateReleasePath).toBe(candidate);
+      expect(readSupervisorOperation(home, created.operation.operationId)?.candidateReleasePath).toBe(candidate);
+      expect(() => createSupervisorOperation({
+        controllerHome: home,
+        repoRoot: process.cwd(),
+        requestId: 'candidate-release-outside',
+        kind: 'rollout',
+        requestedBy: 'test',
+        actor: 'test',
+        candidateReleasePath: join(tmpdir(), 'outside-release'),
+      })).toThrow('SUPERVISOR_RELEASE_PATH_OUTSIDE_CONTROLLER_HOME');
+      expect(() => createSupervisorOperation({
+        controllerHome: home,
+        repoRoot: process.cwd(),
+        requestId: 'candidate-release-wrong-kind',
+        kind: 'restart_full',
+        requestedBy: 'test',
+        actor: 'test',
+        candidateReleasePath: candidate,
+      })).toThrow('SUPERVISOR_RELEASE_PATH_ONLY_VALID_FOR_ROLLOUT');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   test('interrupted mutations become explicit failures instead of blind replay', () => {
