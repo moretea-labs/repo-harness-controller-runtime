@@ -7,6 +7,9 @@ on:
     paths:
       - scripts/apply-gmail-assistant-routines.py
       - .github/workflows/apply-gmail-assistant-routines.yml
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
@@ -36,6 +39,7 @@ jobs:
         run: bun test tests/runtime/gmail-assistant-routines.test.ts
 
       - name: Commit generated implementation
+        if: github.event_name == 'push'
         run: |
           git config user.name "repo-harness automation"
           git config user.email "actions@users.noreply.github.com"
@@ -44,5 +48,3 @@ jobs:
           git diff --cached --quiet && exit 0
           git commit -m "feat(assistant): implement durable Gmail routines"
           git push origin HEAD:feat/gmail-assistant-routines
-
-# Existing-workflow trigger commit.
