@@ -1,0 +1,18 @@
+name: Final Verify Google Assistant
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.10
+      - run: bun install --frozen-lockfile
+      - run: bun x tsc --noEmit
+      - run: bun test tests/runtime/gmail-assistant-routines.test.ts tests/runtime/google-oauth-history-proposals.test.ts tests/runtime/capability-recovery.test.ts
