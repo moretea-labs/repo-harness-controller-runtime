@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { spawnSync } from 'child_process';
@@ -11,6 +11,8 @@ import {
   resetBrowserPluginRuntimeHooksForTest,
   setBrowserPluginRuntimeHooksForTest,
 } from '../../src/runtime/plugins/browser-adapter';
+import { resetBrowserHandoffRuntimeHooksForTest, setBrowserHandoffRuntimeHooksForTest } from '../../src/runtime/plugins/browser-handoff';
+import { interactionCommandPath, patchInteractionSession } from '../../src/runtime/plugins/interaction-session';
 import {
   clearAssistantPluginManifestCacheForTest,
   getAssistantPluginManifest,
@@ -21,6 +23,7 @@ const roots: string[] = [];
 
 afterEach(() => {
   resetBrowserPluginRuntimeHooksForTest();
+  resetBrowserHandoffRuntimeHooksForTest();
   clearAssistantPluginManifestCacheForTest();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
   delete process.env.REPO_HARNESS_CONTROLLER_HOME;
@@ -151,6 +154,9 @@ describe('browser plugin', () => {
       'wait_for_selector',
       'close_page',
       'await_file_transfer',
+      'request_human_handoff',
+      'get_handoff_status',
+      'resolve_handoff',
     ]));
 
     for (const actionId of ['open_page', 'get_text', 'screenshot', 'list_sessions', 'extract_links']) {
@@ -159,7 +165,7 @@ describe('browser plugin', () => {
       expect(actions[actionId]?.confirmation).toBe('none');
     }
 
-    for (const actionId of ['create_session', 'close_session', 'close_page']) {
+    for (const actionId of ['create_session', 'close_session', 'close_page', 'request_human_handoff', 'resolve_handoff']) {
       expect(actions[actionId]?.readOnly).toBe(false);
       expect(actions[actionId]?.risk).toBe('workspace_write');
       expect(actions[actionId]?.confirmation).toBe('authorization');
@@ -562,6 +568,177 @@ describe('browser plugin', () => {
     });
     expect(closed.closed).toBe(true);
   });
+
+  test('keeps a durable handoff, fences its profile, and records explicit resolution', async () => {
+    const { repoRoot } = repoFixture();
+    writeBrowserConfig(repoRoot, { schemaVersion: 1, enabled: true, provider: 'playwright', allowedDomains: ['example.com'] });
+    setBrowserPluginRuntimeHooksForTest({ moduleAvailable: () => true, loadPlaywright: () => mockPlaywright() });
+    const opened = await executeBrowserPluginAction({
+      controllerHome: repoRoot, repoId: 'repo', repoRoot, pluginId: 'browser', actionId: 'create_session',
+      requestId: 'handoff-create', args: { url: 'https://example.com/' }, origin: { surface: 'local-ui', actor: 'test' },
+    });
+    const sessionId = String((opened.session as Record<string, unknown>).sessionId);
+    const specs: string[] = [];
+    setBrowserHandoffRuntimeHooksForTest({
+      now: () => '2026-07-19T08:00:00.000Z', pidAlive: (pid) => pid === 4242,
+      spawnHost: (path) => { specs.push(path); return { pid: 4242 }; }, signal: () => undefined,
+    });
+    const requested = await executeBrowserPluginAction({
+      controllerHome: repoRoot, repoId: 'repo', repoRoot, pluginId: 'browser', actionId: 'request_human_handoff',
+      requestId: 'handoff-request', args: { session_id: sessionId, reason: 'captcha' }, origin: { surface: 'local-ui', actor: 'test' },
+    });
+    const interactionId = String((requested.handoff as Record<string, unknown>).interactionId);
+    expect(existsSync(specs[0]!)).toBe(true);
+    await expect(executeBrowserPluginAction({
+      controllerHome: repoRoot, repoId: 'repo', repoRoot, pluginId: 'browser', actionId: 'get_text',
+      requestId: 'handoff-conflict', args: { session_id: sessionId }, origin: { surface: 'local-ui', actor: 'test' },
+    })).rejects.toThrow('PLUGIN_RESOURCE_BUSY');
+    const resolved = await executeBrowserPluginAction({
+      controllerHome: repoRoot, repoId: 'repo', repoRoot, pluginId: 'browser', actionId: 'resolve_handoff',
+      requestId: 'handoff-resolve', args: { interaction_id: interactionId, resolution: 'resume' }, origin: { surface: 'local-ui', actor: 'test' },
+    });
+    expect(resolved.resolutionRequested).toBe('resume');
+    expect(existsSync(interactionCommandPath(repoRoot, 'browser', interactionId, 'resume'))).toBe(true);
+    patchInteractionSession(repoRoot, 'browser', interactionId, { status: 'completed' });
+    const closed = await executeBrowserPluginAction({
+      controllerHome: repoRoot, repoId: 'repo', repoRoot, pluginId: 'browser', actionId: 'close_session',
+      requestId: 'handoff-close', args: { session_id: sessionId }, origin: { surface: 'local-ui', actor: 'test' },
+    });
+    expect(closed.closed).toBe(true);
+  });
+
+  test('reconciles dead and expired hosts without releasing a live profile early', async () => {
+    const { repoRoot } = repoFixture();
+    writeBrowserConfig(repoRoot, { schemaVersion: 1, enabled: true, provider: 'playwright', allowedDomains: ['example.com'] });
+    setBrowserPluginRuntimeHooksForTest({ moduleAvailable: () => true, loadPlaywright: () => mockPlaywright() });
+    const opened = await executeBrowserPluginAction({
+      controllerHome: repoRoot, repoId: 'repo', repoRoot, pluginId: 'browser', actionId: 'create_session',
+      requestId: 'expiry-create', args: { url: 'https://example.com/' }, origin: { surface: 'local-ui', actor: 'test' },
+    });
+    const sessionId = String((opened.session as Record<string, unknown>).sessionId);
+    let now = '2026-07-19T08:00:00.000Z';
+    let live = true;
+    let signals = 0;
+    setBrowserHandoffRuntimeHooksForTest({
+      now: () => now, pidAlive: () => live, spawnHost: () => ({ pid: 4343 }), signal: () => { signals += 1; },
+    });
+    const requested = await executeBrowserPluginAction({
+      controllerHome: repoRoot, repoId: 'repo', repoRoot, pluginId: 'browser', actionId: 'request_human_handoff',
+      requestId: 'expiry-request', args: { session_id: sessionId, handoff_timeout_ms: 1_000 }, origin: { surface: 'local-ui', actor: 'test' },
+    });
+    const interactionId = String((requested.handoff as Record<string, unknown>).interactionId);
+    now = '2026-07-19T08:00:02.000Z';
+    const closing = await executeBrowserPluginAction({
+      controllerHome: repoRoot, repoId: 'repo', repoRoot, pluginId: 'browser', actionId: 'get_handoff_status',
+      requestId: 'expiry-closing', args: { interaction_id: interactionId }, origin: { surface: 'local-ui', actor: 'test' },
+    });
+    expect((closing.handoff as Record<string, unknown>).status).toBe('closing');
+    expect(signals).toBe(0);
+    await expect(executeBrowserPluginAction({
+      controllerHome: repoRoot, repoId: 'repo', repoRoot, pluginId: 'browser', actionId: 'get_text',
+      requestId: 'expiry-fenced', args: { session_id: sessionId }, origin: { surface: 'local-ui', actor: 'test' },
+    })).rejects.toThrow('PLUGIN_RESOURCE_BUSY');
+    live = false;
+    const failed = await executeBrowserPluginAction({
+      controllerHome: repoRoot, repoId: 'repo', repoRoot, pluginId: 'browser', actionId: 'get_handoff_status',
+      requestId: 'expiry-failed', args: { interaction_id: interactionId }, origin: { surface: 'local-ui', actor: 'test' },
+    });
+    expect((failed.handoff as Record<string, unknown>).status).toBe('failed');
+    const after = await executeBrowserPluginAction({
+      controllerHome: repoRoot, repoId: 'repo', repoRoot, pluginId: 'browser', actionId: 'get_text',
+      requestId: 'expiry-released', args: { session_id: sessionId }, origin: { surface: 'local-ui', actor: 'test' },
+    });
+    expect(after.url).toBe('https://example.com/');
+  });
+
+  const liveSmokeMarker = join(process.cwd(), '.repo-harness', 'run-browser-handoff-live-smoke');
+  const liveSmokeEnabled = existsSync(liveSmokeMarker) && (statSync(liveSmokeMarker).mode & 0o111) !== 0;
+  if (liveSmokeEnabled) {
+    test('live foreground handoff survives the requesting action and releases its profile after resume', async () => {
+      const { repoRoot, controllerHome } = repoFixture();
+      writeBrowserConfig(repoRoot, {
+        schemaVersion: 1,
+        enabled: true,
+        provider: 'playwright',
+        browserChannel: 'chromium',
+        allowedDomains: ['127.0.0.1'],
+        defaultTimeoutMs: 15_000,
+      });
+      const server = Bun.serve({
+        hostname: '127.0.0.1',
+        port: 0,
+        fetch: () => new Response('<!doctype html><title>Handoff Smoke</title><main id="result">ready</main>', {
+          headers: { 'content-type': 'text/html' },
+        }),
+      });
+      const url = `http://127.0.0.1:${server.port}/`;
+      const base = {
+        controllerHome,
+        repoId: 'repo',
+        repoRoot,
+        pluginId: 'browser',
+        origin: { surface: 'local-ui' as const, actor: 'live-smoke' },
+      };
+      let interactionId: string | undefined;
+      try {
+        const opened = await executeBrowserPluginAction({
+          ...base, actionId: 'create_session', requestId: 'live-smoke-create', args: { url },
+        });
+        const sessionId = String((opened.session as Record<string, unknown>).sessionId);
+        const requested = await executeBrowserPluginAction({
+          ...base, actionId: 'request_human_handoff', requestId: 'live-smoke-handoff',
+          args: { session_id: sessionId, reason: 'manual_review', handoff_timeout_ms: 30_000 },
+        });
+        interactionId = String((requested.handoff as Record<string, unknown>).interactionId);
+        let handoff: Record<string, unknown> = {};
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          handoff = (await executeBrowserPluginAction({
+            ...base, actionId: 'get_handoff_status', requestId: `live-smoke-ready-${attempt}`,
+            args: { interaction_id: interactionId },
+          })).handoff as Record<string, unknown>;
+          if (handoff.status === 'waiting_for_user' || ['failed', 'closed'].includes(String(handoff.status))) break;
+          await Bun.sleep(100);
+        }
+        expect(handoff.status).toBe('waiting_for_user');
+        expect((handoff.host as Record<string, unknown>).foregroundPresented).toBe(true);
+        await executeBrowserPluginAction({
+          ...base, actionId: 'resolve_handoff', requestId: 'live-smoke-resume',
+          args: { interaction_id: interactionId, resolution: 'resume' },
+        });
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          handoff = (await executeBrowserPluginAction({
+            ...base, actionId: 'get_handoff_status', requestId: `live-smoke-complete-${attempt}`,
+            args: { interaction_id: interactionId },
+          })).handoff as Record<string, unknown>;
+          if (['completed', 'failed', 'closed'].includes(String(handoff.status))) break;
+          await Bun.sleep(100);
+        }
+        expect(handoff.status).toBe('completed');
+        const after = await executeBrowserPluginAction({
+          ...base, actionId: 'get_text', requestId: 'live-smoke-after', args: { session_id: sessionId, selector: '#result' },
+        });
+        expect(after.url).toBe(url);
+      } finally {
+        if (interactionId) {
+          try {
+            await executeBrowserPluginAction({
+              ...base, actionId: 'resolve_handoff', requestId: 'live-smoke-final-cancel',
+              args: { interaction_id: interactionId, resolution: 'cancel' },
+            });
+            for (let attempt = 0; attempt < 30; attempt += 1) {
+              const final = (await executeBrowserPluginAction({
+                ...base, actionId: 'get_handoff_status', requestId: `live-smoke-final-${attempt}`,
+                args: { interaction_id: interactionId },
+              })).handoff as Record<string, unknown>;
+              if (['completed', 'closed', 'failed'].includes(String(final.status))) break;
+              await Bun.sleep(100);
+            }
+          } catch {}
+        }
+        server.stop(true);
+      }
+    });
+  }
 
   test('denies open_page outside allowed domains before launch', async () => {
     const { repoRoot } = repoFixture();
