@@ -292,6 +292,31 @@ describe('goal workloop engine', () => {
     expect((finalized.data as { finalStatus: string }).finalStatus).toBe('succeeded');
   });
 
+  test('successful completion preserves access and approval snapshots', () => {
+    const { ctx } = fixture();
+    const started = startGoalWorkloop(ctx, {
+      objective: 'Preserve authorization boundaries',
+      checks: ['package:check:type'],
+      constraints: {
+        accessMode: 'request',
+        allowDestructive: false,
+        allowMerge: false,
+      },
+      modeInput: { scopeClear: true, expectedFiles: 5, expectedChangedLines: 250 },
+    });
+    const workId = (started.data as { work: { workId: string } }).work.workId;
+    const before = getWorkContract(ctx.workStore, workId)!;
+    verifyGoalWorkloop(ctx, { workId, checkId: 'package:check:type' });
+    const finalized = finalizeGoalWorkloop(ctx, { workId });
+    const after = getWorkContract(ctx.workStore, workId)!;
+
+    expect(finalized.status).toBe('ok');
+    expect(after.constraints.accessMode).toBe('request');
+    expect(after.constraints.allowDestructive).toBe(false);
+    expect(after.constraints.allowMerge).toBe(false);
+    expect(after.approvalPolicy).toEqual(before.approvalPolicy);
+  });
+
   test('reconciles stale running work only when no execution owner remains', () => {
     const { ctx } = fixture();
     const started = startGoalWorkloop(ctx, {

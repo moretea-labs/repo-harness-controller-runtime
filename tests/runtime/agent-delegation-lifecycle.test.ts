@@ -239,11 +239,14 @@ describe('agent delegation lifecycle bootstrap stability', () => {
       taskId: 'T1',
       requestId: 'req-restart',
     };
-    markOperationCompleted(controllerHome, {
-      ...created,
+    const running = updateExecutionJob(controllerHome, created.repoId, created.jobId, (job) => ({
+      ...job,
       attempt: 1,
       status: 'running',
-    }, 1, {
+      workerPid: 1,
+      heartbeatAt: new Date().toISOString(),
+    }));
+    markOperationCompleted(controllerHome, running, 1, {
       outcome: 'succeeded',
       result: buildDelegatedExecutionResult({ childReference }),
       childReference,
@@ -322,6 +325,80 @@ describe('agent delegation lifecycle bootstrap stability', () => {
     expect(recovered.error?.code).not.toBe('WORKER_OUTCOME_AMBIGUOUS');
     expect(recovered.error?.code).not.toBe('OPERATION_OUTCOME_AMBIGUOUS');
     expect(summary.recovered + summary.terminal).toBeGreaterThanOrEqual(1);
+  });
+
+  test('stale Worker cannot write a receipt after the Job attempt changes', () => {
+    const controllerHome = temp('repo-harness-stale-receipt-attempt-');
+    const created = createExecutionJob(controllerHome, {
+      repoId: 'repo-a',
+      type: 'repository-command',
+      requestId: 'req-stale-attempt',
+      semanticKey: 'repository-command:stale-attempt',
+      origin: { surface: 'system', actor: 'test' },
+      payload: { operation: 'repository-command' },
+      resourceClaims: [{ resourceKey: 'repo:repo-a', mode: 'write' }],
+    }).job;
+    const firstOwner = updateExecutionJob(controllerHome, created.repoId, created.jobId, (job) => ({
+      ...job,
+      status: 'running',
+      attempt: 1,
+      workerPid: 910_001,
+      heartbeatAt: new Date().toISOString(),
+    }));
+    markOperationStarted(controllerHome, firstOwner, 910_001);
+    updateExecutionJob(controllerHome, created.repoId, created.jobId, (job) => ({
+      ...job,
+      status: 'running',
+      attempt: 2,
+      workerPid: 910_002,
+      heartbeatAt: new Date().toISOString(),
+    }));
+
+    expect(() => markOperationCompleted(controllerHome, firstOwner, 910_001, {
+      outcome: 'succeeded',
+      result: { stale: true },
+    })).toThrow('OPERATION_RECEIPT_OWNERSHIP_STALE');
+    expect(readOperationReceipt(controllerHome, created.repoId, created.jobId)).toMatchObject({
+      attempt: 1,
+      workerPid: 910_001,
+      state: 'started',
+    });
+  });
+
+  test('reconciliation ignores a completed receipt from a replaced Worker PID', () => {
+    const controllerHome = temp('repo-harness-stale-receipt-pid-');
+    const created = createExecutionJob(controllerHome, {
+      repoId: 'repo-a',
+      type: 'repository-command',
+      requestId: 'req-stale-pid',
+      semanticKey: 'repository-command:stale-pid',
+      origin: { surface: 'system', actor: 'test' },
+      payload: { operation: 'repository-command' },
+      resourceClaims: [{ resourceKey: 'repo:repo-a', mode: 'write' }],
+      maxAttempts: 1,
+    }).job;
+    const firstOwner = updateExecutionJob(controllerHome, created.repoId, created.jobId, (job) => ({
+      ...job,
+      status: 'running',
+      attempt: 1,
+      workerPid: 920_001,
+      heartbeatAt: new Date().toISOString(),
+    }));
+    markOperationCompleted(controllerHome, firstOwner, 920_001, {
+      outcome: 'succeeded',
+      result: { stale: true },
+    });
+    updateExecutionJob(controllerHome, created.repoId, created.jobId, (job) => ({
+      ...job,
+      status: 'running',
+      workerPid: 920_002,
+      heartbeatAt: new Date(Date.now() - 120_000).toISOString(),
+    }));
+
+    const summary = reconcileExecutionJobs(controllerHome, created.repoId);
+    const reconciled = getExecutionJob(controllerHome, created.repoId, created.jobId);
+    expect(summary.recovered).toBe(0);
+    expect(reconciled.status).not.toBe('succeeded');
   });
 
   test('6. same requestId does not create a second Agent Run', () => {
@@ -609,7 +686,7 @@ describe('agent delegation lifecycle bootstrap stability', () => {
 
     const { registerRepository } = await import('../../src/cli/repositories/registry');
     const repository = registerRepository({ path: repoRoot, controllerHome });
-    const boundParent = createExecutionJob(controllerHome, {
+    const createdParent = createExecutionJob(controllerHome, {
       repoId: repository.repoId,
       checkoutId: repository.activeCheckoutId,
       type: 'agent-run',
@@ -627,6 +704,13 @@ describe('agent delegation lifecycle bootstrap stability', () => {
       },
       resourceClaims: [{ resourceKey: `agent-dispatch:${repository.repoId}:${local.jobId}`, mode: 'write' }],
     }).job;
+    const boundParent = updateExecutionJob(controllerHome, createdParent.repoId, createdParent.jobId, (job) => ({
+      ...job,
+      status: 'running',
+      attempt: 1,
+      workerPid: process.pid,
+      heartbeatAt: new Date().toISOString(),
+    }));
 
     const started = Date.now();
     const result = await executeExecutionJob(controllerHome, boundParent);

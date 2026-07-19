@@ -8,7 +8,7 @@ import {
   mergeChildReferences,
   buildDelegatedExecutionResult,
 } from '../../execution/jobs/child-reference';
-import { readOperationReceipt } from '../../execution/jobs/receipt-store';
+import { operationReceiptMatchesJobOwnership, readOperationReceipt } from '../../execution/jobs/receipt-store';
 import { releaseExecutionLeases, renewExecutionLeases } from '../../resources/leases/store';
 import { isProcessAlive, terminateProcessTree, terminateProcessTreeSync, type ProcessTreeTerminationResult } from '../../shared/process-tree';
 import { settleScheduledExecution } from '../../workflow/schedules/settlement';
@@ -30,7 +30,7 @@ function canAutomaticallyReplay(job: ExecutionJob): boolean {
 
 function recoverCompletedReceipt(controllerHome: string, job: ExecutionJob): ExecutionJob | undefined {
   const receipt = readOperationReceipt(controllerHome, job.repoId, job.jobId);
-  if (!receipt || receipt.attempt !== job.attempt) return undefined;
+  if (!receipt || !operationReceiptMatchesJobOwnership(receipt, job)) return undefined;
 
   // Parent Agent-delegation Jobs that already persisted a child reference are
   // recovered as succeeded (delegation accepted), never as ambiguous.
@@ -92,7 +92,7 @@ function isAgentDelegationJob(job: ExecutionJob): boolean {
 
 function ambiguousStartedOperation(controllerHome: string, job: ExecutionJob): boolean {
   const receipt = readOperationReceipt(controllerHome, job.repoId, job.jobId);
-  if (!receipt || receipt.attempt !== job.attempt) return false;
+  if (!receipt || !operationReceiptMatchesJobOwnership(receipt, job)) return false;
   // Delegated or completed receipts are never ambiguous.
   if (receipt.state === 'delegated' || receipt.state === 'completed') return false;
   if (hasDurableChildReference(childReferenceFromReceipt(receipt)) || hasDurableChildReference(childReferenceFromJob(job))) {

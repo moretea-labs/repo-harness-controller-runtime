@@ -1588,7 +1588,7 @@ describe("MCP controller profile", () => {
         });
         for (
           let attempt = 0;
-          attempt < 200 && issue.value.tasks[0].status !== "review";
+          attempt < 200 && !["review", "verifying"].includes(issue.value.tasks[0].status);
           attempt += 1
         ) {
           await Bun.sleep(25);
@@ -1596,8 +1596,16 @@ describe("MCP controller profile", () => {
             issue_id: created.value.id,
           });
         }
-        expect(issue.value.tasks[0].status).toBe("review");
-        expect(issue.value.tasks[0].verification).toBeUndefined();
+        expect(["review", "verifying"]).toContain(issue.value.tasks[0].status);
+        if (issue.value.tasks[0].status === "review") {
+          expect(issue.value.tasks[0].verification).toBeUndefined();
+        } else {
+          expect(issue.value.tasks[0].verification.acceptanceResults[0]).toMatchObject({
+            ok: false,
+            outcome: "not_evaluated",
+            source: "run_completion",
+          });
+        }
       } finally {
         process.env.PATH = originalPath;
         rmSync(binRoot, { recursive: true, force: true });

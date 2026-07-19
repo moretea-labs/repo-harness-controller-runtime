@@ -14,7 +14,7 @@ import {
   isAgentDelegationOperation,
   mergeChildReferences,
 } from '../jobs/child-reference';
-import { markOperationCompleted, markOperationStarted, readOperationReceipt } from '../jobs/receipt-store';
+import { markOperationCompleted, markOperationStarted, operationReceiptMatchesJobOwnership, readOperationReceipt } from '../jobs/receipt-store';
 import { markScheduledExecutionRunning } from '../../workflow/schedules/settlement';
 import { invalidateExecutionWorker } from './ownership';
 import { rebuildRepositoryProjection } from '../../projections/materialized-view';
@@ -55,7 +55,8 @@ function recoverDelegatedChildIfPresent(message: string): boolean {
   try {
     const current = getExecutionJob(controllerHome, repoId, jobId);
     if (current.status !== 'running' || current.workerPid !== process.pid) return false;
-    const receipt = readOperationReceipt(controllerHome, repoId, jobId);
+    const candidateReceipt = readOperationReceipt(controllerHome, repoId, jobId);
+    const receipt = candidateReceipt && operationReceiptMatchesJobOwnership(candidateReceipt, current) ? candidateReceipt : undefined;
     const childReference = mergeChildReferences(
       childReferenceFromReceipt(receipt),
       childReferenceFromJob(current),
@@ -206,9 +207,11 @@ async function main(): Promise<void> {
   );
   const evidenceIds = [...current.evidenceIds, evidence.evidenceId];
   const terminalError = execution.error ? { ...execution.error, details: bounded?.result } : undefined;
+  const candidateReceipt = readOperationReceipt(controllerHome, repoId, jobId);
+  const trustedReceipt = candidateReceipt && operationReceiptMatchesJobOwnership(candidateReceipt, current) ? candidateReceipt : undefined;
   const childReference = mergeChildReferences(
     childReferenceFromJob({ ...current, result: execution.ok ? bounded?.result : current.result }),
-    childReferenceFromReceipt(readOperationReceipt(controllerHome, repoId, jobId)),
+    childReferenceFromReceipt(trustedReceipt),
     childReferenceFromUnknown(execution.result),
   );
   markOperationCompleted(controllerHome, current, process.pid, {
