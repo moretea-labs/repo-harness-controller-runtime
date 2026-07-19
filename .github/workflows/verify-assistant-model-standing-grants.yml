@@ -24,11 +24,21 @@ jobs:
       - run: bun install --frozen-lockfile
 
       - name: Apply integration patches
+        shell: bash
         run: |
-          python3 scripts/apply-standing-grant-core.py
-          python3 scripts/apply-assistant-model-runtime.py
-          python3 scripts/apply-assistant-model-apis.py
-          python3 scripts/apply-assistant-model-openapi.py
+          set +e
+          {
+            echo '--- core ---'
+            python3 scripts/apply-standing-grant-core.py || exit $?
+            echo '--- runtime ---'
+            python3 scripts/apply-assistant-model-runtime.py || exit $?
+            echo '--- apis ---'
+            python3 scripts/apply-assistant-model-apis.py || exit $?
+            echo '--- openapi ---'
+            python3 scripts/apply-assistant-model-openapi.py || exit $?
+          } 2>&1 | tee assistant-model-patch.log
+          echo "${PIPESTATUS[0]}" > assistant-model-patch.status
+          exit 0
 
       - name: Type check
         shell: bash
@@ -51,6 +61,8 @@ jobs:
         with:
           name: assistant-model-standing-grant-diagnostics
           path: |
+            assistant-model-patch.log
+            assistant-model-patch.status
             assistant-model-tsc.log
             assistant-model-tsc.status
             assistant-model-tests.log
@@ -58,6 +70,7 @@ jobs:
 
       - name: Enforce verification
         run: |
+          test "$(cat assistant-model-patch.status)" = "0"
           test "$(cat assistant-model-tsc.status)" = "0"
           test "$(cat assistant-model-tests.status)" = "0"
 
