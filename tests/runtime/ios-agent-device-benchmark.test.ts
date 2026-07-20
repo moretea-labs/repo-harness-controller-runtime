@@ -23,3 +23,15 @@ describe('iOS agent-device benchmark statistics', () => {
     });
   });
 });
+
+
+describe('iOS benchmark phase telemetry', () => {
+  it('summarizes sparse phase timing samples without fabricating missing values', () => {
+    const values = [12.5, 7.5, 10];
+    const summary = summarize(values);
+    expect(summary.count).toBe(3);
+    expect(summary.min).toBe(7.5);
+    expect(summary.p50).toBe(10);
+    expect(summary.max).toBe(12.5);
+  });
+});

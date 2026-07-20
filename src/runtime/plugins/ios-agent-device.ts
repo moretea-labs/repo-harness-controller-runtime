@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { existsSync, mkdirSync } from 'fs';
 import { isAbsolute, join } from 'path';
 import { spawnSync } from 'child_process';
+import { performance } from 'perf_hooks';
 import { repositoryControllerRoot } from '../../cli/repositories/controller-home';
 import { readJsonFile, writeJsonAtomic } from '../shared/json-files';
 import { AssistantPluginError, toAssistantPluginError } from './errors';
@@ -915,9 +916,21 @@ function subActionInput(
 }
 
 async function executeJdSearch(input: AssistantPluginActionExecutionInput): Promise<Record<string, unknown>> {
+  const workflowStartedAt = performance.now();
+  const timingsMs = {
+    targetSelection: 0,
+    open: 0,
+    targetDiscovery: 0,
+    interactionAndEvidence: 0,
+    screenshot: 0,
+    close: 0,
+    total: 0,
+  };
+  const targetSelectionStartedAt = performance.now();
   const query = validateJdQuery(input.args.query);
   const deviceSelector = requireString(input.args.device, 'device');
   const selected = selectTarget(input, deviceSelector);
+  timingsMs.targetSelection = performance.now() - targetSelectionStartedAt;
   if (selected.kind !== 'device') {
     throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', 'agent_device_jd_search requires one exact connected physical iPhone.', {
       retryable: false,
@@ -930,6 +943,7 @@ async function executeJdSearch(input: AssistantPluginActionExecutionInput): Prom
     runner_bundle_id: optionalString(input.args.runner_bundle_id),
     developer_dir: optionalString(input.args.developer_dir),
   };
+  const openStartedAt = performance.now();
   const opened = await executeIosAgentDeviceAction(subActionInput(input, 'agent_device_open', {
     ...sharedArgs,
     app: JD_BUNDLE_ID,
@@ -938,6 +952,7 @@ async function executeJdSearch(input: AssistantPluginActionExecutionInput): Prom
     relaunch: input.args.relaunch === true,
   }));
   const interaction = opened.interaction as InteractionSessionRecord | undefined;
+  timingsMs.open = performance.now() - openStartedAt;
   if (!interaction) {
     throw new AssistantPluginError('AGENT_DEVICE_OPEN_FAILED', 'agent-device did not return an interaction for JD.', { retryable: false });
   }
@@ -960,11 +975,14 @@ async function executeJdSearch(input: AssistantPluginActionExecutionInput): Prom
   let accessibilitySnapshotRequests = 0;
   let nativeBatchRequests = 0;
   let nativeBatchSteps = 0;
+  let targetDiscoveryStartedAt = 0;
+  let interactionStartedAt = 0;
   try {
     // A caller may retain both a fast accessibility ref and a stable selector.
     // Prefer the selector because refs are snapshot-scoped and may be stale after
     // app foregrounding or navigation; fall back to the ref for compatibility.
     let searchTarget = optionalString(input.args.search_selector) ?? optionalString(input.args.search_target);
+    targetDiscoveryStartedAt = performance.now();
     if (!searchTarget) {
       initialAccessibilitySnapshot = true;
       accessibilitySnapshotRequests += 1;
@@ -980,6 +998,8 @@ async function executeJdSearch(input: AssistantPluginActionExecutionInput): Prom
       });
     }
 
+    timingsMs.targetDiscovery = performance.now() - targetDiscoveryStartedAt;
+    interactionStartedAt = performance.now();
     const submitTarget = optionalString(input.args.submit_selector) ?? optionalString(input.args.submit_target);
     const waitStep: AgentDeviceBatchStep = resultText
       ? { kind: 'wait', input: { wait_type: 'text', text: resultText, timeout_ms: 15_000 } }
@@ -1089,13 +1109,19 @@ async function executeJdSearch(input: AssistantPluginActionExecutionInput): Prom
         accessibilitySnapshotRequests += 1;
       }
     }
+    timingsMs.interactionAndEvidence = performance.now() - interactionStartedAt;
+    const screenshotStartedAt = performance.now();
     screenshot = await executeIosAgentDeviceAction(subActionInput(input, 'agent_device_screenshot', {
       interaction_id: interactionId,
       label: 'jd-search-results',
       max_size: 1600,
     }));
+    timingsMs.screenshot = performance.now() - screenshotStartedAt;
   } finally {
+    const closeStartedAt = performance.now();
     await executeIosAgentDeviceAction(subActionInput(input, 'agent_device_close', { interaction_id: interactionId }));
+    timingsMs.close = performance.now() - closeStartedAt;
+    timingsMs.total = performance.now() - workflowStartedAt;
   }
   return {
     provider: 'agent-device',
@@ -1117,6 +1143,9 @@ async function executeJdSearch(input: AssistantPluginActionExecutionInput): Prom
       fullAccessibilitySnapshot: accessibilityEvidenceTier === 'full_snapshot',
       resultScope: resultScope ?? null,
       snapshotDepth: accessibilityEvidenceTier === 'exact_wait' ? null : snapshotDepth,
+      timingsMs: Object.fromEntries(
+        Object.entries(timingsMs).map(([key, value]) => [key, Math.round(value * 100) / 100]),
+      ),
     },
     visibleResultText: boundedVisibleText(finalSnapshot, query),
     result: bounded(redactExactText(finalSnapshot, query)),

@@ -250,6 +250,12 @@ describe('optional agent-device iOS Simulator provider', () => {
     expect((result.executionPlan as Record<string, unknown>).initialAccessibilitySnapshot).toBe(false);
     expect((result.executionPlan as Record<string, unknown>).accessibilitySnapshotRequests).toBe(0);
     expect((result.executionPlan as Record<string, unknown>).fullAccessibilitySnapshot).toBe(false);
+    const phaseTimings = (result.executionPlan as Record<string, unknown>).timingsMs as Record<string, number>;
+    expect(Object.keys(phaseTimings).sort()).toEqual([
+      'close', 'interactionAndEvidence', 'open', 'screenshot', 'targetDiscovery', 'targetSelection', 'total',
+    ].sort());
+    expect(Object.values(phaseTimings).every((value) => value >= 0)).toBe(true);
+    expect(phaseTimings.total).toBeGreaterThanOrEqual(phaseTimings.open + phaseTimings.close);
     expect(commands.some(({ argv }) => argv[1] === 'close')).toBe(true);
   });
 

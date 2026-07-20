@@ -45,6 +45,15 @@ export interface IosBenchmarkSample {
   exactWaitFallback: boolean;
   runnerRoundTrips?: number;
   providerWallClockMs?: number;
+  phaseTimingsMs?: {
+    targetSelection?: number;
+    open?: number;
+    targetDiscovery?: number;
+    interactionAndEvidence?: number;
+    screenshot?: number;
+    close?: number;
+    total?: number;
+  };
 }
 
 export function percentile(values: number[], percentileValue: number): number {
@@ -205,6 +214,7 @@ export async function runBenchmark(): Promise<Record<string, unknown>> {
     });
     const totalMs = performance.now() - startedAt;
     const executionPlan = stringRecord(result.executionPlan) ?? {};
+    const phaseTimingsMs = stringRecord(executionPlan.timingsMs) as IosBenchmarkSample['phaseTimingsMs'];
     const cost = findCost(result);
     samples.push({
       index,
@@ -220,10 +230,27 @@ export async function runBenchmark(): Promise<Record<string, unknown>> {
       exactWaitFallback: executionPlan.exactWaitFallback === true,
       runnerRoundTrips: cost.runnerRoundTrips,
       providerWallClockMs: cost.wallClockMs,
+      phaseTimingsMs,
     });
   }
 
   const measured = samples.filter((sample) => !sample.warmup);
+  const phaseNames = [
+    'targetSelection',
+    'open',
+    'targetDiscovery',
+    'interactionAndEvidence',
+    'screenshot',
+    'close',
+    'total',
+  ] as const;
+  const phaseTimingsMs = Object.fromEntries(phaseNames.map((phase) => [
+    phase,
+    summarize(measured.flatMap((sample) => {
+      const value = sample.phaseTimingsMs?.[phase];
+      return typeof value === 'number' ? [value] : [];
+    })),
+  ]));
   const byTier = Object.fromEntries(
     [...new Set(measured.map((sample) => sample.tier))].map((tier) => [
       tier,
@@ -265,6 +292,7 @@ export async function runBenchmark(): Promise<Record<string, unknown>> {
       accessibilitySnapshotRequests: summarize(measured.map((sample) => sample.accessibilitySnapshotRequests)),
       nativeBatchRequests: summarize(measured.map((sample) => sample.nativeBatchRequests)),
       nativeBatchSteps: summarize(measured.map((sample) => sample.nativeBatchSteps)),
+      phaseTimingsMs,
       byTier,
     },
     samples,
