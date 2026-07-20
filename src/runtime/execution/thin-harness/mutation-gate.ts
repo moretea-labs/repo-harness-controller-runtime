@@ -1,10 +1,13 @@
 /**
  * Checkout Mutation Ownership backed by the shared Execution Lease arbiter.
  *
- * Fast Path and Durable Work both claim `workspace:<checkoutId>` (write mode)
- * through acquireExecutionLeases — no separate file-gate race, no one-way
- * observation. Heartbeat renew keeps long batches alive; release is
- * compare-and-delete via fencing tokens.
+ * Fast Path uses visibility=ephemeral (active set + fencing only; no projection
+ * dirty / scheduler wake / runtime events). Durable workers use default durable
+ * leases. Both contend on workspace:<checkoutId> with expanded path/git-ref
+ * overlap rules.
+ *
+ * Ownership lifecycle is covered by the mutation lease alone — do NOT hold the
+ * repository controller lock for the duration of the write (renew needs that lock).
  */
 import { createHash } from 'crypto';
 import {
@@ -17,7 +20,6 @@ import type { ExecutionLease } from '../../resources/leases/types';
 import { runBoundedGit } from './async-process';
 
 export interface CheckoutMutationGate {
-  /** Alias of ownerJobId used for lease ownership. */
   gateId: string;
   owner: string;
   ownerJobId: string;
@@ -31,6 +33,7 @@ export interface CheckoutMutationGate {
   acquiredAt: string;
   expiresAt: string;
   ttlMs: number;
+  renewCount: number;
 }
 
 export interface MutationGateBusy {
@@ -43,44 +46,54 @@ export type MutationGateAcquireResult =
   | { acquired: true; gate: CheckoutMutationGate }
   | MutationGateBusy;
 
+export interface MutationGateHelpers {
+  renew: () => CheckoutMutationGate;
+  assert: () => void;
+  /** Aborts when ownership is lost or renew fails. Combine with caller signal. */
+  signal: AbortSignal;
+  getGate: () => CheckoutMutationGate;
+}
+
 const DEFAULT_TTL_MS = 30_000;
-const MIN_TTL_MS = 5_000;
+const MIN_TTL_MS = 3_000;
 const MAX_TTL_MS = 120_000;
 
 export function checkoutMutationResourceKey(checkoutId: string): string {
   return `workspace:${checkoutId}`;
 }
 
-async function snapshotHash(repoRoot: string): Promise<{ head: string | null; statusHash: string | null }> {
+async function snapshotHash(repoRoot: string, signal?: AbortSignal): Promise<{ head: string | null; statusHash: string | null }> {
   const [headResult, statusResult] = await Promise.all([
     runBoundedGit(repoRoot, ['rev-parse', '--verify', 'HEAD'], {
       timeoutMs: 5_000,
       maxOutputBytes: 4_096,
+      signal,
     }),
     runBoundedGit(repoRoot, [
       'status', '--porcelain=v1', '--untracked-files=all', '--', '.', ':(exclude).ai/harness/**',
     ], {
       timeoutMs: 5_000,
       maxOutputBytes: 128 * 1024,
+      signal,
     }),
   ]);
-  if (!headResult.ok && !headResult.stdout.trim()) {
-    // Unborn HEAD is ok (empty repo); hard failures still produce empty status.
+  if (statusResult.cancelled || headResult.cancelled) {
+    throw new Error('CANCELLED: mutation snapshot aborted');
   }
-  const head = headResult.ok ? (headResult.stdout.trim() || null) : null;
-  if (!statusResult.ok && !statusResult.cancelled) {
+  if (!statusResult.ok) {
     throw new Error(`MUTATION_SNAPSHOT_FAILED: git status failed: ${statusResult.stderr || statusResult.exitCode}`);
   }
-  const status = statusResult.stdout;
+  // unborn HEAD is ok (empty repo / no commits yet)
+  const head = headResult.ok ? (headResult.stdout.trim() || null) : null;
   return {
     head,
-    statusHash: createHash('sha256').update(status).digest('hex'),
+    statusHash: createHash('sha256').update(statusResult.stdout).digest('hex'),
   };
 }
 
 /**
- * Acquire exclusive checkout mutation ownership via the durable lease store.
- * Does not create ExecutionJob. Durable writers claiming the same workspace key conflict atomically.
+ * Acquire exclusive checkout mutation ownership via ephemeral Execution Lease.
+ * Snapshot is taken AFTER lease acquisition under ownership.
  */
 export async function acquireCheckoutMutationGate(input: {
   controllerHome: string;
@@ -96,26 +109,19 @@ export async function acquireCheckoutMutationGate(input: {
     ? input.owner
     : `fast:${input.owner}`;
 
-  let snap: { head: string | null; statusHash: string | null };
-  try {
-    snap = await snapshotHash(input.repoRoot);
-  } catch (error) {
-    return {
-      busy: true,
-      reason: 'snapshot_failed',
-      blockers: [{
-        kind: 'fast_gate',
-        owner: error instanceof Error ? error.message : String(error),
-      }],
-    };
-  }
-
+  // 1) Acquire lease first (short controller lock only inside lease store).
   const result = acquireExecutionLeases(
     input.controllerHome,
     input.repoId,
     ownerJobId,
     [{ resourceKey, mode: 'write' }],
-    ttlMs,
+    {
+      visibility: 'ephemeral',
+      notifyScheduler: false,
+      invalidateProjection: false,
+      emitRuntimeEvent: false,
+      ttlMs,
+    },
   );
 
   if (!result.acquired || result.leases.length === 0) {
@@ -132,6 +138,29 @@ export async function acquireCheckoutMutationGate(input: {
   }
 
   const lease = result.leases[0]!;
+
+  // 2) Snapshot under ownership — never before lease.
+  let snap: { head: string | null; statusHash: string | null };
+  try {
+    snap = await snapshotHash(input.repoRoot);
+  } catch (error) {
+    releaseExecutionLeases(
+      input.controllerHome,
+      input.repoId,
+      ownerJobId,
+      [{ leaseId: lease.leaseId, fencingToken: lease.fencingToken }],
+      { visibility: 'ephemeral', notifyScheduler: false, invalidateProjection: false, emitRuntimeEvent: false },
+    );
+    return {
+      busy: true,
+      reason: 'snapshot_failed',
+      blockers: [{
+        kind: 'fast_gate',
+        owner: error instanceof Error ? error.message : String(error),
+      }],
+    };
+  }
+
   return {
     acquired: true,
     gate: {
@@ -148,6 +177,7 @@ export async function acquireCheckoutMutationGate(input: {
       acquiredAt: lease.acquiredAt,
       expiresAt: lease.expiresAt,
       ttlMs,
+      renewCount: 0,
     },
   };
 }
@@ -174,6 +204,7 @@ export function renewCheckoutMutationGate(
     expiresAt: lease.expiresAt,
     fencingToken: lease.fencingToken,
     ttlMs: nextTtl,
+    renewCount: gate.renewCount + 1,
   };
 }
 
@@ -197,6 +228,7 @@ export function releaseCheckoutMutationGate(
     repoId,
     gateIdOrOwner,
     fencing ? [{ leaseId: fencing.leaseId, fencingToken: fencing.fencingToken }] : undefined,
+    { visibility: 'ephemeral', notifyScheduler: false, invalidateProjection: false, emitRuntimeEvent: false },
   );
 }
 
@@ -209,12 +241,27 @@ export function releaseCheckoutMutationGateOwned(
     gate.repoId,
     gate.ownerJobId,
     [{ leaseId: gate.leaseId, fencingToken: gate.fencingToken }],
+    { visibility: 'ephemeral', notifyScheduler: false, invalidateProjection: false, emitRuntimeEvent: false },
   );
+}
+
+function combineAbortSignals(signals: Array<AbortSignal | undefined>): AbortSignal {
+  const controller = new AbortController();
+  for (const signal of signals) {
+    if (!signal) continue;
+    if (signal.aborted) {
+      controller.abort(signal.reason);
+      return controller.signal;
+    }
+    signal.addEventListener('abort', () => controller.abort(signal.reason), { once: true });
+  }
+  return controller.signal;
 }
 
 /**
  * Hold mutation ownership for the duration of operation with automatic heartbeat renew.
- * Renew interval = ttl/3. Renew failure aborts by throwing after operation cancellation is signalled.
+ * Renew interval = ttl/3. Renew failure aborts ownershipSignal (not only flags).
+ * Does NOT hold repository controller lock during operation.
  */
 export async function withCheckoutMutationGate<T>(
   input: {
@@ -224,11 +271,9 @@ export async function withCheckoutMutationGate<T>(
     repoRoot: string;
     owner: string;
     ttlMs?: number;
+    signal?: AbortSignal;
   },
-  operation: (gate: CheckoutMutationGate, helpers: {
-    renew: () => CheckoutMutationGate;
-    assert: () => void;
-  }) => Promise<T>,
+  operation: (gate: CheckoutMutationGate, helpers: MutationGateHelpers) => Promise<T>,
 ): Promise<{ ok: true; value: T; gate: CheckoutMutationGate } | { ok: false; busy: MutationGateBusy }> {
   const acquired = await acquireCheckoutMutationGate(input);
   if (!('acquired' in acquired) || !acquired.acquired) {
@@ -236,29 +281,50 @@ export async function withCheckoutMutationGate<T>(
   }
 
   let gate = acquired.gate;
+  const ownershipAbort = new AbortController();
+  const combined = combineAbortSignals([input.signal, ownershipAbort.signal]);
   let renewFailed: Error | undefined;
-  const renewIntervalMs = Math.max(1_000, Math.floor(gate.ttlMs / 3));
+  const renewIntervalMs = Math.max(500, Math.floor(gate.ttlMs / 3));
+
+  const failOwnership = (error: unknown) => {
+    if (renewFailed) return;
+    renewFailed = error instanceof Error ? error : new Error(String(error));
+    try {
+      ownershipAbort.abort(renewFailed);
+    } catch {
+      /* already aborted */
+    }
+  };
+
   const timer = setInterval(() => {
     try {
       gate = renewCheckoutMutationGate(input.controllerHome, gate);
     } catch (error) {
-      renewFailed = error instanceof Error ? error : new Error(String(error));
+      failOwnership(error);
     }
   }, renewIntervalMs);
   timer.unref?.();
 
+  const helpers: MutationGateHelpers = {
+    renew: () => {
+      if (renewFailed) throw renewFailed;
+      gate = renewCheckoutMutationGate(input.controllerHome, gate);
+      return gate;
+    },
+    assert: () => {
+      if (renewFailed) throw renewFailed;
+      if (combined.aborted) throw new Error('MUTATION_OWNERSHIP_LOST: ownership signal aborted');
+      assertCheckoutMutationGate(input.controllerHome, gate);
+    },
+    signal: combined,
+    getGate: () => gate,
+  };
+
   try {
-    const value = await operation(gate, {
-      renew: () => {
-        gate = renewCheckoutMutationGate(input.controllerHome, gate);
-        return gate;
-      },
-      assert: () => {
-        if (renewFailed) throw renewFailed;
-        assertCheckoutMutationGate(input.controllerHome, gate);
-      },
-    });
+    const value = await operation(gate, helpers);
     if (renewFailed) throw renewFailed;
+    // Final fencing check before success returns.
+    assertCheckoutMutationGate(input.controllerHome, gate);
     return { ok: true, value, gate };
   } finally {
     clearInterval(timer);

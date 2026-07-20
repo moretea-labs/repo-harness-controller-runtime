@@ -21,10 +21,17 @@ import {
   resetFastPathMetrics,
   routeExecution,
   runBoundedProcess,
+  withCheckoutMutationGate,
   writeFastReceipt,
 } from '../../src/runtime/execution/thin-harness';
 import { listExecutionJobs } from '../../src/runtime/execution/jobs/store';
-import { acquireExecutionLeases, releaseExecutionLeases } from '../../src/runtime/resources/leases/store';
+import {
+  acquireExecutionLeases,
+  getLeaseSideEffectMetrics,
+  releaseExecutionLeases,
+  resetLeaseSideEffectMetrics,
+} from '../../src/runtime/resources/leases/store';
+import { resourceKeysOverlap } from '../../src/runtime/resources/claims/conflicts';
 
 const roots: string[] = [];
 
@@ -78,6 +85,7 @@ function localJobCount(repoRoot: string): number {
 afterEach(() => {
   while (roots.length > 0) rmSync(roots.pop()!, { recursive: true, force: true });
   resetFastPathMetrics();
+  resetLeaseSideEffectMetrics();
 });
 
 describe('Thin Harness execution router', () => {
@@ -595,6 +603,111 @@ describe('Thin Harness fast execution', () => {
       }
     }
   });
+
+  test('resourceKeysOverlap: workspace conflicts path and git-ref', () => {
+    const checkout = 'co_abc';
+    expect(resourceKeysOverlap(`workspace:${checkout}`, `path:src/a.ts`)).toBe(true);
+    expect(resourceKeysOverlap(`workspace:${checkout}`, `path:${checkout}:src/a.ts`)).toBe(true);
+    expect(resourceKeysOverlap(`workspace:${checkout}`, `path:other:src/a.ts`)).toBe(false);
+    expect(resourceKeysOverlap(`workspace:${checkout}`, `git-index:${checkout}`)).toBe(true);
+    expect(resourceKeysOverlap(`workspace:${checkout}`, 'git-ref:refs/heads/main')).toBe(true);
+    expect(resourceKeysOverlap(`workspace:${checkout}`, `workspace:${checkout}`)).toBe(true);
+    expect(resourceKeysOverlap(`workspace:${checkout}`, 'workspace:other')).toBe(false);
+  });
+
+  test('fast workspace lease blocks durable path lease', async () => {
+    const { controllerHome, repository, repoRoot } = fixture();
+    const gate = await acquireCheckoutMutationGate({
+      controllerHome,
+      repoId: repository.repoId,
+      checkoutId: repository.activeCheckoutId,
+      repoRoot,
+      owner: 'fast:block-path',
+      ttlMs: 15_000,
+    });
+    expect('acquired' in gate && gate.acquired).toBe(true);
+    try {
+      const pathLease = acquireExecutionLeases(
+        controllerHome,
+        repository.repoId,
+        'JOB-path-writer',
+        [{ resourceKey: 'path:src/sample.ts', mode: 'write' }],
+        10_000,
+      );
+      expect(pathLease.acquired).toBe(false);
+      const refLease = acquireExecutionLeases(
+        controllerHome,
+        repository.repoId,
+        'JOB-ref-writer',
+        [{ resourceKey: 'git-ref:refs/heads/main', mode: 'write' }],
+        10_000,
+      );
+      expect(refLease.acquired).toBe(false);
+    } finally {
+      if ('acquired' in gate && gate.acquired) {
+        releaseCheckoutMutationGate(controllerHome, repository.repoId, repository.activeCheckoutId, gate.gate.ownerJobId, {
+          leaseId: gate.gate.leaseId,
+          fencingToken: gate.gate.fencingToken,
+        });
+      }
+    }
+  });
+
+  test('ephemeral fast lease does not mark projection dirty or wake scheduler', async () => {
+    const { controllerHome, repository } = fixture();
+    resetLeaseSideEffectMetrics();
+    const before = getLeaseSideEffectMetrics();
+    const applied = await executeFast(
+      { controllerHome, repository },
+      {
+        operation: 'apply_patch',
+        mode: 'fast',
+        input: {
+          operations: [{
+            type: 'replace',
+            path: 'src/sample.ts',
+            old_text: 'export const answer = 42;',
+            new_text: 'export const answer = 7;',
+          }],
+          allowed_paths: ['src/**'],
+        },
+        allowedPaths: ['src/**'],
+        requestId: 'ephemeral-side-effects',
+      },
+    );
+    expect(applied.ok).toBe(true);
+    expect(applied.durableSideEffects.projectionUpdateCount).toBe(0);
+    expect(applied.durableSideEffects.schedulerWakeCount ?? 0).toBe(0);
+    expect(applied.durableSideEffects.runtimeEventCount ?? 0).toBe(0);
+    const after = getLeaseSideEffectMetrics();
+    expect(after.projectionDirtyMarks - before.projectionDirtyMarks).toBe(0);
+    expect(after.schedulerWakes - before.schedulerWakes).toBe(0);
+    expect(after.ephemeralAcquires - before.ephemeralAcquires).toBeGreaterThanOrEqual(1);
+  });
+
+  test('long mutation heartbeat renews without LOCK_HELD while holding ownership', async () => {
+    const { controllerHome, repository, repoRoot } = fixture();
+    const result = await withCheckoutMutationGate(
+      {
+        controllerHome,
+        repoId: repository.repoId,
+        checkoutId: repository.activeCheckoutId,
+        repoRoot,
+        owner: 'fast:heartbeat-long',
+        ttlMs: 3_000,
+      },
+      async (gate, helpers) => {
+        // Hold ownership for > 2 renew intervals without holding repository controller lock.
+        await new Promise((resolve) => setTimeout(resolve, 7_000));
+        helpers.assert();
+        return helpers.getGate().renewCount;
+      },
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toBeGreaterThanOrEqual(2);
+    }
+  }, 15_000);
 
   test('concurrent same requestId only one mutation; second is in_progress or replay', async () => {
     const { controllerHome, repository, repoRoot } = fixture();

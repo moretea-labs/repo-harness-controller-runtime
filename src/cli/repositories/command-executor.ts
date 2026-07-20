@@ -392,9 +392,20 @@ function repositorySnapshot(root: string): RepositoryCommandSnapshot {
   return buildSnapshotFromGitTexts(root, head, branch, status, refs);
 }
 
-async function gitTextAsync(root: string, args: string[], signal?: AbortSignal): Promise<string> {
-  if (signal?.aborted) throw new Error('CANCELLED: repository snapshot aborted');
-  return await new Promise<string>((resolve, reject) => {
+interface GitTextAsyncResult {
+  ok: boolean;
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  cancelled: boolean;
+}
+
+async function gitTextAsync(root: string, args: string[], signal?: AbortSignal): Promise<GitTextAsyncResult> {
+  if (signal?.aborted) {
+    return { ok: false, exitCode: 1, stdout: '', stderr: 'cancelled', timedOut: false, cancelled: true };
+  }
+  return await new Promise<GitTextAsyncResult>((resolve) => {
     const child = spawn('git', ['-C', root, ...args], {
       cwd: root,
       env: commandEnvironment(),
@@ -404,21 +415,39 @@ async function gitTextAsync(root: string, args: string[], signal?: AbortSignal):
     const stdout = collectOutput(256 * 1024);
     const stderr = collectOutput(64 * 1024);
     let settled = false;
+    let timedOut = false;
+    let cancelled = false;
     const timeout = setTimeout(() => {
+      timedOut = true;
       void killCommandTree(child).finally(() => {
         if (!settled) {
           settled = true;
-          reject(new Error(`git ${args.join(' ')} timed out`));
+          resolve({
+            ok: false,
+            exitCode: 1,
+            stdout: stdout.complete().trim(),
+            stderr: `git ${args.join(' ')} timed out`,
+            timedOut: true,
+            cancelled: false,
+          });
         }
       });
     }, 10_000);
     timeout.unref();
     const onAbort = () => {
+      cancelled = true;
       void killCommandTree(child).finally(() => {
         if (!settled) {
           settled = true;
           clearTimeout(timeout);
-          reject(new Error('CANCELLED: repository snapshot aborted'));
+          resolve({
+            ok: false,
+            exitCode: 1,
+            stdout: '',
+            stderr: 'cancelled',
+            timedOut: false,
+            cancelled: true,
+          });
         }
       });
     };
@@ -430,7 +459,14 @@ async function gitTextAsync(root: string, args: string[], signal?: AbortSignal):
         settled = true;
         clearTimeout(timeout);
         signal?.removeEventListener('abort', onAbort);
-        reject(error);
+        resolve({
+          ok: false,
+          exitCode: 1,
+          stdout: '',
+          stderr: error.message,
+          timedOut: false,
+          cancelled: false,
+        });
       }
     });
     child.on('close', (code) => {
@@ -438,30 +474,101 @@ async function gitTextAsync(root: string, args: string[], signal?: AbortSignal):
       settled = true;
       clearTimeout(timeout);
       signal?.removeEventListener('abort', onAbort);
-      if (code === 0) resolve(stdout.complete().trim());
-      else resolve('');
+      const exitCode = code ?? 1;
+      resolve({
+        ok: exitCode === 0 && !timedOut && !cancelled,
+        exitCode,
+        stdout: stdout.complete().trim(),
+        stderr: stderr.complete(),
+        timedOut,
+        cancelled,
+      });
     });
   });
 }
 
+const MAX_DIRTY_PATHS_FOR_FINGERPRINT = 200;
+const MAX_FINGERPRINT_FILE_BYTES = 256 * 1024;
+
 /**
  * Async repository snapshot for Fast Path — Git via async spawn.
- * Path fingerprints remain local fs reads (bounded by dirty path count).
+ * Path fingerprints remain local fs reads but are bounded; over-limit → throw (caller may Durable).
  */
 export async function repositorySnapshotAsync(
   root: string,
   signal?: AbortSignal,
 ): Promise<RepositoryCommandSnapshot> {
-  const [head, branch, status, refs] = await Promise.all([
+  const [headResult, branchResult, statusResult, refsResult] = await Promise.all([
     gitTextAsync(root, ['rev-parse', '--verify', 'HEAD'], signal),
     gitTextAsync(root, ['branch', '--show-current'], signal),
     gitTextAsync(root, ['status', '--porcelain=v1', '--branch', '--untracked-files=all', '--', ...REPOSITORY_SNAPSHOT_PATHS], signal),
     gitTextAsync(root, ['show-ref'], signal),
   ]);
-  // Yield once before fingerprinting dirty files so concurrent MCP requests can progress.
+
+  if (statusResult.cancelled || headResult.cancelled || branchResult.cancelled || refsResult.cancelled) {
+    throw new Error('CANCELLED: repository snapshot aborted');
+  }
+  if (statusResult.timedOut || headResult.timedOut) {
+    throw new Error('SNAPSHOT_TIMEOUT: git snapshot timed out');
+  }
+  // status is required; empty porcelain is ok only when ok=true
+  if (!statusResult.ok) {
+    throw new Error(`SNAPSHOT_FAILED: git status exit ${statusResult.exitCode}: ${statusResult.stderr}`);
+  }
+  // unborn HEAD: rev-parse may fail — allow null head only when repo is otherwise readable
+  const head = headResult.ok ? (headResult.stdout || null) : null;
+  if (!headResult.ok && !/unknown revision|bad revision|Needed a single revision|ambiguous argument/i.test(headResult.stderr)
+    && headResult.exitCode !== 128) {
+    // exit 128 often unborn/missing HEAD — still allow if status worked
+  }
+  // show-ref empty (no refs) is ok with exit 1 in some git versions — treat empty as ok if stderr empty-ish
+  const refs = refsResult.ok || refsResult.stdout === '' || refsResult.exitCode === 1
+    ? refsResult.stdout
+    : (() => { throw new Error(`SNAPSHOT_FAILED: git show-ref exit ${refsResult.exitCode}: ${refsResult.stderr}`); })();
+  const branch = branchResult.ok ? (branchResult.stdout || null) : null;
+  const status = statusResult.stdout;
+
   await new Promise((resolve) => setImmediate(resolve));
   if (signal?.aborted) throw new Error('CANCELLED: repository snapshot aborted');
-  return buildSnapshotFromGitTexts(root, head || null, branch || null, status, refs);
+
+  const lines = status.split(/\r?\n/).filter((line) => line && !line.startsWith('##'));
+  if (lines.length > MAX_DIRTY_PATHS_FOR_FINGERPRINT) {
+    throw new Error(`SNAPSHOT_TOO_DIRTY: ${lines.length} dirty paths exceeds Fast Path cap ${MAX_DIRTY_PATHS_FOR_FINGERPRINT}`);
+  }
+
+  const statusByPath = new Map<string, string[]>();
+  for (const line of lines) {
+    const path = statusPath(line);
+    if (!path) continue;
+    const entries = statusByPath.get(path) ?? [];
+    entries.push(line);
+    statusByPath.set(path, entries);
+  }
+  const paths = [...statusByPath.keys()].sort();
+  const pathFingerprints = Object.fromEntries(paths.map((path) => {
+    const absolute = resolve(root, path);
+    try {
+      if (existsSync(absolute)) {
+        const stat = lstatSync(absolute);
+        if (stat.isFile() && stat.size > MAX_FINGERPRINT_FILE_BYTES) {
+          // Metadata-only for large files
+          return [path, createHash('sha256').update(`large:${stat.size}:${stat.mode}`).digest('hex')];
+        }
+      }
+    } catch {
+      /* fall through to full fingerprint */
+    }
+    return [path, repositoryPathFingerprint(root, path, statusByPath.get(path) ?? [])];
+  }));
+  return {
+    head,
+    branch,
+    status,
+    dirty: paths.length > 0,
+    refsHash: createHash('sha256').update(refs).digest('hex'),
+    paths,
+    pathFingerprints,
+  };
 }
 
 function approvalToken(

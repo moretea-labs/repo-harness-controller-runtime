@@ -1,5 +1,7 @@
 import type { ResourceClaimMode } from '../../execution/jobs/types';
 
+export type LeaseVisibility = 'durable' | 'ephemeral';
+
 export interface ExecutionLease {
   schemaVersion: 1;
   leaseId: string;
@@ -11,6 +13,17 @@ export interface ExecutionLease {
   acquiredAt: string;
   expiresAt: string;
   heartbeatAt: string;
+  /** ephemeral = Fast Path ownership: active set only, no scheduler/projection noise */
+  visibility?: LeaseVisibility;
+}
+
+export interface LeaseAcquisitionOptions {
+  /** Default durable (existing Job path). ephemeral skips scheduler/projection/events. */
+  visibility?: LeaseVisibility;
+  notifyScheduler?: boolean;
+  invalidateProjection?: boolean;
+  emitRuntimeEvent?: boolean;
+  ttlMs?: number;
 }
 
 export interface LeaseAcquisitionResult {

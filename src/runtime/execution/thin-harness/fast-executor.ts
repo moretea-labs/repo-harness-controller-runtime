@@ -2,7 +2,6 @@ import { existsSync, readFileSync, statSync, writeFileSync, unlinkSync, mkdirSyn
 import { dirname, join } from 'path';
 import { applySafePatch } from '../../../cli/repositories/safe-patch';
 import { repositoryGitCommit } from '../../../cli/repositories/structured-git';
-import { withControllerLockAsync } from '../../../cli/repositories/locks';
 import {
   executeRepositoryCommandAsync,
   previewRepositoryCommandExecutionAsync,
@@ -11,6 +10,7 @@ import {
 import { getMcpPolicy } from '../../../cli/mcp/policy';
 import { readRepositoryRange, searchRepository } from '../../../cli/repository/inspector';
 import type { RepositoryRecord } from '../../../cli/repositories/types';
+import { getLeaseSideEffectMetrics } from '../../resources/leases/store';
 import { runBoundedGit, runBoundedProcess } from './async-process';
 import { extractPatchPaths, pathAllowed, routeExecution } from './execution-router';
 import { LatencyTrace } from './latency-trace';
@@ -22,6 +22,7 @@ import {
   mutationGateBusyMessage,
   withCheckoutMutationGate,
   type CheckoutMutationGate,
+  type MutationGateHelpers,
 } from './mutation-gate';
 import {
   beginFastRequest,
@@ -60,8 +61,9 @@ export interface FastExecuteInput {
   signal?: AbortSignal;
   /** When set, reuses outer mutation gate (batch). */
   externalMutation?: boolean;
-  /** Outer gate fencing for batch steps. */
+  /** Outer gate fencing + helpers for batch steps. */
   externalGate?: CheckoutMutationGate;
+  externalHelpers?: MutationGateHelpers;
 }
 
 export interface FastExecuteResult {
@@ -82,7 +84,12 @@ export interface FastExecuteResult {
     localJobCount: number;
     workerSpawnCount: number;
     projectionUpdateCount: number;
+    schedulerWakeCount?: number;
+    runtimeEventCount?: number;
+    ephemeralLeaseAcquireCount?: number;
   };
+  ledgerPersisted?: boolean;
+  ledgerWarning?: string;
 }
 
 function boundedTimeout(value: number | undefined): number {
@@ -108,12 +115,19 @@ function summaryFrom(value: unknown, max = 512): string {
   }
 }
 
-function zeroSideEffects() {
+function observedSideEffects(before: ReturnType<typeof getLeaseSideEffectMetrics>) {
+  const after = getLeaseSideEffectMetrics();
   return {
     executionJobCount: 0,
     localJobCount: 0,
     workerSpawnCount: 0,
-    projectionUpdateCount: 0,
+    // Real instrumentation — ephemeral Fast leases must keep these at 0.
+    projectionUpdateCount: Math.max(0, after.projectionDirtyMarks - before.projectionDirtyMarks),
+    schedulerWakeCount: Math.max(0, after.schedulerWakes - before.schedulerWakes),
+    runtimeEventCount: Math.max(0,
+      (after.durableAcquireEvents + after.durableReleaseEvents)
+      - (before.durableAcquireEvents + before.durableReleaseEvents)),
+    ephemeralLeaseAcquireCount: Math.max(0, after.ephemeralAcquires - before.ephemeralAcquires),
   };
 }
 
@@ -303,6 +317,7 @@ export async function executeFast(
 ): Promise<FastExecuteResult> {
   const startedAt = new Date().toISOString();
   const trace = new LatencyTrace('fast');
+  const sideEffectsBefore = getLeaseSideEffectMetrics();
   const receiptMode = request.receiptMode ?? 'standalone';
   const requestId = request.requestId?.trim() || undefined;
   const inputHash = hashRequestInput({ operation: request.operation, input: request.input });
@@ -334,7 +349,7 @@ export async function executeFast(
       decision,
       operationSucceeded: false,
       latency: trace.snapshot(ctx.includeLatencyBreakdown === true),
-      durableSideEffects: zeroSideEffects(),
+      durableSideEffects: observedSideEffects(sideEffectsBefore),
       result: { error: { code: decision.rejectCode ?? 'FAST_REJECTED', message: decision.reasons.join('; ') } },
     };
   }
@@ -348,7 +363,7 @@ export async function executeFast(
         reason: decision.reasons.join('; '),
         suggestedOperation: decision.suggestedOperation ?? 'Durable Work',
       },
-      durableSideEffects: zeroSideEffects(),
+      durableSideEffects: observedSideEffects(sideEffectsBefore),
       result: {
         mode: 'durable',
         reason: decision.reasons.join('; '),
@@ -364,7 +379,7 @@ export async function executeFast(
       decision,
       operationSucceeded: false,
       latency: trace.snapshot(ctx.includeLatencyBreakdown === true),
-      durableSideEffects: zeroSideEffects(),
+      durableSideEffects: observedSideEffects(sideEffectsBefore),
       result: { error: { code: 'CANCELLED', message: 'aborted before execution' } },
     };
   }
@@ -390,7 +405,7 @@ export async function executeFast(
         }),
         operationSucceeded: false,
         latency: trace.snapshot(ctx.includeLatencyBreakdown === true),
-        durableSideEffects: zeroSideEffects(),
+        durableSideEffects: observedSideEffects(sideEffectsBefore),
         escalation: {
           reason: 'stage/commit require request_id for Fast Path idempotency',
           suggestedOperation: 'provide request_id or use Durable Work',
@@ -435,7 +450,7 @@ export async function executeFast(
           receiptExecutionId: ledgerEntry.entry.receiptExecutionId,
         },
         latency: trace.snapshot(ctx.includeLatencyBreakdown === true),
-        durableSideEffects: zeroSideEffects(),
+        durableSideEffects: observedSideEffects(sideEffectsBefore),
       };
     }
     if (ledgerEntry.kind === 'in_progress') {
@@ -455,7 +470,28 @@ export async function executeFast(
           },
         },
         latency: trace.snapshot(ctx.includeLatencyBreakdown === true),
-        durableSideEffects: zeroSideEffects(),
+        durableSideEffects: observedSideEffects(sideEffectsBefore),
+      };
+    }
+    if (ledgerEntry.kind === 'unknown') {
+      return {
+        ok: false,
+        decision: emptyDecision({
+          mode: 'durable',
+          reasons: ['ledger_unknown_requires_reconcile'],
+          effects: decision.effects,
+          suggestedOperation: 'reconcile stale ledger before retry',
+        }),
+        operationSucceeded: false,
+        result: {
+          error: {
+            code: 'LEDGER_UNKNOWN',
+            message: ledgerEntry.message,
+            entryId: ledgerEntry.entry.entryId,
+          },
+        },
+        latency: trace.snapshot(ctx.includeLatencyBreakdown === true),
+        durableSideEffects: observedSideEffects(sideEffectsBefore),
       };
     }
     if (ledgerEntry.kind === 'conflict') {
@@ -475,7 +511,7 @@ export async function executeFast(
           },
         },
         latency: trace.snapshot(ctx.includeLatencyBreakdown === true),
-        durableSideEffects: zeroSideEffects(),
+        durableSideEffects: observedSideEffects(sideEffectsBefore),
       };
     }
   }
@@ -486,7 +522,8 @@ export async function executeFast(
   const runBody = async (
     fencingToken?: number,
     baseHead?: string | null,
-    helpers?: { assert: () => void },
+    helpers?: MutationGateHelpers,
+    effectiveSignal?: AbortSignal,
   ): Promise<{
     ok: boolean;
     outcome: FastOutcome;
@@ -504,6 +541,7 @@ export async function executeFast(
     let policyDecision = 'allowed';
     let ok = true;
 
+    const signal = effectiveSignal ?? request.signal;
     try {
       helpers?.assert();
       if (operation === 'read_file' || operation === 'read_file_range') {
@@ -531,7 +569,7 @@ export async function executeFast(
           String(request.input.query ?? ''),
           typeof request.input.max_results === 'number' ? request.input.max_results : 50,
           typeof request.input.max_files === 'number' ? request.input.max_files : 2_000,
-          request.signal,
+          signal,
         ));
       } else if (operation === 'git_status' || operation === 'repository_git_status') {
         resultPayload = await trace.measure('snapshotMs', async () => asyncGitStatus(
@@ -539,7 +577,7 @@ export async function executeFast(
           ctx.repository.repoId,
           ctx.repository.activeCheckoutId,
           timeoutMs,
-          request.signal,
+          signal,
         ));
       } else if (operation === 'git_diff' || operation === 'repository_git_diff' || operation === 'git_diff_paths') {
         resultPayload = await trace.measure('executionMs', async () => asyncGitDiff(
@@ -548,10 +586,11 @@ export async function executeFast(
           ctx.repository.activeCheckoutId,
           request.input,
           timeoutMs,
-          request.signal,
+          signal,
         ));
       } else if (operation === 'apply_patch' || operation === 'repository_safe_patch_apply' || operation === 'apply_edit_operations') {
         helpers?.assert();
+        if (signal?.aborted) throw new Error('CANCELLED: ownership or request aborted');
         const allowed = request.allowedPaths ?? stringList(request.input.allowed_paths);
         const opPaths = extractPatchPaths(request.input.operations);
         if (allowed?.length) {
@@ -628,7 +667,7 @@ export async function executeFast(
           const git = await runBoundedGit(root, ['add', '--', ...paths], {
             timeoutMs,
             maxOutputBytes: FAST_PATH_MAX_OUTPUT_BYTES,
-            signal: request.signal,
+            signal,
           });
           if (git.cancelled) throw new Error('CANCELLED: git add cancelled');
           if (git.timedOut) throw new Error('GIT_STAGE_TIMEOUT: git add timed out');
@@ -678,7 +717,7 @@ export async function executeFast(
           maxOutputBytes: FAST_PATH_MAX_OUTPUT_BYTES,
           sessionId: ctx.sessionId,
           principalId: ctx.principalId,
-          signal: request.signal,
+          signal,
         }, ctx.controllerHome));
         const approvalToken = typeof request.input.approval_token === 'string' && request.input.approval_token.trim()
           ? request.input.approval_token.trim()
@@ -697,7 +736,7 @@ export async function executeFast(
             maxOutputBytes: FAST_PATH_MAX_OUTPUT_BYTES,
             sessionId: ctx.sessionId,
             principalId: ctx.principalId,
-            signal: request.signal,
+            signal,
             reuseSnapshot: preview.before,
           }, ctx.controllerHome);
           reuseSnapshot = sealed.before;
@@ -727,7 +766,7 @@ export async function executeFast(
             maxOutputBytes: FAST_PATH_MAX_OUTPUT_BYTES,
             sessionId: ctx.sessionId,
             principalId: ctx.principalId,
-            signal: request.signal,
+            signal,
             reuseSnapshot,
           },
         ));
@@ -759,13 +798,32 @@ export async function executeFast(
       }
     } catch (error) {
       ok = false;
-      outcome = request.signal?.aborted ? 'cancelled' : 'failed';
+      outcome = signal?.aborted ? 'cancelled' : 'failed';
       const message = error instanceof Error ? error.message : String(error);
       const code = message.includes(':') ? message.slice(0, message.indexOf(':')) : 'FAST_EXECUTION_FAILED';
       resultPayload = {
         error: { code, message },
         ...((error as { preview?: unknown })?.preview ? { preview: (error as { preview: unknown }).preview } : {}),
       };
+    }
+
+    // Post-mutation fencing check when ownership helpers available.
+    if (ok && helpers) {
+      try {
+        helpers.assert();
+      } catch (error) {
+        ok = false;
+        outcome = 'failed';
+        repositoryChanged = true;
+        resultPayload = {
+          ...resultPayload,
+          error: {
+            code: 'MUTATION_OWNERSHIP_LOST',
+            message: error instanceof Error ? error.message : String(error),
+            reconciliationRequired: true,
+          },
+        };
+      }
     }
 
     return {
@@ -784,6 +842,8 @@ export async function executeFast(
   let baseHead: string | null | undefined;
 
   if (needsMutation && !request.externalMutation) {
+    // Mutation lease alone serializes writers — do NOT hold repository controller lock
+    // during runBody (renewExecutionLeases needs that lock for heartbeat).
     const gated = await withCheckoutMutationGate(
       {
         controllerHome: ctx.controllerHome,
@@ -792,17 +852,12 @@ export async function executeFast(
         repoRoot: root,
         owner,
         ttlMs: timeoutMs + 10_000,
+        signal: request.signal,
       },
       async (gate, helpers) => {
         fencingToken = gate.fencingToken;
         baseHead = gate.baseHead;
-        return withControllerLockAsync(
-          ctx.controllerHome,
-          { scope: 'repository', repoId: ctx.repository.repoId, resource: 'fast-write' },
-          'thin-harness:fast-write',
-          () => runBody(gate.fencingToken, gate.baseHead, helpers),
-          timeoutMs + 10_000,
-        );
+        return runBody(gate.fencingToken, gate.baseHead, helpers, helpers.signal);
       },
     );
     if (!gated.ok) {
@@ -823,7 +878,7 @@ export async function executeFast(
         }),
         operationSucceeded: false,
         latency: trace.snapshot(ctx.includeLatencyBreakdown === true),
-        durableSideEffects: zeroSideEffects(),
+        durableSideEffects: observedSideEffects(sideEffectsBefore),
         result: {
           error: {
             code: 'MUTATION_BUSY',
@@ -838,34 +893,28 @@ export async function executeFast(
       };
     }
     bodyResult = gated.value;
+    fencingToken = gated.gate.fencingToken;
+    baseHead = gated.gate.baseHead;
   } else if (needsMutation && request.externalMutation) {
-    bodyResult = await withControllerLockAsync(
-      ctx.controllerHome,
-      { scope: 'repository', repoId: ctx.repository.repoId, resource: 'fast-write' },
-      'thin-harness:fast-write-external-gate',
-      () => runBody(
-        request.externalGate?.fencingToken,
-        request.externalGate?.baseHead,
-        request.externalGate
-          ? {
-            assert: () => {
-              // Batch holds outer ownership; step-level assert is best-effort.
-            },
-          }
-          : undefined,
-      ),
-      timeoutMs + 5_000,
+    const helpers = request.externalHelpers;
+    fencingToken = request.externalGate?.fencingToken ?? helpers?.getGate().fencingToken;
+    baseHead = request.externalGate?.baseHead ?? helpers?.getGate().baseHead;
+    bodyResult = await runBody(
+      fencingToken,
+      baseHead,
+      helpers,
+      helpers?.signal ?? request.signal,
     );
-    fencingToken = request.externalGate?.fencingToken;
-    baseHead = request.externalGate?.baseHead;
   } else {
-    bodyResult = await runBody();
+    bodyResult = await runBody(undefined, undefined, undefined, request.signal);
   }
 
   const finishedAt = new Date().toISOString();
   let receipt: FastExecutionReceipt | undefined;
   let receiptPersisted: boolean | undefined;
   let receiptWarning: string | undefined;
+  let ledgerPersisted: boolean | undefined;
+  let ledgerWarning: string | undefined;
 
   // Snapshot latency before receipt so persisted duration is complete for op time.
   const preReceiptLatency = trace.snapshot(false);
@@ -900,19 +949,17 @@ export async function executeFast(
 
   const latency = trace.snapshot(ctx.includeLatencyBreakdown === true);
   if (receipt) {
-    // Keep memory and disk aligned for duration when possible; disk already has pre-receipt duration.
     receipt.durationMs = durationForReceipt;
     if (ctx.includeLatencyBreakdown === true) {
       receipt.latency = {
         ...latency,
-        // Persist pre-receipt total in latency.totalMs consistency with durationMs.
         totalMs: durationForReceipt + (latency.receiptMs || 0),
       };
     }
   }
 
   if (ledgerEntry?.kind === 'acquired') {
-    completeFastRequest(ctx.controllerHome, ledgerEntry.entry, {
+    const completed = completeFastRequest(ctx.controllerHome, ledgerEntry.entry, {
       status: bodyResult.ok ? 'succeeded' : 'failed',
       resultSummary: summaryFrom(bodyResult.resultPayload, 1_024),
       error: bodyResult.ok
@@ -920,20 +967,25 @@ export async function executeFast(
         : (bodyResult.resultPayload.error as { message?: string } | undefined)?.message,
       receiptExecutionId: receipt?.executionId,
     });
+    ledgerPersisted = completed.ok;
+    ledgerWarning = completed.warning;
   }
 
+  // Mutation success is independent of receipt/ledger persistence failures.
   return {
     ok: bodyResult.ok,
     decision,
     receipt,
     receiptPersisted,
     receiptWarning,
+    ledgerPersisted,
+    ledgerWarning,
     operationSucceeded: bodyResult.ok,
     changedPaths: bodyResult.changedPaths,
     repositoryChanged: bodyResult.repositoryChanged,
     outcome: bodyResult.outcome,
     result: bodyResult.resultPayload,
     latency,
-    durableSideEffects: zeroSideEffects(),
+    durableSideEffects: observedSideEffects(sideEffectsBefore),
   };
 }

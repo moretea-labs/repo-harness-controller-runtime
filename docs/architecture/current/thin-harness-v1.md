@@ -2,7 +2,7 @@
 
 > Status: **Runtime Authority (additive)**  
 > Baseline revision: feature branch `grok/thin-harness-v1`  
-> Review remediation: round-2 P0.1/P0.2/P1.1 — lease-backed Mutation Ownership, async cancel, typed effects
+> Review remediation: round-3 P0.1a/b — ephemeral lease, no write-time repo lock, ownership abort, expanded claim overlap
 
 ## Purpose
 
@@ -123,26 +123,33 @@ bounded child process (process group) / yielded search
 - Timeout/cancel: SIGTERM process group → grace → SIGKILL via `terminateProcessTree`.
 - stdout/stderr collectors cap while streaming.
 
-## Checkout Mutation Ownership (round-2)
+## Checkout Mutation Ownership (round-3)
 
 Fast and Durable share the **same** Execution Lease arbiter:
 
 ```text
 resourceKey = workspace:<checkoutId>
 mode = write
+visibility = ephemeral (Fast) | durable (Jobs)
 ownerJobId = fast:<session>:<op>:<requestId> | JOB-<durable>
 fencingToken = per-resource monotonic counter (lease store)
 ```
 
-- Fast mutation calls `acquireExecutionLeases` — **no** separate file-gate rename race.
-- Durable lease acquire conflicts with Fast ownership and vice versa (atomic under controller lock).
-- Heartbeat renew every TTL/3 while holding ownership; renew failure stops further writes.
-- Release is compare-and-delete via leaseId + fencingToken.
-- Write batches hold **one** ownership for the entire batch wall-clock deadline (`FAST_BATCH_MAX_TOTAL_MS`).
-- Router decision carries typed `effects` (`mutatesWorkspace`, etc.); ownership is based on effects, not operation name lists alone.
-- Focused checks that may write (snapshots/caches) set `mutatesWorkspace=true` and take ownership.
-- Read lanes reject any step with `mutatesWorkspace` / non-readonly effect before execution.
-- stage/commit and write batches require `request_id` + Request Ledger (atomic O_EXCL) for Fast Path.
+Lock model (critical):
+
+```text
+repository controller lock  →  ONLY acquire / renew / release lease metadata
+mutation lease              →  covers the full real write lifecycle
+```
+
+- Fast uses `visibility: ephemeral` — active lease set + fencing only; **no** Runtime Event, **no** Projection dirty, **no** Scheduler wake.
+- Durable path remains default (events + projection + wake).
+- `workspace:<checkoutId>` overlaps `path:` (same/unscoped checkout), `git-index:<checkoutId>`, `git-head:<checkoutId>`, and `git-ref*` claims.
+- Snapshot is taken **after** lease acquire (never before).
+- Heartbeat renew every TTL/3; renew failure aborts a dedicated ownership `AbortSignal` (combined with caller signal) and fails closed.
+- Write path does **not** hold repository controller lock during `runBody` (so renew cannot `LOCK_HELD`).
+- Batch passes real `externalGate` + `externalHelpers` (assert/renew/signal) into each step.
+- Request Ledger: O_EXCL begin, CAS complete (never throws over mutation success), stale `in_progress` → `unknown` (reconcile).
 
 ## Batch API (typed)
 

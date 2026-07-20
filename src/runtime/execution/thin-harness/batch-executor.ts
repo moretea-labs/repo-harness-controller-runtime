@@ -243,7 +243,10 @@ export async function executeRepositoryBatch(
     FAST_BATCH_MAX_TOTAL_MS,
   );
 
-  const runSteps = async (helpers?: { assert: () => void; renew: () => unknown }): Promise<{
+  const runSteps = async (
+    gate?: import('./mutation-gate').CheckoutMutationGate,
+    helpers?: import('./mutation-gate').MutationGateHelpers,
+  ): Promise<{
     stepResults: RepositoryBatchStepResult[];
     stoppedEarly: boolean;
     partialFailure: boolean;
@@ -257,7 +260,7 @@ export async function executeRepositoryBatch(
     let repositoryChanged = false;
 
     for (let index = 0; index < steps.length; index += 1) {
-      if (request.signal?.aborted) {
+      if (request.signal?.aborted || helpers?.signal.aborted) {
         stoppedEarly = true;
         partialFailure = true;
         break;
@@ -321,11 +324,31 @@ export async function executeRepositoryBatch(
           timeoutMs: stepTimeout,
           allowedPaths: request.allowedPaths,
           receiptMode: 'none',
-          signal: request.signal,
+          signal: helpers?.signal ?? request.signal,
           externalMutation: hasWrite,
+          externalGate: gate,
+          externalHelpers: helpers,
         },
       );
-      helpers?.renew();
+      try {
+        helpers?.renew();
+      } catch (error) {
+        stoppedEarly = true;
+        partialFailure = true;
+        stepResults.push({
+          id: stepId,
+          kind: step.kind,
+          ok: false,
+          outcome: 'failed',
+          durationMs: Math.round((performance.now() - stepStarted) * 100) / 100,
+          error: {
+            code: 'MUTATION_RENEW_FAILED',
+            message: error instanceof Error ? error.message : String(error),
+          },
+          changedPaths: executed.changedPaths,
+        });
+        break;
+      }
       const durationMs = Math.round((performance.now() - stepStarted) * 100) / 100;
       const outcome: FastOutcome = executed.ok
         ? (executed.outcome ?? 'succeeded')
@@ -388,60 +411,84 @@ export async function executeRepositoryBatch(
   let allChangedPaths: string[] = [];
   let repositoryChanged = false;
 
-  if (hasWrite) {
-    const gated = await withCheckoutMutationGate(
-      {
-        controllerHome: ctx.controllerHome,
-        repoId: ctx.repository.repoId,
-        checkoutId: ctx.repository.activeCheckoutId,
-        repoRoot: ctx.repository.canonicalRoot,
-        owner: `fast-batch:${requestId ?? Date.now()}`,
-        ttlMs: batchDeadlineMs + 15_000,
-      },
-      async (_gate, helpers) => runSteps(helpers),
-    );
-    if (!gated.ok) {
-      if (ledger?.kind === 'acquired') {
-        completeFastRequest(ctx.controllerHome, ledger.entry, {
-          status: 'failed',
-          error: mutationGateBusyMessage(gated.busy),
-        });
+  try {
+    if (hasWrite) {
+      const gated = await withCheckoutMutationGate(
+        {
+          controllerHome: ctx.controllerHome,
+          repoId: ctx.repository.repoId,
+          checkoutId: ctx.repository.activeCheckoutId,
+          repoRoot: ctx.repository.canonicalRoot,
+          owner: `fast-batch:${requestId ?? Date.now()}`,
+          ttlMs: batchDeadlineMs + 15_000,
+          signal: request.signal,
+        },
+        async (gate, helpers) => runSteps(gate, helpers),
+      );
+      if (!gated.ok) {
+        if (ledger?.kind === 'acquired') {
+          completeFastRequest(ctx.controllerHome, ledger.entry, {
+            status: 'failed',
+            error: mutationGateBusyMessage(gated.busy),
+          });
+        }
+        return {
+          ok: false,
+          mode: 'busy',
+          decision: {
+            mode: 'durable',
+            reasons: ['checkout_mutation_busy', gated.busy.reason],
+            risk: 'workspace_write',
+            estimatedClass: 'short',
+            requiresIsolation: false,
+            requiresRecovery: false,
+            effects: decision.effects,
+            suggestedOperation: 'retry after durable writer finishes',
+          },
+          steps: [],
+          stoppedEarly: true,
+          partialFailure: false,
+          latency: trace.snapshot(request.includeLatencyBreakdown === true),
+          escalation: {
+            reason: mutationGateBusyMessage(gated.busy),
+            suggestedOperation: 'wait or use Durable Work',
+          },
+        };
       }
-      return {
-        ok: false,
-        mode: 'busy',
-        decision: {
-          mode: 'durable',
-          reasons: ['checkout_mutation_busy', gated.busy.reason],
-          risk: 'workspace_write',
-          estimatedClass: 'short',
-          requiresIsolation: false,
-          requiresRecovery: false,
-          effects: decision.effects,
-          suggestedOperation: 'retry after durable writer finishes',
-        },
-        steps: [],
-        stoppedEarly: true,
-        partialFailure: false,
-        latency: trace.snapshot(request.includeLatencyBreakdown === true),
-        escalation: {
-          reason: mutationGateBusyMessage(gated.busy),
-          suggestedOperation: 'wait or use Durable Work',
-        },
-      };
+      stepResults = gated.value.stepResults;
+      stoppedEarly = gated.value.stoppedEarly;
+      partialFailure = gated.value.partialFailure;
+      allChangedPaths = gated.value.allChangedPaths;
+      repositoryChanged = gated.value.repositoryChanged;
+    } else {
+      const ran = await runSteps();
+      stepResults = ran.stepResults;
+      stoppedEarly = ran.stoppedEarly;
+      partialFailure = ran.partialFailure;
+      allChangedPaths = ran.allChangedPaths;
+      repositoryChanged = ran.repositoryChanged;
     }
-    stepResults = gated.value.stepResults;
-    stoppedEarly = gated.value.stoppedEarly;
-    partialFailure = gated.value.partialFailure;
-    allChangedPaths = gated.value.allChangedPaths;
-    repositoryChanged = gated.value.repositoryChanged;
-  } else {
-    const ran = await runSteps();
-    stepResults = ran.stepResults;
-    stoppedEarly = ran.stoppedEarly;
-    partialFailure = ran.partialFailure;
-    allChangedPaths = ran.allChangedPaths;
-    repositoryChanged = ran.repositoryChanged;
+  } catch (error) {
+    if (ledger?.kind === 'acquired') {
+      completeFastRequest(ctx.controllerHome, ledger.entry, {
+        status: 'unknown',
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return {
+      ok: false,
+      mode: 'fast',
+      decision,
+      steps: stepResults,
+      stoppedEarly: true,
+      partialFailure: true,
+      nonAtomic: true,
+      latency: trace.snapshot(request.includeLatencyBreakdown === true),
+      escalation: {
+        reason: error instanceof Error ? error.message : String(error),
+        suggestedOperation: 'inspect workspace; ledger may be unknown',
+      },
+    };
   }
 
   const ok = stepResults.length > 0 && stepResults.every((entry) => entry.ok) && !stoppedEarly;
