@@ -89,6 +89,7 @@ describe('optional agent-device iOS Simulator provider', () => {
     expect(manifest.capabilities.map((capability) => capability.capabilityId)).toContain('ios-agent-device-simulator');
     expect(manifest.capabilities.map((capability) => capability.capabilityId)).toContain('ios-agent-device-physical');
     expect(manifest.actions.map((action) => action.actionId)).toContain('agent_device_open');
+    expect(manifest.actions.map((action) => action.actionId)).toContain('agent_device_batch');
     expect(manifest.actions.map((action) => action.actionId)).toContain('agent_device_prepare');
     expect(manifest.actions.map((action) => action.actionId)).toContain('agent_device_jd_search');
     expect(manifest.health.warnings).not.toContain('agent-device is not installed.');
@@ -164,10 +165,33 @@ describe('optional agent-device iOS Simulator provider', () => {
         }
         if (args[0] === 'snapshot') {
           snapshotCount += 1;
-          const tree = snapshotCount === 1
-            ? '@e1 SearchField label="搜索商品" value=""'
-            : '@e7 StaticText label="爱他美卓傲 1段 800g"\n@e8 StaticText label="奶粉搜索结果"';
-          return { ok: true, status: 0, stdout: success({ tree }), stderr: '', command: [command, ...args] };
+          return {
+            ok: true, status: 0,
+            stdout: success({ tree: '@e1 SearchField label="搜索商品" value=""' }),
+            stderr: '', command: [command, ...args],
+          };
+        }
+        if (args[0] === 'batch') {
+          const steps = JSON.parse(args[args.indexOf('--steps') + 1]!) as Array<{ command: string; input: Record<string, unknown> }>;
+          return {
+            ok: true, status: 0,
+            stdout: success({
+              total: steps.length,
+              executed: steps.length,
+              results: steps.map((step, index) => ({
+                step: index + 1,
+                command: step.command,
+                ok: true,
+                data: step.command === 'snapshot'
+                  ? { tree: '@e7 StaticText label="爱他美卓傲 1段 800g"\n@e8 StaticText label="奶粉搜索结果"' }
+                  : step.command === 'wait'
+                    ? { matched: true, text: step.input.text ?? step.input.selector }
+                    : { input: step.input },
+              })),
+              cost: { wallClockMs: 1200, runnerRoundTrips: 4 },
+            }),
+            stderr: '', command: [command, ...args],
+          };
         }
         if (args[0] === 'screenshot') writeFileSync(args[1]!, 'png');
         return { ok: true, status: 0, stdout: success({ command: args[0] }), stderr: '', command: [command, ...args] };
@@ -185,6 +209,7 @@ describe('optional agent-device iOS Simulator provider', () => {
     const result = await executeIosPluginAction(pluginInput(value, 'agent_device_jd_search', {
       ...runnerConfig,
       query: '爱他美卓傲 1段 800g',
+      result_text: '奶粉搜索结果',
     }));
 
     expect(result.workflow).toBe('jd_product_search');
@@ -198,12 +223,25 @@ describe('optional agent-device iOS Simulator provider', () => {
     expect(readInteractionSession(value.repoRoot, 'ios-device', String((result.interaction as Record<string, unknown>).interactionId))?.status).toBe('closed');
 
     const prepare = commands.find(({ argv }) => argv[1] === 'prepare')!;
-    expect(prepare.argv).toEqual(expect.arrayContaining(['ios-runner', '--device', 'PHONE-1']));
+    expect(prepare.argv).toEqual(expect.arrayContaining(['ios-runner', '--device', 'greyson']));
     expect(prepare.env?.AGENT_DEVICE_IOS_TEAM_ID).toBe('TEAM123456');
     expect(prepare.env?.AGENT_DEVICE_IOS_BUNDLE_ID).toBe('com.example.agentdevice.runner');
     expect(prepare.env?.DEVELOPER_DIR).toBe(developerDir);
-    expect(commands.some(({ argv }) => argv[1] === 'open' && argv.includes('com.360buy.jdmobile'))).toBe(true);
+    const open = commands.find(({ argv }) => argv[1] === 'open' && argv.includes('com.360buy.jdmobile'))!;
+    expect(open.argv).not.toContain('--relaunch');
+    const batches = commands.filter(({ argv }) => argv[1] === 'batch');
+    expect(batches).toHaveLength(2);
+    const fillSteps = JSON.parse(batches[0]!.argv[batches[0]!.argv.indexOf('--steps') + 1]!) as Array<{ command: string; input: Record<string, unknown> }>;
+    const resultSteps = JSON.parse(batches[1]!.argv[batches[1]!.argv.indexOf('--steps') + 1]!) as Array<{ command: string; input: Record<string, unknown> }>;
+    expect(fillSteps.map((step) => step.command)).toEqual(['fill']);
+    expect(fillSteps[0]?.input.settle).toBe(true);
+    expect(fillSteps[0]?.input.target).toEqual({ kind: 'ref', ref: 'e1' });
+    expect(resultSteps.map((step) => step.command)).toEqual(['wait']);
+    expect(resultSteps[0]?.input).toEqual({ kind: 'text', text: '奶粉搜索结果', timeoutMs: 15_000 });
     expect(commands.some(({ argv }) => argv[1] === 'keyboard' && argv[2] === 'return')).toBe(true);
+    expect((result.executionPlan as Record<string, unknown>).nativeBatchRequests).toBe(2);
+    expect((result.executionPlan as Record<string, unknown>).exactResultWait).toBe(true);
+    expect((result.executionPlan as Record<string, unknown>).fullAccessibilitySnapshot).toBe(false);
     expect(commands.some(({ argv }) => argv[1] === 'close')).toBe(true);
   });
 
@@ -273,14 +311,76 @@ describe('optional agent-device iOS Simulator provider', () => {
     expect(recorded?.targetId).toBe('SIM-1');
 
     const openCommand = commands.find(({ argv }) => argv[1] === 'open')!;
-    expect(openCommand.argv).toEqual(expect.arrayContaining(['--device', 'SIM-1', '--session', sessionId, '--platform', 'ios', '--json', '--relaunch']));
+    expect(openCommand.argv).toEqual(expect.arrayContaining(['--device', 'iPhone 17 Pro', '--session', sessionId, '--platform', 'ios', '--json', '--relaunch']));
     const sessionCommands = commands.filter(({ argv }) => ['open', 'snapshot', 'press', 'fill', 'scroll', 'screenshot', 'events', 'close'].includes(argv[1]!));
     const stateDirs = new Set(sessionCommands.map(({ env }) => env?.AGENT_DEVICE_STATE_DIR));
     expect(stateDirs.size).toBe(1);
     expect([...stateDirs][0]).toContain(interactionId);
-    expect(sessionCommands.every(({ env }) => env?.AGENT_DEVICE_DAEMON_IDLE_TIMEOUT_MS === '5000')).toBe(true);
-    expect(sessionCommands.every(({ env }) => env?.AGENT_DEVICE_IOS_RUNNER_RETENTION_MS === '0')).toBe(true);
+    expect(sessionCommands.every(({ env }) => env?.AGENT_DEVICE_DAEMON_IDLE_TIMEOUT_MS === '300000')).toBe(true);
+    expect(sessionCommands.every(({ env }) => env?.AGENT_DEVICE_IOS_RUNNER_IDLE_STOP_MS === '300000')).toBe(true);
+    expect(sessionCommands.every(({ env }) => env?.AGENT_DEVICE_IOS_RUNNER_RETENTION_MS === undefined)).toBe(true);
     for (const command of commands) expect(command.argv).not.toContain('mcp');
+  });
+
+  it('runs multiple allowlisted actions through one native batch and redacts fill text', async () => {
+    const value = fixture();
+    readyIosTooling();
+    const commands: string[][] = [];
+    setIosAgentDeviceRuntimeHooksForTest({
+      platform: () => 'darwin',
+      runCommand: (command, args) => {
+        commands.push([command, ...args]);
+        if (args[0] === '--version') return { ok: true, status: 0, stdout: '0.19.3\n', stderr: '', command: [command, ...args] };
+        if (args[0] === 'devices') {
+          return { ok: true, status: 0, stdout: success({ devices: [device('SIM-1', 'iPhone 17 Pro', 'simulator', true)] }), stderr: '', command: [command, ...args] };
+        }
+        if (args[0] === 'batch') {
+          const steps = JSON.parse(args[args.indexOf('--steps') + 1]!) as Array<{ command: string; input: Record<string, unknown> }>;
+          return {
+            ok: true, status: 0,
+            stdout: success({
+              total: steps.length,
+              executed: steps.length,
+              results: steps.map((step, index) => ({ step: index + 1, command: step.command, ok: true, data: step.input })),
+              cost: { wallClockMs: 800, runnerRoundTrips: steps.length },
+            }),
+            stderr: '', command: [command, ...args],
+          };
+        }
+        return { ok: true, status: 0, stdout: success(), stderr: '', command: [command, ...args] };
+      },
+    });
+
+    const opened = await executeIosPluginAction(pluginInput(value, 'agent_device_open', { app: 'App', device: 'SIM-1' }));
+    const interactionId = String((opened.interaction as Record<string, unknown>).interactionId);
+    const result = await executeIosPluginAction(pluginInput(value, 'agent_device_batch', {
+      interaction_id: interactionId,
+      steps: [
+        { kind: 'press', input: { target: 'label="Continue"' } },
+        { kind: 'fill', input: { target: 'id="email"', text: 'private@example.com', delay_ms: 10 } },
+        { kind: 'wait', input: { wait_type: 'stable', quiet_ms: 300, timeout_ms: 3_000 } },
+        { kind: 'snapshot', input: { interactive: true } },
+      ],
+    }));
+
+    expect(result.batched).toBe(true);
+    expect(result.stepCount).toBe(4);
+    expect(JSON.stringify(result)).not.toContain('private@example.com');
+    const batches = commands.filter((argv) => argv[1] === 'batch');
+    expect(batches).toHaveLength(1);
+    const nativeSteps = JSON.parse(batches[0]![batches[0]!.indexOf('--steps') + 1]!) as Array<{ command: string; input: Record<string, unknown> }>;
+    expect(nativeSteps.map((step) => step.command)).toEqual(['press', 'fill', 'wait', 'snapshot']);
+    expect(nativeSteps[0]?.input.settle).toBe(true);
+    expect(nativeSteps[0]?.input.target).toEqual({ kind: 'selector', selector: 'label="Continue"' });
+    expect(nativeSteps[1]?.input.settle).toBe(true);
+    expect(nativeSteps[1]?.input.target).toEqual({ kind: 'selector', selector: 'id="email"' });
+    expect(nativeSteps[1]?.input.delayMs).toBe(10);
+
+    await expect(executeIosPluginAction(pluginInput(value, 'agent_device_batch', {
+      interaction_id: interactionId,
+      steps: [{ kind: 'press', input: { target: '@e1', command: 'close' } }],
+    }))).rejects.toThrow('unsupported fields');
+    expect(commands.filter((argv) => argv[1] === 'batch')).toHaveLength(1);
   });
 
   it('closes failed sessions and redacts fill text from all error evidence', async () => {
@@ -399,7 +499,7 @@ describe('optional agent-device iOS Simulator provider', () => {
 
   it('serializes all session actions and never exposes arbitrary or nested MCP execution', () => {
     const actions = Object.fromEntries(iosAgentDeviceActions().map((action) => [action.actionId, action]));
-    for (const actionId of ['agent_device_open', 'agent_device_press', 'agent_device_fill', 'agent_device_scroll', 'agent_device_screenshot', 'agent_device_close']) {
+    for (const actionId of ['agent_device_open', 'agent_device_batch', 'agent_device_press', 'agent_device_fill', 'agent_device_scroll', 'agent_device_screenshot', 'agent_device_close']) {
       expect(actions[actionId]?.confirmation).toBe(actionId === 'agent_device_screenshot' ? 'none' : 'authorization');
       expect(actions[actionId]?.resourceClaims).toEqual(expect.arrayContaining([
         { resource: 'repo-state', mode: 'write' },
