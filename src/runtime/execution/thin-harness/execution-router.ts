@@ -11,7 +11,6 @@ import {
 
 export interface RouteExecutionInput {
   operation: FastOperationKind | string;
-  /** Caller-requested mode. Default auto. */
   mode?: 'auto' | 'fast' | 'durable';
   background?: boolean;
   requiresRecovery?: boolean;
@@ -25,11 +24,11 @@ export interface RouteExecutionInput {
   concurrentWriteLanes?: boolean;
   timeoutMs?: number;
   command?: string | readonly string[];
-  /** Explicit path scope for patches / stage / commit. */
   paths?: string[];
   allowedPaths?: string[];
-  /** Number of operations in a patch. */
   patchOperationCount?: number;
+  /** Paths extracted from patch operations[].path */
+  patchPaths?: string[];
   steps?: RepositoryBatchStep[];
   defaultBranch?: string;
 }
@@ -46,8 +45,8 @@ const FAST_OPERATIONS = new Set<string>([
   'commit_paths',
   'batch',
   'read_lanes',
+  'patch_proposal_validate',
   'patch_proposal_lanes',
-  // Existing MCP tool names that map to fast-eligible ops
   'repository_git_status',
   'repository_git_diff',
   'repository_safe_patch_apply',
@@ -98,30 +97,75 @@ function riskFromClassification(risk: string): ExecutionRisk {
   return 'unknown';
 }
 
-function isFocusedCheckCommand(command: string | readonly string[] | undefined, defaultBranch?: string): boolean {
+/**
+ * Strict focused-check gate: typed argv only, explicit file/filter required.
+ * Bare package-test commands always fail this check.
+ */
+export function isFocusedCheckCommand(command: string | readonly string[] | undefined): boolean {
   if (command === undefined) return false;
-  const classification = classifyRepositoryCommand(command, defaultBranch);
-  if (classification.risk !== 'readonly' && classification.risk !== 'workspace_write') return false;
   const canonical = normalizeRepositoryCommand(command);
-  const words = canonical.kind === 'argv'
-    ? [canonical.executable ?? '', ...(canonical.args ?? [])].map((part) => String(part).toLowerCase())
-    : String(canonical.shellCommand ?? '').toLowerCase().split(/\s+/);
-  const joined = words.join(' ');
-  // Focused checks: bun test <file>, node --test <file>, pytest path, go test ./pkg
-  if (words[0] === 'bun' && words[1] === 'test') {
-    // Allow both package-level focused filters and explicit file paths; reject full coverage runs.
-    return !joined.includes('--coverage');
-  }
-  if (words[0] === 'node' && words.some((w) => w === '--test' || w.startsWith('--test='))) return true;
-  if (words[0] === 'pytest' || words[0] === 'py.test') return true;
-  if (words[0] === 'go' && words[1] === 'test') {
-    // Reject monorepo-wide ./... without a package filter when only that token is present.
-    if (joined.includes('./...') && !words.some((w) => w.startsWith('./') && w !== './...')) return false;
+  if (canonical.kind !== 'argv') return false;
+  const words = [canonical.executable ?? '', ...(canonical.args ?? [])]
+    .map((part) => String(part))
+    .filter(Boolean);
+  if (words.length < 2) return false;
+  const program = words[0]!.split(/[\\/]/).at(-1)!.toLowerCase();
+  const rest = words.slice(1);
+  const lowerRest = rest.map((word) => word.toLowerCase());
+  const joined = lowerRest.join(' ');
+
+  if (joined.includes('--coverage') || joined.includes('./...')) return false;
+
+  // Skip the first non-flag token when it is a known test verb (e.g. `bun test`, `cargo test`).
+  const VERBS = new Set(['test', 'check', 'run']);
+  const pathCandidates = rest.filter((word, index) => {
+    if (word.startsWith('-')) return false;
+    // First positional after program is often the verb, not a path.
+    if (index === 0 && VERBS.has(word.toLowerCase())) return false;
     return true;
+  });
+
+  const hasPathLike = pathCandidates.some((word) => (
+    word.includes('/')
+    || word.includes('\\')
+    || /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|swift|test|spec)$/i.test(word)
+    || /^(tests?|src|pkg|app|lib)\b/i.test(word)
+  ));
+  const hasNameFilter = lowerRest.some((word) =>
+    word === '-t'
+    || word === '--test-name-pattern'
+    || word.startsWith('--test-name-pattern=')
+    || word === '-k'
+    || word.startsWith('-k=')
+    || word === '--filter'
+    || word.startsWith('--filter=')
+    || word === '-p'
+    || word.startsWith('-p=')
+    || word === '--package'
+    || word.startsWith('--package='));
+
+  if (program === 'bun' && lowerRest[0] === 'test') {
+    // Require an explicit file/filter beyond bare `bun test`.
+    return pathCandidates.length >= 1 && (hasPathLike || hasNameFilter);
   }
-  if (words[0] === 'cargo' && (words[1] === 'test' || words[1] === 'check')) return true;
-  // bun/node test scripts without package install side effects
-  if (['npm', 'pnpm', 'yarn'].includes(words[0] ?? '') && words[1] === 'test') return true;
+  if (program === 'node' && lowerRest.some((w) => w === '--test' || w.startsWith('--test='))) {
+    return hasPathLike || hasNameFilter;
+  }
+  if (program === 'pytest' || program === 'py.test') {
+    return pathCandidates.length >= 1 && (hasPathLike || hasNameFilter);
+  }
+  if (program === 'go' && lowerRest[0] === 'test') {
+    return hasPathLike || hasNameFilter;
+  }
+  if (program === 'cargo' && (lowerRest[0] === 'test' || lowerRest[0] === 'check')) {
+    // Bare `cargo test` runs the full suite — require package/filter/target.
+    return hasPathLike || hasNameFilter || lowerRest.includes('--lib') || lowerRest.includes('--bin')
+      || lowerRest.some((w) => w.startsWith('--bin=') || w.startsWith('--package') || w.startsWith('--test'));
+  }
+  // npm/pnpm/yarn test are never focused — arbitrary package scripts.
+  if (['npm', 'pnpm', 'yarn'].includes(program) && lowerRest[0] === 'test') {
+    return false;
+  }
   return false;
 }
 
@@ -136,23 +180,36 @@ function commandLooksDestructive(command: string | readonly string[] | undefined
   return DESTRUCTIVE_HINTS.some((hint) => lower.includes(hint));
 }
 
-function pathsOutOfScope(paths: string[] | undefined, allowedPaths: string[] | undefined): boolean {
+export function pathsOutOfScope(paths: string[] | undefined, allowedPaths: string[] | undefined): boolean {
   if (!paths?.length || !allowedPaths?.length) return false;
-  return paths.some((path) => {
-    const normalized = path.replace(/^\.\//, '');
-    return !allowedPaths.some((allowed) => {
-      const pattern = allowed.replace(/^\.\//, '');
-      if (pattern.endsWith('/**')) {
-        const prefix = pattern.slice(0, -3);
-        return normalized === prefix || normalized.startsWith(`${prefix}/`);
-      }
-      if (pattern.endsWith('/*')) {
-        const prefix = pattern.slice(0, -2);
-        return normalized.startsWith(`${prefix}/`) && !normalized.slice(prefix.length + 1).includes('/');
-      }
-      return normalized === pattern || normalized.startsWith(`${pattern}/`);
-    });
+  return paths.some((path) => !pathAllowed(path, allowedPaths));
+}
+
+export function pathAllowed(path: string, allowedPaths: string[]): boolean {
+  const normalized = path.replace(/^\.\//, '').replace(/\\/g, '/');
+  if (normalized.includes('..')) return false;
+  return allowedPaths.some((allowed) => {
+    const pattern = allowed.replace(/^\.\//, '').replace(/\\/g, '/');
+    if (pattern.endsWith('/**')) {
+      const prefix = pattern.slice(0, -3);
+      return normalized === prefix || normalized.startsWith(`${prefix}/`);
+    }
+    if (pattern.endsWith('/*')) {
+      const prefix = pattern.slice(0, -2);
+      return normalized.startsWith(`${prefix}/`) && !normalized.slice(prefix.length + 1).includes('/');
+    }
+    return normalized === pattern || normalized.startsWith(`${pattern}/`);
   });
+}
+
+export function extractPatchPaths(operations: unknown): string[] {
+  if (!Array.isArray(operations)) return [];
+  return [...new Set(
+    operations
+      .filter((entry): entry is Record<string, unknown> => typeof entry === 'object' && entry !== null)
+      .map((entry) => String(entry.path ?? '').trim().replace(/\\/g, '/'))
+      .filter(Boolean),
+  )];
 }
 
 /**
@@ -163,6 +220,10 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
   const reasons: string[] = [];
   const operation = String(input.operation || 'unknown');
   const requested = input.mode ?? 'auto';
+  const scopedPaths = [
+    ...(input.paths ?? []),
+    ...(input.patchPaths ?? []),
+  ];
 
   if (requested === 'durable') {
     return {
@@ -176,7 +237,6 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
     };
   }
 
-  // Hard rejects first
   if (commandLooksDestructive(input.command) || operation.includes('destructive')) {
     return {
       mode: 'reject',
@@ -190,7 +250,7 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
     };
   }
 
-  if (pathsOutOfScope(input.paths, input.allowedPaths)) {
+  if (pathsOutOfScope(scopedPaths, input.allowedPaths)) {
     return {
       mode: 'reject',
       reasons: ['paths_outside_declared_scope'],
@@ -202,46 +262,28 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
     };
   }
 
-  // Durable escalation signals
-  if (input.background === true) {
-    reasons.push('background_execution_requested');
-  }
-  if (input.requiresRecovery === true) {
-    reasons.push('cross_session_recovery_required');
-  }
-  if (input.requiresIsolation === true || input.requiresWorktree === true) {
-    reasons.push('isolation_or_worktree_required');
-  }
-  if (input.requiresRetry === true) {
-    reasons.push('durable_retry_required');
-  }
-  if (input.agentRun === true) {
-    reasons.push('agent_run');
-  }
-  if (input.interactionSession === true) {
-    reasons.push('long_interaction_session');
-  }
-  if (input.humanHandoff === true) {
-    reasons.push('human_handoff_required');
-  }
-  if (input.remoteWrite === true) {
-    reasons.push('remote_write');
-  }
-  if (input.concurrentWriteLanes === true) {
-    reasons.push('concurrent_write_lanes');
-  }
+  if (input.background === true) reasons.push('background_execution_requested');
+  if (input.requiresRecovery === true) reasons.push('cross_session_recovery_required');
+  if (input.requiresIsolation === true || input.requiresWorktree === true) reasons.push('isolation_or_worktree_required');
+  if (input.requiresRetry === true) reasons.push('durable_retry_required');
+  if (input.agentRun === true) reasons.push('agent_run');
+  if (input.interactionSession === true) reasons.push('long_interaction_session');
+  if (input.humanHandoff === true) reasons.push('human_handoff_required');
+  if (input.remoteWrite === true) reasons.push('remote_write');
+  if (input.concurrentWriteLanes === true) reasons.push('concurrent_write_lanes');
   if (typeof input.timeoutMs === 'number' && input.timeoutMs > FAST_PATH_MAX_TIMEOUT_MS) {
     reasons.push(`timeout_exceeds_fast_cap_${FAST_PATH_MAX_TIMEOUT_MS}`);
   }
-  if (DURABLE_OPERATIONS.has(operation)) {
-    reasons.push(`operation_${operation}_is_durable_by_policy`);
-  }
+  if (DURABLE_OPERATIONS.has(operation)) reasons.push(`operation_${operation}_is_durable_by_policy`);
+
   if (operation === 'repository_command_execute' || operation === 'run_short_command' || operation === 'run_focused_check') {
     if (input.command !== undefined) {
       const classification = classifyRepositoryCommand(input.command, input.defaultBranch);
-      if (classification.risk === 'remote_write') {
-        reasons.push('command_classified_remote_write');
+      const canonical = normalizeRepositoryCommand(input.command);
+      if (canonical.kind !== 'argv' && (operation === 'run_focused_check' || operation === 'run_short_command')) {
+        reasons.push('shell_command_not_allowed_on_fast_path');
       }
+      if (classification.risk === 'remote_write') reasons.push('command_classified_remote_write');
       if (classification.risk === 'destructive') {
         return {
           mode: 'reject',
@@ -254,19 +296,19 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
           suggestedOperation: 'repository_command_preview',
         };
       }
-      const focused = isFocusedCheckCommand(input.command, input.defaultBranch);
-      if (classification.risk === 'workspace_write' && operation !== 'run_focused_check' && !focused) {
-        // Mutating non-focused commands stay durable unless explicitly patch/stage/commit typed ops
-        if (operation === 'repository_command_execute' || operation === 'run_short_command') {
-          reasons.push('mutating_command_not_focused_check');
+      const focused = isFocusedCheckCommand(input.command);
+      if (operation === 'run_focused_check' && !focused) {
+        reasons.push('not_a_strict_focused_check');
+      }
+      if (classification.risk === 'workspace_write' && !focused) {
+        if (operation === 'repository_command_execute' || operation === 'run_short_command' || operation === 'run_focused_check') {
+          reasons.push('mutating_or_unfocused_command');
         }
       }
-      if (classification.risk === 'readonly' || focused) {
-        // eligible for fast unless other durable flags fire
-      } else if (!FAST_OPERATIONS.has(operation)) {
+      if (classification.risk !== 'readonly' && !focused && !FAST_OPERATIONS.has(operation)) {
         reasons.push('untrusted_or_unclassified_command');
       }
-    } else if (operation === 'repository_command_execute') {
+    } else if (operation === 'repository_command_execute' || operation === 'run_focused_check') {
       reasons.push('missing_command');
     }
   }
@@ -292,6 +334,7 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
         mode: 'auto',
         command: step.input.command as string | string[] | undefined,
         paths: Array.isArray(step.input.paths) ? step.input.paths.map(String) : undefined,
+        patchPaths: extractPatchPaths(step.input.operations),
         allowedPaths: input.allowedPaths,
         timeoutMs: typeof step.input.timeout_ms === 'number' ? step.input.timeout_ms : input.timeoutMs,
         patchOperationCount: Array.isArray(step.input.operations) ? step.input.operations.length : undefined,
@@ -319,7 +362,6 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
 
   if (reasons.length > 0) {
     if (requested === 'fast') {
-      // Explicit fast cannot force past durable requirements
       return {
         mode: 'durable',
         reasons: ['fast_requested_but_policy_requires_durable', ...reasons],
@@ -341,7 +383,6 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
     };
   }
 
-  // Fast eligibility
   if (!FAST_OPERATIONS.has(operation) && operation !== 'repository_command_execute') {
     return {
       mode: 'durable',
@@ -354,7 +395,7 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
     };
   }
 
-  if (operation === 'repository_command_execute') {
+  if (operation === 'repository_command_execute' || operation === 'run_short_command' || operation === 'run_focused_check') {
     if (input.command === undefined) {
       return {
         mode: 'durable',
@@ -367,11 +408,23 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
       };
     }
     const classification = classifyRepositoryCommand(input.command, input.defaultBranch);
-    const focused = isFocusedCheckCommand(input.command, input.defaultBranch);
+    const focused = isFocusedCheckCommand(input.command);
+    const canonical = normalizeRepositoryCommand(input.command);
+    if (canonical.kind !== 'argv') {
+      return {
+        mode: 'durable',
+        reasons: ['shell_command_requires_durable'],
+        risk: riskFromClassification(classification.risk),
+        estimatedClass: 'long',
+        requiresIsolation: false,
+        requiresRecovery: false,
+        suggestedOperation: 'repository_command_execute via Durable Work / Local Job',
+      };
+    }
     if (classification.risk === 'readonly' || focused) {
       return {
         mode: 'fast',
-        reasons: focused ? ['focused_check_command'] : ['readonly_allowlisted_command'],
+        reasons: focused ? ['strict_focused_check_command'] : ['readonly_allowlisted_command'],
         risk: riskFromClassification(classification.risk),
         estimatedClass: 'short',
         requiresIsolation: false,
@@ -439,6 +492,7 @@ export function isFastEligibleTool(name: string, args: Record<string, unknown> =
     paths: Array.isArray(args.paths) ? args.paths.map(String) : undefined,
     allowedPaths: Array.isArray(args.allowed_paths) ? args.allowed_paths.map(String) : undefined,
     patchOperationCount: Array.isArray(args.operations) ? args.operations.length : undefined,
+    patchPaths: extractPatchPaths(args.operations),
   });
   return decision.mode === 'fast';
 }

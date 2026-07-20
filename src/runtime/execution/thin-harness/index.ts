@@ -5,3 +5,5 @@ export * from './fast-receipt';
 export * from './fast-executor';
 export * from './batch-executor';
 export * from './lightweight-lanes';
+export * from './mutation-gate';
+export * from './async-process';

@@ -1,20 +1,14 @@
 import type { LatencyBreakdown } from './types';
 import { EMPTY_LATENCY } from './types';
 
-export type LatencySegment = keyof Omit<LatencyBreakdown, 'path' | 'totalMs'>;
+export type LatencySegment = 'routingMs' | 'policyMs' | 'snapshotMs' | 'executionMs' | 'receiptMs';
 
 const SEGMENT_KEYS: LatencySegment[] = [
-  'gatewayValidationMs',
-  'authorizationMs',
-  'resourceClaimMs',
-  'jobPersistenceMs',
-  'schedulerWaitMs',
-  'workerStartupMs',
-  'repositorySnapshotMs',
-  'operationExecutionMs',
-  'evidencePersistenceMs',
-  'projectionUpdateMs',
-  'responseSerializationMs',
+  'routingMs',
+  'policyMs',
+  'snapshotMs',
+  'executionMs',
+  'receiptMs',
 ];
 
 function roundMs(value: number): number {
@@ -22,9 +16,7 @@ function roundMs(value: number): number {
 }
 
 /**
- * Bounded in-process latency accumulator.
- * Does not write files by itself; callers may attach the summary to a receipt
- * or return only totalMs by default.
+ * Bounded in-process latency accumulator with mutually exclusive segments.
  */
 export class LatencyTrace {
   private readonly startedAt = performance.now();
@@ -74,17 +66,32 @@ export class LatencyTrace {
   snapshot(includeDetail = true): LatencyBreakdown {
     this.stop();
     const totalMs = roundMs(performance.now() - this.startedAt);
+    const routingMs = roundMs(this.segments.routingMs ?? 0);
+    const policyMs = roundMs(this.segments.policyMs ?? 0);
+    const snapshotMs = roundMs(this.segments.snapshotMs ?? 0);
+    const executionMs = roundMs(this.segments.executionMs ?? 0);
+    const receiptMs = roundMs(this.segments.receiptMs ?? 0);
     if (!includeDetail) {
       return { ...EMPTY_LATENCY, totalMs, path: this.path };
     }
-    const breakdown: LatencyBreakdown = { ...EMPTY_LATENCY, totalMs, path: this.path };
-    for (const key of SEGMENT_KEYS) {
-      breakdown[key] = roundMs(this.segments[key] ?? 0);
-    }
-    return breakdown;
+    return {
+      ...EMPTY_LATENCY,
+      routingMs,
+      policyMs,
+      snapshotMs,
+      executionMs,
+      receiptMs,
+      totalMs,
+      path: this.path,
+      // Compatibility aliases (non-overlapping mapping).
+      gatewayValidationMs: routingMs,
+      authorizationMs: policyMs,
+      repositorySnapshotMs: snapshotMs,
+      operationExecutionMs: executionMs,
+      evidencePersistenceMs: receiptMs,
+    };
   }
 
-  /** Compact form suitable for default API responses. */
   summaryMs(): { totalMs: number; path?: LatencyBreakdown['path'] } {
     this.stop();
     return {
@@ -94,19 +101,7 @@ export class LatencyTrace {
   }
 }
 
-export function mergeLatency(...parts: LatencyBreakdown[]): LatencyBreakdown {
-  const merged: LatencyBreakdown = { ...EMPTY_LATENCY };
-  for (const part of parts) {
-    for (const key of SEGMENT_KEYS) {
-      merged[key] = roundMs(merged[key] + (part[key] ?? 0));
-    }
-    merged.totalMs = roundMs(merged.totalMs + (part.totalMs ?? 0));
-    if (part.path) merged.path = part.path;
-  }
-  return merged;
-}
-
-/** Estimate repo-harness overhead vs underlying operation time. */
 export function harnessOverheadMs(breakdown: LatencyBreakdown): number {
-  return Math.max(0, roundMs(breakdown.totalMs - breakdown.operationExecutionMs));
+  const op = breakdown.executionMs || breakdown.operationExecutionMs || 0;
+  return Math.max(0, roundMs(breakdown.totalMs - op));
 }

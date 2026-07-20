@@ -1,7 +1,8 @@
 # Thin Harness V1
 
 > Status: **Runtime Authority (additive)**  
-> Baseline revision: implemented on feature branch `grok/thin-harness-v1`
+> Baseline revision: feature branch `grok/thin-harness-v1`  
+> Review remediation: P0/P1 async Fast Path + mutation gate (post REQUEST_CHANGES)
 
 ## Purpose
 
@@ -23,12 +24,14 @@ Use Campaign only for multiple truly independent, long-lived deliverables.
 | Component | Path | Responsibility |
 | --- | --- | --- |
 | Execution Router | `src/runtime/execution/thin-harness/execution-router.ts` | Decide `fast` / `durable` / `reject` |
-| Latency Trace | `src/runtime/execution/thin-harness/latency-trace.ts` | Bounded in-process segment timing |
-| Fast Executor | `src/runtime/execution/thin-harness/fast-executor.ts` | In-process / short-child execution |
-| Fast Receipt | `src/runtime/execution/thin-harness/fast-receipt.ts` | One bounded receipt per fast call |
-| Batch Executor | `src/runtime/execution/thin-harness/batch-executor.ts` | Typed multi-step batch (≤20) |
-| Lightweight Lanes | `src/runtime/execution/thin-harness/lightweight-lanes.ts` | Read-only + patch-proposal lanes |
-| MCP integration | `src/cli/mcp/repository-tools.ts` | Fast path for eligible `repository_command_execute`; optional full-surface batch/lanes tools |
+| Latency Trace | `src/runtime/execution/thin-harness/latency-trace.ts` | Mutually exclusive Fast Path segments |
+| Async Process | `src/runtime/execution/thin-harness/async-process.ts` | Bounded async spawn + process-tree kill + AbortSignal |
+| Mutation Gate | `src/runtime/execution/thin-harness/mutation-gate.ts` | Shared checkout write fencing with durable leases |
+| Fast Executor | `src/runtime/execution/thin-harness/fast-executor.ts` | Async Fast Path execution |
+| Fast Receipt | `src/runtime/execution/thin-harness/fast-receipt.ts` | Bounded receipt; failures do not mask mutation success |
+| Batch Executor | `src/runtime/execution/thin-harness/batch-executor.ts` | Typed multi-step batch (≤20); one parent receipt; whole-batch write gate |
+| Lightweight Lanes | `src/runtime/execution/thin-harness/lightweight-lanes.ts` | Concurrent read lanes + patch_proposal_validate |
+| MCP integration | `src/cli/mcp/repository-tools.ts` | Fast path for eligible `repository_command_execute`; optional batch/lanes tools |
 
 ### Execution modes
 
@@ -46,27 +49,29 @@ interface ExecutionDecision {
 
 ### Fast Path eligibility (default)
 
-- repository file read
-- bounded search
-- Git status / bounded Git diff
-- small path-scoped patch
-- path-scoped stage / commit
-- allowlisted typed argv readonly commands
-- allowlisted short focused checks
+- repository file read (size-capped)
+- bounded search (async `rg` preferred; inspector fallback after yield)
+- Git status / bounded Git diff (async spawn)
+- small path-scoped patch (pre-apply path validation + rollback)
+- path-scoped stage / commit under Checkout Mutation Gate
+- allowlisted typed argv **readonly** commands
+- **strict** focused checks only (typed argv + explicit file/filter; bare `bun test` / `npm test` / `pytest` → durable)
 - continuous local edits on one checkout
 
 ### Must use Durable Path
 
 - background / cross-session recovery
-- full test suites or timeouts above Fast Path cap (30s)
+- unfocused or full test suites
+- timeouts above Fast Path cap (**15s**)
 - remote writes (`git push`, PR merge/delete, publish)
 - deploy / release / supervisor switch
 - destructive operations
 - worker isolation / worktree / durable retry
 - Agent Run
-- untrusted / unclassified commands
+- untrusted / unclassified / shell commands
 - device / browser long interaction sessions
 - human handoff flows
+- checkout mutation busy (durable writer or competing fast writer)
 
 ### Must reject (or strong confirmation path)
 
@@ -93,10 +98,44 @@ interface ExecutionDecision {
 - repository binding + checkout identity
 - path validation + command policy
 - permission snapshot / authorization for mutating commands
-- typed argv, timeout, cancellation, output caps, secret redaction
+- typed argv, timeout, **AbortSignal** cancellation, output caps (streamed, not unbounded buffer), secret redaction
 - before/after Git snapshot for commands
-- checkout-level short write lock (not global scheduler lock)
-- one final Fast Receipt
+- **Checkout Mutation Gate** shared with durable write leases (plus controller lock for serialization)
+- one final Fast Receipt (`receiptMode: standalone`); batch/lanes use parent receipt only (`receiptMode: none` on children)
+- optional `requestId` + `inputHash` idempotent replay for mutations
+
+## Async execution model (P0)
+
+```text
+Gateway
+  ↓
+Fast Router
+  ↓
+async Fast Executor
+  ↓
+bounded child process (process group) / yielded search
+```
+
+- `repository_command_execute` Fast Path uses `executeRepositoryCommandAsync`.
+- Git status/diff/stage use `runBoundedGit` (async spawn).
+- Timeout/cancel: SIGTERM process group → grace → SIGKILL via `terminateProcessTree`.
+- stdout/stderr collectors cap while streaming.
+
+## Checkout Mutation Gate (P1)
+
+Shared fencing for Fast and Durable writers:
+
+```text
+repoId + checkoutId
+active durable write leases (workspace:*, repo-content:*, path:*, git-ref:*)
+active fast mutation gate
+Git base head + status hash (fencing metadata)
+```
+
+- Fast writes acquire a lightweight gate (not an ExecutionJob).
+- Durable workers with write leases block Fast writes (`MUTATION_BUSY` / escalate durable).
+- Write batches hold **one** gate for the entire batch.
+- Stage uses `withControllerLockAsync` so the lock is not released before the Promise settles.
 
 ## Batch API (typed)
 
@@ -107,6 +146,8 @@ interface RepositoryBatchRequest {
   mode?: "auto" | "fast" | "durable";
   steps: RepositoryBatchStep[]; // max 20
   stopOnError?: boolean; // default true
+  requestId?: string;
+  signal?: AbortSignal;
 }
 ```
 
@@ -121,7 +162,9 @@ Rules:
 
 - one repository binding and one pre-execution route decision for the whole batch
 - never silently upgrade mid-batch; durable steps fail closed before any step runs
-- one primary Fast Receipt for the batch
+- one primary Fast Receipt for the batch (no per-step receipts)
+- write batches: single mutation gate for all mutating steps
+- commit-containing batches are marked `nonAtomic=true` (no pseudo-transaction rollback)
 - large payloads may use existing result references
 
 ## Lightweight Lanes
@@ -130,15 +173,16 @@ Rules:
 
 - max concurrency 4
 - shared checkout, no branch / worktree / Issue / Campaign
-- parent receipt only; child lanes return summaries
+- parent receipt only; child lanes use `receiptMode: none`
+- real overlap via async primitives; `concurrent` flag reports start/finish overlap
 - fail-fast optional (default continue)
 
-### Patch Proposal Lane
+### Patch Proposal Validate (not Agent analysis)
 
-- returns proposed patch, writePaths, assumptions, risk notes
+- validates caller-supplied proposals for path conflicts only
+- returns `proposalId`, `baseRevision`, digests, writePaths
 - never writes the main checkout
-- Integrator applies selected proposals sequentially through Fast Path patch
-- write/write, write/read, project file, and schema conflicts demote proposals to analysis-only
+- Integrator rechecks revision, conflicts, writePaths subset, digests before apply
 
 ## Campaign boundary
 
@@ -149,17 +193,27 @@ Rules:
 
 ## Latency measurement
 
-Segments:
+Fast Path local segments (mutually exclusive; not full Gateway fiction):
 
 ```text
-gatewayValidationMs authorizationMs resourceClaimMs jobPersistenceMs
-schedulerWaitMs workerStartupMs repositorySnapshotMs operationExecutionMs
-evidencePersistenceMs projectionUpdateMs responseSerializationMs totalMs
+routingMs policyMs snapshotMs executionMs receiptMs totalMs
 ```
 
-Defaults return only `totalMs`. Full breakdown is available under debug/benchmark (`includeLatencyBreakdown`).
+Compatibility aliases may map:
 
-Benchmark entrypoint:
+```text
+gatewayValidationMs ← routingMs
+authorizationMs ← policyMs
+repositorySnapshotMs ← snapshotMs
+operationExecutionMs ← executionMs
+evidencePersistenceMs ← receiptMs
+```
+
+Unmeasured durable pipeline stages stay 0 (not claimed as measured zero cost).
+
+Defaults return only `totalMs`. Full breakdown under `includeLatencyBreakdown`.
+
+Benchmark entrypoint (library path; A/B via real Gateway still recommended before merge claims):
 
 ```bash
 bun scripts/benchmark-thin-harness.ts
@@ -176,3 +230,4 @@ Thin Harness is primarily a **library execution path** used by eligible reposito
 2. Escalate explicitly — never silent mid-flight upgrades.
 3. Keep Durable Work / Scheduler / Worker unchanged for long and high-risk work.
 4. Do not trade safety for speed.
+5. Receipt persistence failure never rewrites a successful mutation outcome.

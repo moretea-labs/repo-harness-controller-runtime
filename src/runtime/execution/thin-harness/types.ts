@@ -11,7 +11,8 @@ export type ExecutionRisk =
   | 'destructive'
   | 'unknown';
 export type EstimatedClass = 'short' | 'long' | 'unknown';
-export type FastOutcome = 'succeeded' | 'failed' | 'cancelled' | 'timed_out' | 'escalated' | 'rejected';
+export type FastOutcome = 'succeeded' | 'failed' | 'cancelled' | 'timed_out' | 'escalated' | 'rejected' | 'busy';
+export type ReceiptMode = 'none' | 'standalone';
 
 export type FastOperationKind =
   | 'read_file'
@@ -25,7 +26,7 @@ export type FastOperationKind =
   | 'commit_paths'
   | 'batch'
   | 'read_lanes'
-  | 'patch_proposal_lanes';
+  | 'patch_proposal_validate';
 
 export interface ExecutionDecision {
   mode: ExecutionMode;
@@ -40,25 +41,36 @@ export interface ExecutionDecision {
   rejectCode?: string;
 }
 
-/** Latency breakdown segments for eligible operations. Sensitive args are never recorded. */
+/** Fast-path local timing segments (not full Gateway pipeline fiction). */
 export interface LatencyBreakdown {
-  gatewayValidationMs: number;
-  authorizationMs: number;
-  resourceClaimMs: number;
-  jobPersistenceMs: number;
-  schedulerWaitMs: number;
-  workerStartupMs: number;
-  repositorySnapshotMs: number;
-  operationExecutionMs: number;
-  evidencePersistenceMs: number;
-  projectionUpdateMs: number;
-  responseSerializationMs: number;
+  routingMs: number;
+  policyMs: number;
+  snapshotMs: number;
+  executionMs: number;
+  receiptMs: number;
   totalMs: number;
-  /** Path label: fast | durable | mixed */
   path?: 'fast' | 'durable' | 'mixed' | 'reject';
+  /** @deprecated aliases for older field names; prefer routing/policy/execution. */
+  gatewayValidationMs?: number;
+  authorizationMs?: number;
+  resourceClaimMs?: number;
+  jobPersistenceMs?: number;
+  schedulerWaitMs?: number;
+  workerStartupMs?: number;
+  repositorySnapshotMs?: number;
+  operationExecutionMs?: number;
+  evidencePersistenceMs?: number;
+  projectionUpdateMs?: number;
+  responseSerializationMs?: number;
 }
 
 export const EMPTY_LATENCY: LatencyBreakdown = {
+  routingMs: 0,
+  policyMs: 0,
+  snapshotMs: 0,
+  executionMs: 0,
+  receiptMs: 0,
+  totalMs: 0,
   gatewayValidationMs: 0,
   authorizationMs: 0,
   resourceClaimMs: 0,
@@ -70,7 +82,6 @@ export const EMPTY_LATENCY: LatencyBreakdown = {
   evidencePersistenceMs: 0,
   projectionUpdateMs: 0,
   responseSerializationMs: 0,
-  totalMs: 0,
 };
 
 export interface FastExecutionReceipt {
@@ -90,11 +101,14 @@ export interface FastExecutionReceipt {
   policyDecision: string;
   outputSummary?: string;
   artifactRefs?: string[];
-  /** Optional detailed timing; omitted unless debug/benchmark requested. */
   latency?: LatencyBreakdown;
   stepCount?: number;
   laneCount?: number;
   reasons?: string[];
+  requestId?: string;
+  fencingToken?: number;
+  baseHead?: string | null;
+  inputHash?: string;
 }
 
 export type RepositoryBatchStepKind =
@@ -111,7 +125,6 @@ export type RepositoryBatchStepKind =
 export interface RepositoryBatchStep {
   id?: string;
   kind: RepositoryBatchStepKind;
-  /** Step-specific typed payload — never free-form shell workflows. */
   input: Record<string, unknown>;
 }
 
@@ -121,11 +134,12 @@ export interface RepositoryBatchRequest {
   mode?: 'auto' | 'fast' | 'durable';
   steps: RepositoryBatchStep[];
   stopOnError?: boolean;
-  /** When true, attach full latency breakdown on the receipt. */
   includeLatencyBreakdown?: boolean;
   timeoutMs?: number;
   allowedPaths?: string[];
   purpose?: string;
+  requestId?: string;
+  signal?: AbortSignal;
 }
 
 export interface RepositoryBatchStepResult {
@@ -142,14 +156,16 @@ export interface RepositoryBatchStepResult {
 
 export interface RepositoryBatchResult {
   ok: boolean;
-  mode: 'fast' | 'durable' | 'reject';
+  mode: 'fast' | 'durable' | 'reject' | 'busy';
   decision: ExecutionDecision;
   receipt?: FastExecutionReceipt;
+  receiptPersisted?: boolean;
+  receiptWarning?: string;
   steps: RepositoryBatchStepResult[];
   stoppedEarly: boolean;
   partialFailure: boolean;
+  nonAtomic?: boolean;
   latency: LatencyBreakdown;
-  /** Present when mixed/durable mode requires explicit escalation. */
   escalation?: {
     reason: string;
     suggestedOperation: string;
@@ -163,11 +179,11 @@ export interface ReadLaneRequest {
   input: Record<string, unknown>;
 }
 
-export interface PatchProposalLaneRequest {
+/** Validates caller-supplied patch proposals for path conflicts (not an Agent analyzer). */
+export interface PatchProposalValidateRequest {
   id?: string;
   readPaths: string[];
   writePaths: string[];
-  /** Proposed operations in apply_patch shape; never applied by the lane itself. */
   proposedOperations: unknown[];
   assumptions?: string[];
   riskNotes?: string[];
@@ -185,22 +201,27 @@ export interface LightweightLanesRequest {
   repoId: string;
   checkoutId?: string;
   readLanes?: ReadLaneRequest[];
-  patchProposalLanes?: PatchProposalLaneRequest[];
+  /** @deprecated use patchProposalValidations */
+  patchProposalLanes?: PatchProposalValidateRequest[];
+  patchProposalValidations?: PatchProposalValidateRequest[];
   failFast?: boolean;
   includeLatencyBreakdown?: boolean;
   maxConcurrency?: number;
+  signal?: AbortSignal;
 }
 
 export interface ReadLaneResult {
   id: string;
   ok: boolean;
   durationMs: number;
+  startedAtMs?: number;
+  finishedAtMs?: number;
   summary?: string;
   result?: Record<string, unknown>;
   error?: { code: string; message: string };
 }
 
-export interface PatchProposalLaneResult {
+export interface PatchProposalValidateResult {
   id: string;
   ok: boolean;
   durationMs: number;
@@ -214,25 +235,33 @@ export interface PatchProposalLaneResult {
   conflicts?: LaneConflict[];
   summary?: string;
   error?: { code: string; message: string };
+  proposalId?: string;
+  baseRevision?: string | null;
+  proposalDigest?: string;
+  operationsDigest?: string;
+  checkoutId?: string;
 }
 
 export interface LightweightLanesResult {
   ok: boolean;
   receipt?: FastExecutionReceipt;
+  receiptPersisted?: boolean;
   readLanes: ReadLaneResult[];
-  patchProposals: PatchProposalLaneResult[];
+  patchProposals: PatchProposalValidateResult[];
   conflicts: LaneConflict[];
   latency: LatencyBreakdown;
   appliedByIntegrator: false;
   createdIssue: false;
   createdCampaign: false;
   createdWorktree: false;
+  concurrent: boolean;
 }
 
 /** Caps shared by Fast Path. */
-export const FAST_PATH_MAX_TIMEOUT_MS = 30_000;
-export const FAST_PATH_DEFAULT_TIMEOUT_MS = 15_000;
+export const FAST_PATH_MAX_TIMEOUT_MS = 15_000;
+export const FAST_PATH_DEFAULT_TIMEOUT_MS = 10_000;
 export const FAST_PATH_MAX_OUTPUT_BYTES = 128 * 1024;
+export const FAST_PATH_MAX_FILE_BYTES = 512 * 1024;
 export const FAST_BATCH_MAX_STEPS = 20;
 export const FAST_LANE_MAX_CONCURRENCY = 4;
 export const FAST_RECEIPT_RETENTION = 200;

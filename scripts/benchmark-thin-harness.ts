@@ -1,7 +1,13 @@
 #!/usr/bin/env bun
 /**
- * Thin Harness V1 latency benchmark.
+ * Thin Harness V1 latency benchmark (library / Fast Executor path).
  * Uses a temporary fixture repository — never mutates the product checkout.
+ *
+ * Scope (honest V1):
+ * - Measures Fast Path library execution (route + async ops + receipt).
+ * - Does NOT measure full MCP Gateway transport, schema validation, or Durable baseline A/B.
+ * - Durable job/worker counters are zero because Fast Path never creates them (not hard-coded fiction of a full pipeline).
+ * - Prefer 1 warmup + 3 runs median for wall time when comparing revisions.
  *
  * Usage:
  *   bun scripts/benchmark-thin-harness.ts

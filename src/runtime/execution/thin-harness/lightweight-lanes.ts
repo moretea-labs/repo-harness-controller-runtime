@@ -1,14 +1,16 @@
+import { createHash, randomUUID } from 'crypto';
 import type { RepositoryRecord } from '../../../cli/repositories/types';
+import { runBoundedGit } from './async-process';
 import { executeFast } from './fast-executor';
 import { LatencyTrace } from './latency-trace';
-import { recordFastReceiptMetric, writeFastReceipt } from './fast-receipt';
+import { writeFastReceipt } from './fast-receipt';
 import {
   FAST_LANE_MAX_CONCURRENCY,
   type LaneConflict,
   type LightweightLanesRequest,
   type LightweightLanesResult,
-  type PatchProposalLaneRequest,
-  type PatchProposalLaneResult,
+  type PatchProposalValidateRequest,
+  type PatchProposalValidateResult,
   type ReadLaneRequest,
   type ReadLaneResult,
 } from './types';
@@ -52,11 +54,7 @@ function overlaps(left: string[], right: string[]): string[] {
     || [...rightSet].some((other) => path.startsWith(`${other}/`) || other.startsWith(`${path}/`)));
 }
 
-/**
- * Detect write/write, write/read, project-file, and schema conflicts among patch proposal lanes.
- * Conflicting lanes are demoted to analysis-only; no multi-worktree masking.
- */
-export function detectPatchProposalConflicts(lanes: Array<PatchProposalLaneRequest & { id: string }>): LaneConflict[] {
+export function detectPatchProposalConflicts(lanes: Array<PatchProposalValidateRequest & { id: string }>): LaneConflict[] {
   const conflicts: LaneConflict[] = [];
   for (let i = 0; i < lanes.length; i += 1) {
     for (let j = i + 1; j < lanes.length; j += 1) {
@@ -117,7 +115,6 @@ export function detectPatchProposalConflicts(lanes: Array<PatchProposalLaneReque
     }
   }
 
-  // De-dupe by type+sorted lane ids+paths
   const seen = new Set<string>();
   return conflicts.filter((conflict) => {
     const key = `${conflict.type}:${[...conflict.laneIds].sort().join(',')}:${[...conflict.paths].sort().join(',')}`;
@@ -146,15 +143,20 @@ async function mapPool<T, R>(
   return results;
 }
 
+function digest(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(value ?? null)).digest('hex').slice(0, 24);
+}
+
 /**
- * Lightweight concurrent lanes without Campaign, Issue Task, or long-lived worktrees.
- * Read lanes share one checkout snapshot semantics; patch proposal lanes never write.
+ * Lightweight concurrent lanes without Campaign/Issue/worktree.
+ * Read lanes use async Fast primitives. Proposal lanes only validate conflicts (no Agent analysis).
  */
 export async function executeLightweightLanes(
   ctx: LanesExecutorContext,
   request: LightweightLanesRequest,
 ): Promise<LightweightLanesResult> {
   const startedAt = new Date().toISOString();
+  const wallStart = performance.now();
   const trace = new LatencyTrace('fast');
   const concurrency = Math.max(
     1,
@@ -165,7 +167,8 @@ export async function executeLightweightLanes(
     ...lane,
     id: lane.id?.trim() || `read_${index + 1}`,
   }));
-  const proposalInputs: Array<PatchProposalLaneRequest & { id: string }> = (request.patchProposalLanes ?? []).map((lane, index) => ({
+  const proposalSource = request.patchProposalValidations ?? request.patchProposalLanes ?? [];
+  const proposalInputs: Array<PatchProposalValidateRequest & { id: string }> = proposalSource.map((lane, index) => ({
     ...lane,
     id: lane.id?.trim() || `proposal_${index + 1}`,
     readPaths: (lane.readPaths ?? []).map(String),
@@ -176,18 +179,15 @@ export async function executeLightweightLanes(
   const conflicts = detectPatchProposalConflicts(proposalInputs);
   const conflictedLaneIds = new Set(conflicts.flatMap((entry) => entry.laneIds));
 
-  const readResults = await trace.measure('operationExecutionMs', async () => mapPool(
+  const readResults = await trace.measure('executionMs', async () => mapPool(
     readLaneInputs,
     concurrency,
     async (lane) => {
+      const startedAtMs = performance.now() - wallStart;
       const laneStarted = performance.now();
       try {
-        // Force read-only operations only
         if (!['search', 'read_file', 'git_status', 'git_diff', 'run_short_command'].includes(lane.kind)) {
           throw new Error(`READ_LANE_KIND_INVALID: ${lane.kind}`);
-        }
-        if (lane.kind === 'run_short_command') {
-          // Only allow readonly classification via fast executor precheck
         }
         const executed = await executeFast(
           {
@@ -201,24 +201,34 @@ export async function executeLightweightLanes(
             operation: lane.kind,
             mode: 'fast',
             input: lane.input,
+            receiptMode: 'none',
+            signal: request.signal,
           },
         );
-        if (executed.receipt?.repositoryChanged) {
+        if (executed.operationSucceeded === false && executed.result?.error) {
+          /* fall through */
+        }
+        // Mutation from a read lane is a hard failure
+        const repoChanged = Boolean(
+          (executed.result as { repositoryChanged?: boolean } | undefined)?.repositoryChanged,
+        );
+        if (repoChanged) {
           return {
             id: lane.id,
             ok: false,
             durationMs: Math.round((performance.now() - laneStarted) * 100) / 100,
-            error: {
-              code: 'READ_LANE_MUTATION',
-              message: 'read lane attempted repository mutation',
-            },
+            startedAtMs,
+            finishedAtMs: performance.now() - wallStart,
+            error: { code: 'READ_LANE_MUTATION', message: 'read lane attempted repository mutation' },
           } satisfies ReadLaneResult;
         }
         return {
           id: lane.id,
           ok: executed.ok,
           durationMs: Math.round((performance.now() - laneStarted) * 100) / 100,
-          summary: executed.receipt?.outputSummary,
+          startedAtMs,
+          finishedAtMs: performance.now() - wallStart,
+          summary: executed.ok ? `ok:${lane.kind}` : 'failed',
           result: executed.result,
           error: executed.ok
             ? undefined
@@ -234,6 +244,8 @@ export async function executeLightweightLanes(
           id: lane.id,
           ok: false,
           durationMs: Math.round((performance.now() - laneStarted) * 100) / 100,
+          startedAtMs,
+          finishedAtMs: performance.now() - wallStart,
           error: {
             code: 'READ_LANE_FAILED',
             message: error instanceof Error ? error.message : String(error),
@@ -243,37 +255,57 @@ export async function executeLightweightLanes(
     },
   ));
 
-  if (request.failFast === true && readResults.some((entry) => !entry.ok)) {
-    // Continue patch proposals only when failFast is false; for failFast stop further work.
-  }
-
   const shouldRunProposals = request.failFast !== true || readResults.every((entry) => entry.ok);
+  const baseRevision = await (async () => {
+    try {
+      const out = await runBoundedGit(ctx.repository.canonicalRoot, ['rev-parse', 'HEAD'], {
+        timeoutMs: 5_000,
+        maxOutputBytes: 4_096,
+        signal: request.signal,
+      });
+      return out.ok ? (out.stdout.trim() || null) : null;
+    } catch {
+      return null;
+    }
+  })();
 
-  const proposalResults: PatchProposalLaneResult[] = shouldRunProposals
-    ? await mapPool(proposalInputs, concurrency, async (lane) => {
-      const laneStarted = performance.now();
+  const proposalResults: PatchProposalValidateResult[] = shouldRunProposals
+    ? proposalInputs.map((lane) => {
       const laneConflicts = conflicts.filter((conflict) => conflict.laneIds.includes(lane.id));
       const analysisOnly = conflictedLaneIds.has(lane.id);
+      const proposalId = `prop_${randomUUID().slice(0, 12)}`;
+      const operationsDigest = digest(lane.proposedOperations);
       return {
         id: lane.id,
         ok: true,
-        durationMs: Math.round((performance.now() - laneStarted) * 100) / 100,
+        durationMs: 0,
         readPaths: lane.readPaths,
         writePaths: lane.writePaths,
-        // Never apply — only return the proposal (or empty ops when analysis-only).
         proposedOperations: analysisOnly ? [] : lane.proposedOperations,
         assumptions: lane.assumptions,
         riskNotes: [
           ...(lane.riskNotes ?? []),
           ...(analysisOnly ? ['Demoted to analysis-only due to path conflicts with other lanes.'] : []),
+          'patch_proposal_validate only validates conflicts; it does not run an analyzer Agent.',
         ],
         suggestedFocusedCheck: lane.suggestedFocusedCheck,
         analysisOnly,
         conflicts: laneConflicts.length ? laneConflicts : undefined,
         summary: analysisOnly
           ? `analysis-only due to conflicts (${laneConflicts.map((c) => c.type).join(', ')})`
-          : `proposal ready with ${lane.proposedOperations.length} operations`,
-      } satisfies PatchProposalLaneResult;
+          : `proposal validated with ${lane.proposedOperations.length} operations`,
+        proposalId,
+        baseRevision,
+        proposalDigest: digest({
+          proposalId,
+          writePaths: lane.writePaths,
+          operationsDigest,
+          baseRevision,
+          checkoutId: ctx.repository.activeCheckoutId,
+        }),
+        operationsDigest,
+        checkoutId: ctx.repository.activeCheckoutId,
+      } satisfies PatchProposalValidateResult;
     })
     : proposalInputs.map((lane) => ({
       id: lane.id,
@@ -291,10 +323,20 @@ export async function executeLightweightLanes(
   const ok = readResults.every((entry) => entry.ok)
     && proposalResults.every((entry) => entry.ok || entry.analysisOnly);
 
-  const receipt = recordFastReceiptMetric(writeFastReceipt(ctx.controllerHome, {
+  // True concurrency: multiple lanes started before others finished.
+  const concurrent = readResults.length >= 2 && readResults.some((left, i) =>
+    readResults.some((right, j) => i !== j
+      && left.startedAtMs !== undefined
+      && right.startedAtMs !== undefined
+      && left.finishedAtMs !== undefined
+      && right.finishedAtMs !== undefined
+      && left.startedAtMs < right.finishedAtMs
+      && right.startedAtMs < left.finishedAtMs));
+
+  const written = writeFastReceipt(ctx.controllerHome, {
     repoId: ctx.repository.repoId,
     checkoutId: ctx.repository.activeCheckoutId,
-    operation: proposalInputs.length ? 'patch_proposal_lanes' : 'read_lanes',
+    operation: proposalInputs.length ? 'patch_proposal_validate' : 'read_lanes',
     startedAt,
     finishedAt,
     durationMs: latency.totalMs,
@@ -303,14 +345,15 @@ export async function executeLightweightLanes(
     repositoryChanged: false,
     authorizationDecision: 'read_only_lanes',
     policyDecision: 'allowed',
-    outputSummary: `readLanes=${readResults.length} proposals=${proposalResults.length} conflicts=${conflicts.length}`,
+    outputSummary: `readLanes=${readResults.length} proposals=${proposalResults.length} conflicts=${conflicts.length} concurrent=${concurrent}`,
     latency: request.includeLatencyBreakdown === true ? latency : undefined,
     laneCount: readResults.length + proposalResults.length,
-  }));
+  });
 
   return {
     ok,
-    receipt,
+    receipt: written.receipt,
+    receiptPersisted: written.persisted,
     readLanes: readResults,
     patchProposals: proposalResults,
     conflicts,
@@ -319,20 +362,22 @@ export async function executeLightweightLanes(
     createdIssue: false,
     createdCampaign: false,
     createdWorktree: false,
+    concurrent,
   };
 }
 
 /**
- * Integrator helper: sequentially apply selected non-conflicting proposals
- * through Fast Path apply_patch. Caller chooses which proposals to apply.
+ * Integrator: sequentially apply selected non-conflicting validated proposals.
+ * Re-validates writePaths, digests, and conflicts before apply.
  */
 export async function integratePatchProposals(
   ctx: LanesExecutorContext,
-  proposals: PatchProposalLaneResult[],
+  proposals: PatchProposalValidateResult[],
   options: {
     sessionId?: string;
     allowedPaths?: string[];
     purpose?: string;
+    expectedBaseRevision?: string | null;
   } = {},
 ): Promise<{
   ok: boolean;
@@ -342,16 +387,88 @@ export async function integratePatchProposals(
   const applied: Array<{ proposalId: string; ok: boolean; changedPaths: string[]; error?: string }> = [];
   const receiptIds: string[] = [];
 
+  // Re-run conflict detection on remaining applyable proposals.
+  const recheck = detectPatchProposalConflicts(
+    proposals
+      .filter((entry) => !entry.analysisOnly && entry.ok && entry.proposedOperations.length > 0)
+      .map((entry) => ({
+        id: entry.id,
+        readPaths: entry.readPaths,
+        writePaths: entry.writePaths,
+        proposedOperations: entry.proposedOperations,
+      })),
+  );
+  const conflicted = new Set(recheck.flatMap((entry) => entry.laneIds));
+
+  let currentHead: string | null = null;
+  try {
+    const out = await runBoundedGit(ctx.repository.canonicalRoot, ['rev-parse', 'HEAD'], {
+      timeoutMs: 5_000,
+      maxOutputBytes: 4_096,
+    });
+    currentHead = out.ok ? (out.stdout.trim() || null) : null;
+  } catch {
+    currentHead = null;
+  }
+
   for (const proposal of proposals) {
     if (proposal.analysisOnly || !proposal.ok || proposal.proposedOperations.length === 0) {
       applied.push({
-        proposalId: proposal.id,
+        proposalId: proposal.proposalId ?? proposal.id,
         ok: false,
         changedPaths: [],
         error: proposal.analysisOnly ? 'analysis_only' : 'empty_or_failed_proposal',
       });
       continue;
     }
+    if (conflicted.has(proposal.id)) {
+      applied.push({
+        proposalId: proposal.proposalId ?? proposal.id,
+        ok: false,
+        changedPaths: [],
+        error: 'conflict_recheck_failed',
+      });
+      continue;
+    }
+    if (proposal.baseRevision && currentHead && proposal.baseRevision !== currentHead) {
+      applied.push({
+        proposalId: proposal.proposalId ?? proposal.id,
+        ok: false,
+        changedPaths: [],
+        error: `revision_changed expected=${proposal.baseRevision} actual=${currentHead}`,
+      });
+      continue;
+    }
+    if (options.expectedBaseRevision && proposal.baseRevision && options.expectedBaseRevision !== proposal.baseRevision) {
+      applied.push({
+        proposalId: proposal.proposalId ?? proposal.id,
+        ok: false,
+        changedPaths: [],
+        error: 'expected_base_revision_mismatch',
+      });
+      continue;
+    }
+
+    // Operation paths must be subset of writePaths
+    const opPaths = proposal.proposedOperations
+      .filter((entry): entry is Record<string, unknown> => typeof entry === 'object' && entry !== null)
+      .map((entry) => String(entry.path ?? ''))
+      .filter(Boolean);
+    const outside = opPaths.filter((path) => !proposal.writePaths.some((write) => {
+      const n = path.replace(/^\.\//, '');
+      const w = write.replace(/^\.\//, '');
+      return n === w || n.startsWith(`${w}/`);
+    }));
+    if (outside.length > 0) {
+      applied.push({
+        proposalId: proposal.proposalId ?? proposal.id,
+        ok: false,
+        changedPaths: [],
+        error: `operation_paths_outside_writePaths: ${outside.join(', ')}`,
+      });
+      continue;
+    }
+
     const executed = await executeFast(
       {
         controllerHome: ctx.controllerHome,
@@ -369,22 +486,37 @@ export async function integratePatchProposals(
           allowed_paths: options.allowedPaths ?? proposal.writePaths,
         },
         allowedPaths: options.allowedPaths ?? proposal.writePaths,
+        receiptMode: 'standalone',
       },
     );
     if (executed.receipt) receiptIds.push(executed.receipt.executionId);
+    const changed = executed.receipt?.changedPaths
+      ?? ((executed.result?.applied as { appliedChunks?: Array<{ paths?: string[] }> } | undefined)?.appliedChunks
+        ?.flatMap((chunk) => chunk.paths ?? []) ?? []);
     applied.push({
-      proposalId: proposal.id,
-      ok: executed.ok,
-      changedPaths: executed.receipt?.changedPaths ?? [],
+      proposalId: proposal.proposalId ?? proposal.id,
+      ok: executed.ok && executed.operationSucceeded !== false,
+      changedPaths: changed,
       error: executed.ok
         ? undefined
         : (executed.result?.error as { message?: string } | undefined)?.message ?? 'apply failed',
     });
     if (!executed.ok) break;
+
+    // Refresh head after successful apply
+    try {
+      const out = await runBoundedGit(ctx.repository.canonicalRoot, ['rev-parse', 'HEAD'], {
+        timeoutMs: 5_000,
+        maxOutputBytes: 4_096,
+      });
+      currentHead = out.ok ? (out.stdout.trim() || currentHead) : currentHead;
+    } catch {
+      /* keep previous */
+    }
   }
 
   return {
-    ok: applied.every((entry) => entry.ok),
+    ok: applied.length > 0 && applied.every((entry) => entry.ok),
     applied,
     receiptIds,
   };

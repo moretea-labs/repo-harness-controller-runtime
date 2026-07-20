@@ -7,6 +7,7 @@ import { ensureControllerHome } from '../../src/cli/repositories/controller-home
 import { registerRepository } from '../../src/cli/repositories/registry';
 import { listLocalBridgeJobSnapshots } from '../../src/cli/local-bridge/job-store';
 import {
+  acquireCheckoutMutationGate,
   detectPatchProposalConflicts,
   executeFast,
   executeLightweightLanes,
@@ -14,11 +15,16 @@ import {
   getFastPathMetrics,
   integratePatchProposals,
   isFastEligibleTool,
+  isFocusedCheckCommand,
   listFastReceipts,
+  releaseCheckoutMutationGate,
   resetFastPathMetrics,
   routeExecution,
+  runBoundedProcess,
+  writeFastReceipt,
 } from '../../src/runtime/execution/thin-harness';
 import { listExecutionJobs } from '../../src/runtime/execution/jobs/store';
+import { acquireExecutionLeases, releaseExecutionLeases } from '../../src/runtime/resources/leases/store';
 
 const roots: string[] = [];
 
@@ -133,6 +139,35 @@ describe('Thin Harness execution router', () => {
       allowedPaths: ['src/**'],
     }).mode).toBe('reject');
   });
+
+  test('bare package tests are not focused; file-scoped checks are', () => {
+    expect(isFocusedCheckCommand(['bun', 'test'])).toBe(false);
+    expect(isFocusedCheckCommand(['npm', 'test'])).toBe(false);
+    expect(isFocusedCheckCommand(['pnpm', 'test'])).toBe(false);
+    expect(isFocusedCheckCommand(['yarn', 'test'])).toBe(false);
+    expect(isFocusedCheckCommand(['pytest'])).toBe(false);
+    expect(isFocusedCheckCommand(['cargo', 'test'])).toBe(false);
+    expect(isFocusedCheckCommand(['node', '--test'])).toBe(false);
+    expect(isFocusedCheckCommand(['bun', 'test', 'tests/runtime/thin-harness.test.ts'])).toBe(true);
+    expect(isFocusedCheckCommand(['pytest', 'tests/test_foo.py', '-k', 'smoke'])).toBe(true);
+    expect(isFocusedCheckCommand(['cargo', 'test', '--lib'])).toBe(true);
+    expect(routeExecution({
+      operation: 'run_focused_check',
+      command: ['bun', 'test'],
+    }).mode).toBe('durable');
+    expect(routeExecution({
+      operation: 'run_focused_check',
+      command: ['npm', 'test'],
+    }).mode).toBe('durable');
+    expect(routeExecution({
+      operation: 'run_focused_check',
+      command: ['pytest'],
+    }).mode).toBe('durable');
+    expect(routeExecution({
+      operation: 'run_focused_check',
+      command: ['bun', 'test', 'tests/runtime/thin-harness.test.ts'],
+    }).mode).toBe('fast');
+  });
 });
 
 describe('Thin Harness fast execution', () => {
@@ -217,8 +252,10 @@ describe('Thin Harness fast execution', () => {
         allowedPaths: ['src/**'],
       },
     );
-    // Either rejected by edit session policy or path-scope post-check.
-    expect(denied.ok === false || denied.decision.mode === 'reject').toBe(true);
+    // Must fail closed without mutating the out-of-scope file.
+    expect(denied.ok).toBe(false);
+    expect(readFileSync(join(repoRoot, 'README.md'), 'utf8')).toContain('hello thin harness');
+    expect(readFileSync(join(repoRoot, 'README.md'), 'utf8')).not.toContain('hello denied');
   });
 
   test('short readonly command runs on fast path without local job', async () => {
@@ -237,6 +274,221 @@ describe('Thin Harness fast execution', () => {
     expect(result.decision.mode).toBe('fast');
     expect(localJobCount(repoRoot)).toBe(beforeLocal);
     expect(result.latency.totalMs).toBeGreaterThan(0);
+  });
+
+  test('fast command yields so concurrent async work can progress (event-loop friendly)', async () => {
+    const { controllerHome, repository } = fixture();
+    let healthTicks = 0;
+    const health = (async () => {
+      for (let i = 0; i < 20; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        healthTicks += 1;
+      }
+    })();
+    const command = executeFast(
+      { controllerHome, repository },
+      {
+        operation: 'repository_command_execute',
+        mode: 'auto',
+        input: { command: ['sleep', '0.25'] },
+        timeoutMs: 5_000,
+      },
+    );
+    await Promise.all([command, health]);
+    // If spawnSync blocked the loop, health ticks would stay near 0.
+    expect(healthTicks).toBeGreaterThanOrEqual(5);
+  });
+
+  test('receipt write failure does not flip a successful mutation to failed', async () => {
+    const { controllerHome, repository, repoRoot } = fixture();
+    // Force receipt dir into a non-writable file so write fails after mutation.
+    const receiptsParent = join(controllerHome, 'repositories', repository.repoId);
+    mkdirSync(receiptsParent, { recursive: true });
+    // writeFastReceipt uses repositoryControllerRoot/.../fast-receipts — poison via chmod if needed.
+    // Prefer exercising writeFastReceipt API directly for the failure path contract.
+    const written = writeFastReceipt('/definitely/not/a/writable/controller-home', {
+      repoId: repository.repoId,
+      checkoutId: repository.activeCheckoutId,
+      operation: 'apply_patch',
+      startedAt: new Date().toISOString(),
+      durationMs: 1,
+      outcome: 'succeeded',
+      changedPaths: ['src/sample.ts'],
+      repositoryChanged: true,
+    });
+    expect(written.persisted).toBe(false);
+    expect(written.warning).toBeTruthy();
+    expect(written.receipt?.outcome).toBe('succeeded');
+
+    const applied = await executeFast(
+      { controllerHome, repository },
+      {
+        operation: 'apply_patch',
+        mode: 'fast',
+        input: {
+          operations: [{
+            type: 'replace',
+            path: 'src/sample.ts',
+            old_text: 'export const answer = 42;',
+            new_text: 'export const answer = 77;',
+          }],
+          allowed_paths: ['src/**'],
+        },
+        allowedPaths: ['src/**'],
+        receiptMode: 'none',
+      },
+    );
+    expect(applied.ok).toBe(true);
+    expect(applied.operationSucceeded).toBe(true);
+    expect(applied.receipt).toBeUndefined();
+    expect(readFileSync(join(repoRoot, 'src/sample.ts'), 'utf8')).toContain('77');
+  });
+
+  test('identical request_id replays without re-applying mutation', async () => {
+    const { controllerHome, repository, repoRoot } = fixture();
+    const requestId = 'req-idempotent-patch-1';
+    const input = {
+      operations: [{
+        type: 'replace',
+        path: 'src/sample.ts',
+        old_text: 'export const answer = 42;',
+        new_text: 'export const answer = 55;',
+      }],
+      allowed_paths: ['src/**'],
+    };
+    const first = await executeFast(
+      { controllerHome, repository },
+      {
+        operation: 'apply_patch',
+        mode: 'fast',
+        input,
+        allowedPaths: ['src/**'],
+        requestId,
+      },
+    );
+    expect(first.ok).toBe(true);
+    expect(readFileSync(join(repoRoot, 'src/sample.ts'), 'utf8')).toContain('55');
+
+    // Revert file to prove replay does not re-run apply.
+    writeFileSync(join(repoRoot, 'src/sample.ts'), 'export const answer = 42;\n');
+    const second = await executeFast(
+      { controllerHome, repository },
+      {
+        operation: 'apply_patch',
+        mode: 'fast',
+        input,
+        allowedPaths: ['src/**'],
+        requestId,
+      },
+    );
+    expect(second.ok).toBe(true);
+    expect(second.result?.replayed).toBe(true);
+    expect(readFileSync(join(repoRoot, 'src/sample.ts'), 'utf8')).toContain('42');
+  });
+
+  test('out-of-scope patch is rejected before mutation and leaves file unchanged', async () => {
+    const { controllerHome, repository, repoRoot } = fixture();
+    const before = readFileSync(join(repoRoot, 'README.md'), 'utf8');
+    const denied = await executeFast(
+      { controllerHome, repository },
+      {
+        operation: 'apply_patch',
+        mode: 'fast',
+        input: {
+          operations: [{
+            type: 'replace',
+            path: 'README.md',
+            old_text: 'hello thin harness',
+            new_text: 'should not apply',
+          }],
+        },
+        allowedPaths: ['src/**'],
+      },
+    );
+    expect(denied.ok).toBe(false);
+    expect(readFileSync(join(repoRoot, 'README.md'), 'utf8')).toBe(before);
+  });
+
+  test('durable write lease blocks fast mutation gate', async () => {
+    const { controllerHome, repository } = fixture();
+    const leases = acquireExecutionLeases(
+      controllerHome,
+      repository.repoId,
+      'JOB-durable-writer-test',
+      [{ resourceKey: `workspace:${repository.activeCheckoutId}`, mode: 'write' }],
+      15_000,
+    );
+    expect(leases.acquired).toBe(true);
+    try {
+      const result = await executeFast(
+        { controllerHome, repository },
+        {
+          operation: 'apply_patch',
+          mode: 'fast',
+          input: {
+            operations: [{
+              type: 'replace',
+              path: 'src/sample.ts',
+              old_text: 'export const answer = 42;',
+              new_text: 'export const answer = 1;',
+            }],
+            allowed_paths: ['src/**'],
+          },
+          allowedPaths: ['src/**'],
+        },
+      );
+      expect(result.ok).toBe(false);
+      expect(result.decision.reasons.some((reason) => reason.includes('mutation_busy') || reason.includes('busy'))).toBe(true);
+      expect((result.result?.error as { code?: string } | undefined)?.code).toBe('MUTATION_BUSY');
+    } finally {
+      releaseExecutionLeases(controllerHome, repository.repoId, 'JOB-durable-writer-test');
+    }
+  });
+
+  test('stage_paths holds mutation gate until git completes', async () => {
+    const { controllerHome, repository, repoRoot } = fixture();
+    writeFileSync(join(repoRoot, 'src/sample.ts'), 'export const answer = 88;\n');
+    const owner = 'test-hold-gate';
+    const gate = await acquireCheckoutMutationGate({
+      controllerHome,
+      repoId: repository.repoId,
+      checkoutId: repository.activeCheckoutId,
+      repoRoot,
+      owner,
+      ttlMs: 10_000,
+    });
+    expect('acquired' in gate && gate.acquired).toBe(true);
+    try {
+      const competing = await executeFast(
+        { controllerHome, repository },
+        {
+          operation: 'stage_paths',
+          mode: 'fast',
+          input: { paths: ['src/sample.ts'] },
+        },
+      );
+      expect(competing.ok).toBe(false);
+      expect((competing.result?.error as { code?: string } | undefined)?.code).toBe('MUTATION_BUSY');
+    } finally {
+      if ('acquired' in gate && gate.acquired) {
+        releaseCheckoutMutationGate(controllerHome, repository.repoId, repository.activeCheckoutId, gate.gate.gateId);
+      }
+    }
+  });
+
+  test('AbortSignal cancels bounded process and marks cancelled', async () => {
+    const controller = new AbortController();
+    const pending = runBoundedProcess('sleep', ['2'], {
+      cwd: process.cwd(),
+      timeoutMs: 10_000,
+      maxOutputBytes: 1024,
+      signal: controller.signal,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    controller.abort();
+    const result = await pending;
+    expect(result.cancelled || result.ok === false).toBe(true);
+    expect(result.exitCode).not.toBe(0);
   });
 });
 
@@ -263,6 +515,11 @@ describe('Thin Harness batch', () => {
     expect(batch.receipt?.stepCount).toBe(4);
     expect(batch.receipt?.operation).toBe('batch');
     expect(executionJobCount(controllerHome, repository.repoId)).toBe(0);
+    // Parent receipt only — no N+1 child receipts for batch steps.
+    const receipts = listFastReceipts(controllerHome, repository.repoId, 50);
+    const batchReceipts = receipts.filter((entry) => entry.operation === 'batch');
+    expect(batchReceipts).toHaveLength(1);
+    expect(receipts.filter((entry) => entry.operation === 'read_file' || entry.operation === 'search')).toHaveLength(0);
 
     const failing = await executeRepositoryBatch(
       { controllerHome, repository },
@@ -315,10 +572,10 @@ describe('Thin Harness lightweight lanes', () => {
         includeLatencyBreakdown: true,
         maxConcurrency: 4,
         readLanes: [
-          { id: 'a', kind: 'search', input: { query: 'answer' } },
-          { id: 'b', kind: 'read_file', input: { path: 'README.md' } },
-          { id: 'c', kind: 'git_status', input: {} },
-          { id: 'd', kind: 'git_diff', input: {} },
+          { id: 'a', kind: 'run_short_command', input: { command: ['sleep', '0.2'] } },
+          { id: 'b', kind: 'run_short_command', input: { command: ['sleep', '0.2'] } },
+          { id: 'c', kind: 'run_short_command', input: { command: ['sleep', '0.2'] } },
+          { id: 'd', kind: 'run_short_command', input: { command: ['sleep', '0.2'] } },
         ],
       },
     );
@@ -331,8 +588,21 @@ describe('Thin Harness lightweight lanes', () => {
     expect(lanes.appliedByIntegrator).toBe(false);
     expect(readFileSync(join(repoRoot, 'README.md'), 'utf8')).toBe(before);
     expect(lanes.receipt?.laneCount).toBe(4);
-    // Wall time should reflect overlapping work (soft check; avoid flaking on tiny fixtures).
-    expect(elapsed).toBeLessThan(30_000);
+    // Parent receipt only.
+    const receipts = listFastReceipts(controllerHome, repository.repoId, 20);
+    expect(receipts.filter((entry) => entry.operation === 'read_lanes' || entry.operation === 'patch_proposal_validate')).toHaveLength(1);
+    // Deterministic concurrency: 4x200ms serial ≈800ms; concurrent should be well under serial sum.
+    expect(elapsed).toBeLessThan(700);
+    expect(lanes.concurrent).toBe(true);
+    // Overlapping start/finish windows.
+    const withTiming = lanes.readLanes.filter((lane) =>
+      lane.startedAtMs !== undefined && lane.finishedAtMs !== undefined);
+    expect(withTiming.length).toBe(4);
+    const overlaps = withTiming.some((left, i) =>
+      withTiming.some((right, j) => i !== j
+        && left.startedAtMs! < right.finishedAtMs!
+        && right.startedAtMs! < left.finishedAtMs!));
+    expect(overlaps).toBe(true);
   });
 
   test('patch proposal conflicts demote to analysis-only; integrator applies non-conflicting proposals', async () => {
@@ -424,6 +694,30 @@ describe('Thin Harness lightweight lanes', () => {
     expect(integrated.ok).toBe(true);
     expect(readFileSync(join(repoRoot, 'src/sample.ts'), 'utf8')).toContain('99');
     expect(executionJobCount(controllerHome, repository.repoId)).toBe(0);
+
+    // Integrator rejects stale base revision proposals.
+    const stale = await integratePatchProposals(
+      { controllerHome, repository },
+      [{
+        id: 'stale',
+        ok: true,
+        durationMs: 0,
+        readPaths: ['src/sample.ts'],
+        writePaths: ['src/sample.ts'],
+        proposedOperations: [{
+          type: 'replace',
+          path: 'src/sample.ts',
+          old_text: 'export const answer = 99;',
+          new_text: 'export const answer = 100;',
+        }],
+        proposalId: 'prop_stale',
+        baseRevision: '0000000000000000000000000000000000000000',
+        checkoutId: repository.activeCheckoutId,
+      }],
+      { allowedPaths: ['src/**'] },
+    );
+    expect(stale.ok).toBe(false);
+    expect(stale.applied[0]?.error).toContain('revision_changed');
   });
 
   test('one lane failure does not cancel others unless failFast', async () => {
