@@ -91,11 +91,12 @@
       "recommendedAgent": "codex",
       "notes": [
         "Automation turn 2: implementing one bounded stale-ref recovery and tiered evidence increment on clean main.",
-        "Completed selector-preference increment: stable search/submit selectors override cached refs, eliminating the initial snapshot and stale-ref risk when both are supplied. Focused iOS tests, type, runtime architecture, and MCP compatibility passed. Remaining T2 work: automatic stale-ref retry/recovery and measured tier escalation."
+        "Completed selector-preference increment: stable search/submit selectors override cached refs, eliminating the initial snapshot and stale-ref risk when both are supplied. Focused iOS tests, type, runtime architecture, and MCP compatibility passed. Remaining T2 work: automatic stale-ref retry/recovery and measured tier escalation.",
+        "Implemented and committed one-shot classified stale accessibility ref recovery for JD search at af68cee8bce75c870edf9f06cd6b978e34ace57c. Only ref/accessibility errors with stale/expired/missing/not-found semantics refresh one interactive snapshot and retry once; all other errors still failSession and close/fence ownership. Focused tests, type, runtime architecture and MCP compatibility passed. Remaining T2 work: exact-wait failure escalation to scoped/full snapshots and evidence-tier latency benchmarks."
       ],
       "runIds": [],
       "createdAt": "2026-07-20T15:31:27.625Z",
-      "updatedAt": "2026-07-20T17:06:02.492Z",
+      "updatedAt": "2026-07-20T20:05:34.909Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     },
     {
@@ -165,6 +166,6 @@
     }
   ],
   "createdAt": "2026-07-20T15:31:27.625Z",
-  "updatedAt": "2026-07-20T17:06:02.492Z",
+  "updatedAt": "2026-07-20T20:05:34.909Z",
   "repoId": "repo_123b7cf58b6b17b5cbe46a56"
 }
