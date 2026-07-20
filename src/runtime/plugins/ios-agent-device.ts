@@ -846,12 +846,21 @@ async function executeJdSearch(input: AssistantPluginActionExecutionInput): Prom
   const exactResultWait = Boolean(resultText || resultSelector);
   const resultScope = optionalString(input.args.result_scope);
   const snapshotDepth = batchInteger(input.args.snapshot_depth, 20, 1, 20);
+  const accessibilityEvidenceTier = exactResultWait
+    ? 'exact_wait'
+    : resultScope
+      ? 'scoped_snapshot'
+      : 'full_snapshot';
+  let initialAccessibilitySnapshot = false;
+  let nativeBatchRequests = 0;
+  let nativeBatchSteps = 0;
   try {
     // A caller may retain both a fast accessibility ref and a stable selector.
     // Prefer the selector because refs are snapshot-scoped and may be stale after
     // app foregrounding or navigation; fall back to the ref for compatibility.
     let searchTarget = optionalString(input.args.search_selector) ?? optionalString(input.args.search_target);
     if (!searchTarget) {
+      initialAccessibilitySnapshot = true;
       const initialSnapshot = await executeIosAgentDeviceAction(subActionInput(input, 'agent_device_snapshot', {
         interaction_id: interactionId,
         interactive: true,
@@ -889,6 +898,8 @@ async function executeJdSearch(input: AssistantPluginActionExecutionInput): Prom
       input: { target: searchTarget, text: query, delay_ms: 20 },
     };
     if (submitTarget) {
+      nativeBatchRequests = 1;
+      nativeBatchSteps = 2 + evidenceSteps.length;
       finalSnapshot = runSessionBatch(
         input,
         record,
@@ -900,6 +911,8 @@ async function executeJdSearch(input: AssistantPluginActionExecutionInput): Prom
         30_000,
       );
     } else {
+      nativeBatchRequests = 2;
+      nativeBatchSteps = 1 + evidenceSteps.length;
       // agent-device 0.19.3 exposes keyboard return only through the CLI
       // command, not the Node batch keyboard schema (status/dismiss only).
       runSessionBatch(input, record, prepareAgentDeviceBatch([fillStep], record), 20_000);
@@ -928,10 +941,13 @@ async function executeJdSearch(input: AssistantPluginActionExecutionInput): Prom
     runnerReadiness: 'verified_by_open',
     executionPlan: {
       relaunch: input.args.relaunch === true,
-      nativeBatchRequests: optionalString(input.args.submit_target) ? 1 : 2,
-      nativeBatchSteps: 4,
+      nativeBatchRequests,
+      nativeBatchSteps,
       exactResultWait,
-      fullAccessibilitySnapshot: !exactResultWait,
+      accessibilityEvidenceTier,
+      initialAccessibilitySnapshot,
+      accessibilitySnapshotRequests: (initialAccessibilitySnapshot ? 1 : 0) + (exactResultWait ? 0 : 1),
+      fullAccessibilitySnapshot: accessibilityEvidenceTier === 'full_snapshot',
       resultScope: resultScope ?? null,
       snapshotDepth: exactResultWait ? null : snapshotDepth,
     },

@@ -244,7 +244,11 @@ describe('optional agent-device iOS Simulator provider', () => {
     expect(steps[2]?.input).toEqual({ kind: 'text', text: '奶粉搜索结果', timeoutMs: 15_000 });
     expect(commands.some(({ argv }) => argv[1] === 'keyboard' && argv[2] === 'return')).toBe(false);
     expect((result.executionPlan as Record<string, unknown>).nativeBatchRequests).toBe(1);
+    expect((result.executionPlan as Record<string, unknown>).nativeBatchSteps).toBe(3);
     expect((result.executionPlan as Record<string, unknown>).exactResultWait).toBe(true);
+    expect((result.executionPlan as Record<string, unknown>).accessibilityEvidenceTier).toBe('exact_wait');
+    expect((result.executionPlan as Record<string, unknown>).initialAccessibilitySnapshot).toBe(false);
+    expect((result.executionPlan as Record<string, unknown>).accessibilitySnapshotRequests).toBe(0);
     expect((result.executionPlan as Record<string, unknown>).fullAccessibilitySnapshot).toBe(false);
     expect(commands.some(({ argv }) => argv[1] === 'close')).toBe(true);
   });
