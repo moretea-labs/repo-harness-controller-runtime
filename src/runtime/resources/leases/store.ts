@@ -9,7 +9,12 @@ import { markRepositoryProjectionDirty } from '../../projections/invalidation';
 import { touchSchedulerWakeSignal } from '../../control-plane/global-scheduler/wake-signal';
 import { claimsConflict } from '../claims/conflicts';
 import { appendRuntimeEvent } from '../../evidence/event-ledger';
-import type { ExecutionLease, LeaseAcquisitionResult } from './types';
+import type {
+  ExecutionLease,
+  LeaseAcquisitionOptions,
+  LeaseAcquisitionResult,
+  LeaseVisibility,
+} from './types';
 
 function leaseRoot(controllerHome: string, repoId: string): string {
   return join(repositoryControllerRoot(controllerHome, repoId), 'leases');
@@ -28,6 +33,45 @@ function nextFencingToken(controllerHome: string, repoId: string, resourceKey: s
   const value = Math.max(0, current.value) + 1;
   writeJsonAtomic(path, { value, resourceKey, updatedAt: new Date().toISOString() });
   return value;
+}
+
+function resolveSideEffects(options?: LeaseAcquisitionOptions, visibility?: LeaseVisibility): {
+  visibility: LeaseVisibility;
+  notifyScheduler: boolean;
+  invalidateProjection: boolean;
+  emitRuntimeEvent: boolean;
+} {
+  const vis = options?.visibility ?? visibility ?? 'durable';
+  const ephemeral = vis === 'ephemeral';
+  return {
+    visibility: vis,
+    notifyScheduler: options?.notifyScheduler ?? !ephemeral,
+    invalidateProjection: options?.invalidateProjection ?? !ephemeral,
+    emitRuntimeEvent: options?.emitRuntimeEvent ?? !ephemeral,
+  };
+}
+
+/** Instrumentation counters for Thin Harness metrics (process-local). */
+const leaseSideEffectMetrics = {
+  durableAcquireEvents: 0,
+  durableReleaseEvents: 0,
+  projectionDirtyMarks: 0,
+  schedulerWakes: 0,
+  ephemeralAcquires: 0,
+  ephemeralReleases: 0,
+};
+
+export function getLeaseSideEffectMetrics() {
+  return { ...leaseSideEffectMetrics };
+}
+
+export function resetLeaseSideEffectMetrics(): void {
+  leaseSideEffectMetrics.durableAcquireEvents = 0;
+  leaseSideEffectMetrics.durableReleaseEvents = 0;
+  leaseSideEffectMetrics.projectionDirtyMarks = 0;
+  leaseSideEffectMetrics.schedulerWakes = 0;
+  leaseSideEffectMetrics.ephemeralAcquires = 0;
+  leaseSideEffectMetrics.ephemeralReleases = 0;
 }
 
 export function listActiveLeases(controllerHome: string, repoId: string): ExecutionLease[] {
@@ -50,8 +94,14 @@ export function acquireExecutionLeases(
   repoId: string,
   ownerJobId: string,
   claims: ResourceClaimSpec[],
-  ttlMs = 30_000,
+  ttlMsOrOptions: number | LeaseAcquisitionOptions = 30_000,
 ): LeaseAcquisitionResult {
+  const options: LeaseAcquisitionOptions = typeof ttlMsOrOptions === 'number'
+    ? { ttlMs: ttlMsOrOptions }
+    : ttlMsOrOptions;
+  const ttlMs = options.ttlMs ?? 30_000;
+  const effects = resolveSideEffects(options);
+
   return withControllerLock(controllerHome, { scope: 'repository', repoId }, `lease-acquire:${ownerJobId}`, () => {
     const active = listActiveLeases(controllerHome, repoId).filter((lease) => lease.ownerJobId !== ownerJobId);
     const blockers = claims.flatMap((claim) => active
@@ -71,23 +121,40 @@ export function acquireExecutionLeases(
       acquiredAt: timestamp,
       expiresAt,
       heartbeatAt: timestamp,
+      visibility: effects.visibility,
     }));
     for (const lease of leases) {
       writeJsonAtomic(leasePath(controllerHome, repoId, lease.leaseId), lease);
-      appendRuntimeEvent(controllerHome, {
-        repoId,
-        entityType: 'lease',
-        entityId: lease.leaseId,
-        eventType: 'lease_acquired',
-        requestId: ownerJobId,
-        correlationId: ownerJobId,
-        revision: lease.fencingToken,
-        data: { resourceKey: lease.resourceKey, mode: lease.mode, expiresAt: lease.expiresAt },
-      });
+      if (effects.emitRuntimeEvent) {
+        appendRuntimeEvent(controllerHome, {
+          repoId,
+          entityType: 'lease',
+          entityId: lease.leaseId,
+          eventType: 'lease_acquired',
+          requestId: ownerJobId,
+          correlationId: ownerJobId,
+          revision: lease.fencingToken,
+          data: {
+            resourceKey: lease.resourceKey,
+            mode: lease.mode,
+            expiresAt: lease.expiresAt,
+            visibility: lease.visibility,
+          },
+        });
+        leaseSideEffectMetrics.durableAcquireEvents += 1;
+      } else {
+        leaseSideEffectMetrics.ephemeralAcquires += 1;
+      }
     }
     if (leases.length > 0) {
-      markRepositoryProjectionDirty(controllerHome, repoId, `leases-acquired:${ownerJobId}`);
-      touchSchedulerWakeSignal(controllerHome, `leases-acquired:${ownerJobId}`);
+      if (effects.invalidateProjection) {
+        markRepositoryProjectionDirty(controllerHome, repoId, `leases-acquired:${ownerJobId}`);
+        leaseSideEffectMetrics.projectionDirtyMarks += 1;
+      }
+      if (effects.notifyScheduler) {
+        touchSchedulerWakeSignal(controllerHome, `leases-acquired:${ownerJobId}`);
+        leaseSideEffectMetrics.schedulerWakes += 1;
+      }
     }
     return { acquired: true, leases, blockers: [] };
   }, 10_000);
@@ -128,29 +195,45 @@ export function releaseExecutionLeases(
   repoId: string,
   ownerJobId: string,
   expected?: ExpectedLeaseRef[],
+  options?: Pick<LeaseAcquisitionOptions, 'visibility' | 'notifyScheduler' | 'invalidateProjection' | 'emitRuntimeEvent'>,
 ): void {
   withControllerLock(controllerHome, { scope: 'repository', repoId }, `lease-release:${ownerJobId}`, () => {
     const expectedTokens = expectedLeaseMap(expected);
     let released = false;
+    let visibility: LeaseVisibility = options?.visibility ?? 'durable';
     for (const lease of listActiveLeases(controllerHome, repoId)) {
       if (lease.ownerJobId !== ownerJobId) continue;
       if (expectedTokens && expectedTokens.get(lease.leaseId) !== lease.fencingToken) continue;
+      visibility = lease.visibility ?? visibility;
       removeFile(leasePath(controllerHome, repoId, lease.leaseId));
-      appendRuntimeEvent(controllerHome, {
-        repoId,
-        entityType: 'lease',
-        entityId: lease.leaseId,
-        eventType: 'lease_released',
-        requestId: ownerJobId,
-        correlationId: ownerJobId,
-        revision: lease.fencingToken,
-        data: { resourceKey: lease.resourceKey, mode: lease.mode },
-      });
+      const effects = resolveSideEffects(options, lease.visibility);
+      if (effects.emitRuntimeEvent) {
+        appendRuntimeEvent(controllerHome, {
+          repoId,
+          entityType: 'lease',
+          entityId: lease.leaseId,
+          eventType: 'lease_released',
+          requestId: ownerJobId,
+          correlationId: ownerJobId,
+          revision: lease.fencingToken,
+          data: { resourceKey: lease.resourceKey, mode: lease.mode, visibility: lease.visibility },
+        });
+        leaseSideEffectMetrics.durableReleaseEvents += 1;
+      } else {
+        leaseSideEffectMetrics.ephemeralReleases += 1;
+      }
       released = true;
     }
     if (released) {
-      markRepositoryProjectionDirty(controllerHome, repoId, `leases-released:${ownerJobId}`);
-      touchSchedulerWakeSignal(controllerHome, `leases-released:${ownerJobId}`);
+      const effects = resolveSideEffects(options, visibility);
+      if (effects.invalidateProjection) {
+        markRepositoryProjectionDirty(controllerHome, repoId, `leases-released:${ownerJobId}`);
+        leaseSideEffectMetrics.projectionDirtyMarks += 1;
+      }
+      if (effects.notifyScheduler) {
+        touchSchedulerWakeSignal(controllerHome, `leases-released:${ownerJobId}`);
+        leaseSideEffectMetrics.schedulerWakes += 1;
+      }
     }
   }, 10_000);
 }

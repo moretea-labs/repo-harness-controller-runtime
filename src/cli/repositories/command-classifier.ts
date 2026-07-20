@@ -24,6 +24,8 @@ const READ_ONLY_PROGRAMS = new Set([
   'sort', 'uniq', 'cut', 'tr', 'stat', 'file', 'which', 'whereis', 'basename',
   'dirname', 'printf', 'echo', 'true', 'false', 'ps', 'pgrep', 'date', 'uname',
   'id', 'whoami', 'du', 'df', 'realpath', 'readlink', 'jq', 'shasum', 'sha256sum',
+  // Pure delay/wait utilities do not mutate the repository; used by Fast Path concurrency tests.
+  'sleep',
 ]);
 
 const READ_ONLY_GIT_SUBCOMMANDS = new Set([

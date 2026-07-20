@@ -30,6 +30,9 @@ const required = [
   'src/runtime/execution/jobs/store.ts',
   'src/runtime/execution/jobs/receipt-store.ts',
   'src/runtime/execution/workers/worker-entry.ts',
+  'src/runtime/execution/thin-harness/index.ts',
+  'src/runtime/execution/thin-harness/execution-router.ts',
+  'docs/architecture/current/thin-harness-v1.md',
   'src/runtime/resources/leases/store.ts',
   'src/runtime/evidence/event-ledger.ts',
   'src/runtime/evidence/evidence-store.ts',
@@ -79,6 +82,10 @@ requireText('src/runtime/execution/jobs/store.ts', "'recent.json'");
 requireText('src/runtime/execution/jobs/store.ts', "'requests'");
 requireText('src/runtime/execution/jobs/store.ts', 'transitionExecutionJobFromWorker');
 requireText('src/runtime/execution/jobs/receipt-store.ts', "state: 'started' | 'completed'");
+requireText('src/runtime/execution/thin-harness/execution-router.ts', "mode: 'fast'");
+requireText('src/runtime/execution/thin-harness/execution-router.ts', 'routeExecution');
+requireText('src/runtime/execution/thin-harness/types.ts', 'FastExecutionReceipt');
+requireText('docs/architecture/current/thin-harness-v1.md', 'Default to direct Fast Path execution');
 requireText('src/runtime/resources/leases/types.ts', 'fencingToken: number');
 requireText('src/runtime/resources/leases/store.ts', 'assertFencingToken');
 requireText('src/runtime/resources/leases/store.ts', 'expectedLeaseMap');
