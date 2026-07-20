@@ -699,16 +699,18 @@ describe("MCP controller profile", () => {
       expect(coreNames).toEqual(expect.arrayContaining(["rh_status", "rh_inbox", "rh_context", "rh_work", "repository_list"]));
       expect(coreNames).toContain("create_campaign");
       expect(coreNames.length).toBeGreaterThanOrEqual(100);
-      // Keep the public controller surface explicit and bounded; intentional additions must update this contract.
-      expect(coreNames.length).toBe(134);
-      expect(exposedControllerToolDefinitions(advanced).map((tool) => tool.name)).toEqual(coreNames);
-      expect(exposedControllerToolDefinitions(advanced).map((tool) => tool.name)).toContain("create_campaign");
-      expect(exposedControllerToolDefinitions(advanced).map((tool) => tool.name)).toContain("submit_campaign_review");
-      expect(exposedControllerToolDefinitions(advanced).map((tool) => tool.name)).toContain("finish_task_run");
-      expect(exposedControllerToolDefinitions(advanced).map((tool) => tool.name)).toContain("list_plugins");
-      expect(exposedControllerToolDefinitions(advanced).map((tool) => tool.name)).toContain("get_plugin");
-      expect(exposedControllerToolDefinitions(advanced).map((tool) => tool.name)).toContain("plugin_action_execute");
-      expect(exposedControllerToolDefinitions(full).length).toBeGreaterThan(100);
+      // Keep the public Controller surface within the declared 128-tool schema budget.
+      expect(coreNames.length).toBe(128);
+      const advancedNames = exposedControllerToolDefinitions(advanced).map((tool) => tool.name);
+      const fullNames = exposedControllerToolDefinitions(full).map((tool) => tool.name);
+      expect(advancedNames).toEqual(coreNames);
+      expect(advancedNames).toContain("create_campaign");
+      expect(advancedNames).toContain("submit_campaign_review");
+      expect(advancedNames).toContain("finish_task_run");
+      expect(advancedNames).toContain("list_plugins");
+      expect(advancedNames).toContain("get_plugin");
+      expect(advancedNames).toContain("plugin_action_execute");
+      expect(fullNames.length).toBeGreaterThan(coreNames.length);
 
       let daemonPid: number | undefined;
       try {

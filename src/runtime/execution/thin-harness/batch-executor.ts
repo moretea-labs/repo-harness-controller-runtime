@@ -5,7 +5,12 @@ import { executeFast } from './fast-executor';
 import { LatencyTrace } from './latency-trace';
 import { writeFastReceipt } from './fast-receipt';
 import { mutationGateBusyMessage, withCheckoutMutationGate } from './mutation-gate';
-import { beginFastRequest, completeFastRequest, heartbeatFastRequest } from './request-ledger';
+import {
+  beginFastRequest,
+  bindFastRequestBaseSnapshot,
+  completeFastRequest,
+  heartbeatFastRequest,
+} from './request-ledger';
 import { hashRequestInput } from './fast-receipt';
 import {
   FAST_BATCH_MAX_STEPS,
@@ -456,7 +461,26 @@ export async function executeRepositoryBatch(
         },
         async (gate, helpers) => {
           if (ledger?.kind === 'acquired') {
-            heartbeatFastRequest(ctx.controllerHome, ledger.entry, batchDeadlineMs + 15_000);
+            const baseSnapshot = JSON.stringify({
+              head: gate.baseHead,
+              statusHash: gate.baseStatusHash,
+            });
+            const bound = bindFastRequestBaseSnapshot(
+              ctx.controllerHome,
+              ledger.entry,
+              baseSnapshot,
+            );
+            if (!bound.ok) {
+              throw new Error(`LEDGER_BASE_SNAPSHOT_FAILED: ${bound.warning ?? bound.code ?? 'unknown error'}`);
+            }
+            const beat = heartbeatFastRequest(
+              ctx.controllerHome,
+              bound.entry ?? ledger.entry,
+              batchDeadlineMs + 15_000,
+            );
+            if (!beat.ok) {
+              throw new Error(`LEDGER_HEARTBEAT_FAILED: ${beat.warning ?? beat.code ?? 'unknown error'}`);
+            }
           }
           return runSteps(gate, helpers);
         },

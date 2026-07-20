@@ -17,6 +17,7 @@ import {
 } from 'fs';
 import { join } from 'path';
 import { repositoryControllerRoot } from '../../../cli/repositories/controller-home';
+import { withControllerLock } from '../../../cli/repositories/locks';
 
 export type FastRequestLedgerStatus =
   | 'reserved'
@@ -94,6 +95,21 @@ function entryFileName(checkoutId: string, requestId: string): string {
 
 function entryPath(controllerHome: string, repoId: string, checkoutId: string, requestId: string): string {
   return join(ledgerDir(controllerHome, repoId), entryFileName(checkoutId, requestId));
+}
+
+function withLedgerLock<T>(
+  controllerHome: string,
+  repoId: string,
+  owner: string,
+  operation: () => T,
+): T {
+  return withControllerLock(
+    controllerHome,
+    { scope: 'global', resource: `fast-request-ledger-${repoId}` },
+    `fast-request-ledger:${owner}`,
+    operation,
+    10_000,
+  );
 }
 
 function readEntry(path: string): FastRequestLedgerEntry | undefined {
@@ -276,51 +292,111 @@ export function beginFastRequest(input: {
 }
 
 /**
+ * Bind the lease-owned base snapshot before the first mutation.
+ * The update is serialized with heartbeat/completion so stale writers cannot
+ * overwrite a terminal ledger state.
+ */
+export function bindFastRequestBaseSnapshot(
+  controllerHome: string,
+  expected: FastRequestLedgerEntry,
+  baseSnapshot: string,
+): LedgerCompleteResult {
+  return withLedgerLock(controllerHome, expected.repoId, `${expected.requestId}:bind`, () => {
+    try {
+      const path = entryPath(controllerHome, expected.repoId, expected.checkoutId, expected.requestId);
+      const current = readEntry(path);
+      if (!current) {
+        return { ok: false, code: 'LEDGER_MISSING', warning: 'ledger entry missing while binding base snapshot' };
+      }
+      if (
+        current.entryId !== expected.entryId
+        || current.owner !== expected.owner
+        || current.inputHash !== expected.inputHash
+      ) {
+        return {
+          ok: false,
+          code: 'LEDGER_STALE_OWNER',
+          entry: current,
+          warning: 'LEDGER_STALE_OWNER: base snapshot refused for non-matching entry',
+        };
+      }
+      if (!isActiveStatus(current.status)) {
+        return { ok: false, code: 'LEDGER_CAS_FAILED', entry: current, warning: 'ledger is already terminal' };
+      }
+      if (current.baseSnapshot && current.baseSnapshot !== baseSnapshot) {
+        return {
+          ok: false,
+          code: 'LEDGER_CAS_FAILED',
+          entry: current,
+          warning: 'ledger base snapshot is already bound to a different workspace state',
+        };
+      }
+      const next: FastRequestLedgerEntry = {
+        ...current,
+        status: 'executing',
+        baseSnapshot,
+        heartbeatAt: new Date().toISOString(),
+      };
+      writeEntryAtomic(path, next);
+      return { ok: true, entry: next };
+    } catch (error) {
+      return {
+        ok: false,
+        code: 'LEDGER_WRITE_FAILED',
+        warning: error instanceof Error ? error.message : String(error),
+      };
+    }
+  });
+}
+
+/**
  * Heartbeat ledger entry — aligned with mutation ownership TTL.
- * CAS on entryId + owner; never throws.
+ * The read/check/write sequence is protected by a dedicated ledger lock.
  */
 export function heartbeatFastRequest(
   controllerHome: string,
   expected: FastRequestLedgerEntry,
   ttlMs?: number,
 ): LedgerCompleteResult {
-  try {
-    const path = entryPath(controllerHome, expected.repoId, expected.checkoutId, expected.requestId);
-    const current = readEntry(path);
-    if (!current) {
-      return { ok: false, code: 'LEDGER_MISSING', warning: 'ledger entry missing at heartbeat' };
-    }
-    if (
-      current.entryId !== expected.entryId
-      || current.owner !== expected.owner
-      || current.inputHash !== expected.inputHash
-    ) {
+  return withLedgerLock(controllerHome, expected.repoId, `${expected.requestId}:heartbeat`, () => {
+    try {
+      const path = entryPath(controllerHome, expected.repoId, expected.checkoutId, expected.requestId);
+      const current = readEntry(path);
+      if (!current) {
+        return { ok: false, code: 'LEDGER_MISSING', warning: 'ledger entry missing at heartbeat' };
+      }
+      if (
+        current.entryId !== expected.entryId
+        || current.owner !== expected.owner
+        || current.inputHash !== expected.inputHash
+      ) {
+        return {
+          ok: false,
+          code: 'LEDGER_STALE_OWNER',
+          entry: current,
+          warning: 'LEDGER_STALE_OWNER: heartbeat refused for non-matching entry',
+        };
+      }
+      if (!isActiveStatus(current.status)) {
+        return { ok: true, entry: current };
+      }
+      const extendMs = Math.max(30_000, ttlMs ?? DEFAULT_LEDGER_TTL_MS);
+      const next: FastRequestLedgerEntry = {
+        ...current,
+        status: current.status === 'reserved' ? 'executing' : current.status,
+        heartbeatAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + extendMs).toISOString(),
+      };
+      writeEntryAtomic(path, next);
+      return { ok: true, entry: next };
+    } catch (error) {
       return {
         ok: false,
-        code: 'LEDGER_STALE_OWNER',
-        entry: current,
-        warning: 'LEDGER_STALE_OWNER: heartbeat refused for non-matching entry',
+        code: 'LEDGER_WRITE_FAILED',
+        warning: error instanceof Error ? error.message : String(error),
       };
     }
-    if (!isActiveStatus(current.status)) {
-      return { ok: true, entry: current };
-    }
-    const extendMs = Math.max(30_000, ttlMs ?? DEFAULT_LEDGER_TTL_MS);
-    const next: FastRequestLedgerEntry = {
-      ...current,
-      status: current.status === 'reserved' ? 'executing' : current.status,
-      heartbeatAt: new Date().toISOString(),
-      expiresAt: new Date(Date.now() + extendMs).toISOString(),
-    };
-    writeEntryAtomic(path, next);
-    return { ok: true, entry: next };
-  } catch (error) {
-    return {
-      ok: false,
-      code: 'LEDGER_WRITE_FAILED',
-      warning: error instanceof Error ? error.message : String(error),
-    };
-  }
+  });
 }
 
 /**
@@ -340,64 +416,66 @@ export function completeFastRequest(
     resultSnapshot?: string;
   },
 ): LedgerCompleteResult {
-  try {
-    const path = entryPath(controllerHome, expected.repoId, expected.checkoutId, expected.requestId);
-    const current = readEntry(path);
-    if (!current) {
-      return { ok: false, code: 'LEDGER_MISSING', warning: 'ledger entry missing at completion' };
-    }
-    if (
-      current.entryId !== expected.entryId
-      || current.owner !== expected.owner
-      || current.inputHash !== expected.inputHash
-    ) {
-      return {
-        ok: false,
-        code: 'LEDGER_STALE_OWNER',
-        entry: current,
-        warning: 'LEDGER_STALE_OWNER: current entry does not match expected owner/entryId/inputHash',
-      };
-    }
-    if (!isActiveStatus(current.status)) {
-      // Already terminal — do not overwrite succeeded with failed from late caller.
-      if (current.status === 'succeeded' && update.status !== 'succeeded') {
+  return withLedgerLock(controllerHome, expected.repoId, `${expected.requestId}:complete`, () => {
+    try {
+      const path = entryPath(controllerHome, expected.repoId, expected.checkoutId, expected.requestId);
+      const current = readEntry(path);
+      if (!current) {
+        return { ok: false, code: 'LEDGER_MISSING', warning: 'ledger entry missing at completion' };
+      }
+      if (
+        current.entryId !== expected.entryId
+        || current.owner !== expected.owner
+        || current.inputHash !== expected.inputHash
+      ) {
         return {
           ok: false,
           code: 'LEDGER_STALE_OWNER',
           entry: current,
-          warning: 'LEDGER_STALE_OWNER: refusing to overwrite terminal succeeded entry',
+          warning: 'LEDGER_STALE_OWNER: current entry does not match expected owner/entryId/inputHash',
         };
       }
-      return { ok: true, entry: current };
-    }
+      if (!isActiveStatus(current.status)) {
+        // Already terminal — do not overwrite succeeded with failed from a late caller.
+        if (current.status === 'succeeded' && update.status !== 'succeeded') {
+          return {
+            ok: false,
+            code: 'LEDGER_STALE_OWNER',
+            entry: current,
+            warning: 'LEDGER_STALE_OWNER: refusing to overwrite terminal succeeded entry',
+          };
+        }
+        return { ok: true, entry: current };
+      }
 
-    const next: FastRequestLedgerEntry = {
-      ...current,
-      status: update.status,
-      finishedAt: new Date().toISOString(),
-      heartbeatAt: new Date().toISOString(),
-      resultRef: update.resultRef,
-      resultSummary: update.resultSummary?.slice(0, 2_048),
-      error: update.error?.slice(0, 1_024),
-      receiptExecutionId: update.receiptExecutionId,
-      resultSnapshot: update.resultSnapshot,
-    };
-    writeEntryAtomic(path, next);
-    return { ok: true, entry: next };
-  } catch (error) {
-    return {
-      ok: false,
-      code: 'LEDGER_WRITE_FAILED',
-      warning: error instanceof Error ? error.message : String(error),
-    };
-  }
+      const next: FastRequestLedgerEntry = {
+        ...current,
+        status: update.status,
+        finishedAt: new Date().toISOString(),
+        heartbeatAt: new Date().toISOString(),
+        resultRef: update.resultRef,
+        resultSummary: update.resultSummary?.slice(0, 2_048),
+        error: update.error?.slice(0, 1_024),
+        receiptExecutionId: update.receiptExecutionId,
+        resultSnapshot: update.resultSnapshot,
+      };
+      writeEntryAtomic(path, next);
+      return { ok: true, entry: next };
+    } catch (error) {
+      return {
+        ok: false,
+        code: 'LEDGER_WRITE_FAILED',
+        warning: error instanceof Error ? error.message : String(error),
+      };
+    }
+  });
 }
 
 /**
  * Reconcile a stale active/unknown entry using workspace evidence.
  * Never auto-retries when execution cannot be proven incomplete.
  */
-export function reconcileFastRequest(input: {
+function reconcileFastRequestUnlocked(input: {
   controllerHome: string;
   entry: FastRequestLedgerEntry;
   currentSnapshot?: string;
@@ -483,6 +561,17 @@ export function reconcileFastRequest(input: {
   }
 
   return { entry: next, verdict, notes, autoRetriable };
+}
+
+export function reconcileFastRequest(
+  input: Parameters<typeof reconcileFastRequestUnlocked>[0],
+): LedgerReconcileResult {
+  return withLedgerLock(
+    input.controllerHome,
+    input.entry.repoId,
+    `${input.entry.requestId}:reconcile`,
+    () => reconcileFastRequestUnlocked(input),
+  );
 }
 
 export function readFastRequest(

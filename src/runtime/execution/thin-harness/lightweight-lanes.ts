@@ -8,6 +8,7 @@ import { writeFastReceipt } from './fast-receipt';
 import {
   createServerPatchProposal,
   markServerPatchProposalApplied,
+  readServerPatchProposal,
   validateServerPatchProposalForApply,
   type ServerPatchProposal,
 } from './proposal-store';
@@ -461,23 +462,40 @@ export async function integratePatchProposals(
   const receiptIds: string[] = [];
   const continueOnError = options.continueOnError === true;
 
-  const applyable = proposals.filter(
-    (entry) => !entry.analysisOnly && entry.ok && entry.proposalId && (entry.proposedOperations?.length ?? 0) > 0,
+  const requested = proposals.filter(
+    (entry) => !entry.analysisOnly && entry.ok && entry.proposalId,
+  );
+  const serverCandidates = requested.map((entry) => ({
+    entry,
+    server: readServerPatchProposal(
+      ctx.controllerHome,
+      ctx.repository.repoId,
+      entry.proposalId!,
+    ),
+  }));
+  const applyable = serverCandidates.filter(
+    (candidate): candidate is { entry: PatchProposalValidateResult; server: ServerPatchProposal } =>
+      Boolean(candidate.server && candidate.server.operations.length > 0),
+  );
+  const serverByProposalId = new Map(
+    serverCandidates
+      .filter((candidate): candidate is { entry: PatchProposalValidateResult; server: ServerPatchProposal } => Boolean(candidate.server))
+      .map((candidate) => [candidate.entry.proposalId!, candidate.server]),
   );
 
-  // Re-run conflict detection before any apply.
+  // Re-run conflict detection from trusted server records, not caller-supplied paths.
   const recheck = detectPatchProposalConflicts(
-    applyable.map((entry) => ({
+    applyable.map(({ entry, server }) => ({
       id: entry.id,
-      readPaths: entry.readPaths,
-      writePaths: entry.writePaths,
-      proposedOperations: entry.proposedOperations,
+      readPaths: server.readPaths,
+      writePaths: server.writePaths,
+      proposedOperations: server.operations,
     })),
   );
   const conflicted = new Set(recheck.flatMap((entry) => entry.laneIds));
 
-  const writePaths = [...new Set(applyable.flatMap((entry) => entry.writePaths))];
-  if (applyable.length === 0) {
+  const writePaths = [...new Set(applyable.flatMap(({ server }) => server.writePaths))];
+  if (requested.length === 0) {
     return { ok: false, applied: [], receiptIds: [] };
   }
 
@@ -501,6 +519,22 @@ export async function integratePatchProposals(
       },
     },
     async (gate, helpers) => {
+      // Validate every candidate against the same full workspace snapshot before
+      // the first mutation. Later sequential applies recheck only relevant paths,
+      // so one non-conflicting proposal does not invalidate the next via statusHash.
+      const prevalidated = new Map<string, Awaited<ReturnType<typeof validateServerPatchProposalForApply>>>();
+      for (const { entry } of applyable) {
+        helpers.assert();
+        prevalidated.set(entry.proposalId!, await validateServerPatchProposalForApply({
+          controllerHome: ctx.controllerHome,
+          repoId: ctx.repository.repoId,
+          checkoutId: ctx.repository.activeCheckoutId,
+          repoRoot: ctx.repository.canonicalRoot,
+          proposalId: entry.proposalId!,
+          signal: helpers.signal,
+        }));
+      }
+
       for (const proposal of proposals) {
         if (proposal.analysisOnly || !proposal.ok || !proposal.proposalId) {
           applied.push({
@@ -522,6 +556,31 @@ export async function integratePatchProposals(
           continue;
         }
 
+        const stored = serverByProposalId.get(proposal.proposalId);
+        if (!stored) {
+          applied.push({
+            proposalId: proposal.proposalId,
+            ok: false,
+            changedPaths: [],
+            error: 'PROPOSAL_NOT_FOUND: server proposal record missing',
+          });
+          if (!continueOnError) break;
+          continue;
+        }
+        const initialValidation = prevalidated.get(proposal.proposalId);
+        if (!initialValidation?.ok) {
+          applied.push({
+            proposalId: proposal.proposalId,
+            ok: false,
+            changedPaths: [],
+            error: initialValidation
+              ? `${initialValidation.code}: ${initialValidation.message}`
+              : 'PROPOSAL_NOT_PREVALIDATED',
+          });
+          if (!continueOnError) break;
+          continue;
+        }
+
         helpers.assert();
         const validation = await validateServerPatchProposalForApply({
           controllerHome: ctx.controllerHome,
@@ -530,6 +589,7 @@ export async function integratePatchProposals(
           repoRoot: ctx.repository.canonicalRoot,
           proposalId: proposal.proposalId,
           signal: helpers.signal,
+          skipWorkspaceSnapshot: true,
         });
         if (!validation.ok) {
           applied.push({

@@ -5,6 +5,10 @@ import { join } from 'path';
 import { spawnSync } from 'child_process';
 import { ensureControllerHome } from '../../src/cli/repositories/controller-home';
 import { registerRepository } from '../../src/cli/repositories/registry';
+import {
+  callRepositoryTool,
+  repositoryToolDefinitions,
+} from '../../src/cli/mcp/repository-tools';
 import { listLocalBridgeJobSnapshots } from '../../src/cli/local-bridge/job-store';
 import {
   acquireCheckoutMutationGate,
@@ -1025,6 +1029,53 @@ describe('Thin Harness lightweight lanes', () => {
   });
 });
 
+describe('Thin Harness MCP workbench consolidation', () => {
+  test('keeps the stable tool surface bounded while preserving route and batch operations', async () => {
+    const retired = new Set([
+      'repository_batch_execute',
+      'repository_lanes_execute',
+      'repository_lanes_integrate',
+      'repository_fast_receipt_get',
+      'repository_fast_receipt_list',
+      'repository_execution_route',
+    ]);
+    expect(repositoryToolDefinitions.some((tool) => tool.name === 'repository_workbench')).toBe(true);
+    expect(repositoryToolDefinitions.some((tool) => retired.has(tool.name))).toBe(false);
+
+    const { controllerHome, repository } = fixture();
+    const routed = await callRepositoryTool(controllerHome, 'repository_workbench', {
+      repo_id: repository.repoId,
+      checkout_id: repository.activeCheckoutId,
+      operation: 'execution_route',
+      payload: { operation: 'git_status' },
+    });
+    expect(routed?.isError).not.toBe(true);
+    const routedPayload = routed?.structuredContent as {
+      decision?: { mode?: string };
+    } | undefined;
+    expect(routedPayload?.decision?.mode).toBe('fast');
+
+    const batch = await callRepositoryTool(controllerHome, 'repository_workbench', {
+      repo_id: repository.repoId,
+      checkout_id: repository.activeCheckoutId,
+      operation: 'batch_execute',
+      payload: {
+        steps: [
+          { kind: 'read_file', input: { path: 'README.md' } },
+          { kind: 'git_status', input: {} },
+        ],
+      },
+    });
+    expect(batch?.isError).not.toBe(true);
+    const batchPayload = batch?.structuredContent as {
+      mode?: string;
+      steps?: unknown[];
+    } | undefined;
+    expect(batchPayload?.mode).toBe('fast');
+    expect(Array.isArray(batchPayload?.steps)).toBe(true);
+  });
+});
+
 describe('Thin Harness compatibility guards', () => {
   test('auto is default when mode omitted; high-risk never wrongly enters fast', () => {
     expect(routeExecution({ operation: 'git_status' }).mode).toBe('fast');
@@ -1535,5 +1586,162 @@ describe('Thin Harness V1 close-out correctness', () => {
     expect(samples).toBeGreaterThan(0);
     // Soft bound: async path should not stall event loop for multi-second stretches.
     expect(maxLag).toBeLessThan(2_000);
+  });
+
+  test('ledger terminal state survives late heartbeat and base snapshot is immutable', async () => {
+    const {
+      beginFastRequest,
+      bindFastRequestBaseSnapshot,
+      completeFastRequest,
+      heartbeatFastRequest,
+      readFastRequest,
+    } = await import('../../src/runtime/execution/thin-harness/request-ledger');
+    const { controllerHome, repository } = fixture();
+    const begun = beginFastRequest({
+      controllerHome,
+      repoId: repository.repoId,
+      checkoutId: repository.activeCheckoutId,
+      requestId: 'ledger-terminal-heartbeat',
+      inputHash: 'ledger-terminal-hash',
+      operation: 'apply_patch',
+      owner: 'ledger-terminal-owner',
+    });
+    expect(begun.kind).toBe('acquired');
+    if (begun.kind !== 'acquired') return;
+
+    const bound = bindFastRequestBaseSnapshot(controllerHome, begun.entry, 'lease-snapshot-a');
+    expect(bound.ok).toBe(true);
+    const completed = completeFastRequest(controllerHome, bound.entry ?? begun.entry, {
+      status: 'succeeded',
+      resultSummary: 'done',
+    });
+    expect(completed.ok).toBe(true);
+
+    const lateHeartbeat = heartbeatFastRequest(controllerHome, begun.entry, 30_000);
+    expect(lateHeartbeat.ok).toBe(true);
+    const stored = readFastRequest(
+      controllerHome,
+      repository.repoId,
+      repository.activeCheckoutId,
+      'ledger-terminal-heartbeat',
+    );
+    expect(stored?.status).toBe('succeeded');
+    expect(stored?.baseSnapshot).toBe('lease-snapshot-a');
+
+    const conflictingBind = bindFastRequestBaseSnapshot(
+      controllerHome,
+      begun.entry,
+      'lease-snapshot-b',
+    );
+    expect(conflictingBind.ok).toBe(false);
+  });
+
+  test('savepoint restores broken symlink and removes created parent directories', async () => {
+    const {
+      createWorkspaceSavepoint,
+      discardWorkspaceSavepoint,
+      restoreWorkspaceSavepoint,
+      verifySavepointRestored,
+    } = await import('../../src/runtime/execution/thin-harness/workspace-savepoint');
+    const { symlinkSync, readlinkSync } = await import('fs');
+    const { controllerHome, repository, repoRoot } = fixture();
+    const brokenPath = join(repoRoot, 'src', 'broken-link');
+    symlinkSync('target-that-does-not-exist', brokenPath);
+
+    const savepoint = createWorkspaceSavepoint({
+      controllerHome,
+      repoId: repository.repoId,
+      repoRoot,
+      paths: ['src/broken-link', 'generated/deep/file.txt'],
+    });
+    rmSync(brokenPath, { force: true });
+    writeFileSync(brokenPath, 'not-a-link\n');
+    mkdirSync(join(repoRoot, 'generated', 'deep'), { recursive: true });
+    writeFileSync(join(repoRoot, 'generated', 'deep', 'file.txt'), 'created\n');
+
+    const restored = restoreWorkspaceSavepoint(savepoint);
+    const verified = verifySavepointRestored(repoRoot, savepoint);
+    expect(restored.ok).toBe(true);
+    expect(verified.ok).toBe(true);
+    expect(readlinkSync(brokenPath)).toBe('target-that-does-not-exist');
+    expect(existsSync(join(repoRoot, 'generated'))).toBe(false);
+    discardWorkspaceSavepoint(savepoint);
+  });
+
+  test('integrator applies two non-conflicting server proposals from one base snapshot', async () => {
+    const { controllerHome, repository, repoRoot } = fixture();
+    writeFileSync(join(repoRoot, 'src', 'other.ts'), 'export const other = 1;\n');
+    git(repoRoot, ['add', 'src/other.ts']);
+    git(repoRoot, ['commit', '-m', 'add-other']);
+
+    const lanes = await executeLightweightLanes(
+      { controllerHome, repository },
+      {
+        repoId: repository.repoId,
+        patchProposalLanes: [
+          {
+            id: 'proposal-a',
+            readPaths: ['src/sample.ts'],
+            writePaths: ['src/sample.ts'],
+            proposedOperations: [{
+              type: 'replace',
+              path: 'src/sample.ts',
+              old_text: 'export const answer = 42;',
+              new_text: 'export const answer = 43;',
+            }],
+          },
+          {
+            id: 'proposal-b',
+            readPaths: ['src/other.ts'],
+            writePaths: ['src/other.ts'],
+            proposedOperations: [{
+              type: 'replace',
+              path: 'src/other.ts',
+              old_text: 'export const other = 1;',
+              new_text: 'export const other = 2;',
+            }],
+          },
+        ],
+      },
+    );
+    expect(lanes.conflicts).toHaveLength(0);
+
+    const integrated = await integratePatchProposals(
+      { controllerHome, repository },
+      lanes.patchProposals,
+      {
+        allowedPaths: ['src/**'],
+        requestId: 'integrate-two-non-conflicting',
+      },
+    );
+    expect(integrated.ok).toBe(true);
+    expect(integrated.applied.filter((entry) => entry.ok)).toHaveLength(2);
+    expect(readFileSync(join(repoRoot, 'src', 'sample.ts'), 'utf8')).toContain('43');
+    expect(readFileSync(join(repoRoot, 'src', 'other.ts'), 'utf8')).toContain('2');
+  });
+
+  test('fast commit uses cancellable async Git path and advances HEAD', async () => {
+    const { controllerHome, repository, repoRoot } = fixture();
+    const before = spawnSync('git', ['-C', repoRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+    writeFileSync(join(repoRoot, 'src', 'sample.ts'), 'export const answer = 500;\n');
+    let ticks = 0;
+    const timer = setInterval(() => { ticks += 1; }, 5);
+    const result = await executeFast(
+      { controllerHome, repository },
+      {
+        operation: 'commit_paths',
+        requestId: 'fast-async-commit',
+        input: {
+          message: 'test: async fast commit',
+          paths: ['src/sample.ts'],
+        },
+      },
+    );
+    clearInterval(timer);
+    const after = spawnSync('git', ['-C', repoRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+    expect(result.ok).toBe(true);
+    expect(result.operationSucceeded).toBe(true);
+    expect(after).not.toBe(before);
+    expect(ticks).toBeGreaterThan(0);
   });
 });

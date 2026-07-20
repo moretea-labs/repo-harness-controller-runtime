@@ -110,10 +110,21 @@ export const repositoryToolDefinitions: McpToolDefinition[] = [
   definition('repository_remove', 'Soft-remove a repository while retaining audit history.', {
     repo_id: repoId,
   }, ['repo_id'], true),
-  definition('repository_workbench', 'Return global or repository-filtered Workbench state.', {
+  definition('repository_workbench', 'Return Workbench state or invoke one bounded Thin Harness operation without adding top-level MCP tools.', {
     repo_id: repoId,
+    checkout_id: { type: 'string', description: 'Optional checkout identity for repository-scoped operations.' },
     include_removed: { type: 'boolean' },
-  }, [], true),
+    operation: {
+      type: 'string',
+      enum: ['summary', 'batch_execute', 'lanes_execute', 'lanes_integrate', 'fast_receipt_get', 'fast_receipt_list', 'execution_route'],
+      description: 'Defaults to summary. Thin Harness operations use the payload object.',
+    },
+    payload: {
+      type: 'object',
+      description: 'Operation-specific bounded arguments. Batch and write operations should include request_id.',
+      additionalProperties: true,
+    },
+  }),
 
 
 
@@ -235,111 +246,7 @@ export const repositoryToolDefinitions: McpToolDefinition[] = [
     max_output_bytes: { type: 'number', description: 'Optional cap for captured stdout/stderr.' },
   }, ['command']),
 
-  // Thin Harness V1 — typed batch / lanes / receipts without new durable ceremony.
-  definition('repository_batch_execute', 'Execute multiple typed repository steps in one bounded Fast Path call (max 20). Rejects mixed durable steps before execution. Does not create ExecutionJob/Worker/Campaign.', {
-    repo_id: repoId,
-    checkout_id: { type: 'string' },
-    mode: { type: 'string', enum: ['auto', 'fast', 'durable'], description: 'Defaults to auto. durable returns an escalation hint without executing.' },
-    steps: {
-      type: 'array',
-      description: 'Typed steps: read_file, search, git_status, git_diff, apply_patch, run_short_command, run_focused_check, stage_paths, commit_paths.',
-      items: {
-        type: 'object',
-        properties: {
-          id: { type: 'string' },
-          kind: {
-            type: 'string',
-            enum: ['read_file', 'search', 'git_status', 'git_diff', 'apply_patch', 'run_short_command', 'run_focused_check', 'stage_paths', 'commit_paths'],
-          },
-          input: { type: 'object', description: 'Typed step payload. Never a free-form shell workflow.' },
-        },
-        required: ['kind', 'input'],
-        additionalProperties: false,
-      },
-      maxItems: 20,
-    },
-    stop_on_error: { type: 'boolean', description: 'Defaults to true.' },
-    allowed_paths: { type: 'array', items: { type: 'string' } },
-    timeout_ms: { type: 'number' },
-    include_latency_breakdown: { type: 'boolean' },
-    purpose: { type: 'string' },
-  }, ['steps']),
-  definition('repository_lanes_execute', 'Run lightweight read-only analysis lanes and/or patch-proposal lanes without Campaign, Issue Task, or long-lived worktrees. Patch proposals are never applied here.', {
-    repo_id: repoId,
-    checkout_id: { type: 'string' },
-    read_lanes: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          id: { type: 'string' },
-          kind: { type: 'string', enum: ['search', 'read_file', 'git_status', 'git_diff', 'run_short_command'] },
-          input: { type: 'object' },
-        },
-        required: ['kind', 'input'],
-      },
-      maxItems: 4,
-    },
-    patch_proposal_lanes: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          id: { type: 'string' },
-          read_paths: { type: 'array', items: { type: 'string' } },
-          write_paths: { type: 'array', items: { type: 'string' } },
-          proposed_operations: { type: 'array', items: { type: 'object' } },
-          assumptions: { type: 'array', items: { type: 'string' } },
-          risk_notes: { type: 'array', items: { type: 'string' } },
-          suggested_focused_check: { anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
-        },
-        required: ['write_paths', 'proposed_operations'],
-      },
-      maxItems: 4,
-    },
-    fail_fast: { type: 'boolean' },
-    max_concurrency: { type: 'number', description: 'Capped at 4.' },
-    include_latency_breakdown: { type: 'boolean' },
-  }, []),
-  definition('repository_lanes_integrate', 'Sequentially apply selected non-conflicting patch proposals through Fast Path apply_patch. Single integrator; never concurrent checkout writes.', {
-    repo_id: repoId,
-    checkout_id: { type: 'string' },
-    proposals: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          id: { type: 'string' },
-          write_paths: { type: 'array', items: { type: 'string' } },
-          proposed_operations: { type: 'array', items: { type: 'object' } },
-          analysis_only: { type: 'boolean' },
-          ok: { type: 'boolean' },
-        },
-        required: ['id', 'proposed_operations'],
-      },
-    },
-    session_id: { type: 'string' },
-    allowed_paths: { type: 'array', items: { type: 'string' } },
-    purpose: { type: 'string' },
-  }, ['proposals']),
-  definition('repository_fast_receipt_get', 'Read one Fast Path receipt by execution id. Receipts are not Issue/Task completion evidence.', {
-    repo_id: repoId,
-    execution_id: { type: 'string' },
-  }, ['execution_id'], true),
-  definition('repository_fast_receipt_list', 'List recent Fast Path receipts for a repository (bounded).', {
-    repo_id: repoId,
-    limit: { type: 'number' },
-  }, [], true),
-  definition('repository_execution_route', 'Dry-run Thin Harness execution router decision (fast|durable|reject) without executing.', {
-    repo_id: repoId,
-    operation: { type: 'string' },
-    mode: { type: 'string', enum: ['auto', 'fast', 'durable'] },
-    command: { anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
-    timeout_ms: { type: 'number' },
-    background: { type: 'boolean' },
-    paths: { type: 'array', items: { type: 'string' } },
-    allowed_paths: { type: 'array', items: { type: 'string' } },
-  }, ['operation'], true),
+  // Thin Harness V1 is exposed through repository_workbench operations to keep the stable tool surface bounded.
 ];
 
 export const repositoryToolNames = repositoryToolDefinitions.map((tool) => tool.name);
@@ -439,11 +346,34 @@ export async function callRepositoryTool(
         return result({ repository: disableRepository(repoIdValue, controllerHome) });
       case 'repository_remove':
         return result({ repository: removeRepository(repoIdValue, controllerHome) });
-      case 'repository_workbench':
-        return result({ workbench: buildControllerWorkbench(controllerHome, {
-          repoId: repoIdValue || undefined,
-          includeRemoved: args.include_removed === true,
-        }) });
+      case 'repository_workbench': {
+        const operation = typeof args.operation === 'string' ? args.operation : 'summary';
+        if (operation === 'summary') {
+          return result({ workbench: buildControllerWorkbench(controllerHome, {
+            repoId: repoIdValue || undefined,
+            includeRemoved: args.include_removed === true,
+          }) });
+        }
+        const internalTool = {
+          batch_execute: 'repository_batch_execute',
+          lanes_execute: 'repository_lanes_execute',
+          lanes_integrate: 'repository_lanes_integrate',
+          fast_receipt_get: 'repository_fast_receipt_get',
+          fast_receipt_list: 'repository_fast_receipt_list',
+          execution_route: 'repository_execution_route',
+        }[operation];
+        if (!internalTool) {
+          return failure(new Error(`REPOSITORY_WORKBENCH_OPERATION_INVALID: ${operation}`));
+        }
+        const payload = typeof args.payload === 'object' && args.payload !== null
+          ? args.payload as Record<string, unknown>
+          : {};
+        return callRepositoryTool(controllerHome, internalTool, {
+          ...payload,
+          repo_id: repoIdValue || payload.repo_id,
+          checkout_id: typeof args.checkout_id === 'string' ? args.checkout_id : payload.checkout_id,
+        });
+      }
 
 
 
@@ -756,6 +686,7 @@ export async function callRepositoryTool(
             timeoutMs: typeof args.timeout_ms === 'number' ? args.timeout_ms : undefined,
             includeLatencyBreakdown: args.include_latency_breakdown === true,
             purpose: typeof args.purpose === 'string' ? args.purpose : undefined,
+            requestId: typeof args.request_id === 'string' ? args.request_id.trim() || undefined : undefined,
           },
         );
         const payload = batch as unknown as Record<string, unknown>;
@@ -823,6 +754,11 @@ export async function callRepositoryTool(
               writePaths: Array.isArray(entry.write_paths) ? entry.write_paths.map(String) : [],
               proposedOperations: Array.isArray(entry.proposed_operations) ? entry.proposed_operations : [],
               analysisOnly: entry.analysis_only === true,
+              proposalId: typeof entry.proposal_id === 'string'
+                ? entry.proposal_id
+                : typeof entry.proposalId === 'string'
+                  ? entry.proposalId
+                  : undefined,
             }))
           : [];
         const integrated = await integratePatchProposals(
@@ -832,6 +768,8 @@ export async function callRepositoryTool(
             sessionId: typeof args.session_id === 'string' ? args.session_id : undefined,
             allowedPaths: Array.isArray(args.allowed_paths) ? args.allowed_paths.map(String) : undefined,
             purpose: typeof args.purpose === 'string' ? args.purpose : undefined,
+            requestId: typeof args.request_id === 'string' ? args.request_id.trim() || undefined : undefined,
+            continueOnError: args.continue_on_error === true,
           },
         );
         const payload = integrated as unknown as Record<string, unknown>;

@@ -16,8 +16,9 @@ import {
   writeFileSync,
   chmodSync,
   readdirSync,
+  type Stats,
 } from 'fs';
-import { dirname, join } from 'path';
+import { dirname, join, relative, resolve } from 'path';
 import { randomUUID } from 'crypto';
 import { repositoryControllerRoot } from '../../../cli/repositories/controller-home';
 
@@ -52,42 +53,80 @@ function ensureDir(path: string): void {
   mkdirSync(path, { recursive: true });
 }
 
+function lstatIfPresent(path: string): Stats | undefined {
+  try {
+    return lstatSync(path);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return undefined;
+    throw error;
+  }
+}
+
+function normalizeRepoPath(repoRoot: string, rawPath: string): string {
+  const root = resolve(repoRoot);
+  const absolute = resolve(root, rawPath.replace(/\\/g, '/'));
+  const normalized = relative(root, absolute).replace(/\\/g, '/');
+  if (!normalized || normalized === '..' || normalized.startsWith('../')) {
+    throw new Error(`SAVEPOINT_PATH_DENIED: ${rawPath} escapes the repository`);
+  }
+  return normalized;
+}
+
+function pathsIncludingAncestors(repoRoot: string, paths: string[]): string[] {
+  const ordered: string[] = [];
+  const seen = new Set<string>();
+  for (const rawPath of paths) {
+    const target = normalizeRepoPath(repoRoot, rawPath);
+    const ancestors: string[] = [];
+    let current = dirname(target).replace(/\\/g, '/');
+    while (current && current !== '.') {
+      ancestors.push(current);
+      const next = dirname(current).replace(/\\/g, '/');
+      if (next === current) break;
+      current = next;
+    }
+    for (const path of [...ancestors.reverse(), target]) {
+      if (seen.has(path)) continue;
+      seen.add(path);
+      ordered.push(path);
+    }
+  }
+  return ordered;
+}
+
 function captureEntry(repoRoot: string, relativePath: string, backupDir: string): SavepointEntry {
   const absolute = join(repoRoot, relativePath);
-  if (!existsSync(absolute)) {
-    return { path: relativePath, kind: 'missing' };
-  }
-  try {
-    const stat = lstatSync(absolute);
-    if (stat.isSymbolicLink()) {
-      return {
-        path: relativePath,
-        kind: 'symlink',
-        mode: stat.mode,
-        symlinkTarget: readlinkSync(absolute),
-      };
-    }
-    if (stat.isDirectory()) {
-      return {
-        path: relativePath,
-        kind: 'directory',
-        mode: stat.mode,
-      };
-    }
-    const backupName = `${relativePath.replace(/[\\/]/g, '__')}__${randomUUID().slice(0, 8)}.bin`;
-    const backupAbsolute = join(backupDir, backupName);
-    ensureDir(dirname(backupAbsolute));
-    copyFileSync(absolute, backupAbsolute);
+  const stat = lstatIfPresent(absolute);
+  if (!stat) return { path: relativePath, kind: 'missing' };
+  if (stat.isSymbolicLink()) {
     return {
       path: relativePath,
-      kind: 'file',
+      kind: 'symlink',
       mode: stat.mode,
-      backupAbsolute,
+      symlinkTarget: readlinkSync(absolute),
     };
-  } catch {
-    // Best-effort: treat unreadable as missing for capture (restore will flag if needed)
-    return { path: relativePath, kind: 'missing' };
   }
+  if (stat.isDirectory()) {
+    return {
+      path: relativePath,
+      kind: 'directory',
+      mode: stat.mode,
+    };
+  }
+  if (!stat.isFile()) {
+    throw new Error(`SAVEPOINT_UNSUPPORTED_ENTRY: ${relativePath}`);
+  }
+  const backupName = `${relativePath.replace(/[\\/]/g, '__')}__${randomUUID().slice(0, 8)}.bin`;
+  const backupAbsolute = join(backupDir, backupName);
+  ensureDir(dirname(backupAbsolute));
+  copyFileSync(absolute, backupAbsolute);
+  return {
+    path: relativePath,
+    kind: 'file',
+    mode: stat.mode,
+    backupAbsolute,
+  };
 }
 
 /**
@@ -106,8 +145,8 @@ export function createWorkspaceSavepoint(input: {
     savepointId,
   );
   ensureDir(backupDir);
-  const unique = [...new Set(input.paths.map((path) => path.replace(/^\.\//, '').replace(/\\/g, '/')).filter(Boolean))];
-  const entries = unique.map((path) => captureEntry(input.repoRoot, path, backupDir));
+  const capturedPaths = pathsIncludingAncestors(input.repoRoot, input.paths);
+  const entries = capturedPaths.map((path) => captureEntry(input.repoRoot, path, backupDir));
   const meta: WorkspaceSavepoint = {
     savepointId,
     repoRoot: input.repoRoot,
@@ -122,17 +161,17 @@ export function createWorkspaceSavepoint(input: {
 function restoreOne(repoRoot: string, entry: SavepointEntry): void {
   const absolute = join(repoRoot, entry.path);
   if (entry.kind === 'missing') {
-    if (existsSync(absolute)) {
-      const stat = lstatSync(absolute);
-      if (stat.isDirectory()) rmSync(absolute, { recursive: true, force: true });
+    const stat = lstatIfPresent(absolute);
+    if (stat) {
+      if (stat.isDirectory() && !stat.isSymbolicLink()) rmSync(absolute, { recursive: true, force: true });
       else unlinkSync(absolute);
     }
     return;
   }
   if (entry.kind === 'symlink') {
-    if (existsSync(absolute)) {
-      const stat = lstatSync(absolute);
-      if (stat.isDirectory()) rmSync(absolute, { recursive: true, force: true });
+    const stat = lstatIfPresent(absolute);
+    if (stat) {
+      if (stat.isDirectory() && !stat.isSymbolicLink()) rmSync(absolute, { recursive: true, force: true });
       else unlinkSync(absolute);
     } else {
       ensureDir(dirname(absolute));
@@ -156,10 +195,10 @@ function restoreOne(repoRoot: string, entry: SavepointEntry): void {
     throw new Error(`SAVEPOINT_BACKUP_MISSING: ${entry.path}`);
   }
   ensureDir(dirname(absolute));
-  if (existsSync(absolute)) {
-    const stat = lstatSync(absolute);
-    if (stat.isDirectory()) rmSync(absolute, { recursive: true, force: true });
-    else if (stat.isSymbolicLink()) unlinkSync(absolute);
+  const current = lstatIfPresent(absolute);
+  if (current) {
+    if (current.isDirectory() && !current.isSymbolicLink()) rmSync(absolute, { recursive: true, force: true });
+    else unlinkSync(absolute);
   }
   copyFileSync(entry.backupAbsolute, absolute);
   if (entry.mode !== undefined) {
@@ -227,23 +266,35 @@ export function diffAgainstSavepoint(
   for (const path of set) {
     const absolute = join(repoRoot, path);
     const entry = savepoint.entries.find((item) => item.path === path);
-    const exists = existsSync(absolute);
+    let stat: Stats | undefined;
+    try {
+      stat = lstatIfPresent(absolute);
+    } catch {
+      changed.push(path);
+      continue;
+    }
     if (!entry) {
-      if (exists) changed.push(path);
+      if (stat) changed.push(path);
       continue;
     }
     if (entry.kind === 'missing') {
-      if (exists) changed.push(path);
+      if (stat) changed.push(path);
       continue;
     }
-    if (!exists) {
+    if (!stat) {
       changed.push(path);
       continue;
     }
     try {
-      const stat = lstatSync(absolute);
       if (entry.kind === 'symlink') {
         if (!stat.isSymbolicLink() || readlinkSync(absolute) !== entry.symlinkTarget) {
+          changed.push(path);
+        }
+        continue;
+      }
+      if (entry.kind === 'directory') {
+        if (!stat.isDirectory() || stat.isSymbolicLink()
+          || (entry.mode !== undefined && (stat.mode & 0o777) !== (entry.mode & 0o777))) {
           changed.push(path);
         }
         continue;

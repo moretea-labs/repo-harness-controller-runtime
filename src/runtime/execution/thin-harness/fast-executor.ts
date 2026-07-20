@@ -1,7 +1,6 @@
 import { existsSync, readFileSync, statSync, writeFileSync, unlinkSync, mkdirSync } from 'fs';
 import { dirname, join } from 'path';
 import { applySafePatch } from '../../../cli/repositories/safe-patch';
-import { repositoryGitCommit } from '../../../cli/repositories/structured-git';
 import {
   executeRepositoryCommandAsync,
   previewRepositoryCommandExecutionAsync,
@@ -27,6 +26,7 @@ import {
 } from './mutation-gate';
 import {
   beginFastRequest,
+  bindFastRequestBaseSnapshot,
   completeFastRequest,
   heartbeatFastRequest,
   type FastRequestLedgerEntry,
@@ -114,6 +114,87 @@ function boundedTimeout(value: number | undefined): number {
 function stringList(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
   return value.map(String).filter(Boolean);
+}
+
+async function executeFastGitCommit(
+  repoRoot: string,
+  input: Record<string, unknown>,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+  const message = String(input.message ?? '').trim();
+  if (!message) throw new Error('GIT_COMMIT_MESSAGE_REQUIRED: message is required');
+  if (message.length > 4_000 || message.includes('\0')) {
+    throw new Error('GIT_COMMIT_MESSAGE_INVALID: message is too long or contains a null byte');
+  }
+  const paths = [...new Set((stringList(input.paths) ?? [])
+    .map((path) => path.trim().replace(/\\/g, '/'))
+    .filter(Boolean))].sort();
+  if (paths.length > 200) throw new Error('GIT_PATHS_INVALID: at most 200 paths are allowed');
+  const allowEmpty = input.allow_empty === true;
+
+  let stage: Awaited<ReturnType<typeof runBoundedGit>> | undefined;
+  if (paths.length > 0) {
+    stage = await runBoundedGit(repoRoot, ['add', '--all', '--', ...paths], {
+      timeoutMs,
+      maxOutputBytes: FAST_PATH_MAX_OUTPUT_BYTES,
+      signal,
+    });
+    if (stage.cancelled) throw new Error('CANCELLED: git add cancelled');
+    if (stage.timedOut) throw new Error('GIT_STAGE_TIMEOUT: git add timed out');
+    if (!stage.ok) throw new Error(`GIT_STAGE_FAILED: ${stage.stderr || `exit ${stage.exitCode}`}`);
+  }
+
+  const diffCheck = await runBoundedGit(repoRoot, ['diff', '--cached', '--quiet'], {
+    timeoutMs,
+    maxOutputBytes: 8_192,
+    signal,
+  });
+  if (diffCheck.cancelled) throw new Error('CANCELLED: staged diff check cancelled');
+  if (diffCheck.timedOut) throw new Error('GIT_DIFF_CHECK_TIMEOUT: staged diff check timed out');
+  if (diffCheck.exitCode !== 0 && diffCheck.exitCode !== 1) {
+    throw new Error(`GIT_DIFF_CHECK_FAILED: ${diffCheck.stderr || `exit ${diffCheck.exitCode}`}`);
+  }
+  if (diffCheck.exitCode === 0 && !allowEmpty) {
+    throw new Error('GIT_NOTHING_STAGED: no staged changes to commit');
+  }
+
+  const commitArgs = [
+    'commit', '-m', message,
+    ...(allowEmpty ? ['--allow-empty'] : []),
+    ...(paths.length > 0 ? ['--only', '--', ...paths] : []),
+  ];
+  const commit = await runBoundedGit(repoRoot, commitArgs, {
+    timeoutMs,
+    maxOutputBytes: FAST_PATH_MAX_OUTPUT_BYTES,
+    signal,
+  });
+  if (commit.cancelled) throw new Error('CANCELLED: git commit cancelled');
+  if (commit.timedOut) throw new Error('GIT_COMMIT_TIMEOUT: git commit timed out');
+  if (!commit.ok) throw new Error(`GIT_COMMIT_FAILED: ${commit.stderr || `exit ${commit.exitCode}`}`);
+
+  const head = await runBoundedGit(repoRoot, ['rev-parse', '--verify', 'HEAD'], {
+    timeoutMs: Math.min(timeoutMs, 5_000),
+    maxOutputBytes: 4_096,
+    signal,
+  });
+  if (!head.ok) throw new Error(`GIT_COMMIT_VERIFY_FAILED: ${head.stderr || `exit ${head.exitCode}`}`);
+
+  return {
+    committed: true,
+    head: head.stdout.trim(),
+    paths,
+    stage: stage ? {
+      exitCode: stage.exitCode,
+      stdout: stage.stdout,
+      stderr: stage.stderr,
+    } : undefined,
+    commit: {
+      exitCode: commit.exitCode,
+      stdout: commit.stdout,
+      stderr: commit.stderr,
+    },
+  };
 }
 
 function policyFor(repoRoot: string) {
@@ -785,16 +866,14 @@ export async function executeFast(
         outcome = 'succeeded';
       } else if (operation === 'commit_paths' || operation === 'git_commit_paths' || operation === 'repository_git_commit') {
         helpers?.assert();
-        resultPayload = await trace.measure('executionMs', async () => {
-          const commit = repositoryGitCommit(ctx.controllerHome, ctx.repository, {
-            message: request.input.message,
-            paths: request.input.paths,
-            allowEmpty: request.input.allow_empty,
-          });
-          return { commit, fencingToken, baseHead } as Record<string, unknown>;
-        });
-        const commit = resultPayload.commit as { paths?: string[] } | undefined;
-        changedPaths = commit?.paths ?? stringList(request.input.paths) ?? [];
+        const commit = await trace.measure('executionMs', async () => executeFastGitCommit(
+          root,
+          request.input,
+          timeoutMs,
+          signal,
+        ));
+        resultPayload = { commit, fencingToken, baseHead };
+        changedPaths = (commit.paths as string[] | undefined) ?? stringList(request.input.paths) ?? [];
         repositoryChanged = true;
       } else if (
         operation === 'run_short_command'
@@ -958,7 +1037,21 @@ export async function executeFast(
           fencingToken = gate.fencingToken;
           baseHead = gate.baseHead;
           if (acquiredLedger) {
-            heartbeatFastRequest(ctx.controllerHome, acquiredLedger, timeoutMs + 10_000);
+            const baseSnapshot = JSON.stringify({
+              head: gate.baseHead,
+              statusHash: gate.baseStatusHash,
+            });
+            const bound = bindFastRequestBaseSnapshot(
+              ctx.controllerHome,
+              acquiredLedger,
+              baseSnapshot,
+            );
+            if (!bound.ok) {
+              throw new Error(`LEDGER_BASE_SNAPSHOT_FAILED: ${bound.warning ?? bound.code ?? 'unknown error'}`);
+            }
+            if (bound.entry) acquiredLedger = bound.entry;
+            const beat = heartbeatFastRequest(ctx.controllerHome, acquiredLedger, timeoutMs + 10_000);
+            if (beat.entry) acquiredLedger = beat.entry;
           }
           // Align ledger heartbeat with ownership renews.
           const ledgerHeartbeat = setInterval(() => {

@@ -142,12 +142,9 @@ export const STABLE_CONTROLLER_TOOL_NAMES = [
   'toolchain_plugin_summary',
   'workspace_auth_status',
   'workspace_auth_login_prepare',
-  'assistant_model_readiness',
-  'assistant_standing_grants',
-  'assistant_standing_grant_create',
-  'assistant_standing_grant_revoke',
-  'assistant_action_proposals',
-  'assistant_action_proposal_resolve',
+  // Advanced assistant model/grant/proposal tools remain registered in the
+  // exhaustive full compatibility profile; keep the stable connector within
+  // its declared 128-tool schema budget.
   'web_targets_list',
   'web_target_snapshot',
   'web_domain_access_preview',

@@ -1,15 +1,16 @@
 #!/usr/bin/env bun
 /**
- * Thin Harness V1 — real Gateway/MCP facade A/B benchmark.
+ * Thin Harness V1 — repository MCP facade and execution-kernel benchmark.
  *
- * Measures the same public executor surface used by Gateway tools (executeFast /
- * executeRepositoryBatch / executeLightweightLanes / mutation ownership), with:
+ * Measures the public repository facade where available and the bounded Fast
+ * execution kernel for primitive reads / mutation ownership, with:
  * - 1 warmup + 3 timed runs (median)
  * - event-loop lag sampling during each case
  * - real lease instrumentation deltas (not hard-coded zeros)
  *
- * Baseline revision (compare offline / checkout): e1582c573b738c29ff41eda6884685488654e5b9
- * Feature revision: current HEAD
+ * Historical baseline reference: e1582c573b738c29ff41eda6884685488654e5b9
+ * This script reports current-feature evidence only; it does not fabricate a
+ * historical A/B result from a revision without the same benchmark contract.
  *
  * Usage:
  *   bun scripts/benchmark-thin-harness-gateway-ab.ts
@@ -29,7 +30,6 @@ import {
   withCheckoutMutationGate,
   type LatencyBreakdown,
 } from '../src/runtime/execution/thin-harness';
-import { harnessOverheadMs } from '../src/runtime/execution/thin-harness/latency-trace';
 import {
   getLeaseSideEffectMetrics,
   resetLeaseSideEffectMetrics,
@@ -37,6 +37,7 @@ import {
 import { listExecutionJobs } from '../src/runtime/execution/jobs/store';
 import { listLocalBridgeJobSnapshots } from '../src/cli/local-bridge/job-store';
 import { listFastReceipts } from '../src/runtime/execution/thin-harness/fast-receipt';
+import { callRepositoryTool } from '../src/cli/mcp/repository-tools';
 
 const BASELINE_REV = 'e1582c573b738c29ff41eda6884685488654e5b9';
 
@@ -121,6 +122,40 @@ interface CaseReport {
   runs: MetricsSample[];
 }
 
+function emptyLatency(): LatencyBreakdown {
+  return {
+    routingMs: 0,
+    policyMs: 0,
+    snapshotMs: 0,
+    executionMs: 0,
+    receiptMs: 0,
+    totalMs: 0,
+    path: 'fast',
+  };
+}
+
+async function callRepositoryFacade(
+  fixture: ReturnType<typeof createFixture>,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<{
+  ok: boolean;
+  latency: LatencyBreakdown;
+  receipt?: { executionId: string } | null;
+}> {
+  const response = await callRepositoryTool(fixture.controllerHome, name, {
+    repo_id: fixture.repository.repoId,
+    checkout_id: fixture.repository.activeCheckoutId,
+    ...args,
+  });
+  const payload = (response?.structuredContent ?? {}) as Record<string, unknown>;
+  return {
+    ok: response?.isError !== true && payload.ok !== false,
+    latency: (payload.latency as LatencyBreakdown | undefined) ?? emptyLatency(),
+    receipt: (payload.receipt as { executionId: string } | null | undefined) ?? null,
+  };
+}
+
 async function measureEventLoopLag(during: () => Promise<void>): Promise<number> {
   let maxLag = 0;
   const handle = setInterval(() => {
@@ -176,10 +211,21 @@ async function sampleOnce(
     routingMs: 0, policyMs: 0, snapshotMs: 0, executionMs: 0, receiptMs: 0, totalMs: 0,
   };
 
+  const operationMs = Math.max(
+    latency.operationExecutionMs ?? 0,
+    latency.executionMs ?? 0,
+    latency.repositorySnapshotMs ?? 0,
+    latency.snapshotMs ?? 0,
+  );
+  const observedReceiptDelta = Math.max(
+    0,
+    listFastReceipts(fixture.controllerHome, fixture.repository.repoId, 200).length - receiptsBefore,
+  );
+
   return {
     totalMs: latency.totalMs,
-    operationMs: latency.operationExecutionMs ?? latency.executionMs ?? 0,
-    overheadMs: harnessOverheadMs(latency),
+    operationMs,
+    overheadMs: Math.max(0, Math.round((latency.totalMs - operationMs) * 100) / 100),
     eventLoopLagMs: lag,
     executionJobCount: Math.max(
       0,
@@ -207,11 +253,7 @@ async function sampleOnce(
       0,
       (side.schedulerWakeCount ?? 0) + sideAfter.schedulerWakes - sideBefore.schedulerWakes,
     ),
-    receiptCount: Math.max(
-      0,
-      (result?.receipt ? 1 : 0)
-        + (listFastReceipts(fixture.controllerHome, fixture.repository.repoId, 200).length - receiptsBefore),
-    ),
+    receiptCount: Math.max(result?.receipt ? 1 : 0, observedReceiptDelta),
     leaseFilesTouched: Math.max(
       0,
       Math.abs(countLeaseFiles(fixture.controllerHome, fixture.repository.repoId) - leasesBefore)
@@ -329,65 +371,53 @@ async function main() {
       });
     }));
 
-    cases.push(await runCase(fixture, 'focused_command', () => executeFast(ctx, {
-      operation: 'repository_command_execute',
-      input: { command: ['git', 'status', '--short'] },
-      timeoutMs: 10_000,
-    })));
+    cases.push(await runCase(fixture, 'focused_command_facade', () => callRepositoryFacade(
+      fixture,
+      'repository_command_execute',
+      {
+        command: ['git', 'status', '--short'],
+        timeout_ms: 10_000,
+        include_latency_breakdown: true,
+      },
+    )));
 
-    cases.push(await runCase(fixture, '7_step_batch', async () => {
-      const batch = await executeRepositoryBatch(ctx, {
-        repoId: fixture.repository.repoId,
-        includeLatencyBreakdown: true,
-        steps: [
-          { kind: 'read_file', input: { path: 'README.md' } },
-          { kind: 'search', input: { query: 'add' } },
-          { kind: 'read_file', input: { path: 'src/lib.ts' } },
-          { kind: 'git_diff', input: {} },
-          { kind: 'git_status', input: {} },
-          { kind: 'run_short_command', input: { command: ['git', 'rev-parse', 'HEAD'] } },
-          { kind: 'search', input: { query: 'benchmark' } },
-        ],
-      });
-      return {
-        ok: batch.ok,
-        latency: batch.latency,
-        receipt: batch.receipt,
-        durableSideEffects: {
-          executionJobCount: 0,
-          localJobCount: 0,
-          workerSpawnCount: 0,
-          projectionUpdateCount: 0,
-          runtimeEventCount: 0,
-          schedulerWakeCount: 0,
+    cases.push(await runCase(fixture, '7_step_batch_facade', () => callRepositoryFacade(
+      fixture,
+      'repository_workbench',
+      {
+        operation: 'batch_execute',
+        payload: {
+          include_latency_breakdown: true,
+          steps: [
+            { kind: 'read_file', input: { path: 'README.md' } },
+            { kind: 'search', input: { query: 'add' } },
+            { kind: 'read_file', input: { path: 'src/lib.ts' } },
+            { kind: 'git_diff', input: {} },
+            { kind: 'git_status', input: {} },
+            { kind: 'run_short_command', input: { command: ['git', 'rev-parse', 'HEAD'] } },
+            { kind: 'search', input: { query: 'benchmark' } },
+          ],
         },
-      };
-    }));
+      },
+    )));
 
-    cases.push(await runCase(fixture, '4_lane_read_analysis', async () => {
-      const lanes = await executeLightweightLanes(ctx, {
-        repoId: fixture.repository.repoId,
-        includeLatencyBreakdown: true,
-        maxConcurrency: 4,
-        readLanes: [
-          { kind: 'search', input: { query: 'add' } },
-          { kind: 'read_file', input: { path: 'README.md' } },
-          { kind: 'git_status', input: {} },
-          { kind: 'git_diff', input: {} },
-        ],
-      });
-      return {
-        ok: lanes.ok,
-        latency: lanes.latency,
-        receipt: lanes.receipt,
-        durableSideEffects: {
-          executionJobCount: 0,
-          localJobCount: 0,
-          workerSpawnCount: 0,
-          projectionUpdateCount: 0,
+    cases.push(await runCase(fixture, '4_lane_read_facade', () => callRepositoryFacade(
+      fixture,
+      'repository_workbench',
+      {
+        operation: 'lanes_execute',
+        payload: {
+          include_latency_breakdown: true,
+          max_concurrency: 4,
+          read_lanes: [
+            { kind: 'search', input: { query: 'add' } },
+            { kind: 'read_file', input: { path: 'README.md' } },
+            { kind: 'git_status', input: {} },
+            { kind: 'git_diff', input: {} },
+          ],
         },
-      };
-    }));
+      },
+    )));
 
     cases.push(await runCase(fixture, 'fast_mutation_ownership', async () => {
       const started = performance.now();
@@ -433,16 +463,17 @@ async function main() {
     }));
 
     const report = {
-      schemaVersion: 2,
-      kind: 'gateway_facade_ab',
+      schemaVersion: 3,
+      kind: 'repository_facade_feature_benchmark',
+      comparisonMode: 'feature_only',
       label,
       featureRevision: head,
       baselineRevision: BASELINE_REV,
       at: new Date().toISOString(),
       note: [
-        'Measures Gateway-facing Thin Harness facades (executeFast / batch / lanes / ownership).',
-        '1 warmup + 3 runs median. Counters from real lease instrumentation + job stores.',
-        `Compare offline vs baseline ${BASELINE_REV} by checking out that commit and re-running with --label baseline.`,
+        'Measures repository MCP facade operations plus bounded execution-kernel primitives.',
+        '1 warmup + 3 runs median. Counters come from lease instrumentation and job stores.',
+        `Baseline ${BASELINE_REV} is a historical reference only; no synthetic A/B claim is made.`,
       ].join(' '),
       cases: cases.map((entry) => ({
         name: entry.name,
@@ -463,9 +494,9 @@ async function main() {
     if (asJson) {
       console.log(JSON.stringify(report, null, 2));
     } else {
-      console.log(`Thin Harness Gateway A/B benchmark [${label}]`);
+      console.log(`Thin Harness repository facade benchmark [${label}]`);
       console.log(`feature=${head}`);
-      console.log(`baseline=${BASELINE_REV} (run this script on that checkout for A/B numbers)\n`);
+      console.log(`baseline-reference=${BASELINE_REV} (feature-only evidence; no synthetic A/B)\n`);
       console.log(
         'case'.padEnd(26),
         'total'.padStart(8),

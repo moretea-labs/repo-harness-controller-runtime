@@ -150,14 +150,30 @@ async function workspaceSnapshot(repoRoot: string, signal?: AbortSignal): Promis
       signal,
     }),
   ]);
-  if (statusResult.cancelled || headResult.cancelled) {
+  if (statusResult.cancelled || headResult.cancelled || refsResult.cancelled) {
     throw new Error('CANCELLED: proposal snapshot aborted');
   }
   if (!statusResult.ok) {
     throw new Error(`PROPOSAL_SNAPSHOT_FAILED: git status ${statusResult.stderr || statusResult.exitCode}`);
   }
-  const head = headResult.ok ? (headResult.stdout.trim() || null) : null;
-  const refs = refsResult.ok || refsResult.exitCode === 1 ? refsResult.stdout : '';
+  let head: string | null = null;
+  if (headResult.ok) {
+    head = headResult.stdout.trim() || null;
+  } else {
+    const unborn = headResult.exitCode === 128
+      && /unknown revision|bad revision|Needed a single revision|ambiguous argument|not a valid object name/i.test(headResult.stderr);
+    if (!unborn) {
+      throw new Error(`PROPOSAL_SNAPSHOT_FAILED: git rev-parse ${headResult.stderr || headResult.exitCode}`);
+    }
+  }
+  let refs = '';
+  if (refsResult.ok) {
+    refs = refsResult.stdout;
+  } else if (refsResult.exitCode === 1 && !refsResult.stderr.trim()) {
+    refs = refsResult.stdout;
+  } else {
+    throw new Error(`PROPOSAL_SNAPSHOT_FAILED: git show-ref ${refsResult.stderr || refsResult.exitCode}`);
+  }
   return {
     head,
     statusHash: createHash('sha256').update(statusResult.stdout).digest('hex'),
@@ -170,11 +186,20 @@ export async function createServerPatchProposal(input: CreateProposalInput): Pro
   const dir = proposalDir(input.controllerHome, input.repoId);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const ttlMs = Math.max(30_000, Math.min(input.ttlMs ?? DEFAULT_PROPOSAL_TTL_MS, MAX_PROPOSAL_TTL_MS));
-  const snap = await workspaceSnapshot(input.repoRoot, input.signal);
+  const beforeSnapshot = await workspaceSnapshot(input.repoRoot, input.signal);
   const [readPathFingerprints, writePathFingerprints] = await Promise.all([
     pathFingerprints(input.repoRoot, input.readPaths, input.signal),
     pathFingerprints(input.repoRoot, input.writePaths, input.signal),
   ]);
+  const afterSnapshot = await workspaceSnapshot(input.repoRoot, input.signal);
+  if (
+    beforeSnapshot.head !== afterSnapshot.head
+    || beforeSnapshot.statusHash !== afterSnapshot.statusHash
+    || beforeSnapshot.refsHash !== afterSnapshot.refsHash
+  ) {
+    throw new Error('PROPOSAL_WORKSPACE_CHANGED_DURING_CAPTURE: retry against a stable workspace snapshot');
+  }
+  const snap = afterSnapshot;
   const proposalId = `prop_${Date.now().toString(36)}_${randomUUID().slice(0, 10)}`;
   const operationsDigest = digest(input.operations);
   const now = new Date().toISOString();
@@ -285,6 +310,9 @@ export async function validateServerPatchProposalForApply(input: {
   repoRoot: string;
   proposalId: string;
   signal?: AbortSignal;
+  /** After an initial full validation under one mutation gate, recheck only the
+   * server record and relevant path fingerprints between sequential proposals. */
+  skipWorkspaceSnapshot?: boolean;
 }): Promise<ProposalValidateFailure> {
   const proposal = readServerPatchProposal(input.controllerHome, input.repoId, input.proposalId);
   if (!proposal) {
@@ -331,22 +359,27 @@ export async function validateServerPatchProposalForApply(input: {
     };
   }
 
-  const snap = await workspaceSnapshot(input.repoRoot, input.signal);
-  if (proposal.baseSnapshot.head && snap.head && proposal.baseSnapshot.head !== snap.head) {
-    return {
-      ok: false,
-      code: 'PROPOSAL_STALE_WORKSPACE',
-      message: `HEAD changed expected=${proposal.baseSnapshot.head} actual=${snap.head}`,
-      proposal,
-    };
-  }
-  if (proposal.baseSnapshot.statusHash !== snap.statusHash) {
-    return {
-      ok: false,
-      code: 'PROPOSAL_STALE_WORKSPACE',
-      message: 'workspace dirty status hash changed since proposal creation',
-      proposal,
-    };
+  let currentHead = proposal.baseSnapshot.head;
+  if (!input.skipWorkspaceSnapshot) {
+    const snap = await workspaceSnapshot(input.repoRoot, input.signal);
+    currentHead = snap.head;
+    if (proposal.baseSnapshot.head !== snap.head) {
+      return {
+        ok: false,
+        code: 'PROPOSAL_STALE_WORKSPACE',
+        message: `HEAD changed expected=${proposal.baseSnapshot.head ?? 'unborn'} actual=${snap.head ?? 'unborn'}`,
+        proposal,
+      };
+    }
+    if (proposal.baseSnapshot.statusHash !== snap.statusHash
+      || proposal.baseSnapshot.refsHash !== snap.refsHash) {
+      return {
+        ok: false,
+        code: 'PROPOSAL_STALE_WORKSPACE',
+        message: 'workspace status or refs changed since proposal creation',
+        proposal,
+      };
+    }
   }
 
   const paths = [...new Set([...proposal.readPaths, ...proposal.writePaths])];
@@ -372,5 +405,5 @@ export async function validateServerPatchProposalForApply(input: {
     }
   }
 
-  return { ok: true, proposal, currentHead: snap.head };
+  return { ok: true, proposal, currentHead };
 }
