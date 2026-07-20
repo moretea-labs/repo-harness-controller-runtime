@@ -489,10 +489,14 @@ async function gitTextAsync(root: string, args: string[], signal?: AbortSignal):
 
 const MAX_DIRTY_PATHS_FOR_FINGERPRINT = 200;
 const MAX_FINGERPRINT_FILE_BYTES = 256 * 1024;
+const MAX_FINGERPRINT_TOTAL_BYTES = 8 * 1024 * 1024;
+const MAX_FINGERPRINT_WORKER_MS = 5_000;
 
 /**
- * Async repository snapshot for Fast Path — Git via async spawn.
- * Path fingerprints remain local fs reads but are bounded; over-limit → throw (caller may Durable).
+ * Async repository snapshot for Fast Path — Git via async spawn, fail-closed.
+ * Dirty path fingerprints run in a Worker Thread with hard budgets.
+ * Over-budget / git errors → throw (caller may escalate to Durable).
+ * Only unborn HEAD and empty refs are allowed non-zero exceptions.
  */
 export async function repositorySnapshotAsync(
   root: string,
@@ -511,24 +515,39 @@ export async function repositorySnapshotAsync(
   if (statusResult.timedOut || headResult.timedOut) {
     throw new Error('SNAPSHOT_TIMEOUT: git snapshot timed out');
   }
-  // status is required; empty porcelain is ok only when ok=true
+  // status is required — fail closed on any non-ok (empty porcelain is ok only when ok=true)
   if (!statusResult.ok) {
     throw new Error(`SNAPSHOT_FAILED: git status exit ${statusResult.exitCode}: ${statusResult.stderr}`);
   }
-  // unborn HEAD: rev-parse may fail — allow null head only when repo is otherwise readable
-  const head = headResult.ok ? (headResult.stdout || null) : null;
-  if (!headResult.ok && !/unknown revision|bad revision|Needed a single revision|ambiguous argument/i.test(headResult.stderr)
-    && headResult.exitCode !== 128) {
-    // exit 128 often unborn/missing HEAD — still allow if status worked
+
+  // unborn HEAD: rev-parse exit 128 / known messages → null; other failures fail-closed
+  let head: string | null = null;
+  if (headResult.ok) {
+    head = headResult.stdout || null;
+  } else {
+    const unborn = headResult.exitCode === 128
+      || /unknown revision|bad revision|Needed a single revision|ambiguous argument|not a valid object name/i.test(headResult.stderr);
+    if (!unborn) {
+      throw new Error(`SNAPSHOT_FAILED: git rev-parse HEAD exit ${headResult.exitCode}: ${headResult.stderr}`);
+    }
   }
-  // show-ref empty (no refs) is ok with exit 1 in some git versions — treat empty as ok if stderr empty-ish
-  const refs = refsResult.ok || refsResult.stdout === '' || refsResult.exitCode === 1
-    ? refsResult.stdout
-    : (() => { throw new Error(`SNAPSHOT_FAILED: git show-ref exit ${refsResult.exitCode}: ${refsResult.stderr}`); })();
+
+  // show-ref: empty repo has exit 1 with empty stdout — allowed; other failures fail-closed
+  let refs = '';
+  if (refsResult.ok) {
+    refs = refsResult.stdout;
+  } else if (refsResult.exitCode === 1 && !refsResult.stderr.trim()) {
+    refs = refsResult.stdout || '';
+  } else if (refsResult.exitCode === 1 && /expected|no match|no references/i.test(refsResult.stderr)) {
+    refs = refsResult.stdout || '';
+  } else {
+    throw new Error(`SNAPSHOT_FAILED: git show-ref exit ${refsResult.exitCode}: ${refsResult.stderr}`);
+  }
+
+  // branch --show-current may fail on detached/unborn — null is fine when status worked
   const branch = branchResult.ok ? (branchResult.stdout || null) : null;
   const status = statusResult.stdout;
 
-  await new Promise((resolve) => setImmediate(resolve));
   if (signal?.aborted) throw new Error('CANCELLED: repository snapshot aborted');
 
   const lines = status.split(/\r?\n/).filter((line) => line && !line.startsWith('##'));
@@ -545,21 +564,23 @@ export async function repositorySnapshotAsync(
     statusByPath.set(path, entries);
   }
   const paths = [...statusByPath.keys()].sort();
-  const pathFingerprints = Object.fromEntries(paths.map((path) => {
-    const absolute = resolve(root, path);
-    try {
-      if (existsSync(absolute)) {
-        const stat = lstatSync(absolute);
-        if (stat.isFile() && stat.size > MAX_FINGERPRINT_FILE_BYTES) {
-          // Metadata-only for large files
-          return [path, createHash('sha256').update(`large:${stat.size}:${stat.mode}`).digest('hex')];
-        }
-      }
-    } catch {
-      /* fall through to full fingerprint */
-    }
-    return [path, repositoryPathFingerprint(root, path, statusByPath.get(path) ?? [])];
-  }));
+
+  // Offload fingerprint I/O to Worker Thread (or bounded sync for tiny sets).
+  const { computePathFingerprintsAsync } = await import(
+    '../../runtime/execution/thin-harness/fingerprint-worker'
+  );
+  const fingerprintResult = await computePathFingerprintsAsync(
+    {
+      root,
+      paths,
+      statusByPath: Object.fromEntries(statusByPath),
+      maxFileBytes: MAX_FINGERPRINT_FILE_BYTES,
+      maxTotalBytes: MAX_FINGERPRINT_TOTAL_BYTES,
+      maxPaths: MAX_DIRTY_PATHS_FOR_FINGERPRINT,
+    },
+    { signal, timeoutMs: MAX_FINGERPRINT_WORKER_MS },
+  );
+
   return {
     head,
     branch,
@@ -567,7 +588,7 @@ export async function repositorySnapshotAsync(
     dirty: paths.length > 0,
     refsHash: createHash('sha256').update(refs).digest('hex'),
     paths,
-    pathFingerprints,
+    pathFingerprints: fingerprintResult.pathFingerprints,
   };
 }
 

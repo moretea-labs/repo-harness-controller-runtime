@@ -11,7 +11,7 @@ export type ExecutionRisk =
   | 'destructive'
   | 'unknown';
 export type EstimatedClass = 'short' | 'long' | 'unknown';
-export type FastOutcome = 'succeeded' | 'failed' | 'cancelled' | 'timed_out' | 'escalated' | 'rejected' | 'busy';
+export type FastOutcome = 'succeeded' | 'failed' | 'cancelled' | 'timed_out' | 'escalated' | 'rejected' | 'busy' | 'unknown';
 export type ReceiptMode = 'none' | 'standalone';
 
 export type FastOperationKind =
@@ -188,6 +188,10 @@ export interface RepositoryBatchResult {
   stoppedEarly: boolean;
   partialFailure: boolean;
   nonAtomic?: boolean;
+  reconciliationRequired?: boolean;
+  ledgerPersisted?: boolean;
+  ledgerWarning?: string;
+  operationSucceeded?: boolean;
   latency: LatencyBreakdown;
   escalation?: {
     reason: string;

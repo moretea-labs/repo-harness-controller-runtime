@@ -78,7 +78,7 @@ async function runCase(
   return {
     name,
     totalMs: result.latency.totalMs,
-    operationExecutionMs: result.latency.operationExecutionMs,
+    operationExecutionMs: result.latency.operationExecutionMs ?? result.latency.executionMs ?? 0,
     overheadMs: harnessOverheadMs(result.latency),
     executionJobCount: side.executionJobCount,
     localJobCount: side.localJobCount,

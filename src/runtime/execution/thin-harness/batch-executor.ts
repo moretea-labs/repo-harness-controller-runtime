@@ -5,7 +5,7 @@ import { executeFast } from './fast-executor';
 import { LatencyTrace } from './latency-trace';
 import { writeFastReceipt } from './fast-receipt';
 import { mutationGateBusyMessage, withCheckoutMutationGate } from './mutation-gate';
-import { beginFastRequest, completeFastRequest } from './request-ledger';
+import { beginFastRequest, completeFastRequest, heartbeatFastRequest } from './request-ledger';
 import { hashRequestInput } from './fast-receipt';
 import {
   FAST_BATCH_MAX_STEPS,
@@ -236,6 +236,27 @@ export async function executeRepositoryBatch(
         latency: trace.snapshot(request.includeLatencyBreakdown === true),
       };
     }
+    if (ledger.kind === 'unknown') {
+      return {
+        ok: false,
+        mode: 'durable',
+        decision: {
+          mode: 'durable',
+          reasons: ['ledger_unknown_requires_reconcile'],
+          risk: 'workspace_write',
+          estimatedClass: 'short',
+          requiresIsolation: false,
+          requiresRecovery: true,
+          effects: decision.effects,
+          suggestedOperation: 'reconcile stale batch ledger before retry',
+        },
+        steps: [],
+        stoppedEarly: true,
+        partialFailure: false,
+        reconciliationRequired: true,
+        latency: trace.snapshot(request.includeLatencyBreakdown === true),
+      };
+    }
   }
 
   const batchDeadlineMs = Math.min(
@@ -411,8 +432,13 @@ export async function executeRepositoryBatch(
   let allChangedPaths: string[] = [];
   let repositoryChanged = false;
 
+  let processStopUnconfirmed = false;
   try {
     if (hasWrite) {
+      const writePaths = steps.flatMap((step) => {
+        if (Array.isArray(step.input.paths)) return step.input.paths.map(String);
+        return extractPatchPaths(step.input.operations);
+      });
       const gated = await withCheckoutMutationGate(
         {
           controllerHome: ctx.controllerHome,
@@ -422,8 +448,18 @@ export async function executeRepositoryBatch(
           owner: `fast-batch:${requestId ?? Date.now()}`,
           ttlMs: batchDeadlineMs + 15_000,
           signal: request.signal,
+          ownership: {
+            writePaths,
+            mutatesGitRefs: hasCommit || decision.effects.mutatesGitRefs,
+            mutatesGitIndex: true,
+          },
         },
-        async (gate, helpers) => runSteps(gate, helpers),
+        async (gate, helpers) => {
+          if (ledger?.kind === 'acquired') {
+            heartbeatFastRequest(ctx.controllerHome, ledger.entry, batchDeadlineMs + 15_000);
+          }
+          return runSteps(gate, helpers);
+        },
       );
       if (!gated.ok) {
         if (ledger?.kind === 'acquired') {
@@ -460,6 +496,7 @@ export async function executeRepositoryBatch(
       partialFailure = gated.value.partialFailure;
       allChangedPaths = gated.value.allChangedPaths;
       repositoryChanged = gated.value.repositoryChanged;
+      processStopUnconfirmed = gated.processStopUnconfirmed === true;
     } else {
       const ran = await runSteps();
       stepResults = ran.stepResults;
@@ -483,6 +520,9 @@ export async function executeRepositoryBatch(
       stoppedEarly: true,
       partialFailure: true,
       nonAtomic: true,
+      reconciliationRequired: true,
+      operationSucceeded: false,
+      ledgerPersisted: ledger?.kind === 'acquired' ? true : undefined,
       latency: trace.snapshot(request.includeLatencyBreakdown === true),
       escalation: {
         reason: error instanceof Error ? error.message : String(error),
@@ -521,17 +561,30 @@ export async function executeRepositoryBatch(
     if (request.includeLatencyBreakdown === true) written.receipt.latency = latency;
   }
 
+  const reconciliationRequired = processStopUnconfirmed
+    || (partialFailure && repositoryChanged)
+    || stepResults.some((step) => step.error?.code === 'MUTATION_OWNERSHIP_LOST'
+      || step.error?.code === 'MUTATION_RENEW_FAILED');
+  let ledgerPersisted: boolean | undefined;
+  let ledgerWarning: string | undefined;
   if (ledger?.kind === 'acquired') {
-    completeFastRequest(ctx.controllerHome, ledger.entry, {
-      status: ok ? 'succeeded' : 'failed',
-      resultSummary: `batch ok=${ok} steps=${stepResults.length}`,
+    const ledgerStatus = ok
+      ? 'succeeded' as const
+      : processStopUnconfirmed || reconciliationRequired && !stepResults.some((s) => s.ok)
+        ? 'unknown' as const
+        : 'failed' as const;
+    const completed = completeFastRequest(ctx.controllerHome, ledger.entry, {
+      status: ledgerStatus,
+      resultSummary: `batch ok=${ok} steps=${stepResults.length} partial=${partialFailure}`,
       receiptExecutionId: written.receipt?.executionId,
-      error: ok ? undefined : 'batch failed or partial',
+      error: ok ? undefined : processStopUnconfirmed ? 'process_stop_unconfirmed' : 'batch failed or partial',
     });
+    ledgerPersisted = completed.ok;
+    ledgerWarning = completed.warning;
   }
 
   let payload: RepositoryBatchResult = {
-    ok,
+    ok: ok && !processStopUnconfirmed,
     mode: 'fast',
     decision,
     receipt: written.receipt,
@@ -539,8 +592,12 @@ export async function executeRepositoryBatch(
     receiptWarning: written.warning,
     steps: stepResults,
     stoppedEarly,
-    partialFailure,
-    nonAtomic: hasCommit || (hasWrite && partialFailure),
+    partialFailure: partialFailure || processStopUnconfirmed,
+    nonAtomic: hasCommit || (hasWrite && (partialFailure || processStopUnconfirmed)),
+    reconciliationRequired: reconciliationRequired || undefined,
+    ledgerPersisted,
+    ledgerWarning,
+    operationSucceeded: ok && stepResults.every((entry) => entry.ok),
     latency,
   };
 

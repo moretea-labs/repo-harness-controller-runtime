@@ -8,3 +8,6 @@ export * from './lightweight-lanes';
 export * from './mutation-gate';
 export * from './async-process';
 export * from './request-ledger';
+export * from './proposal-store';
+export * from './workspace-savepoint';
+export * from './fingerprint-worker';

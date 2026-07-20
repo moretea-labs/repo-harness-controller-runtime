@@ -3,11 +3,12 @@
  *
  * Fast Path uses visibility=ephemeral (active set + fencing only; no projection
  * dirty / scheduler wake / runtime events). Durable workers use default durable
- * leases. Both contend on workspace:<checkoutId> with expanded path/git-ref
- * overlap rules.
+ * leases. Both contend on the same claim set with expanded path/git-ref overlap.
  *
  * Ownership lifecycle is covered by the mutation lease alone — do NOT hold the
  * repository controller lock for the duration of the write (renew needs that lock).
+ *
+ * Claims cover: workspace, git-index, git-head, and optionally git-ref + paths.
  */
 import { createHash } from 'crypto';
 import {
@@ -17,7 +18,9 @@ import {
   renewExecutionLeases,
 } from '../../resources/leases/store';
 import type { ExecutionLease } from '../../resources/leases/types';
+import type { ResourceClaimSpec } from '../../execution/jobs/types';
 import { runBoundedGit } from './async-process';
+import { terminateProcessTree } from '../../shared/process-tree';
 
 export interface CheckoutMutationGate {
   gateId: string;
@@ -26,14 +29,19 @@ export interface CheckoutMutationGate {
   repoId: string;
   checkoutId: string;
   resourceKey: string;
+  resourceKeys: string[];
+  leaseIds: string[];
+  primaryLeaseId: string;
   leaseId: string;
   fencingToken: number;
+  fencingTokens: Record<string, number>;
   baseHead: string | null;
   baseStatusHash: string | null;
   acquiredAt: string;
   expiresAt: string;
   ttlMs: number;
   renewCount: number;
+  claims: ResourceClaimSpec[];
 }
 
 export interface MutationGateBusy {
@@ -52,14 +60,63 @@ export interface MutationGateHelpers {
   /** Aborts when ownership is lost or renew fails. Combine with caller signal. */
   signal: AbortSignal;
   getGate: () => CheckoutMutationGate;
+  /** Register a child pid for ownership-loss process-tree kill. */
+  trackChildPid: (pid: number) => void;
+  /** True when ownership abort fired. */
+  ownershipLost: () => boolean;
+}
+
+export interface MutationOwnershipOptions {
+  /** Paths that will be written (path:<checkout>:<rel> claims). */
+  writePaths?: string[];
+  /** When true, also claim git-ref (commit / branch mutation). */
+  mutatesGitRefs?: boolean;
+  /** When true (default for workspace writes), claim git-index + git-head. */
+  mutatesGitIndex?: boolean;
 }
 
 const DEFAULT_TTL_MS = 30_000;
 const MIN_TTL_MS = 3_000;
 const MAX_TTL_MS = 120_000;
 
+const EPHEMERAL_OPTS = {
+  visibility: 'ephemeral' as const,
+  notifyScheduler: false,
+  invalidateProjection: false,
+  emitRuntimeEvent: false,
+};
+
 export function checkoutMutationResourceKey(checkoutId: string): string {
   return `workspace:${checkoutId}`;
+}
+
+export function buildMutationClaims(
+  checkoutId: string,
+  options: MutationOwnershipOptions = {},
+): ResourceClaimSpec[] {
+  const claims: ResourceClaimSpec[] = [
+    { resourceKey: `workspace:${checkoutId}`, mode: 'write' },
+  ];
+  const mutatesIndex = options.mutatesGitIndex !== false;
+  if (mutatesIndex) {
+    claims.push({ resourceKey: `git-index:${checkoutId}`, mode: 'write' });
+    claims.push({ resourceKey: `git-head:${checkoutId}`, mode: 'write' });
+  }
+  if (options.mutatesGitRefs) {
+    claims.push({ resourceKey: `git-ref:HEAD`, mode: 'write' });
+    claims.push({ resourceKey: `git-ref:refs/heads/*`, mode: 'write' });
+  }
+  for (const path of options.writePaths ?? []) {
+    const relative = path.replace(/^\.\//, '').replace(/\\/g, '/');
+    if (!relative) continue;
+    claims.push({ resourceKey: `path:${checkoutId}:${relative}`, mode: 'write' });
+  }
+  // Dedupe by resourceKey, prefer exclusive/write
+  const map = new Map<string, ResourceClaimSpec>();
+  for (const claim of claims) {
+    map.set(claim.resourceKey, claim);
+  }
+  return [...map.values()];
 }
 
 async function snapshotHash(repoRoot: string, signal?: AbortSignal): Promise<{ head: string | null; statusHash: string | null }> {
@@ -83,7 +140,6 @@ async function snapshotHash(repoRoot: string, signal?: AbortSignal): Promise<{ h
   if (!statusResult.ok) {
     throw new Error(`MUTATION_SNAPSHOT_FAILED: git status failed: ${statusResult.stderr || statusResult.exitCode}`);
   }
-  // unborn HEAD is ok (empty repo / no commits yet)
   const head = headResult.ok ? (headResult.stdout.trim() || null) : null;
   return {
     head,
@@ -91,8 +147,45 @@ async function snapshotHash(repoRoot: string, signal?: AbortSignal): Promise<{ h
   };
 }
 
+function gateFromLeases(
+  ownerJobId: string,
+  repoId: string,
+  checkoutId: string,
+  claims: ResourceClaimSpec[],
+  leases: ExecutionLease[],
+  snap: { head: string | null; statusHash: string | null },
+  ttlMs: number,
+): CheckoutMutationGate {
+  const primary = leases.find((lease) => lease.resourceKey === `workspace:${checkoutId}`) ?? leases[0]!;
+  const fencingTokens: Record<string, number> = {};
+  for (const lease of leases) {
+    fencingTokens[lease.leaseId] = lease.fencingToken;
+  }
+  return {
+    gateId: ownerJobId,
+    owner: ownerJobId,
+    ownerJobId,
+    repoId,
+    checkoutId,
+    resourceKey: primary.resourceKey,
+    resourceKeys: leases.map((lease) => lease.resourceKey),
+    leaseIds: leases.map((lease) => lease.leaseId),
+    primaryLeaseId: primary.leaseId,
+    leaseId: primary.leaseId,
+    fencingToken: primary.fencingToken,
+    fencingTokens,
+    baseHead: snap.head,
+    baseStatusHash: snap.statusHash,
+    acquiredAt: primary.acquiredAt,
+    expiresAt: primary.expiresAt,
+    ttlMs,
+    renewCount: 0,
+    claims,
+  };
+}
+
 /**
- * Acquire exclusive checkout mutation ownership via ephemeral Execution Lease.
+ * Acquire exclusive checkout mutation ownership via ephemeral Execution Lease(s).
  * Snapshot is taken AFTER lease acquisition under ownership.
  */
 export async function acquireCheckoutMutationGate(input: {
@@ -102,24 +195,21 @@ export async function acquireCheckoutMutationGate(input: {
   repoRoot: string;
   owner: string;
   ttlMs?: number;
+  ownership?: MutationOwnershipOptions;
 }): Promise<MutationGateAcquireResult> {
   const ttlMs = Math.max(MIN_TTL_MS, Math.min(input.ttlMs ?? DEFAULT_TTL_MS, MAX_TTL_MS));
-  const resourceKey = checkoutMutationResourceKey(input.checkoutId);
+  const claims = buildMutationClaims(input.checkoutId, input.ownership);
   const ownerJobId = input.owner.startsWith('fast:') || input.owner.startsWith('JOB-')
     ? input.owner
     : `fast:${input.owner}`;
 
-  // 1) Acquire lease first (short controller lock only inside lease store).
   const result = acquireExecutionLeases(
     input.controllerHome,
     input.repoId,
     ownerJobId,
-    [{ resourceKey, mode: 'write' }],
+    claims,
     {
-      visibility: 'ephemeral',
-      notifyScheduler: false,
-      invalidateProjection: false,
-      emitRuntimeEvent: false,
+      ...EPHEMERAL_OPTS,
       ttlMs,
     },
   );
@@ -137,9 +227,6 @@ export async function acquireCheckoutMutationGate(input: {
     };
   }
 
-  const lease = result.leases[0]!;
-
-  // 2) Snapshot under ownership — never before lease.
   let snap: { head: string | null; statusHash: string | null };
   try {
     snap = await snapshotHash(input.repoRoot);
@@ -148,8 +235,8 @@ export async function acquireCheckoutMutationGate(input: {
       input.controllerHome,
       input.repoId,
       ownerJobId,
-      [{ leaseId: lease.leaseId, fencingToken: lease.fencingToken }],
-      { visibility: 'ephemeral', notifyScheduler: false, invalidateProjection: false, emitRuntimeEvent: false },
+      result.leases.map((lease) => ({ leaseId: lease.leaseId, fencingToken: lease.fencingToken })),
+      EPHEMERAL_OPTS,
     );
     return {
       busy: true,
@@ -163,22 +250,7 @@ export async function acquireCheckoutMutationGate(input: {
 
   return {
     acquired: true,
-    gate: {
-      gateId: ownerJobId,
-      owner: ownerJobId,
-      ownerJobId,
-      repoId: input.repoId,
-      checkoutId: input.checkoutId,
-      resourceKey,
-      leaseId: lease.leaseId,
-      fencingToken: lease.fencingToken,
-      baseHead: snap.head,
-      baseStatusHash: snap.statusHash,
-      acquiredAt: lease.acquiredAt,
-      expiresAt: lease.expiresAt,
-      ttlMs,
-      renewCount: 0,
-    },
+    gate: gateFromLeases(ownerJobId, input.repoId, input.checkoutId, claims, result.leases, snap, ttlMs),
   };
 }
 
@@ -188,21 +260,35 @@ export function renewCheckoutMutationGate(
   ttlMs?: number,
 ): CheckoutMutationGate {
   const nextTtl = Math.max(MIN_TTL_MS, Math.min(ttlMs ?? gate.ttlMs, MAX_TTL_MS));
+  const expected = gate.leaseIds.map((leaseId) => ({
+    leaseId,
+    fencingToken: gate.fencingTokens[leaseId] ?? gate.fencingToken,
+  }));
   const renewed = renewExecutionLeases(
     controllerHome,
     gate.repoId,
     gate.ownerJobId,
     nextTtl,
-    [{ leaseId: gate.leaseId, fencingToken: gate.fencingToken }],
+    expected,
   );
-  const lease = renewed.find((entry) => entry.leaseId === gate.leaseId);
-  if (!lease) {
-    throw new Error(`MUTATION_RENEW_FAILED: lease ${gate.leaseId} missing after renew`);
+  if (renewed.length === 0) {
+    throw new Error(`MUTATION_RENEW_FAILED: no leases renewed for ${gate.ownerJobId}`);
+  }
+  const fencingTokens: Record<string, number> = { ...gate.fencingTokens };
+  let expiresAt = gate.expiresAt;
+  let fencingToken = gate.fencingToken;
+  for (const lease of renewed) {
+    fencingTokens[lease.leaseId] = lease.fencingToken;
+    expiresAt = lease.expiresAt;
+    if (lease.leaseId === gate.primaryLeaseId || lease.resourceKey === gate.resourceKey) {
+      fencingToken = lease.fencingToken;
+    }
   }
   return {
     ...gate,
-    expiresAt: lease.expiresAt,
-    fencingToken: lease.fencingToken,
+    expiresAt,
+    fencingToken,
+    fencingTokens,
     ttlMs: nextTtl,
     renewCount: gate.renewCount + 1,
   };
@@ -212,7 +298,16 @@ export function assertCheckoutMutationGate(
   controllerHome: string,
   gate: CheckoutMutationGate,
 ): ExecutionLease {
-  return assertFencingToken(controllerHome, gate.repoId, gate.leaseId, gate.fencingToken);
+  let primary: ExecutionLease | undefined;
+  for (const leaseId of gate.leaseIds) {
+    const token = gate.fencingTokens[leaseId] ?? gate.fencingToken;
+    const lease = assertFencingToken(controllerHome, gate.repoId, leaseId, token);
+    if (leaseId === gate.primaryLeaseId) primary = lease;
+  }
+  if (!primary) {
+    primary = assertFencingToken(controllerHome, gate.repoId, gate.leaseId, gate.fencingToken);
+  }
+  return primary;
 }
 
 export function releaseCheckoutMutationGate(
@@ -220,15 +315,18 @@ export function releaseCheckoutMutationGate(
   repoId: string,
   _checkoutId: string,
   gateIdOrOwner?: string,
-  fencing?: { leaseId: string; fencingToken: number },
+  fencing?: { leaseId: string; fencingToken: number } | Array<{ leaseId: string; fencingToken: number }>,
 ): void {
   if (!gateIdOrOwner) return;
+  const expected = fencing
+    ? (Array.isArray(fencing) ? fencing : [fencing])
+    : undefined;
   releaseExecutionLeases(
     controllerHome,
     repoId,
     gateIdOrOwner,
-    fencing ? [{ leaseId: fencing.leaseId, fencingToken: fencing.fencingToken }] : undefined,
-    { visibility: 'ephemeral', notifyScheduler: false, invalidateProjection: false, emitRuntimeEvent: false },
+    expected,
+    EPHEMERAL_OPTS,
   );
 }
 
@@ -240,8 +338,11 @@ export function releaseCheckoutMutationGateOwned(
     controllerHome,
     gate.repoId,
     gate.ownerJobId,
-    [{ leaseId: gate.leaseId, fencingToken: gate.fencingToken }],
-    { visibility: 'ephemeral', notifyScheduler: false, invalidateProjection: false, emitRuntimeEvent: false },
+    gate.leaseIds.map((leaseId) => ({
+      leaseId,
+      fencingToken: gate.fencingTokens[leaseId] ?? gate.fencingToken,
+    })),
+    EPHEMERAL_OPTS,
   );
 }
 
@@ -258,6 +359,14 @@ function combineAbortSignals(signals: Array<AbortSignal | undefined>): AbortSign
   return controller.signal;
 }
 
+export interface WithMutationGateResult<T> {
+  ok: true;
+  value: T;
+  gate: CheckoutMutationGate;
+  /** When kill of tracked children could not be confirmed. */
+  processStopUnconfirmed?: boolean;
+}
+
 /**
  * Hold mutation ownership for the duration of operation with automatic heartbeat renew.
  * Renew interval = ttl/3. Renew failure aborts ownershipSignal (not only flags).
@@ -272,9 +381,10 @@ export async function withCheckoutMutationGate<T>(
     owner: string;
     ttlMs?: number;
     signal?: AbortSignal;
+    ownership?: MutationOwnershipOptions;
   },
   operation: (gate: CheckoutMutationGate, helpers: MutationGateHelpers) => Promise<T>,
-): Promise<{ ok: true; value: T; gate: CheckoutMutationGate } | { ok: false; busy: MutationGateBusy }> {
+): Promise<WithMutationGateResult<T> | { ok: false; busy: MutationGateBusy }> {
   const acquired = await acquireCheckoutMutationGate(input);
   if (!('acquired' in acquired) || !acquired.acquired) {
     return { ok: false, busy: acquired as MutationGateBusy };
@@ -284,7 +394,26 @@ export async function withCheckoutMutationGate<T>(
   const ownershipAbort = new AbortController();
   const combined = combineAbortSignals([input.signal, ownershipAbort.signal]);
   let renewFailed: Error | undefined;
+  const trackedPids = new Set<number>();
+  let processStopUnconfirmed = false;
   const renewIntervalMs = Math.max(500, Math.floor(gate.ttlMs / 3));
+
+  const killTracked = async () => {
+    for (const pid of trackedPids) {
+      try {
+        const result = await terminateProcessTree(pid, {
+          gracePeriodMs: 200,
+          killAfterMs: 1_500,
+          pollIntervalMs: 50,
+        });
+        if (!result.exited || result.remainingPids.length > 0) {
+          processStopUnconfirmed = true;
+        }
+      } catch {
+        processStopUnconfirmed = true;
+      }
+    }
+  };
 
   const failOwnership = (error: unknown) => {
     if (renewFailed) return;
@@ -294,6 +423,7 @@ export async function withCheckoutMutationGate<T>(
     } catch {
       /* already aborted */
     }
+    void killTracked();
   };
 
   const timer = setInterval(() => {
@@ -318,14 +448,22 @@ export async function withCheckoutMutationGate<T>(
     },
     signal: combined,
     getGate: () => gate,
+    trackChildPid: (pid: number) => {
+      if (pid > 0) trackedPids.add(pid);
+    },
+    ownershipLost: () => Boolean(renewFailed) || ownershipAbort.signal.aborted,
   };
 
   try {
     const value = await operation(gate, helpers);
     if (renewFailed) throw renewFailed;
-    // Final fencing check before success returns.
     assertCheckoutMutationGate(input.controllerHome, gate);
-    return { ok: true, value, gate };
+    return { ok: true, value, gate, processStopUnconfirmed: processStopUnconfirmed || undefined };
+  } catch (error) {
+    if (ownershipAbort.signal.aborted) {
+      await killTracked();
+    }
+    throw error;
   } finally {
     clearInterval(timer);
     try {
@@ -339,4 +477,22 @@ export async function withCheckoutMutationGate<T>(
 export function mutationGateBusyMessage(busy: MutationGateBusy): string {
   const owners = busy.blockers.map((entry) => entry.owner).join(', ');
   return `${busy.reason}: active writers=[${owners}]`;
+}
+
+/**
+ * Build unknown-outcome payload when process stop cannot be confirmed after ownership loss.
+ */
+export function unknownOwnershipOutcome(input: {
+  repositoryChanged?: boolean;
+}): {
+  outcome: 'unknown';
+  repositoryChanged: true;
+  reconciliationRequired: true;
+} {
+  return {
+    outcome: 'unknown',
+    repositoryChanged: true,
+    reconciliationRequired: true,
+    ...(input.repositoryChanged === false ? {} : {}),
+  };
 }

@@ -1,14 +1,31 @@
 /**
- * Fast Path request ledger for mutation idempotency.
- * Atomic create-if-absent before any write; independent of receipt retention.
- * Completion is compare-and-set and never throws to mask mutation success.
+ * Fast Path request ledger for mutation idempotency + crash recovery.
+ * Atomic create-if-absent before any write; CAS completion; stale reconcile.
+ * Ledger write failure must never mask an already-successful mutation.
  */
 import { createHash, randomUUID } from 'crypto';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'fs';
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'fs';
 import { join } from 'path';
 import { repositoryControllerRoot } from '../../../cli/repositories/controller-home';
 
-export type FastRequestLedgerStatus = 'reserved' | 'executing' | 'succeeded' | 'failed' | 'unknown' | 'in_progress';
+export type FastRequestLedgerStatus =
+  | 'reserved'
+  | 'executing'
+  | 'succeeded'
+  | 'failed'
+  | 'unknown'
+  /** @deprecated alias of reserved/executing for older readers */
+  | 'in_progress';
 
 export interface FastRequestLedgerEntry {
   schemaVersion: 1;
@@ -21,6 +38,7 @@ export interface FastRequestLedgerEntry {
   status: FastRequestLedgerStatus;
   owner: string;
   ownerPid: number;
+  ownerSessionId?: string;
   startedAt: string;
   heartbeatAt: string;
   expiresAt: string;
@@ -30,6 +48,8 @@ export interface FastRequestLedgerEntry {
   error?: string;
   receiptExecutionId?: string;
   baseSnapshot?: string;
+  resultSnapshot?: string;
+  reconcileNotes?: string;
 }
 
 export type LedgerBeginResult =
@@ -43,7 +63,19 @@ export interface LedgerCompleteResult {
   ok: boolean;
   entry?: FastRequestLedgerEntry;
   warning?: string;
-  code?: 'LEDGER_STALE_OWNER' | 'LEDGER_WRITE_FAILED' | 'LEDGER_MISSING';
+  code?: 'LEDGER_STALE_OWNER' | 'LEDGER_WRITE_FAILED' | 'LEDGER_MISSING' | 'LEDGER_CAS_FAILED';
+}
+
+export type LedgerReconcileVerdict =
+  | 'succeeded'
+  | 'not_started'
+  | 'unknown';
+
+export interface LedgerReconcileResult {
+  entry: FastRequestLedgerEntry;
+  verdict: LedgerReconcileVerdict;
+  notes: string;
+  autoRetriable: boolean;
 }
 
 const DEFAULT_LEDGER_TTL_MS = 15 * 60_000;
@@ -79,16 +111,26 @@ function writeEntryAtomic(path: string, entry: FastRequestLedgerEntry): void {
   renameSync(temporary, path);
 }
 
+function isActiveStatus(status: FastRequestLedgerStatus): boolean {
+  return status === 'in_progress' || status === 'reserved' || status === 'executing';
+}
+
 function isActiveInProgress(entry: FastRequestLedgerEntry): boolean {
-  if (entry.status !== 'in_progress' && entry.status !== 'reserved' && entry.status !== 'executing') {
-    return false;
-  }
+  if (!isActiveStatus(entry.status)) return false;
   if (entry.expiresAt && Date.parse(entry.expiresAt) <= Date.now()) return false;
+  // Owner process dead + heartbeat stale → not active (caller should reconcile).
+  if (entry.ownerPid && entry.ownerPid !== process.pid) {
+    try {
+      process.kill(entry.ownerPid, 0);
+    } catch {
+      return false;
+    }
+  }
   return true;
 }
 
 /**
- * Atomically claim a requestId for mutation work.
+ * Atomically claim a requestId for mutation work (status=reserved then mark executing).
  * Uses O_EXCL create so concurrent callers cannot both acquire.
  */
 export function beginFastRequest(input: {
@@ -99,7 +141,9 @@ export function beginFastRequest(input: {
   inputHash: string;
   operation: string;
   owner: string;
+  ownerSessionId?: string;
   ttlMs?: number;
+  baseSnapshot?: string;
 }): LedgerBeginResult {
   const requestId = input.requestId.trim();
   if (!requestId) {
@@ -137,14 +181,14 @@ export function beginFastRequest(input: {
     if (isActiveInProgress(existing)) {
       return { kind: 'in_progress', entry: existing };
     }
-    // Stale in_progress / failed / expired: do not auto-delete if we cannot prove no mutation.
-    // Mark unknown if status was in_progress and expired (crash window).
-    if (existing.status === 'in_progress' || existing.status === 'reserved' || existing.status === 'executing') {
+    // Stale reserved/executing/in_progress: mark unknown — never auto-delete if mutation may have run.
+    if (isActiveStatus(existing.status)) {
       const unknown: FastRequestLedgerEntry = {
         ...existing,
         status: 'unknown',
         finishedAt: new Date().toISOString(),
         error: 'stale_in_progress_expired_requires_reconcile',
+        reconcileNotes: 'auto-marked unknown on re-begin of expired/stale active entry',
       };
       try {
         writeEntryAtomic(path, unknown);
@@ -154,10 +198,10 @@ export function beginFastRequest(input: {
       return {
         kind: 'unknown',
         entry: unknown,
-        message: 'LEDGER_STALE: prior request left in_progress after expiry; reconcile required',
+        message: 'LEDGER_STALE: prior request left active after expiry/crash; reconcile required',
       };
     }
-    // failed: allow re-acquire
+    // failed: allow re-acquire by removing terminal failed entry
     try {
       rmSync(path, { force: true });
     } catch {
@@ -174,12 +218,14 @@ export function beginFastRequest(input: {
     requestId,
     inputHash: input.inputHash,
     operation: input.operation,
-    status: 'in_progress',
+    status: 'reserved',
     owner: input.owner,
     ownerPid: process.pid,
+    ownerSessionId: input.ownerSessionId,
     startedAt: now,
     heartbeatAt: now,
     expiresAt: new Date(Date.now() + ttlMs).toISOString(),
+    baseSnapshot: input.baseSnapshot,
   };
 
   try {
@@ -189,7 +235,14 @@ export function beginFastRequest(input: {
     } finally {
       closeSync(fd);
     }
-    return { kind: 'acquired', entry };
+    // Immediately transition reserved → executing (same owner).
+    const executing: FastRequestLedgerEntry = {
+      ...entry,
+      status: 'executing',
+      heartbeatAt: new Date().toISOString(),
+    };
+    writeEntryAtomic(path, executing);
+    return { kind: 'acquired', entry: executing };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'EEXIST') {
@@ -223,8 +276,57 @@ export function beginFastRequest(input: {
 }
 
 /**
+ * Heartbeat ledger entry — aligned with mutation ownership TTL.
+ * CAS on entryId + owner; never throws.
+ */
+export function heartbeatFastRequest(
+  controllerHome: string,
+  expected: FastRequestLedgerEntry,
+  ttlMs?: number,
+): LedgerCompleteResult {
+  try {
+    const path = entryPath(controllerHome, expected.repoId, expected.checkoutId, expected.requestId);
+    const current = readEntry(path);
+    if (!current) {
+      return { ok: false, code: 'LEDGER_MISSING', warning: 'ledger entry missing at heartbeat' };
+    }
+    if (
+      current.entryId !== expected.entryId
+      || current.owner !== expected.owner
+      || current.inputHash !== expected.inputHash
+    ) {
+      return {
+        ok: false,
+        code: 'LEDGER_STALE_OWNER',
+        entry: current,
+        warning: 'LEDGER_STALE_OWNER: heartbeat refused for non-matching entry',
+      };
+    }
+    if (!isActiveStatus(current.status)) {
+      return { ok: true, entry: current };
+    }
+    const extendMs = Math.max(30_000, ttlMs ?? DEFAULT_LEDGER_TTL_MS);
+    const next: FastRequestLedgerEntry = {
+      ...current,
+      status: current.status === 'reserved' ? 'executing' : current.status,
+      heartbeatAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + extendMs).toISOString(),
+    };
+    writeEntryAtomic(path, next);
+    return { ok: true, entry: next };
+  } catch (error) {
+    return {
+      ok: false,
+      code: 'LEDGER_WRITE_FAILED',
+      warning: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/**
  * Compare-and-set completion. Never throws — returns structured result so callers
  * can isolate ledger failures from mutation success.
+ * Requires entryId + owner + inputHash + active status.
  */
 export function completeFastRequest(
   controllerHome: string,
@@ -235,6 +337,7 @@ export function completeFastRequest(
     resultSummary?: string;
     error?: string;
     receiptExecutionId?: string;
+    resultSnapshot?: string;
   },
 ): LedgerCompleteResult {
   try {
@@ -255,7 +358,7 @@ export function completeFastRequest(
         warning: 'LEDGER_STALE_OWNER: current entry does not match expected owner/entryId/inputHash',
       };
     }
-    if (current.status !== 'in_progress' && current.status !== 'reserved' && current.status !== 'executing') {
+    if (!isActiveStatus(current.status)) {
       // Already terminal — do not overwrite succeeded with failed from late caller.
       if (current.status === 'succeeded' && update.status !== 'succeeded') {
         return {
@@ -277,6 +380,7 @@ export function completeFastRequest(
       resultSummary: update.resultSummary?.slice(0, 2_048),
       error: update.error?.slice(0, 1_024),
       receiptExecutionId: update.receiptExecutionId,
+      resultSnapshot: update.resultSnapshot,
     };
     writeEntryAtomic(path, next);
     return { ok: true, entry: next };
@@ -287,6 +391,98 @@ export function completeFastRequest(
       warning: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+/**
+ * Reconcile a stale active/unknown entry using workspace evidence.
+ * Never auto-retries when execution cannot be proven incomplete.
+ */
+export function reconcileFastRequest(input: {
+  controllerHome: string;
+  entry: FastRequestLedgerEntry;
+  currentSnapshot?: string;
+  commitHash?: string | null;
+  receiptExecutionId?: string;
+  changedPaths?: string[];
+  evidence?: {
+    /** Explicit proof mutation completed (receipt, commit, result snapshot match). */
+    provenSucceeded?: boolean;
+    /** Explicit proof mutation never started (identical base snapshot, no changed paths, no receipt). */
+    provenNotStarted?: boolean;
+  };
+}): LedgerReconcileResult {
+  const path = entryPath(
+    input.controllerHome,
+    input.entry.repoId,
+    input.entry.checkoutId,
+    input.entry.requestId,
+  );
+  const current = readEntry(path) ?? input.entry;
+
+  if (current.status === 'succeeded') {
+    return { entry: current, verdict: 'succeeded', notes: 'already_succeeded', autoRetriable: false };
+  }
+  if (current.status === 'failed') {
+    return { entry: current, verdict: 'not_started', notes: 'terminal_failed_may_retry', autoRetriable: true };
+  }
+
+  let verdict: LedgerReconcileVerdict = 'unknown';
+  let notes = 'insufficient_evidence';
+  let autoRetriable = false;
+
+  if (input.evidence?.provenSucceeded || current.receiptExecutionId || input.receiptExecutionId) {
+    verdict = 'succeeded';
+    notes = 'receipt_or_explicit_success_evidence';
+    autoRetriable = false;
+  } else if (
+    input.evidence?.provenNotStarted
+    || (
+      current.baseSnapshot
+      && input.currentSnapshot
+      && current.baseSnapshot === input.currentSnapshot
+      && (!input.changedPaths || input.changedPaths.length === 0)
+      && !current.receiptExecutionId
+    )
+  ) {
+    verdict = 'not_started';
+    notes = 'base_snapshot_unchanged_no_receipt';
+    autoRetriable = true;
+  } else if (input.commitHash && current.baseSnapshot && input.commitHash !== current.baseSnapshot) {
+    // HEAD moved but we cannot prove this request caused it → unknown
+    verdict = 'unknown';
+    notes = 'head_moved_without_request_proof';
+    autoRetriable = false;
+  } else {
+    verdict = 'unknown';
+    notes = 'cannot_prove_not_started_or_succeeded';
+    autoRetriable = false;
+  }
+
+  const nextStatus: FastRequestLedgerStatus =
+    verdict === 'succeeded' ? 'succeeded' : verdict === 'not_started' ? 'failed' : 'unknown';
+
+  const next: FastRequestLedgerEntry = {
+    ...current,
+    status: nextStatus,
+    finishedAt: new Date().toISOString(),
+    heartbeatAt: new Date().toISOString(),
+    resultSnapshot: input.currentSnapshot ?? current.resultSnapshot,
+    receiptExecutionId: input.receiptExecutionId ?? current.receiptExecutionId,
+    reconcileNotes: notes,
+    error: verdict === 'unknown'
+      ? (current.error ?? 'reconcile_unknown')
+      : verdict === 'not_started'
+        ? 'reconciled_not_started'
+        : current.error,
+  };
+
+  try {
+    writeEntryAtomic(path, next);
+  } catch {
+    /* best effort persist */
+  }
+
+  return { entry: next, verdict, notes, autoRetriable };
 }
 
 export function readFastRequest(

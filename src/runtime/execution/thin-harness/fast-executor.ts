@@ -8,7 +8,7 @@ import {
   type RepositoryCommandSnapshot,
 } from '../../../cli/repositories/command-executor';
 import { getMcpPolicy } from '../../../cli/mcp/policy';
-import { readRepositoryRange, searchRepository } from '../../../cli/repository/inspector';
+import { readRepositoryRange } from '../../../cli/repository/inspector';
 import type { RepositoryRecord } from '../../../cli/repositories/types';
 import { getLeaseSideEffectMetrics } from '../../resources/leases/store';
 import { runBoundedGit, runBoundedProcess } from './async-process';
@@ -23,11 +23,22 @@ import {
   withCheckoutMutationGate,
   type CheckoutMutationGate,
   type MutationGateHelpers,
+  type MutationOwnershipOptions,
 } from './mutation-gate';
 import {
   beginFastRequest,
   completeFastRequest,
+  heartbeatFastRequest,
+  type FastRequestLedgerEntry,
 } from './request-ledger';
+import { runInspectorSearchInWorker } from './search-worker';
+import {
+  createWorkspaceSavepoint,
+  discardWorkspaceSavepoint,
+  restoreWorkspaceSavepoint,
+  verifySavepointRestored,
+  type WorkspaceSavepoint,
+} from './workspace-savepoint';
 import {
   FAST_PATH_DEFAULT_TIMEOUT_MS,
   FAST_PATH_MAX_FILE_BYTES,
@@ -75,7 +86,7 @@ export interface FastExecuteResult {
   operationSucceeded?: boolean;
   changedPaths?: string[];
   repositoryChanged?: boolean;
-  outcome?: FastOutcome;
+  outcome?: FastOutcome | 'unknown';
   result?: Record<string, unknown>;
   latency: LatencyBreakdown;
   escalation?: { reason: string; suggestedOperation: string };
@@ -90,6 +101,9 @@ export interface FastExecuteResult {
   };
   ledgerPersisted?: boolean;
   ledgerWarning?: string;
+  reconciliationRequired?: boolean;
+  cleanupRequired?: boolean;
+  processStopUnconfirmed?: boolean;
 }
 
 function boundedTimeout(value: number | undefined): number {
@@ -296,16 +310,31 @@ async function runSearchInWorker(
       engine: 'rg',
     };
   }
-  // Fallback: isolate sync inspector behind setImmediate yield points.
-  // True Worker Thread offload remains a follow-up; do not claim concurrent offload here.
-  await new Promise((resolve) => setImmediate(resolve));
+  // No rg (or hard failure): Worker Thread inspector fallback — never sync on Gateway loop.
   if (signal?.aborted) throw new Error('CANCELLED: search aborted');
-  const result = searchRepository(repoRoot, policyFor(repoRoot), {
-    query,
-    maxResults,
-    maxFiles,
-  }) as unknown as Record<string, unknown>;
-  return { ...result, engine: 'inspector_sync_fallback' };
+  return runInspectorSearchInWorker(
+    { repoRoot, query, maxResults, maxFiles },
+    { timeoutMs: FAST_PATH_DEFAULT_TIMEOUT_MS, signal },
+  );
+}
+
+function ownershipOptionsFor(
+  operation: string,
+  decision: ExecutionDecision,
+  input: Record<string, unknown>,
+): MutationOwnershipOptions {
+  const writePaths = [
+    ...(Array.isArray(input.paths) ? input.paths.map(String) : []),
+    ...extractPatchPaths(input.operations),
+    ...(Array.isArray(input.allowed_paths) ? input.allowed_paths.map(String) : []),
+  ];
+  return {
+    writePaths: writePaths.length ? writePaths : undefined,
+    mutatesGitRefs: decision.effects.mutatesGitRefs
+      || operation.includes('commit')
+      || operation === 'repository_git_commit',
+    mutatesGitIndex: decision.effects.mutatesWorkspace || decision.effects.mutatesGitRefs,
+  };
 }
 
 /**
@@ -422,6 +451,7 @@ export async function executeFast(
 
   // Atomic request ledger before mutation.
   let ledgerEntry: ReturnType<typeof beginFastRequest> | undefined;
+  let acquiredLedger: FastRequestLedgerEntry | undefined;
   if (requestId && needsMutation && receiptMode === 'standalone' && !request.externalMutation) {
     ledgerEntry = beginFastRequest({
       controllerHome: ctx.controllerHome,
@@ -431,7 +461,11 @@ export async function executeFast(
       inputHash,
       operation: String(operation),
       owner,
+      ownerSessionId: ctx.sessionId,
     });
+    if (ledgerEntry.kind === 'acquired') {
+      acquiredLedger = ledgerEntry.entry;
+    }
     if (ledgerEntry.kind === 'replay') {
       return {
         ok: true,
@@ -599,64 +633,125 @@ export async function executeFast(
             throw new Error(`PATH_SCOPE_REJECTED: operations target paths outside allowed scope: ${bad.join(', ')}`);
           }
         }
-        // Pre-apply binary-safe snapshots via Buffer.
-        const beforeSnapshots = new Map<string, Buffer | null>();
-        for (const path of opPaths) {
-          const absolute = join(root, path);
-          beforeSnapshots.set(path, existsSync(absolute) ? readFileSync(absolute) : null);
+        // Create binary-safe savepoint (files, symlinks, modes, create/delete) before apply.
+        let savepoint: WorkspaceSavepoint | undefined;
+        try {
+          savepoint = createWorkspaceSavepoint({
+            controllerHome: ctx.controllerHome,
+            repoId: ctx.repository.repoId,
+            repoRoot: root,
+            paths: opPaths,
+          });
+        } catch (error) {
+          throw new Error(
+            `SAVEPOINT_CREATE_FAILED: ${error instanceof Error ? error.message : String(error)}`,
+          );
         }
-        const applied = await trace.measure('executionMs', async () => applySafePatch(ctx.repository, {
-          sessionId: request.input.session_id,
-          purpose: request.input.purpose ?? 'fast-path-patch',
-          operations: request.input.operations,
-          chunkSize: request.input.chunk_size,
-          expectedRevision: request.input.expected_revision,
-          allowedPaths: allowed,
-          continueOnError: false,
-          refreshFingerprints: request.input.refresh_fingerprints !== false,
-          recoverStaleSession: request.input.recover_stale_session !== false,
-        }));
+        let applied: ReturnType<typeof applySafePatch>;
+        try {
+          helpers?.assert();
+          applied = await trace.measure('executionMs', async () => applySafePatch(ctx.repository, {
+            sessionId: request.input.session_id,
+            purpose: request.input.purpose ?? 'fast-path-patch',
+            operations: request.input.operations,
+            chunkSize: request.input.chunk_size,
+            expectedRevision: request.input.expected_revision,
+            allowedPaths: allowed,
+            continueOnError: false,
+            refreshFingerprints: request.input.refresh_fingerprints !== false,
+            recoverStaleSession: request.input.recover_stale_session !== false,
+          }));
+        } catch (error) {
+          const restored = restoreWorkspaceSavepoint(savepoint);
+          const verified = verifySavepointRestored(root, savepoint);
+          if (!restored.ok || !verified.ok) {
+            resultPayload = {
+              error: {
+                code: 'PATCH_ROLLBACK_INCOMPLETE',
+                message: error instanceof Error ? error.message : String(error),
+                repositoryChanged: true,
+                cleanupRequired: true,
+                reconciliationRequired: true,
+                failedPaths: restored.failedPaths,
+                residual: verified.residual,
+              },
+            };
+            ok = false;
+            outcome = 'failed';
+            repositoryChanged = true;
+            changedPaths = [...new Set([...restored.failedPaths, ...verified.residual])];
+            policyDecision = 'rollback_incomplete';
+            // Do not discard savepoint on incomplete restore.
+            return {
+              ok,
+              outcome,
+              changedPaths,
+              repositoryChanged,
+              resultPayload,
+              authorizationDecision: String(authorizationDecision),
+              policyDecision,
+            };
+          }
+          discardWorkspaceSavepoint(savepoint);
+          throw error;
+        }
         changedPaths = [...new Set((applied.appliedChunks ?? []).flatMap((chunk) => chunk.paths ?? []))];
         repositoryChanged = changedPaths.length > 0;
         ok = applied.status === 'applied';
         outcome = ok ? 'succeeded' : 'failed';
         policyDecision = ok ? 'allowed' : 'failed';
-        if (ok && allowed?.length) {
-          const outOfScope = changedPaths.filter((path) => !pathAllowed(path, allowed));
-          if (outOfScope.length > 0) {
-            let rollbackOk = true;
-            for (const [path, content] of beforeSnapshots) {
-              const absolute = join(root, path);
-              try {
-                if (content === null) {
-                  if (existsSync(absolute)) unlinkSync(absolute);
-                } else {
-                  mkdirSync(dirname(absolute), { recursive: true });
-                  writeFileSync(absolute, content);
-                }
-              } catch {
-                rollbackOk = false;
-              }
-            }
-            ok = false;
-            outcome = 'failed';
-            policyDecision = rollbackOk ? 'path_scope_violation_rolled_back' : 'path_scope_violation_cleanup_required';
-            repositoryChanged = !rollbackOk;
-            changedPaths = rollbackOk ? [] : outOfScope;
+
+        const needsRollback = !ok || (allowed?.length
+          ? changedPaths.some((path) => !pathAllowed(path, allowed))
+          : false);
+
+        if (needsRollback) {
+          const outOfScope = allowed?.length
+            ? changedPaths.filter((path) => !pathAllowed(path, allowed))
+            : [];
+          const restored = restoreWorkspaceSavepoint(savepoint);
+          const verified = verifySavepointRestored(root, savepoint);
+          const rollbackOk = restored.ok && verified.ok;
+          ok = false;
+          outcome = 'failed';
+          if (rollbackOk) {
+            policyDecision = outOfScope.length
+              ? 'path_scope_violation_rolled_back'
+              : 'patch_failed_rolled_back';
+            repositoryChanged = false;
+            changedPaths = [];
+            discardWorkspaceSavepoint(savepoint);
             resultPayload = {
               error: {
-                code: rollbackOk ? 'PATH_SCOPE_VIOLATION' : 'PATH_SCOPE_VIOLATION_CLEANUP_REQUIRED',
-                message: rollbackOk
+                code: outOfScope.length ? 'PATH_SCOPE_VIOLATION' : 'PATCH_FAILED_ROLLED_BACK',
+                message: outOfScope.length
                   ? `changed paths outside declared scope; rolled back: ${outOfScope.join(', ')}`
-                  : `changed paths outside scope; rollback incomplete: ${outOfScope.join(', ')}`,
+                  : `patch failed; workspace restored to savepoint`,
                 outOfScope,
-                cleanupRequired: !rollbackOk,
+                cleanupRequired: false,
+                reconciliationRequired: false,
+                repositoryChanged: false,
               },
+              applied,
             };
           } else {
-            resultPayload = { applied, changedPaths, fencingToken };
+            policyDecision = 'path_scope_violation_cleanup_required';
+            repositoryChanged = true;
+            changedPaths = [...new Set([...outOfScope, ...restored.failedPaths, ...verified.residual])];
+            resultPayload = {
+              error: {
+                code: 'PATH_SCOPE_VIOLATION_CLEANUP_REQUIRED',
+                message: `changed paths; rollback incomplete: ${changedPaths.join(', ')}`,
+                outOfScope,
+                cleanupRequired: true,
+                reconciliationRequired: true,
+                repositoryChanged: true,
+              },
+              applied,
+            };
           }
         } else {
+          discardWorkspaceSavepoint(savepoint);
           resultPayload = { applied, changedPaths, fencingToken };
         }
       } else if (operation === 'stage_paths' || operation === 'git_stage_paths') {
@@ -808,12 +903,12 @@ export async function executeFast(
     }
 
     // Post-mutation fencing check when ownership helpers available.
-    if (ok && helpers) {
+    if (helpers) {
       try {
         helpers.assert();
       } catch (error) {
         ok = false;
-        outcome = 'failed';
+        outcome = helpers.ownershipLost() ? 'cancelled' : 'failed';
         repositoryChanged = true;
         resultPayload = {
           ...resultPayload,
@@ -821,6 +916,7 @@ export async function executeFast(
             code: 'MUTATION_OWNERSHIP_LOST',
             message: error instanceof Error ? error.message : String(error),
             reconciliationRequired: true,
+            repositoryChanged: true,
           },
         };
       }
@@ -840,61 +936,110 @@ export async function executeFast(
   let bodyResult: Awaited<ReturnType<typeof runBody>>;
   let fencingToken: number | undefined;
   let baseHead: string | null | undefined;
+  let processStopUnconfirmed = false;
 
   if (needsMutation && !request.externalMutation) {
     // Mutation lease alone serializes writers — do NOT hold repository controller lock
     // during runBody (renewExecutionLeases needs that lock for heartbeat).
-    const gated = await withCheckoutMutationGate(
-      {
-        controllerHome: ctx.controllerHome,
-        repoId: ctx.repository.repoId,
-        checkoutId: ctx.repository.activeCheckoutId,
-        repoRoot: root,
-        owner,
-        ttlMs: timeoutMs + 10_000,
-        signal: request.signal,
-      },
-      async (gate, helpers) => {
-        fencingToken = gate.fencingToken;
-        baseHead = gate.baseHead;
-        return runBody(gate.fencingToken, gate.baseHead, helpers, helpers.signal);
-      },
-    );
-    if (!gated.ok) {
+    const ownership = ownershipOptionsFor(String(operation), decision, request.input);
+    try {
+      const gated = await withCheckoutMutationGate(
+        {
+          controllerHome: ctx.controllerHome,
+          repoId: ctx.repository.repoId,
+          checkoutId: ctx.repository.activeCheckoutId,
+          repoRoot: root,
+          owner,
+          ttlMs: timeoutMs + 10_000,
+          signal: request.signal,
+          ownership,
+        },
+        async (gate, helpers) => {
+          fencingToken = gate.fencingToken;
+          baseHead = gate.baseHead;
+          if (acquiredLedger) {
+            heartbeatFastRequest(ctx.controllerHome, acquiredLedger, timeoutMs + 10_000);
+          }
+          // Align ledger heartbeat with ownership renews.
+          const ledgerHeartbeat = setInterval(() => {
+            if (acquiredLedger) {
+              const beat = heartbeatFastRequest(ctx.controllerHome, acquiredLedger, gate.ttlMs);
+              if (beat.entry) acquiredLedger = beat.entry;
+            }
+          }, Math.max(500, Math.floor(gate.ttlMs / 3)));
+          ledgerHeartbeat.unref?.();
+          try {
+            return await runBody(gate.fencingToken, gate.baseHead, helpers, helpers.signal);
+          } finally {
+            clearInterval(ledgerHeartbeat);
+          }
+        },
+      );
+      if (!gated.ok) {
+        if (ledgerEntry?.kind === 'acquired') {
+          completeFastRequest(ctx.controllerHome, ledgerEntry.entry, {
+            status: 'failed',
+            error: mutationGateBusyMessage(gated.busy),
+          });
+        }
+        return {
+          ok: false,
+          decision: emptyDecision({
+            mode: 'durable',
+            reasons: ['checkout_mutation_busy', gated.busy.reason],
+            risk: 'workspace_write',
+            effects: decision.effects,
+            suggestedOperation: 'retry after durable writer finishes, or use Durable Work',
+          }),
+          operationSucceeded: false,
+          latency: trace.snapshot(ctx.includeLatencyBreakdown === true),
+          durableSideEffects: observedSideEffects(sideEffectsBefore),
+          result: {
+            error: {
+              code: 'MUTATION_BUSY',
+              message: mutationGateBusyMessage(gated.busy),
+              blockers: gated.busy.blockers,
+            },
+          },
+          escalation: {
+            reason: mutationGateBusyMessage(gated.busy),
+            suggestedOperation: 'wait or use Durable Work',
+          },
+        };
+      }
+      bodyResult = gated.value;
+      fencingToken = gated.gate.fencingToken;
+      baseHead = gated.gate.baseHead;
+      processStopUnconfirmed = gated.processStopUnconfirmed === true;
+    } catch (error) {
       if (ledgerEntry?.kind === 'acquired') {
         completeFastRequest(ctx.controllerHome, ledgerEntry.entry, {
-          status: 'failed',
-          error: mutationGateBusyMessage(gated.busy),
+          status: 'unknown',
+          error: error instanceof Error ? error.message : String(error),
         });
       }
       return {
         ok: false,
-        decision: emptyDecision({
-          mode: 'durable',
-          reasons: ['checkout_mutation_busy', gated.busy.reason],
-          risk: 'workspace_write',
-          effects: decision.effects,
-          suggestedOperation: 'retry after durable writer finishes, or use Durable Work',
-        }),
+        decision,
         operationSucceeded: false,
+        outcome: 'unknown',
+        repositoryChanged: true,
+        reconciliationRequired: true,
+        processStopUnconfirmed: true,
         latency: trace.snapshot(ctx.includeLatencyBreakdown === true),
         durableSideEffects: observedSideEffects(sideEffectsBefore),
+        ledgerPersisted: true,
         result: {
           error: {
-            code: 'MUTATION_BUSY',
-            message: mutationGateBusyMessage(gated.busy),
-            blockers: gated.busy.blockers,
+            code: 'MUTATION_OUTCOME_UNKNOWN',
+            message: error instanceof Error ? error.message : String(error),
+            outcome: 'unknown',
+            repositoryChanged: true,
+            reconciliationRequired: true,
           },
-        },
-        escalation: {
-          reason: mutationGateBusyMessage(gated.busy),
-          suggestedOperation: 'wait or use Durable Work',
         },
       };
     }
-    bodyResult = gated.value;
-    fencingToken = gated.gate.fencingToken;
-    baseHead = gated.gate.baseHead;
   } else if (needsMutation && request.externalMutation) {
     const helpers = request.externalHelpers;
     fencingToken = request.externalGate?.fencingToken ?? helpers?.getGate().fencingToken;
@@ -958,22 +1103,43 @@ export async function executeFast(
     }
   }
 
-  if (ledgerEntry?.kind === 'acquired') {
-    const completed = completeFastRequest(ctx.controllerHome, ledgerEntry.entry, {
-      status: bodyResult.ok ? 'succeeded' : 'failed',
+  const resultError = bodyResult.resultPayload.error as {
+    message?: string;
+    reconciliationRequired?: boolean;
+    cleanupRequired?: boolean;
+    repositoryChanged?: boolean;
+  } | undefined;
+  const outcomeUnknown = processStopUnconfirmed
+    || bodyResult.outcome === 'cancelled' && bodyResult.repositoryChanged
+    || resultError?.reconciliationRequired === true && !bodyResult.ok && bodyResult.repositoryChanged;
+
+  if (ledgerEntry?.kind === 'acquired' || acquiredLedger) {
+    const expected = acquiredLedger ?? ledgerEntry!.entry;
+    const ledgerStatus = bodyResult.ok
+      ? 'succeeded' as const
+      : outcomeUnknown || processStopUnconfirmed
+        ? 'unknown' as const
+        : 'failed' as const;
+    const completed = completeFastRequest(ctx.controllerHome, expected, {
+      status: ledgerStatus,
       resultSummary: summaryFrom(bodyResult.resultPayload, 1_024),
       error: bodyResult.ok
         ? undefined
-        : (bodyResult.resultPayload.error as { message?: string } | undefined)?.message,
+        : resultError?.message,
       receiptExecutionId: receipt?.executionId,
     });
     ledgerPersisted = completed.ok;
     ledgerWarning = completed.warning;
   }
 
+  const cleanupRequired = resultError?.cleanupRequired === true;
+  const reconciliationRequired = resultError?.reconciliationRequired === true
+    || processStopUnconfirmed
+    || outcomeUnknown;
+
   // Mutation success is independent of receipt/ledger persistence failures.
   return {
-    ok: bodyResult.ok,
+    ok: bodyResult.ok && !processStopUnconfirmed,
     decision,
     receipt,
     receiptPersisted,
@@ -982,10 +1148,13 @@ export async function executeFast(
     ledgerWarning,
     operationSucceeded: bodyResult.ok,
     changedPaths: bodyResult.changedPaths,
-    repositoryChanged: bodyResult.repositoryChanged,
-    outcome: bodyResult.outcome,
+    repositoryChanged: Boolean(bodyResult.repositoryChanged) || processStopUnconfirmed,
+    outcome: processStopUnconfirmed ? 'unknown' : bodyResult.outcome,
     result: bodyResult.resultPayload,
     latency,
     durableSideEffects: observedSideEffects(sideEffectsBefore),
+    reconciliationRequired: reconciliationRequired || undefined,
+    cleanupRequired: cleanupRequired || undefined,
+    processStopUnconfirmed: processStopUnconfirmed || undefined,
   };
 }

@@ -6,6 +6,13 @@ import { executeFast } from './fast-executor';
 import { LatencyTrace } from './latency-trace';
 import { writeFastReceipt } from './fast-receipt';
 import {
+  createServerPatchProposal,
+  markServerPatchProposalApplied,
+  validateServerPatchProposalForApply,
+  type ServerPatchProposal,
+} from './proposal-store';
+import { withCheckoutMutationGate } from './mutation-gate';
+import {
   FAST_LANE_MAX_CONCURRENCY,
   type LaneConflict,
   type LightweightLanesRequest,
@@ -190,14 +197,22 @@ export async function executeLightweightLanes(
         if (!['search', 'read_file', 'git_status', 'git_diff', 'run_short_command'].includes(lane.kind)) {
           throw new Error(`READ_LANE_KIND_INVALID: ${lane.kind}`);
         }
-        // Strict readonly gate: only risk=readonly && mutatesWorkspace=false.
+        // Strict readonly gate: mutatesWorkspace/mutatesGitRefs/remoteWrite must all be false.
+        // Focused tests / package scripts / workspace-write commands are rejected.
         const decision = routeExecution({
           operation: lane.kind,
           mode: 'auto',
           command: lane.input.command as string | string[] | undefined,
           defaultBranch: ctx.repository.defaultBranch,
         });
-        if (decision.mode !== 'fast' || decision.effects.mutatesWorkspace || decision.effects.remoteWrite) {
+        const effects = decision.effects;
+        if (
+          decision.mode !== 'fast'
+          || effects.mutatesWorkspace
+          || effects.mutatesGitRefs
+          || effects.remoteWrite
+          || decision.risk !== 'readonly'
+        ) {
           return {
             id: lane.id,
             ok: false,
@@ -286,54 +301,88 @@ export async function executeLightweightLanes(
     }
   })();
 
-  const proposalResults: PatchProposalValidateResult[] = shouldRunProposals
-    ? proposalInputs.map((lane) => {
+  const proposalResults: PatchProposalValidateResult[] = [];
+  if (shouldRunProposals) {
+    for (const lane of proposalInputs) {
       const laneConflicts = conflicts.filter((conflict) => conflict.laneIds.includes(lane.id));
       const analysisOnly = conflictedLaneIds.has(lane.id);
-      const proposalId = `prop_${randomUUID().slice(0, 12)}`;
-      const operationsDigest = digest(lane.proposedOperations);
-      return {
+      try {
+        const stored = await createServerPatchProposal({
+          controllerHome: ctx.controllerHome,
+          repoId: ctx.repository.repoId,
+          checkoutId: ctx.repository.activeCheckoutId,
+          repoRoot: ctx.repository.canonicalRoot,
+          readPaths: lane.readPaths,
+          writePaths: lane.writePaths,
+          operations: analysisOnly ? [] : lane.proposedOperations,
+          owner: ctx.sessionId,
+          assumptions: lane.assumptions,
+          riskNotes: [
+            ...(lane.riskNotes ?? []),
+            ...(analysisOnly ? ['Demoted to analysis-only due to path conflicts with other lanes.'] : []),
+            'patch_proposal_validate only validates conflicts; it does not run an analyzer Agent.',
+          ],
+          suggestedFocusedCheck: lane.suggestedFocusedCheck,
+          analysisOnly,
+          signal: request.signal,
+        });
+        proposalResults.push({
+          id: lane.id,
+          ok: true,
+          durationMs: 0,
+          readPaths: lane.readPaths,
+          writePaths: lane.writePaths,
+          proposedOperations: analysisOnly ? [] : lane.proposedOperations,
+          assumptions: lane.assumptions,
+          riskNotes: stored.riskNotes,
+          suggestedFocusedCheck: lane.suggestedFocusedCheck,
+          analysisOnly,
+          conflicts: laneConflicts.length ? laneConflicts : undefined,
+          summary: analysisOnly
+            ? `analysis-only due to conflicts (${laneConflicts.map((c) => c.type).join(', ')})`
+            : `proposal validated with ${lane.proposedOperations.length} operations (server:${stored.proposalId})`,
+          proposalId: stored.proposalId,
+          baseRevision: stored.baseSnapshot.head ?? baseRevision,
+          proposalDigest: digest({
+            proposalId: stored.proposalId,
+            writePaths: lane.writePaths,
+            operationsDigest: stored.operationsDigest,
+            baseRevision: stored.baseSnapshot.head,
+            checkoutId: ctx.repository.activeCheckoutId,
+          }),
+          operationsDigest: stored.operationsDigest.slice(0, 24),
+          checkoutId: ctx.repository.activeCheckoutId,
+        });
+      } catch (error) {
+        proposalResults.push({
+          id: lane.id,
+          ok: false,
+          durationMs: 0,
+          readPaths: lane.readPaths,
+          writePaths: lane.writePaths,
+          proposedOperations: [],
+          analysisOnly: true,
+          error: {
+            code: 'PROPOSAL_PERSIST_FAILED',
+            message: error instanceof Error ? error.message : String(error),
+          },
+        });
+      }
+    }
+  } else {
+    for (const lane of proposalInputs) {
+      proposalResults.push({
         id: lane.id,
-        ok: true,
+        ok: false,
         durationMs: 0,
         readPaths: lane.readPaths,
         writePaths: lane.writePaths,
-        proposedOperations: analysisOnly ? [] : lane.proposedOperations,
-        assumptions: lane.assumptions,
-        riskNotes: [
-          ...(lane.riskNotes ?? []),
-          ...(analysisOnly ? ['Demoted to analysis-only due to path conflicts with other lanes.'] : []),
-          'patch_proposal_validate only validates conflicts; it does not run an analyzer Agent.',
-        ],
-        suggestedFocusedCheck: lane.suggestedFocusedCheck,
-        analysisOnly,
-        conflicts: laneConflicts.length ? laneConflicts : undefined,
-        summary: analysisOnly
-          ? `analysis-only due to conflicts (${laneConflicts.map((c) => c.type).join(', ')})`
-          : `proposal validated with ${lane.proposedOperations.length} operations`,
-        proposalId,
-        baseRevision,
-        proposalDigest: digest({
-          proposalId,
-          writePaths: lane.writePaths,
-          operationsDigest,
-          baseRevision,
-          checkoutId: ctx.repository.activeCheckoutId,
-        }),
-        operationsDigest,
-        checkoutId: ctx.repository.activeCheckoutId,
-      } satisfies PatchProposalValidateResult;
-    })
-    : proposalInputs.map((lane) => ({
-      id: lane.id,
-      ok: false,
-      durationMs: 0,
-      readPaths: lane.readPaths,
-      writePaths: lane.writePaths,
-      proposedOperations: [],
-      analysisOnly: true,
-      error: { code: 'FAIL_FAST', message: 'skipped because a read lane failed and failFast=true' },
-    }));
+        proposedOperations: [],
+        analysisOnly: true,
+        error: { code: 'FAIL_FAST', message: 'skipped because a read lane failed and failFast=true' },
+      });
+    }
+  }
 
   const finishedAt = new Date().toISOString();
   const latency = trace.snapshot(request.includeLatencyBreakdown === true);
@@ -385,8 +434,9 @@ export async function executeLightweightLanes(
 }
 
 /**
- * Integrator: sequentially apply selected non-conflicting validated proposals.
- * Re-validates writePaths, digests, and conflicts before apply.
+ * Integrator: apply selected server-side proposals under one Mutation Ownership.
+ * Trusts proposalId / server record — revalidates fingerprints, snapshot, conflicts.
+ * One parent receipt; stop on first failure unless continueOnError.
  */
 export async function integratePatchProposals(
   ctx: LanesExecutorContext,
@@ -396,146 +446,230 @@ export async function integratePatchProposals(
     allowedPaths?: string[];
     purpose?: string;
     expectedBaseRevision?: string | null;
+    requestId?: string;
+    continueOnError?: boolean;
+    signal?: AbortSignal;
   } = {},
 ): Promise<{
   ok: boolean;
   applied: Array<{ proposalId: string; ok: boolean; changedPaths: string[]; error?: string }>;
   receiptIds: string[];
+  parentReceiptId?: string;
+  reconciliationRequired?: boolean;
 }> {
   const applied: Array<{ proposalId: string; ok: boolean; changedPaths: string[]; error?: string }> = [];
   const receiptIds: string[] = [];
+  const continueOnError = options.continueOnError === true;
 
-  // Re-run conflict detection on remaining applyable proposals.
+  const applyable = proposals.filter(
+    (entry) => !entry.analysisOnly && entry.ok && entry.proposalId && (entry.proposedOperations?.length ?? 0) > 0,
+  );
+
+  // Re-run conflict detection before any apply.
   const recheck = detectPatchProposalConflicts(
-    proposals
-      .filter((entry) => !entry.analysisOnly && entry.ok && entry.proposedOperations.length > 0)
-      .map((entry) => ({
-        id: entry.id,
-        readPaths: entry.readPaths,
-        writePaths: entry.writePaths,
-        proposedOperations: entry.proposedOperations,
-      })),
+    applyable.map((entry) => ({
+      id: entry.id,
+      readPaths: entry.readPaths,
+      writePaths: entry.writePaths,
+      proposedOperations: entry.proposedOperations,
+    })),
   );
   const conflicted = new Set(recheck.flatMap((entry) => entry.laneIds));
 
-  let currentHead: string | null = null;
-  try {
-    const out = await runBoundedGit(ctx.repository.canonicalRoot, ['rev-parse', 'HEAD'], {
-      timeoutMs: 5_000,
-      maxOutputBytes: 4_096,
-    });
-    currentHead = out.ok ? (out.stdout.trim() || null) : null;
-  } catch {
-    currentHead = null;
+  const writePaths = [...new Set(applyable.flatMap((entry) => entry.writePaths))];
+  if (applyable.length === 0) {
+    return { ok: false, applied: [], receiptIds: [] };
   }
 
-  for (const proposal of proposals) {
-    if (proposal.analysisOnly || !proposal.ok || proposal.proposedOperations.length === 0) {
-      applied.push({
-        proposalId: proposal.proposalId ?? proposal.id,
-        ok: false,
-        changedPaths: [],
-        error: proposal.analysisOnly ? 'analysis_only' : 'empty_or_failed_proposal',
-      });
-      continue;
-    }
-    if (conflicted.has(proposal.id)) {
-      applied.push({
-        proposalId: proposal.proposalId ?? proposal.id,
-        ok: false,
-        changedPaths: [],
-        error: 'conflict_recheck_failed',
-      });
-      continue;
-    }
-    if (proposal.baseRevision && currentHead && proposal.baseRevision !== currentHead) {
-      applied.push({
-        proposalId: proposal.proposalId ?? proposal.id,
-        ok: false,
-        changedPaths: [],
-        error: `revision_changed expected=${proposal.baseRevision} actual=${currentHead}`,
-      });
-      continue;
-    }
-    if (options.expectedBaseRevision && proposal.baseRevision && options.expectedBaseRevision !== proposal.baseRevision) {
-      applied.push({
-        proposalId: proposal.proposalId ?? proposal.id,
-        ok: false,
-        changedPaths: [],
-        error: 'expected_base_revision_mismatch',
-      });
-      continue;
-    }
+  const requestId = options.requestId ?? `integrate-${randomUUID().slice(0, 10)}`;
+  let parentReceiptId: string | undefined;
+  let reconciliationRequired = false;
 
-    // Operation paths must be subset of writePaths
-    const opPaths = proposal.proposedOperations
-      .filter((entry): entry is Record<string, unknown> => typeof entry === 'object' && entry !== null)
-      .map((entry) => String(entry.path ?? ''))
-      .filter(Boolean);
-    const outside = opPaths.filter((path) => !proposal.writePaths.some((write) => {
-      const n = path.replace(/^\.\//, '');
-      const w = write.replace(/^\.\//, '');
-      return n === w || n.startsWith(`${w}/`);
-    }));
-    if (outside.length > 0) {
-      applied.push({
-        proposalId: proposal.proposalId ?? proposal.id,
-        ok: false,
-        changedPaths: [],
-        error: `operation_paths_outside_writePaths: ${outside.join(', ')}`,
-      });
-      continue;
-    }
-
-    const executed = await executeFast(
-      {
-        controllerHome: ctx.controllerHome,
-        repository: ctx.repository,
-        sessionId: ctx.sessionId,
-        principalId: ctx.principalId,
+  const gated = await withCheckoutMutationGate(
+    {
+      controllerHome: ctx.controllerHome,
+      repoId: ctx.repository.repoId,
+      checkoutId: ctx.repository.activeCheckoutId,
+      repoRoot: ctx.repository.canonicalRoot,
+      owner: `fast:integrate:${requestId}`,
+      ttlMs: 45_000,
+      signal: options.signal,
+      ownership: {
+        writePaths,
+        mutatesGitIndex: true,
+        mutatesGitRefs: false,
       },
-      {
-        operation: 'apply_patch',
-        mode: 'fast',
-        input: {
-          operations: proposal.proposedOperations,
-          session_id: options.sessionId,
-          purpose: options.purpose ?? `integrate:${proposal.id}`,
-          allowed_paths: options.allowedPaths ?? proposal.writePaths,
-        },
-        allowedPaths: options.allowedPaths ?? proposal.writePaths,
-        receiptMode: 'standalone',
-      },
-    );
-    if (executed.receipt) receiptIds.push(executed.receipt.executionId);
-    const changed = executed.receipt?.changedPaths
-      ?? ((executed.result?.applied as { appliedChunks?: Array<{ paths?: string[] }> } | undefined)?.appliedChunks
-        ?.flatMap((chunk) => chunk.paths ?? []) ?? []);
-    applied.push({
-      proposalId: proposal.proposalId ?? proposal.id,
-      ok: executed.ok && executed.operationSucceeded !== false,
-      changedPaths: changed,
-      error: executed.ok
-        ? undefined
-        : (executed.result?.error as { message?: string } | undefined)?.message ?? 'apply failed',
-    });
-    if (!executed.ok) break;
+    },
+    async (gate, helpers) => {
+      for (const proposal of proposals) {
+        if (proposal.analysisOnly || !proposal.ok || !proposal.proposalId) {
+          applied.push({
+            proposalId: proposal.proposalId ?? proposal.id,
+            ok: false,
+            changedPaths: [],
+            error: proposal.analysisOnly ? 'analysis_only' : 'empty_or_failed_proposal',
+          });
+          continue;
+        }
+        if (conflicted.has(proposal.id)) {
+          applied.push({
+            proposalId: proposal.proposalId,
+            ok: false,
+            changedPaths: [],
+            error: 'conflict_recheck_failed',
+          });
+          if (!continueOnError) break;
+          continue;
+        }
 
-    // Refresh head after successful apply
-    try {
-      const out = await runBoundedGit(ctx.repository.canonicalRoot, ['rev-parse', 'HEAD'], {
-        timeoutMs: 5_000,
-        maxOutputBytes: 4_096,
+        helpers.assert();
+        const validation = await validateServerPatchProposalForApply({
+          controllerHome: ctx.controllerHome,
+          repoId: ctx.repository.repoId,
+          checkoutId: ctx.repository.activeCheckoutId,
+          repoRoot: ctx.repository.canonicalRoot,
+          proposalId: proposal.proposalId,
+          signal: helpers.signal,
+        });
+        if (!validation.ok) {
+          applied.push({
+            proposalId: proposal.proposalId,
+            ok: false,
+            changedPaths: [],
+            error: `${validation.code}: ${validation.message}`,
+          });
+          if (!continueOnError) break;
+          continue;
+        }
+        const serverProposal: ServerPatchProposal = validation.proposal;
+        if (
+          options.expectedBaseRevision
+          && serverProposal.baseSnapshot.head
+          && options.expectedBaseRevision !== serverProposal.baseSnapshot.head
+        ) {
+          applied.push({
+            proposalId: proposal.proposalId,
+            ok: false,
+            changedPaths: [],
+            error: 'expected_base_revision_mismatch',
+          });
+          if (!continueOnError) break;
+          continue;
+        }
+
+        const opPaths = serverProposal.operations
+          .filter((entry): entry is Record<string, unknown> => typeof entry === 'object' && entry !== null)
+          .map((entry) => String(entry.path ?? ''))
+          .filter(Boolean);
+        const outside = opPaths.filter((path) => !serverProposal.writePaths.some((write) => {
+          const n = path.replace(/^\.\//, '');
+          const w = write.replace(/^\.\//, '');
+          return n === w || n.startsWith(`${w}/`);
+        }));
+        if (outside.length > 0) {
+          applied.push({
+            proposalId: proposal.proposalId,
+            ok: false,
+            changedPaths: [],
+            error: `operation_paths_outside_writePaths: ${outside.join(', ')}`,
+          });
+          if (!continueOnError) break;
+          continue;
+        }
+
+        helpers.assert();
+        const executed = await executeFast(
+          {
+            controllerHome: ctx.controllerHome,
+            repository: ctx.repository,
+            sessionId: ctx.sessionId,
+            principalId: ctx.principalId,
+          },
+          {
+            operation: 'apply_patch',
+            mode: 'fast',
+            input: {
+              operations: serverProposal.operations,
+              session_id: options.sessionId,
+              purpose: options.purpose ?? `integrate:${proposal.id}`,
+              allowed_paths: options.allowedPaths ?? serverProposal.writePaths,
+            },
+            allowedPaths: options.allowedPaths ?? serverProposal.writePaths,
+            receiptMode: 'none',
+            requestId: `${requestId}:${proposal.proposalId}`,
+            signal: helpers.signal,
+            externalMutation: true,
+            externalGate: gate,
+            externalHelpers: helpers,
+          },
+        );
+        if (executed.receipt) receiptIds.push(executed.receipt.executionId);
+        const changed = executed.changedPaths
+          ?? ((executed.result?.applied as { appliedChunks?: Array<{ paths?: string[] }> } | undefined)?.appliedChunks
+            ?.flatMap((chunk) => chunk.paths ?? []) ?? []);
+        const stepOk = executed.ok && executed.operationSucceeded !== false;
+        if (stepOk) {
+          markServerPatchProposalApplied(ctx.controllerHome, ctx.repository.repoId, proposal.proposalId);
+        } else if (executed.reconciliationRequired) {
+          reconciliationRequired = true;
+        }
+        applied.push({
+          proposalId: proposal.proposalId,
+          ok: stepOk,
+          changedPaths: changed,
+          error: stepOk
+            ? undefined
+            : (executed.result?.error as { message?: string } | undefined)?.message ?? 'apply failed',
+        });
+        if (!stepOk && !continueOnError) break;
+      }
+
+      const allOk = applied.length > 0 && applied.every((entry) => entry.ok);
+      const allChanged = [...new Set(applied.flatMap((entry) => entry.changedPaths))];
+      const written = writeFastReceipt(ctx.controllerHome, {
+        repoId: ctx.repository.repoId,
+        checkoutId: ctx.repository.activeCheckoutId,
+        operation: 'patch_proposal_integrate',
+        startedAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+        durationMs: 0,
+        outcome: allOk ? 'succeeded' : 'failed',
+        changedPaths: allChanged,
+        repositoryChanged: allChanged.length > 0,
+        authorizationDecision: 'integrator',
+        policyDecision: allOk ? 'allowed' : 'failed',
+        outputSummary: `integrated=${applied.filter((a) => a.ok).length}/${applied.length}`,
+        requestId,
+        fencingToken: gate.fencingToken,
+        baseHead: gate.baseHead,
       });
-      currentHead = out.ok ? (out.stdout.trim() || currentHead) : currentHead;
-    } catch {
-      /* keep previous */
-    }
+      if (written.receipt) {
+        parentReceiptId = written.receipt.executionId;
+        receiptIds.push(written.receipt.executionId);
+      }
+      return { allOk };
+    },
+  );
+
+  if (!gated.ok) {
+    return {
+      ok: false,
+      applied: [{
+        proposalId: 'batch',
+        ok: false,
+        changedPaths: [],
+        error: `mutation_busy: ${gated.busy.reason}`,
+      }],
+      receiptIds: [],
+      reconciliationRequired: false,
+    };
   }
 
   return {
-    ok: applied.length > 0 && applied.every((entry) => entry.ok),
+    ok: gated.value.allOk,
     applied,
     receiptIds,
+    parentReceiptId,
+    reconciliationRequired: reconciliationRequired || undefined,
   };
 }
