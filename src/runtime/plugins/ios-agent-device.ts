@@ -573,6 +573,23 @@ function isStaleAccessibilityRefError(error: unknown): boolean {
     && /(?:stale|expired|missing|not[\s_-]*found|no[\s_-]*such)/i.test(evidence);
 }
 
+function isExactEvidenceWaitMiss(error: unknown): boolean {
+  const normalized = toAssistantPluginError(error, {
+    code: 'AGENT_DEVICE_COMMAND_FAILED',
+    message: 'The agent-device command failed.',
+    retryable: false,
+  });
+  const evidence = `${normalized.message}\n${JSON.stringify(normalized.details ?? {})}`;
+  const waitFailure = /(?:wait|expected\s+(?:text|selector)|text\s+match|selector\s+match)/i.test(evidence)
+    && /(?:timed?\s*out|timeout|not[\s_-]*found|no\s+match|missing)/i.test(evidence);
+  const infrastructureFailure = /(?:runner|transport|connection|socket|daemon|xctest|device\s+disconnect|spawn|broken\s+pipe)/i.test(evidence);
+  return waitFailure && !infrastructureFailure;
+}
+
+function hasAccessibilityEvidence(value: unknown): boolean {
+  return stringEvidence(value).some((text) => /(?:@e\d+|\b(?:StaticText|SearchField|TextField|Button|Cell|Image|Switch|Link)\b|(?:label|identifier)=)/i.test(text));
+}
+
 function stringEvidence(value: unknown, output: string[] = []): string[] {
   if (typeof value === 'string') output.push(value);
   else if (Array.isArray(value)) value.forEach((entry) => stringEvidence(entry, output));
@@ -845,6 +862,50 @@ function runSessionBatchAttempt(
   return result as Record<string, unknown>;
 }
 
+function recoverExactWaitEvidence(
+  input: AssistantPluginActionExecutionInput,
+  record: InteractionSessionRecord,
+  scope: string | undefined,
+  depth: number,
+): {
+  snapshot: Record<string, unknown>;
+  tier: 'scoped_snapshot' | 'full_snapshot';
+  snapshotRequests: number;
+} {
+  let snapshotRequests = 0;
+  if (scope) {
+    snapshotRequests += 1;
+    try {
+      const scoped = runSessionCommandAttempt(
+        input,
+        record,
+        ['snapshot', '--interactive', '--depth', String(depth), '--scope', scope],
+        'AGENT_DEVICE_SNAPSHOT_FAILED',
+        30_000,
+      );
+      if (hasAccessibilityEvidence(scoped)) {
+        return { snapshot: scoped, tier: 'scoped_snapshot', snapshotRequests };
+      }
+    } catch (error) {
+      if (!isExactEvidenceWaitMiss(error)) return failSession(input, record, error);
+    }
+  }
+
+  snapshotRequests += 1;
+  try {
+    const full = runSessionCommandAttempt(
+      input,
+      record,
+      ['snapshot', '--interactive', '--depth', String(depth), '--force-full'],
+      'AGENT_DEVICE_SNAPSHOT_FAILED',
+      45_000,
+    );
+    return { snapshot: full, tier: 'full_snapshot', snapshotRequests };
+  } catch (error) {
+    return failSession(input, record, error);
+  }
+}
+
 function subActionInput(
   input: AssistantPluginActionExecutionInput,
   actionId: string,
@@ -888,13 +949,15 @@ async function executeJdSearch(input: AssistantPluginActionExecutionInput): Prom
   const exactResultWait = Boolean(resultText || resultSelector);
   const resultScope = optionalString(input.args.result_scope);
   const snapshotDepth = batchInteger(input.args.snapshot_depth, 20, 1, 20);
-  const accessibilityEvidenceTier = exactResultWait
+  let accessibilityEvidenceTier: 'exact_wait' | 'scoped_snapshot' | 'full_snapshot' = exactResultWait
     ? 'exact_wait'
     : resultScope
       ? 'scoped_snapshot'
       : 'full_snapshot';
   let initialAccessibilitySnapshot = false;
   let staleRefRecovery = false;
+  let exactWaitFallback = false;
+  let accessibilitySnapshotRequests = 0;
   let nativeBatchRequests = 0;
   let nativeBatchSteps = 0;
   try {
@@ -904,6 +967,7 @@ async function executeJdSearch(input: AssistantPluginActionExecutionInput): Prom
     let searchTarget = optionalString(input.args.search_selector) ?? optionalString(input.args.search_target);
     if (!searchTarget) {
       initialAccessibilitySnapshot = true;
+      accessibilitySnapshotRequests += 1;
       const initialSnapshot = await executeIosAgentDeviceAction(subActionInput(input, 'agent_device_snapshot', {
         interaction_id: interactionId,
         interactive: true,
@@ -950,6 +1014,7 @@ async function executeJdSearch(input: AssistantPluginActionExecutionInput): Prom
         if (!isStaleAccessibilityRefError(error)) return failSession(input, record, error);
         staleRefRecovery = true;
         initialAccessibilitySnapshot = true;
+        accessibilitySnapshotRequests += 1;
         let refreshedSnapshot: Record<string, unknown>;
         try {
           refreshedSnapshot = runSessionCommandAttempt(
@@ -976,19 +1041,30 @@ async function executeJdSearch(input: AssistantPluginActionExecutionInput): Prom
         runSessionBatch(input, record, prepareAgentDeviceBatch([fillStep], record), 20_000);
       }
     }
+    const fallbackScope = resultScope ?? resultText ?? resultSelector;
     if (submitTarget) {
       nativeBatchRequests += 1;
       nativeBatchSteps += (cachedSearchRef ? 1 : 2) + evidenceSteps.length;
-      finalSnapshot = runSessionBatch(
-        input,
-        record,
-        prepareAgentDeviceBatch([
-          ...(cachedSearchRef ? [] : [fillStep]),
-          { kind: 'press', input: { target: submitTarget } },
-          ...evidenceSteps,
-        ], record),
-        30_000,
-      );
+      const prepared = prepareAgentDeviceBatch([
+        ...(cachedSearchRef ? [] : [fillStep]),
+        { kind: 'press', input: { target: submitTarget } },
+        ...evidenceSteps,
+      ], record);
+      if (exactResultWait) {
+        try {
+          finalSnapshot = runSessionBatchAttempt(input, record, prepared, 30_000);
+        } catch (error) {
+          if (!isExactEvidenceWaitMiss(error)) return failSession(input, record, error);
+          exactWaitFallback = true;
+          const recovered = recoverExactWaitEvidence(input, record, fallbackScope, snapshotDepth);
+          finalSnapshot = recovered.snapshot;
+          accessibilityEvidenceTier = recovered.tier;
+          accessibilitySnapshotRequests += recovered.snapshotRequests;
+        }
+      } else {
+        finalSnapshot = runSessionBatch(input, record, prepared, 30_000);
+        accessibilitySnapshotRequests += 1;
+      }
     } else {
       nativeBatchRequests += cachedSearchRef ? 1 : 2;
       nativeBatchSteps += (cachedSearchRef ? 0 : 1) + evidenceSteps.length;
@@ -996,12 +1072,22 @@ async function executeJdSearch(input: AssistantPluginActionExecutionInput): Prom
       // command, not the Node batch keyboard schema (status/dismiss only).
       if (!cachedSearchRef) runSessionBatch(input, record, prepareAgentDeviceBatch([fillStep], record), 20_000);
       runSessionCommand(input, record, ['keyboard', 'return'], 'JD_SEARCH_SUBMIT_FAILED');
-      finalSnapshot = runSessionBatch(
-        input,
-        record,
-        prepareAgentDeviceBatch(evidenceSteps, record),
-        30_000,
-      );
+      const prepared = prepareAgentDeviceBatch(evidenceSteps, record);
+      if (exactResultWait) {
+        try {
+          finalSnapshot = runSessionBatchAttempt(input, record, prepared, 30_000);
+        } catch (error) {
+          if (!isExactEvidenceWaitMiss(error)) return failSession(input, record, error);
+          exactWaitFallback = true;
+          const recovered = recoverExactWaitEvidence(input, record, fallbackScope, snapshotDepth);
+          finalSnapshot = recovered.snapshot;
+          accessibilityEvidenceTier = recovered.tier;
+          accessibilitySnapshotRequests += recovered.snapshotRequests;
+        }
+      } else {
+        finalSnapshot = runSessionBatch(input, record, prepared, 30_000);
+        accessibilitySnapshotRequests += 1;
+      }
     }
     screenshot = await executeIosAgentDeviceAction(subActionInput(input, 'agent_device_screenshot', {
       interaction_id: interactionId,
@@ -1026,10 +1112,11 @@ async function executeJdSearch(input: AssistantPluginActionExecutionInput): Prom
       accessibilityEvidenceTier,
       initialAccessibilitySnapshot,
       staleRefRecovery,
-      accessibilitySnapshotRequests: (initialAccessibilitySnapshot ? 1 : 0) + (exactResultWait ? 0 : 1),
+      exactWaitFallback,
+      accessibilitySnapshotRequests,
       fullAccessibilitySnapshot: accessibilityEvidenceTier === 'full_snapshot',
       resultScope: resultScope ?? null,
-      snapshotDepth: exactResultWait ? null : snapshotDepth,
+      snapshotDepth: accessibilityEvidenceTier === 'exact_wait' ? null : snapshotDepth,
     },
     visibleResultText: boundedVisibleText(finalSnapshot, query),
     result: bounded(redactExactText(finalSnapshot, query)),

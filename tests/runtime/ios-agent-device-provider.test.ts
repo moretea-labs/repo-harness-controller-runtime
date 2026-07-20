@@ -310,6 +310,108 @@ describe('optional agent-device iOS Simulator provider', () => {
     expect(recoveredSteps[0]?.input.target).toEqual({ kind: 'ref', ref: 'e7' });
   });
 
+  it('escalates an exact wait miss through scoped and full accessibility evidence tiers', async () => {
+    for (const scopedHasEvidence of [true, false]) {
+      const value = fixture();
+      readyIosTooling();
+      const snapshots: string[][] = [];
+      let batchCount = 0;
+      setIosAgentDeviceRuntimeHooksForTest({
+        platform: () => 'darwin',
+        runCommand: (command, args) => {
+          if (args[0] === '--version') return { ok: true, status: 0, stdout: '0.19.3\n', stderr: '', command: [command, ...args] };
+          if (args[0] === 'devices') {
+            return { ok: true, status: 0, stdout: success({ devices: [device('PHONE-1', 'greyson', 'device', true)] }), stderr: '', command: [command, ...args] };
+          }
+          if (args[0] === 'batch') {
+            batchCount += 1;
+            return {
+              ok: false,
+              status: 1,
+              stdout: JSON.stringify({ success: false, error: { message: 'Wait for expected text timed out without a match.' } }),
+              stderr: '',
+              command: [command, ...args],
+            };
+          }
+          if (args[0] === 'snapshot') {
+            snapshots.push(args);
+            const full = args.includes('--force-full');
+            const tree = full
+              ? '@e9 StaticText label="全部搜索结果"'
+              : scopedHasEvidence
+                ? '@e8 StaticText label="搜索结果"'
+                : '';
+            return { ok: true, status: 0, stdout: success({ tree }), stderr: '', command: [command, ...args] };
+          }
+          if (args[0] === 'screenshot') writeFileSync(args[1]!, 'png');
+          return { ok: true, status: 0, stdout: success(), stderr: '', command: [command, ...args] };
+        },
+      });
+
+      const result = await executeIosPluginAction(pluginInput(value, 'agent_device_jd_search', {
+        device: 'greyson',
+        query: '奶粉',
+        search_selector: 'type="SearchField"',
+        submit_selector: 'label="搜索"',
+        result_text: '搜索结果',
+        result_scope: '搜索结果',
+        snapshot_depth: 6,
+      }));
+
+      expect(batchCount).toBe(1);
+      expect(snapshots[0]).toEqual(expect.arrayContaining(['--scope', '搜索结果', '--depth', '6']));
+      expect(snapshots[0]).not.toContain('--force-full');
+      const plan = result.executionPlan as Record<string, unknown>;
+      expect(plan.exactWaitFallback).toBe(true);
+      expect(plan.accessibilityEvidenceTier).toBe(scopedHasEvidence ? 'scoped_snapshot' : 'full_snapshot');
+      expect(plan.accessibilitySnapshotRequests).toBe(scopedHasEvidence ? 1 : 2);
+      expect(plan.fullAccessibilitySnapshot).toBe(!scopedHasEvidence);
+      if (scopedHasEvidence) {
+        expect(snapshots).toHaveLength(1);
+      } else {
+        expect(snapshots).toHaveLength(2);
+        expect(snapshots[1]).toContain('--force-full');
+      }
+      expect((result.interaction as Record<string, unknown>).status).toBe('closed');
+    }
+  });
+
+  it('does not treat Runner or transport timeout as a recoverable exact wait miss', async () => {
+    const value = fixture();
+    readyIosTooling();
+    let snapshotCount = 0;
+    setIosAgentDeviceRuntimeHooksForTest({
+      platform: () => 'darwin',
+      runCommand: (command, args) => {
+        if (args[0] === '--version') return { ok: true, status: 0, stdout: '0.19.3\n', stderr: '', command: [command, ...args] };
+        if (args[0] === 'devices') {
+          return { ok: true, status: 0, stdout: success({ devices: [device('PHONE-1', 'greyson', 'device', true)] }), stderr: '', command: [command, ...args] };
+        }
+        if (args[0] === 'batch') {
+          return {
+            ok: false,
+            status: 1,
+            stdout: JSON.stringify({ success: false, error: { message: 'Runner connection timed out while waiting for text.' } }),
+            stderr: '',
+            command: [command, ...args],
+          };
+        }
+        if (args[0] === 'snapshot') snapshotCount += 1;
+        return { ok: true, status: 0, stdout: success(), stderr: '', command: [command, ...args] };
+      },
+    });
+
+    await expect(executeIosPluginAction(pluginInput(value, 'agent_device_jd_search', {
+      device: 'greyson',
+      query: '奶粉',
+      search_selector: 'type="SearchField"',
+      submit_selector: 'label="搜索"',
+      result_text: '搜索结果',
+      result_scope: '搜索结果',
+    }))).rejects.toThrow('Runner connection timed out');
+    expect(snapshotCount).toBe(0);
+  });
+
   it('blocks sensitive JD workflow semantics before touching device inventory', async () => {
     const value = fixture();
     readyIosTooling();
