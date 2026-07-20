@@ -1,0 +1,162 @@
+{
+  "schemaVersion": 5,
+  "id": "ISS-20260720-66E25D",
+  "title": "Optimize iOS device interaction latency and Thin Harness follow-ups",
+  "slug": "optimize-ios-device-interaction-latency-and-thin-harness-follow-",
+  "kind": "feature",
+  "status": "planned",
+  "summary": "Continue from the merged iOS Fast Path V1. Reduce end-to-end iOS interaction latency using measured session reuse, tiered evidence and repeatable benchmarks, then close remaining evidence-backed Thin Harness follow-ups.",
+  "goals": [
+    "Implement a bounded short-session execution path that reduces scheduler and process startup overhead.",
+    "Use settle results and exact waits before scoped or full accessibility snapshots.",
+    "Measure cold and warm simulator and optional physical-device latency by segment.",
+    "Reduce remaining measured Thin Harness fixed costs without increasing the stable MCP tool surface."
+  ],
+  "nonGoals": [
+    "Release installation or remote publishing.",
+    "Unbounded device action inputs.",
+    "Unmeasured architectural rewrites."
+  ],
+  "acceptanceCriteria": [
+    "Per-device and per-session serialization, timeout, cancellation and redaction remain enforced.",
+    "Exact-result iOS workflows avoid full accessibility-tree capture.",
+    "Benchmarks report p50 and p95 for cold and warm runs without fabricated baselines.",
+    "Eligible Thin Harness Fast operations still create zero ExecutionJob, LocalJob and Worker.",
+    "Focused tests, type, runtime architecture and MCP compatibility checks pass.",
+    "Stable MCP tool budget remains 128."
+  ],
+  "relatedArtifacts": [
+    "06f764806499cded38841b1313b04ae45759d5fa",
+    "EVD-1784559905279-a7d408c8",
+    "EVD-1784560990334-cbe69246",
+    "EVD-1784561013476-2d15a634"
+  ],
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Implement bounded iOS session direct execution",
+      "objective": "Design and implement a short allowlisted interaction-session execution path with ownership, cancellation, timeout, receipt and durable escalation.",
+      "status": "ready",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src/runtime/gateway/**",
+        "src/runtime/plugins/**",
+        "src/runtime/execution/**",
+        "tests/runtime/**",
+        "tests/cli/**",
+        "docs/architecture/**"
+      ],
+      "forbiddenPaths": [],
+      "checks": [
+        "package:check:type",
+        "package:check:runtime-architecture",
+        "package:check:mcp-compatibility"
+      ],
+      "acceptanceCriteria": [
+        "No concurrent writes to one device or interaction.",
+        "Short session actions avoid one durable scheduler job per action.",
+        "Long or recoverable work still escalates to Durable execution."
+      ],
+      "risk": "high",
+      "recommendedAgent": "codex",
+      "notes": [],
+      "runIds": [],
+      "createdAt": "2026-07-20T15:31:27.625Z",
+      "updatedAt": "2026-07-20T15:31:27.625Z"
+    },
+    {
+      "id": "T2",
+      "title": "Complete tiered iOS accessibility evidence",
+      "objective": "Add selector or ref reuse, settle diff, exact wait, scoped snapshot and full snapshot fallback tiers with bounded redacted evidence.",
+      "status": "ready",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src/runtime/plugins/ios-agent-device.ts",
+        "tests/runtime/ios-agent-device-provider.test.ts",
+        "scripts/**",
+        "docs/**"
+      ],
+      "forbiddenPaths": [],
+      "checks": [
+        "package:check:type",
+        "package:check:runtime-architecture"
+      ],
+      "acceptanceCriteria": [
+        "Exact waits skip full trees.",
+        "Stale refs safely recover.",
+        "Snapshot cost is measured by evidence tier."
+      ],
+      "risk": "medium",
+      "recommendedAgent": "codex",
+      "notes": [],
+      "runIds": [],
+      "createdAt": "2026-07-20T15:31:27.625Z",
+      "updatedAt": "2026-07-20T15:31:27.625Z"
+    },
+    {
+      "id": "T3",
+      "title": "Build repeatable iOS latency benchmark",
+      "objective": "Measure controller overhead, process startup, runner round trips, settle, snapshot and artifact costs for cold and warm simulator and optional physical-device runs.",
+      "status": "planned",
+      "dependsOn": [
+        "T2"
+      ],
+      "allowedPaths": [
+        "scripts/**",
+        "src/runtime/plugins/**",
+        "tests/runtime/**",
+        "docs/**"
+      ],
+      "forbiddenPaths": [],
+      "checks": [
+        "package:check:type"
+      ],
+      "acceptanceCriteria": [
+        "At least one warmup and three measured runs per case.",
+        "p50 and p95 are reported.",
+        "Unavailable historical baselines are not synthesized."
+      ],
+      "risk": "low",
+      "recommendedAgent": "codex",
+      "notes": [],
+      "runIds": [],
+      "createdAt": "2026-07-20T15:31:27.625Z",
+      "updatedAt": "2026-07-20T15:31:27.625Z"
+    },
+    {
+      "id": "T4",
+      "title": "Close measured Thin Harness follow-ups",
+      "objective": "Measure and reduce patch savepoint and command-policy costs, large-repository read variance, Workbench schema size and Fast/Durable adapter duplication.",
+      "status": "ready",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src/runtime/execution/thin-harness/**",
+        "src/runtime/gateway/**",
+        "src/cli/mcp/**",
+        "scripts/benchmark-thin-harness-gateway-ab.ts",
+        "tests/runtime/thin-harness.test.ts",
+        "tests/cli/**",
+        "docs/**"
+      ],
+      "forbiddenPaths": [],
+      "checks": [
+        "package:check:type",
+        "package:check:runtime-architecture",
+        "package:check:mcp-compatibility"
+      ],
+      "acceptanceCriteria": [
+        "Only measured bottlenecks are changed.",
+        "Fast eligible operations retain zero durable side effects.",
+        "Stable tool count remains 128."
+      ],
+      "risk": "medium",
+      "recommendedAgent": "codex",
+      "notes": [],
+      "runIds": [],
+      "createdAt": "2026-07-20T15:31:27.625Z",
+      "updatedAt": "2026-07-20T15:31:27.625Z"
+    }
+  ],
+  "createdAt": "2026-07-20T15:31:27.625Z",
+  "updatedAt": "2026-07-20T15:31:27.625Z"
+}
