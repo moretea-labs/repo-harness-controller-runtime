@@ -58,6 +58,7 @@ Read the architecture in this order:
 4. `entity-model.md` — durable entity meanings and ownership.
 5. `job-and-run-lifecycle.md` — execution, retry, cancellation, and terminal-state semantics.
 6. `dispatch-and-agent-strategy.md` — selection of Direct Edit, Quick Agent, durable Tasks, and Agent roles.
+6a. `thin-harness-v1.md` — Fast Path router, typed batch, lightweight lanes, and durable escalation rules.
 7. `scheduler-and-resource-claims.md` — repository actors, claims, leases, workspace conflicts, and integration queues.
 8. `multi-repository-execution.md` — cross-repository quotas, fairness, DAGs, and failure isolation.
 9. `automation-and-schedule-engine.md` — schedules, bounded occurrences, deduplication, budgets, and stop conditions.

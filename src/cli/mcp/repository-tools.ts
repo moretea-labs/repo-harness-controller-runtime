@@ -29,6 +29,16 @@ import {
   repositoryGitStatus,
   repositoryGitSwitchBranch,
 } from '../repositories/structured-git';
+import {
+  executeFast,
+  executeLightweightLanes,
+  executeRepositoryBatch,
+  integratePatchProposals,
+  isFastEligibleTool,
+  listFastReceipts,
+  readFastReceipt,
+  routeExecution,
+} from '../../runtime/execution/thin-harness';
 import type { CallToolResult, McpToolDefinition } from './tools';
 
 export type RepositoryToolResult = CallToolResult;
@@ -224,6 +234,112 @@ export const repositoryToolDefinitions: McpToolDefinition[] = [
     timeout_ms: { type: 'number', description: 'Optional execution timeout in milliseconds.' },
     max_output_bytes: { type: 'number', description: 'Optional cap for captured stdout/stderr.' },
   }, ['command']),
+
+  // Thin Harness V1 — typed batch / lanes / receipts without new durable ceremony.
+  definition('repository_batch_execute', 'Execute multiple typed repository steps in one bounded Fast Path call (max 20). Rejects mixed durable steps before execution. Does not create ExecutionJob/Worker/Campaign.', {
+    repo_id: repoId,
+    checkout_id: { type: 'string' },
+    mode: { type: 'string', enum: ['auto', 'fast', 'durable'], description: 'Defaults to auto. durable returns an escalation hint without executing.' },
+    steps: {
+      type: 'array',
+      description: 'Typed steps: read_file, search, git_status, git_diff, apply_patch, run_short_command, run_focused_check, stage_paths, commit_paths.',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          kind: {
+            type: 'string',
+            enum: ['read_file', 'search', 'git_status', 'git_diff', 'apply_patch', 'run_short_command', 'run_focused_check', 'stage_paths', 'commit_paths'],
+          },
+          input: { type: 'object', description: 'Typed step payload. Never a free-form shell workflow.' },
+        },
+        required: ['kind', 'input'],
+        additionalProperties: false,
+      },
+      maxItems: 20,
+    },
+    stop_on_error: { type: 'boolean', description: 'Defaults to true.' },
+    allowed_paths: { type: 'array', items: { type: 'string' } },
+    timeout_ms: { type: 'number' },
+    include_latency_breakdown: { type: 'boolean' },
+    purpose: { type: 'string' },
+  }, ['steps']),
+  definition('repository_lanes_execute', 'Run lightweight read-only analysis lanes and/or patch-proposal lanes without Campaign, Issue Task, or long-lived worktrees. Patch proposals are never applied here.', {
+    repo_id: repoId,
+    checkout_id: { type: 'string' },
+    read_lanes: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          kind: { type: 'string', enum: ['search', 'read_file', 'git_status', 'git_diff', 'run_short_command'] },
+          input: { type: 'object' },
+        },
+        required: ['kind', 'input'],
+      },
+      maxItems: 4,
+    },
+    patch_proposal_lanes: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          read_paths: { type: 'array', items: { type: 'string' } },
+          write_paths: { type: 'array', items: { type: 'string' } },
+          proposed_operations: { type: 'array', items: { type: 'object' } },
+          assumptions: { type: 'array', items: { type: 'string' } },
+          risk_notes: { type: 'array', items: { type: 'string' } },
+          suggested_focused_check: { anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
+        },
+        required: ['write_paths', 'proposed_operations'],
+      },
+      maxItems: 4,
+    },
+    fail_fast: { type: 'boolean' },
+    max_concurrency: { type: 'number', description: 'Capped at 4.' },
+    include_latency_breakdown: { type: 'boolean' },
+  }, []),
+  definition('repository_lanes_integrate', 'Sequentially apply selected non-conflicting patch proposals through Fast Path apply_patch. Single integrator; never concurrent checkout writes.', {
+    repo_id: repoId,
+    checkout_id: { type: 'string' },
+    proposals: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          write_paths: { type: 'array', items: { type: 'string' } },
+          proposed_operations: { type: 'array', items: { type: 'object' } },
+          analysis_only: { type: 'boolean' },
+          ok: { type: 'boolean' },
+        },
+        required: ['id', 'proposed_operations'],
+      },
+    },
+    session_id: { type: 'string' },
+    allowed_paths: { type: 'array', items: { type: 'string' } },
+    purpose: { type: 'string' },
+  }, ['proposals']),
+  definition('repository_fast_receipt_get', 'Read one Fast Path receipt by execution id. Receipts are not Issue/Task completion evidence.', {
+    repo_id: repoId,
+    execution_id: { type: 'string' },
+  }, ['execution_id'], true),
+  definition('repository_fast_receipt_list', 'List recent Fast Path receipts for a repository (bounded).', {
+    repo_id: repoId,
+    limit: { type: 'number' },
+  }, [], true),
+  definition('repository_execution_route', 'Dry-run Thin Harness execution router decision (fast|durable|reject) without executing.', {
+    repo_id: repoId,
+    operation: { type: 'string' },
+    mode: { type: 'string', enum: ['auto', 'fast', 'durable'] },
+    command: { anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
+    timeout_ms: { type: 'number' },
+    background: { type: 'boolean' },
+    paths: { type: 'array', items: { type: 'string' } },
+    allowed_paths: { type: 'array', items: { type: 'string' } },
+  }, ['operation'], true),
 ];
 
 export const repositoryToolNames = repositoryToolDefinitions.map((tool) => tool.name);
@@ -505,6 +621,59 @@ export async function callRepositoryTool(
           : typeof args.max_output_bytes === 'string'
             ? Number(args.max_output_bytes)
             : undefined;
+        // Thin Harness: short readonly / focused-check commands skip Local Job when eligible.
+        const forceDurable = args.apply_mode === 'async' || args.mode === 'durable' || args.async === true || args.background === true;
+        if (!forceDurable && isFastEligibleTool('repository_command_execute', {
+          command: args.command,
+          timeout_ms: timeoutMs,
+          mode: typeof args.mode === 'string' ? args.mode : 'auto',
+        })) {
+          const fast = await executeFast(
+            { controllerHome, repository, includeLatencyBreakdown: args.include_latency_breakdown === true },
+            {
+              operation: 'repository_command_execute',
+              mode: 'fast',
+              input: {
+                command: args.command,
+                cwd: typeof args.cwd === 'string' ? args.cwd : undefined,
+                approval_token: typeof args.approval_token === 'string' ? args.approval_token : undefined,
+                approval_request_id: typeof args.approval_request_id === 'string' ? args.approval_request_id : undefined,
+                timeout_ms: timeoutMs,
+              },
+              timeoutMs,
+            },
+          );
+          if (fast.escalation) {
+            return result({
+              mode: 'durable',
+              reason: fast.escalation.reason,
+              suggestedOperation: fast.escalation.suggestedOperation,
+              decision: fast.decision,
+              message: 'Fast Path declined before execution. Re-issue via Durable Work / Local Job explicitly.',
+              latency: { totalMs: fast.latency.totalMs },
+            });
+          }
+          return fast.ok
+            ? result({
+              accepted: true,
+              mode: 'fast',
+              repoId: repository.repoId,
+              checkoutId: repository.activeCheckoutId,
+              receipt: fast.receipt,
+              execution: fast.result,
+              durableSideEffects: fast.durableSideEffects,
+              latency: args.include_latency_breakdown === true ? fast.latency : { totalMs: fast.latency.totalMs },
+              next: 'Fast Path completed without Local Job / ExecutionJob / Worker.',
+            })
+            : { ...result({
+              mode: 'fast',
+              repoId: repository.repoId,
+              checkoutId: repository.activeCheckoutId,
+              receipt: fast.receipt,
+              execution: fast.result,
+              latency: args.include_latency_breakdown === true ? fast.latency : { totalMs: fast.latency.totalMs },
+            }), isError: true };
+        }
         const preview = previewRepositoryCommandExecution(repository, {
           command: args.command as string | string[],
           cwd: typeof args.cwd === 'string' ? args.cwd : undefined,
@@ -539,6 +708,7 @@ export async function callRepositoryTool(
         const handoff = await waitForRepositoryCommandHandoff(repository.canonicalRoot, accepted.jobId, maxOutputBytes);
         return result({
           accepted: true,
+          mode: 'durable',
           repoId: repository.repoId,
           checkoutId: repository.activeCheckoutId,
           jobId: accepted.jobId,
@@ -546,6 +716,166 @@ export async function callRepositoryTool(
           localJob: handoff,
           next: handoff.nextLocalCommand ?? `Inspect Job ${accepted.jobId} with get_local_job.`,
         });
+      }
+      case 'repository_batch_execute': {
+        const repository = resolveRepositorySelection({
+          repoId: repoIdValue || undefined,
+          checkoutId: typeof args.checkout_id === 'string' ? args.checkout_id : undefined,
+          controllerHome,
+          allowSoleRepository: true,
+        });
+        const steps = Array.isArray(args.steps)
+          ? args.steps
+            .filter((entry): entry is Record<string, unknown> => typeof entry === 'object' && entry !== null)
+            .map((entry) => ({
+              id: typeof entry.id === 'string' ? entry.id : undefined,
+              kind: String(entry.kind ?? '') as
+                | 'read_file'
+                | 'search'
+                | 'git_status'
+                | 'git_diff'
+                | 'apply_patch'
+                | 'run_short_command'
+                | 'run_focused_check'
+                | 'stage_paths'
+                | 'commit_paths',
+              input: (typeof entry.input === 'object' && entry.input !== null
+                ? entry.input
+                : {}) as Record<string, unknown>,
+            }))
+          : [];
+        const batch = await executeRepositoryBatch(
+          { controllerHome, repository },
+          {
+            repoId: repository.repoId,
+            checkoutId: repository.activeCheckoutId,
+            mode: args.mode === 'fast' || args.mode === 'durable' || args.mode === 'auto' ? args.mode : 'auto',
+            steps,
+            stopOnError: args.stop_on_error !== false,
+            allowedPaths: Array.isArray(args.allowed_paths) ? args.allowed_paths.map(String) : undefined,
+            timeoutMs: typeof args.timeout_ms === 'number' ? args.timeout_ms : undefined,
+            includeLatencyBreakdown: args.include_latency_breakdown === true,
+            purpose: typeof args.purpose === 'string' ? args.purpose : undefined,
+          },
+        );
+        const payload = batch as unknown as Record<string, unknown>;
+        return batch.ok ? result(payload) : { ...result(payload), isError: true };
+      }
+      case 'repository_lanes_execute': {
+        const repository = resolveRepositorySelection({
+          repoId: repoIdValue || undefined,
+          checkoutId: typeof args.checkout_id === 'string' ? args.checkout_id : undefined,
+          controllerHome,
+          allowSoleRepository: true,
+        });
+        const lanes = await executeLightweightLanes(
+          { controllerHome, repository },
+          {
+            repoId: repository.repoId,
+            checkoutId: repository.activeCheckoutId,
+            readLanes: Array.isArray(args.read_lanes)
+              ? args.read_lanes
+                .filter((entry): entry is Record<string, unknown> => typeof entry === 'object' && entry !== null)
+                .map((entry) => ({
+                  id: typeof entry.id === 'string' ? entry.id : undefined,
+                  kind: String(entry.kind ?? 'search') as 'search' | 'read_file' | 'git_status' | 'git_diff' | 'run_short_command',
+                  input: (typeof entry.input === 'object' && entry.input !== null
+                    ? entry.input
+                    : {}) as Record<string, unknown>,
+                }))
+              : undefined,
+            patchProposalLanes: Array.isArray(args.patch_proposal_lanes)
+              ? args.patch_proposal_lanes
+                .filter((entry): entry is Record<string, unknown> => typeof entry === 'object' && entry !== null)
+                .map((entry) => ({
+                  id: typeof entry.id === 'string' ? entry.id : undefined,
+                  readPaths: Array.isArray(entry.read_paths) ? entry.read_paths.map(String) : [],
+                  writePaths: Array.isArray(entry.write_paths) ? entry.write_paths.map(String) : [],
+                  proposedOperations: Array.isArray(entry.proposed_operations) ? entry.proposed_operations : [],
+                  assumptions: Array.isArray(entry.assumptions) ? entry.assumptions.map(String) : undefined,
+                  riskNotes: Array.isArray(entry.risk_notes) ? entry.risk_notes.map(String) : undefined,
+                  suggestedFocusedCheck: entry.suggested_focused_check as string | string[] | undefined,
+                }))
+              : undefined,
+            failFast: args.fail_fast === true,
+            maxConcurrency: typeof args.max_concurrency === 'number' ? args.max_concurrency : undefined,
+            includeLatencyBreakdown: args.include_latency_breakdown === true,
+          },
+        );
+        const payload = lanes as unknown as Record<string, unknown>;
+        return lanes.ok ? result(payload) : { ...result(payload), isError: true };
+      }
+      case 'repository_lanes_integrate': {
+        const repository = resolveRepositorySelection({
+          repoId: repoIdValue || undefined,
+          checkoutId: typeof args.checkout_id === 'string' ? args.checkout_id : undefined,
+          controllerHome,
+          allowSoleRepository: true,
+        });
+        const proposals = Array.isArray(args.proposals)
+          ? args.proposals
+            .filter((entry): entry is Record<string, unknown> => typeof entry === 'object' && entry !== null)
+            .map((entry) => ({
+              id: String(entry.id ?? 'proposal'),
+              ok: entry.ok !== false,
+              durationMs: 0,
+              readPaths: Array.isArray(entry.read_paths) ? entry.read_paths.map(String) : [],
+              writePaths: Array.isArray(entry.write_paths) ? entry.write_paths.map(String) : [],
+              proposedOperations: Array.isArray(entry.proposed_operations) ? entry.proposed_operations : [],
+              analysisOnly: entry.analysis_only === true,
+            }))
+          : [];
+        const integrated = await integratePatchProposals(
+          { controllerHome, repository },
+          proposals,
+          {
+            sessionId: typeof args.session_id === 'string' ? args.session_id : undefined,
+            allowedPaths: Array.isArray(args.allowed_paths) ? args.allowed_paths.map(String) : undefined,
+            purpose: typeof args.purpose === 'string' ? args.purpose : undefined,
+          },
+        );
+        const payload = integrated as unknown as Record<string, unknown>;
+        return integrated.ok ? result(payload) : { ...result(payload), isError: true };
+      }
+      case 'repository_fast_receipt_get': {
+        const repository = resolveRepositorySelection({
+          repoId: repoIdValue || undefined,
+          checkoutId: typeof args.checkout_id === 'string' ? args.checkout_id : undefined,
+          controllerHome,
+          allowSoleRepository: true,
+        });
+        const receipt = readFastReceipt(controllerHome, repository.repoId, String(args.execution_id ?? ''));
+        if (!receipt) return failure(new Error(`FAST_RECEIPT_NOT_FOUND: ${String(args.execution_id ?? '')}`));
+        return result({ receipt });
+      }
+      case 'repository_fast_receipt_list': {
+        const repository = resolveRepositorySelection({
+          repoId: repoIdValue || undefined,
+          checkoutId: typeof args.checkout_id === 'string' ? args.checkout_id : undefined,
+          controllerHome,
+          allowSoleRepository: true,
+        });
+        const limit = typeof args.limit === 'number' ? args.limit : undefined;
+        return result({ receipts: listFastReceipts(controllerHome, repository.repoId, limit) });
+      }
+      case 'repository_execution_route': {
+        const repository = resolveRepositorySelection({
+          repoId: repoIdValue || undefined,
+          checkoutId: typeof args.checkout_id === 'string' ? args.checkout_id : undefined,
+          controllerHome,
+          allowSoleRepository: true,
+        });
+        const decision = routeExecution({
+          operation: String(args.operation ?? ''),
+          mode: args.mode === 'fast' || args.mode === 'durable' || args.mode === 'auto' ? args.mode : 'auto',
+          command: args.command as string | string[] | undefined,
+          timeoutMs: typeof args.timeout_ms === 'number' ? args.timeout_ms : undefined,
+          background: args.background === true,
+          paths: Array.isArray(args.paths) ? args.paths.map(String) : undefined,
+          allowedPaths: Array.isArray(args.allowed_paths) ? args.allowed_paths.map(String) : undefined,
+          defaultBranch: repository.defaultBranch,
+        });
+        return result({ decision, repoId: repository.repoId, checkoutId: repository.activeCheckoutId });
       }
       default:
         return failure(new Error(`UNKNOWN_REPOSITORY_TOOL: ${name}`));

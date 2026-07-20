@@ -23,6 +23,7 @@ The migration preserves the existing Issue, Task, Run, Edit Session, Local Job, 
 | Capability | Status | Runtime evidence |
 | --- | --- | --- |
 | Thin MCP Gateway | Implemented | `src/runtime/gateway/mcp/router.ts`, `src/cli/mcp/server.ts`, `src/cli/mcp/transports/http.ts` |
+| Thin Harness V1 Fast Path | Implemented | `src/runtime/execution/thin-harness/` router, fast executor, receipts, typed batch, lightweight lanes; eligible short repository commands skip Local Job / ExecutionJob; docs in `thin-harness-v1.md` |
 | Deterministic MCP transport lifecycle | Implemented | global `McpSessionRegistry`, three-path DELETE support, stream leases, active-POST protection, capacity-aware `/ready`, and reconnect regression coverage |
 | Persist-before-execute durable commands | Implemented | `src/runtime/execution/jobs/store.ts`, global request index and semantic conflict detection |
 | Independently restartable Controller Daemon | Implemented | `src/runtime/control-plane/daemon-entry.ts`, `daemon-client.ts` |

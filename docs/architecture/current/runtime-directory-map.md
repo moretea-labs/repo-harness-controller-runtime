@@ -18,6 +18,7 @@ src/runtime/
   execution/
     jobs/                      Durable Job schema, indexes, Operation Receipts and compatibility projection
     workers/                   Isolated one-Job process execution
+    thin-harness/              Fast Path router, latency trace, receipts, typed batch, lightweight lanes
   resources/
     claims/                    Conflict taxonomy and conservative unknown scope
     leases/                    Lease, renewal, release and fencing

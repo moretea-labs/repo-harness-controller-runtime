@@ -53,6 +53,8 @@ const DIRECT_HOT_READ_TOOLS = new Set([
   'rh_status', 'rh_context', 'rh_inbox',
   'controller_context_pack',
   'repository_git_status', 'repository_git_diff', 'git_diff_paths',
+  // Thin Harness V1 inspection / route helpers (no durable job).
+  'repository_fast_receipt_get', 'repository_fast_receipt_list', 'repository_execution_route',
 ]);
 
 export function isDirectHotReadTool(name: string): boolean {
@@ -70,6 +72,10 @@ const INTERACTIVE_SYNC_WRITE_TOOLS = new Set([
   'create_edit_savepoint',
   'git_stage_paths',
   'git_commit_paths',
+  // Thin Harness V1 batch / lanes stay in-process (Fast Path). Durable escalation is explicit.
+  'repository_batch_execute',
+  'repository_lanes_execute',
+  'repository_lanes_integrate',
   // Recovery writes against an existing Run must remain available while legacy
   // Runs are the very thing preventing runtime-storage relocation. These tools
   // do not create new execution ownership or dispatch new work.
