@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Repo Sentinel</string>
+    <string name="accessibility_description">为 repo-harness 提供受限的 Android 页面读取、点击、输入、返回和滑动能力。不会自动处理密码、验证码或付款确认。</string>
+</resources>
