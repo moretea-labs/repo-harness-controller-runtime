@@ -548,6 +548,31 @@ function runSessionCommand(
   }
 }
 
+function runSessionCommandAttempt(
+  input: AssistantPluginActionExecutionInput,
+  record: InteractionSessionRecord,
+  args: string[],
+  failureCode: string,
+  timeoutMs = 60_000,
+): Record<string, unknown> {
+  return runJson(input, [...args, '--session', record.sessionId, '--platform', 'ios', '--json'], {
+    record,
+    timeoutMs,
+    failureCode,
+  });
+}
+
+function isStaleAccessibilityRefError(error: unknown): boolean {
+  const normalized = toAssistantPluginError(error, {
+    code: 'AGENT_DEVICE_COMMAND_FAILED',
+    message: 'The agent-device command failed.',
+    retryable: false,
+  });
+  const evidence = `${normalized.message}\n${JSON.stringify(normalized.details ?? {})}`;
+  return /(?:accessibility|element|ref|@e\d+)/i.test(evidence)
+    && /(?:stale|expired|missing|not[\s_-]*found|no[\s_-]*such)/i.test(evidence);
+}
+
 function stringEvidence(value: unknown, output: string[] = []): string[] {
   if (typeof value === 'string') output.push(value);
   else if (Array.isArray(value)) value.forEach((entry) => stringEvidence(entry, output));
@@ -803,6 +828,23 @@ function runSessionBatch(
   return result as Record<string, unknown>;
 }
 
+function runSessionBatchAttempt(
+  input: AssistantPluginActionExecutionInput,
+  record: InteractionSessionRecord,
+  prepared: PreparedAgentDeviceBatch,
+  timeoutMs = 120_000,
+): Record<string, unknown> {
+  let result: unknown = runSessionCommandAttempt(input, record, [
+    'batch',
+    '--steps', JSON.stringify(prepared.nativeSteps),
+    '--on-error', 'stop',
+    '--max-steps', String(MAX_BATCH_STEPS),
+    '--cost',
+  ], 'AGENT_DEVICE_BATCH_FAILED', timeoutMs);
+  for (const text of prepared.redactions) result = redactExactText(result, text);
+  return result as Record<string, unknown>;
+}
+
 function subActionInput(
   input: AssistantPluginActionExecutionInput,
   actionId: string,
@@ -852,6 +894,7 @@ async function executeJdSearch(input: AssistantPluginActionExecutionInput): Prom
       ? 'scoped_snapshot'
       : 'full_snapshot';
   let initialAccessibilitySnapshot = false;
+  let staleRefRecovery = false;
   let nativeBatchRequests = 0;
   let nativeBatchSteps = 0;
   try {
@@ -893,29 +936,65 @@ async function executeJdSearch(input: AssistantPluginActionExecutionInput): Prom
         },
       ];
     const record = requireRecord(subActionInput(input, 'agent_device_batch', { interaction_id: interactionId }));
-    const fillStep: AgentDeviceBatchStep = {
+    let fillStep: AgentDeviceBatchStep = {
       kind: 'fill',
       input: { target: searchTarget, text: query, delay_ms: 20 },
     };
+    const cachedSearchRef = !optionalString(input.args.search_selector) && /^@e\d+(?:~s\d+)?$/.test(searchTarget);
+    if (cachedSearchRef) {
+      nativeBatchRequests += 1;
+      nativeBatchSteps += 1;
+      try {
+        runSessionBatchAttempt(input, record, prepareAgentDeviceBatch([fillStep], record), 20_000);
+      } catch (error) {
+        if (!isStaleAccessibilityRefError(error)) return failSession(input, record, error);
+        staleRefRecovery = true;
+        initialAccessibilitySnapshot = true;
+        let refreshedSnapshot: Record<string, unknown>;
+        try {
+          refreshedSnapshot = runSessionCommandAttempt(
+            input,
+            record,
+            ['snapshot', '--interactive'],
+            'AGENT_DEVICE_SNAPSHOT_FAILED',
+            30_000,
+          );
+        } catch (snapshotError) {
+          return failSession(input, record, snapshotError);
+        }
+        const refreshedTarget = interactiveRef(refreshedSnapshot, /搜索|搜一搜|search|searchfield|请输入/i);
+        if (!refreshedTarget) {
+          return failSession(input, record, new AssistantPluginError(
+            'JD_SEARCH_FIELD_NOT_FOUND',
+            'The cached JD search ref was stale and no replacement search field was found.',
+            { retryable: false },
+          ));
+        }
+        fillStep = { kind: 'fill', input: { target: refreshedTarget, text: query, delay_ms: 20 } };
+        nativeBatchRequests += 1;
+        nativeBatchSteps += 1;
+        runSessionBatch(input, record, prepareAgentDeviceBatch([fillStep], record), 20_000);
+      }
+    }
     if (submitTarget) {
-      nativeBatchRequests = 1;
-      nativeBatchSteps = 2 + evidenceSteps.length;
+      nativeBatchRequests += 1;
+      nativeBatchSteps += (cachedSearchRef ? 1 : 2) + evidenceSteps.length;
       finalSnapshot = runSessionBatch(
         input,
         record,
         prepareAgentDeviceBatch([
-          fillStep,
+          ...(cachedSearchRef ? [] : [fillStep]),
           { kind: 'press', input: { target: submitTarget } },
           ...evidenceSteps,
         ], record),
         30_000,
       );
     } else {
-      nativeBatchRequests = 2;
-      nativeBatchSteps = 1 + evidenceSteps.length;
+      nativeBatchRequests += cachedSearchRef ? 1 : 2;
+      nativeBatchSteps += (cachedSearchRef ? 0 : 1) + evidenceSteps.length;
       // agent-device 0.19.3 exposes keyboard return only through the CLI
       // command, not the Node batch keyboard schema (status/dismiss only).
-      runSessionBatch(input, record, prepareAgentDeviceBatch([fillStep], record), 20_000);
+      if (!cachedSearchRef) runSessionBatch(input, record, prepareAgentDeviceBatch([fillStep], record), 20_000);
       runSessionCommand(input, record, ['keyboard', 'return'], 'JD_SEARCH_SUBMIT_FAILED');
       finalSnapshot = runSessionBatch(
         input,
@@ -946,6 +1025,7 @@ async function executeJdSearch(input: AssistantPluginActionExecutionInput): Prom
       exactResultWait,
       accessibilityEvidenceTier,
       initialAccessibilitySnapshot,
+      staleRefRecovery,
       accessibilitySnapshotRequests: (initialAccessibilitySnapshot ? 1 : 0) + (exactResultWait ? 0 : 1),
       fullAccessibilitySnapshot: accessibilityEvidenceTier === 'full_snapshot',
       resultScope: resultScope ?? null,

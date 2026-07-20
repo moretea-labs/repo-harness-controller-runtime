@@ -253,6 +253,63 @@ describe('optional agent-device iOS Simulator provider', () => {
     expect(commands.some(({ argv }) => argv[1] === 'close')).toBe(true);
   });
 
+  it('refreshes one stale cached JD search ref without terminalizing the session', async () => {
+    const value = fixture();
+    readyIosTooling();
+    let batchCount = 0;
+    let snapshotCount = 0;
+    const commands: string[][] = [];
+    setIosAgentDeviceRuntimeHooksForTest({
+      platform: () => 'darwin',
+      now: () => new Date('2026-07-20T09:00:00.000Z'),
+      runCommand: (command, args) => {
+        commands.push([command, ...args]);
+        if (args[0] === '--version') return { ok: true, status: 0, stdout: '0.19.3\n', stderr: '', command: [command, ...args] };
+        if (args[0] === 'devices') {
+          return { ok: true, status: 0, stdout: success({ devices: [device('PHONE-1', 'greyson', 'device', true)] }), stderr: '', command: [command, ...args] };
+        }
+        if (args[0] === 'snapshot') {
+          snapshotCount += 1;
+          return { ok: true, status: 0, stdout: success({ tree: '@e7 SearchField label="搜索商品" value=""' }), stderr: '', command: [command, ...args] };
+        }
+        if (args[0] === 'batch') {
+          batchCount += 1;
+          if (batchCount === 1) {
+            return {
+              ok: false,
+              status: 1,
+              stdout: JSON.stringify({ success: false, error: { message: 'Accessibility ref @e1 is stale and not found.' } }),
+              stderr: '',
+              command: [command, ...args],
+            };
+          }
+          const steps = JSON.parse(args[args.indexOf('--steps') + 1]!) as Array<{ command: string; input: Record<string, unknown> }>;
+          return { ok: true, status: 0, stdout: success({ results: steps.map((step) => ({ command: step.command, data: { matched: true } })) }), stderr: '', command: [command, ...args] };
+        }
+        if (args[0] === 'screenshot') writeFileSync(args[1]!, 'png');
+        return { ok: true, status: 0, stdout: success(), stderr: '', command: [command, ...args] };
+      },
+    });
+
+    const result = await executeIosPluginAction(pluginInput(value, 'agent_device_jd_search', {
+      device: 'greyson',
+      query: '奶粉',
+      search_target: '@e1',
+      submit_selector: 'label="搜索"',
+      result_text: '搜索结果',
+    }));
+
+    expect(snapshotCount).toBe(1);
+    expect(batchCount).toBe(3);
+    expect((result.executionPlan as Record<string, unknown>).staleRefRecovery).toBe(true);
+    expect((result.executionPlan as Record<string, unknown>).accessibilitySnapshotRequests).toBe(1);
+    expect((result.interaction as Record<string, unknown>).status).toBe('closed');
+    expect(commands.filter((argv) => argv[1] === 'close')).toHaveLength(1);
+    const recoveredFill = commands.filter((argv) => argv[1] === 'batch')[1]!;
+    const recoveredSteps = JSON.parse(recoveredFill[recoveredFill.indexOf('--steps') + 1]!) as Array<{ input: Record<string, unknown> }>;
+    expect(recoveredSteps[0]?.input.target).toEqual({ kind: 'ref', ref: 'e7' });
+  });
+
   it('blocks sensitive JD workflow semantics before touching device inventory', async () => {
     const value = fixture();
     readyIosTooling();
