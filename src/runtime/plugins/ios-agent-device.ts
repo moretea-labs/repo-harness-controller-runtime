@@ -847,7 +847,10 @@ async function executeJdSearch(input: AssistantPluginActionExecutionInput): Prom
   const resultScope = optionalString(input.args.result_scope);
   const snapshotDepth = batchInteger(input.args.snapshot_depth, 20, 1, 20);
   try {
-    let searchTarget = optionalString(input.args.search_target);
+    // A caller may retain both a fast accessibility ref and a stable selector.
+    // Prefer the selector because refs are snapshot-scoped and may be stale after
+    // app foregrounding or navigation; fall back to the ref for compatibility.
+    let searchTarget = optionalString(input.args.search_selector) ?? optionalString(input.args.search_target);
     if (!searchTarget) {
       const initialSnapshot = await executeIosAgentDeviceAction(subActionInput(input, 'agent_device_snapshot', {
         interaction_id: interactionId,
@@ -861,7 +864,7 @@ async function executeJdSearch(input: AssistantPluginActionExecutionInput): Prom
       });
     }
 
-    const submitTarget = optionalString(input.args.submit_target);
+    const submitTarget = optionalString(input.args.submit_selector) ?? optionalString(input.args.submit_target);
     const waitStep: AgentDeviceBatchStep = resultText
       ? { kind: 'wait', input: { wait_type: 'text', text: resultText, timeout_ms: 15_000 } }
       : resultSelector
@@ -1043,7 +1046,8 @@ export function iosAgentDeviceActions(): AssistantPluginActionDescriptor[] {
       argumentsSchema: {
         type: 'object', properties: {
           device: { type: 'string' }, query: { type: 'string' }, team_id: { type: 'string' }, runner_bundle_id: { type: 'string' }, developer_dir: { type: 'string' },
-          search_target: { type: 'string' }, submit_target: { type: 'string' }, relaunch: { type: 'boolean' },
+          search_target: { type: 'string' }, search_selector: { type: 'string' },
+          submit_target: { type: 'string' }, submit_selector: { type: 'string' }, relaunch: { type: 'boolean' },
           result_text: { type: 'string' }, result_selector: { type: 'string' },
           result_scope: { type: 'string' }, snapshot_depth: { type: 'number' },
         },

@@ -89,10 +89,13 @@
       ],
       "risk": "medium",
       "recommendedAgent": "codex",
-      "notes": [],
+      "notes": [
+        "Automation turn 2: implementing one bounded stale-ref recovery and tiered evidence increment on clean main.",
+        "Completed selector-preference increment: stable search/submit selectors override cached refs, eliminating the initial snapshot and stale-ref risk when both are supplied. Focused iOS tests, type, runtime architecture, and MCP compatibility passed. Remaining T2 work: automatic stale-ref retry/recovery and measured tier escalation."
+      ],
       "runIds": [],
       "createdAt": "2026-07-20T15:31:27.625Z",
-      "updatedAt": "2026-07-20T15:31:27.625Z",
+      "updatedAt": "2026-07-20T17:06:02.492Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     },
     {
@@ -162,6 +165,6 @@
     }
   ],
   "createdAt": "2026-07-20T15:31:27.625Z",
-  "updatedAt": "2026-07-20T15:31:27.625Z",
+  "updatedAt": "2026-07-20T17:06:02.492Z",
   "repoId": "repo_123b7cf58b6b17b5cbe46a56"
 }

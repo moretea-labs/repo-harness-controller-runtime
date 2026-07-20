@@ -209,6 +209,10 @@ describe('optional agent-device iOS Simulator provider', () => {
     const result = await executeIosPluginAction(pluginInput(value, 'agent_device_jd_search', {
       ...runnerConfig,
       query: '爱他美卓傲 1段 800g',
+      search_target: '@e999',
+      search_selector: 'type="SearchField"',
+      submit_target: '@e998',
+      submit_selector: 'label="搜索"',
       result_text: '奶粉搜索结果',
     }));
 
@@ -230,16 +234,16 @@ describe('optional agent-device iOS Simulator provider', () => {
     const open = commands.find(({ argv }) => argv[1] === 'open' && argv.includes('com.360buy.jdmobile'))!;
     expect(open.argv).not.toContain('--relaunch');
     const batches = commands.filter(({ argv }) => argv[1] === 'batch');
-    expect(batches).toHaveLength(2);
-    const fillSteps = JSON.parse(batches[0]!.argv[batches[0]!.argv.indexOf('--steps') + 1]!) as Array<{ command: string; input: Record<string, unknown> }>;
-    const resultSteps = JSON.parse(batches[1]!.argv[batches[1]!.argv.indexOf('--steps') + 1]!) as Array<{ command: string; input: Record<string, unknown> }>;
-    expect(fillSteps.map((step) => step.command)).toEqual(['fill']);
-    expect(fillSteps[0]?.input.settle).toBe(true);
-    expect(fillSteps[0]?.input.target).toEqual({ kind: 'ref', ref: 'e1' });
-    expect(resultSteps.map((step) => step.command)).toEqual(['wait']);
-    expect(resultSteps[0]?.input).toEqual({ kind: 'text', text: '奶粉搜索结果', timeoutMs: 15_000 });
-    expect(commands.some(({ argv }) => argv[1] === 'keyboard' && argv[2] === 'return')).toBe(true);
-    expect((result.executionPlan as Record<string, unknown>).nativeBatchRequests).toBe(2);
+    expect(snapshotCount).toBe(0);
+    expect(batches).toHaveLength(1);
+    const steps = JSON.parse(batches[0]!.argv[batches[0]!.argv.indexOf('--steps') + 1]!) as Array<{ command: string; input: Record<string, unknown> }>;
+    expect(steps.map((step) => step.command)).toEqual(['fill', 'press', 'wait']);
+    expect(steps[0]?.input.settle).toBe(true);
+    expect(steps[0]?.input.target).toEqual({ kind: 'selector', selector: 'type="SearchField"' });
+    expect(steps[1]?.input.target).toEqual({ kind: 'selector', selector: 'label="搜索"' });
+    expect(steps[2]?.input).toEqual({ kind: 'text', text: '奶粉搜索结果', timeoutMs: 15_000 });
+    expect(commands.some(({ argv }) => argv[1] === 'keyboard' && argv[2] === 'return')).toBe(false);
+    expect((result.executionPlan as Record<string, unknown>).nativeBatchRequests).toBe(1);
     expect((result.executionPlan as Record<string, unknown>).exactResultWait).toBe(true);
     expect((result.executionPlan as Record<string, unknown>).fullAccessibilitySnapshot).toBe(false);
     expect(commands.some(({ argv }) => argv[1] === 'close')).toBe(true);
