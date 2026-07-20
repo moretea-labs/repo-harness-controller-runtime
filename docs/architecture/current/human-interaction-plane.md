@@ -64,3 +64,14 @@ The existing `ios` plugin includes an optional `agent-device` provider with thes
 - Open accepts only an app name or bundle identifier, not a URL or token-bearing deep link. `fill` is limited to non-sensitive text; passwords and verification codes must be entered manually.
 - Command failure, explicit close, or the next access after expiry attempts to close the provider session. Terminal state is written only after close succeeds; cleanup failure remains `closing`, keeps simulator ownership fenced, and can be retried through the idempotent close action. Fill arguments and diagnostics are redacted from failure evidence. Provider daemons use a five-second idle timeout and zero iOS runner retention after close.
 - Physical iPhone mutation remains outside this provider and requires a separate device-authorization and safety review.
+
+
+## Physical iOS Computer Use boundary
+
+The iOS plugin treats a paired physical iPhone as a separate `ios-device` provider rather than widening the simulator-only `agent-device` contract.
+
+The CoreDevice layer is authoritative for bounded device discovery, exact installed-app lookup, foreground application launch, and native PNG screen capture. Device selection is exact by CoreDevice identifier, UDID, or an unambiguous exact name. Responses omit serial numbers, ECIDs, application container paths, pairing records, and signing material.
+
+UI-tree inspection and input injection are optional. They require a separately installed, correctly signed WebDriverAgent-compatible runner already forwarded to an unauthenticated localhost HTTP endpoint configured through `REPO_HARNESS_IOS_DEVICE_RUNNER_URL`. Repo Harness does not download, build, sign, install, or persist that runner automatically. A missing or unhealthy runner leaves CoreDevice launch and screenshot available while `snapshot`, `press`, `fill`, and `scroll` fail closed with typed prerequisite errors.
+
+Every physical-device mutation is serialized through the interaction session. Text input is removed from results and event evidence. Passwords, passcodes, verification codes, biometric prompts, account recovery, purchases, checkout submission, order confirmation, and payment semantics are human-only. The provider does not jailbreak devices, bypass device locks, solve CAPTCHAs, accept tokenized deep links, or shut down or erase the phone when a session closes.

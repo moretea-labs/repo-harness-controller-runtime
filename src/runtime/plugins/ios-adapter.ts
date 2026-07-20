@@ -30,6 +30,13 @@ import {
   iosAgentDeviceStatus,
   isIosAgentDeviceAction,
 } from './ios-agent-device';
+import {
+  executeIosPhysicalDeviceAction,
+  iosPhysicalDeviceActions,
+  iosPhysicalDeviceCapabilities,
+  iosPhysicalDeviceStatus,
+  isIosPhysicalDeviceAction,
+} from './ios-physical-device';
 
 const IOS_PLUGIN_ID = 'ios';
 const CONFIG_ROOT = '.repo-harness/plugins';
@@ -114,6 +121,7 @@ function health(repoRoot: string): AssistantPluginHealth {
         simctlAvailable: 'simctlAvailable' in xcode ? xcode.simctlAvailable : undefined,
       } : xcode,
       agentDevice: iosAgentDeviceStatus(),
+      physicalDevice: iosPhysicalDeviceStatus(),
       artifactRoots: {
         repoLocal: '.repo-harness/ios/',
         controller: 'controller-home/repositories/<repoId>/artifacts/ios/',
@@ -136,6 +144,7 @@ function permissions(ready: boolean): AssistantPluginPermissionScope[] {
     { scope: 'ios.discover', mode: 'read', description: 'Discover Xcode projects, schemes, and simulator inventory.', granted: ready, required: true },
     { scope: 'ios.build', mode: 'write', description: 'Build iOS app targets into bounded DerivedData.', granted: ready, required: true },
     { scope: 'ios.simulator', mode: 'write', description: 'Boot simulators, install, launch, screenshot, and collect logs.', granted: ready, required: true },
+    { scope: 'ios.device', mode: 'write', description: 'Inspect and interact with an exact paired physical iPhone through bounded CoreDevice and optional signed UI-runner actions.', granted: ready, required: false },
   ];
 }
 
@@ -156,6 +165,7 @@ function capabilities(): AssistantPluginCapability[] {
       actions: ['smoke_review', 'build', 'launch_simulator', 'capture_screenshot'],
     },
     ...iosAgentDeviceCapabilities(),
+    ...iosPhysicalDeviceCapabilities(),
   ];
 }
 
@@ -339,6 +349,7 @@ function actions(): AssistantPluginActionDescriptor[] {
       },
     },
     ...iosAgentDeviceActions(),
+    ...iosPhysicalDeviceActions(),
   ];
 }
 
@@ -356,7 +367,7 @@ export function buildIosPluginManifest(previousRevision = 0, previousUpdatedAt?:
     authority: {
       strategy: 'derived',
       duplicateStateAllowed: false,
-      sourceOfTruth: ['local:xcodebuild', 'local:simctl', 'local:agent-device@0.19.3', `repo-local:${CONFIG_ROOT}/ios.json`],
+      sourceOfTruth: ['local:xcodebuild', 'local:simctl', 'local:devicectl', 'local:agent-device@0.19.3', 'process-env:REPO_HARNESS_IOS_DEVICE_RUNNER_URL', `repo-local:${CONFIG_ROOT}/ios.json`],
     },
     enabled,
     lifecycle: {
@@ -377,6 +388,7 @@ export function buildIosPluginManifest(previousRevision = 0, previousUpdatedAt?:
 
 export async function executeIosPluginAction(input: AssistantPluginActionExecutionInput): Promise<Record<string, unknown>> {
   if (isIosAgentDeviceAction(input.actionId)) return executeIosAgentDeviceAction(input);
+  if (isIosPhysicalDeviceAction(input.actionId)) return executeIosPhysicalDeviceAction(input);
   const currentPlatform = iosDevelopmentPlatform();
   if (currentPlatform !== 'darwin' && input.actionId !== 'discover_project' && input.actionId !== 'xcode_status') {
     throw new AssistantPluginError('PLUGIN_DEPENDENCY_MISSING', 'iOS plugin actions require macOS with Xcode/Simulator.', {
