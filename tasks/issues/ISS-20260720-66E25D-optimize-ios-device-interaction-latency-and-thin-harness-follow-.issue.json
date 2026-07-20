@@ -92,11 +92,12 @@
       "notes": [
         "Automation turn 2: implementing one bounded stale-ref recovery and tiered evidence increment on clean main.",
         "Completed selector-preference increment: stable search/submit selectors override cached refs, eliminating the initial snapshot and stale-ref risk when both are supplied. Focused iOS tests, type, runtime architecture, and MCP compatibility passed. Remaining T2 work: automatic stale-ref retry/recovery and measured tier escalation.",
-        "Implemented and committed one-shot classified stale accessibility ref recovery for JD search at af68cee8bce75c870edf9f06cd6b978e34ace57c. Only ref/accessibility errors with stale/expired/missing/not-found semantics refresh one interactive snapshot and retry once; all other errors still failSession and close/fence ownership. Focused tests, type, runtime architecture and MCP compatibility passed. Remaining T2 work: exact-wait failure escalation to scoped/full snapshots and evidence-tier latency benchmarks."
+        "Implemented and committed one-shot classified stale accessibility ref recovery for JD search at af68cee8bce75c870edf9f06cd6b978e34ace57c. Only ref/accessibility errors with stale/expired/missing/not-found semantics refresh one interactive snapshot and retry once; all other errors still failSession and close/fence ownership. Focused tests, type, runtime architecture and MCP compatibility passed. Remaining T2 work: exact-wait failure escalation to scoped/full snapshots and evidence-tier latency benchmarks.",
+        "Completed and committed exact-wait evidence escalation at 2d9a55d4d4b006cd4e6841df613e140f4b0ba478. Only classified text/selector wait misses fall back to scoped interactive snapshot, then one full snapshot if scoped evidence is empty. Runner/transport/connection failures remain fail-closed and close/fence the session. Focused iOS tests, TypeScript, runtime architecture, MCP compatibility, and edit-session verification passed. Remaining T2 work is repeatable cold/warm p50/p95 evidence-tier benchmarking and any evidence-backed tuning."
       ],
       "runIds": [],
       "createdAt": "2026-07-20T15:31:27.625Z",
-      "updatedAt": "2026-07-20T20:05:34.909Z",
+      "updatedAt": "2026-07-20T21:15:07.000Z",
       "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     },
     {
@@ -166,6 +167,6 @@
     }
   ],
   "createdAt": "2026-07-20T15:31:27.625Z",
-  "updatedAt": "2026-07-20T20:05:34.909Z",
+  "updatedAt": "2026-07-20T21:15:07.000Z",
   "repoId": "repo_123b7cf58b6b17b5cbe46a56"
 }
