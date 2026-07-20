@@ -30,6 +30,20 @@ const MAX_JSON_BYTES = 64 * 1024;
 const SESSION_EXPIRY_MS = 2 * 60 * 60_000;
 const JD_BUNDLE_ID = 'com.360buy.jdmobile';
 const MAX_JD_QUERY_LENGTH = 120;
+const MAX_BATCH_STEPS = 20;
+const DEFAULT_AGENT_DEVICE_IDLE_MS = '300000';
+const BATCH_KINDS = ['snapshot', 'press', 'fill', 'scroll', 'keyboard', 'wait', 'back'] as const;
+type AgentDeviceBatchKind = typeof BATCH_KINDS[number];
+
+interface AgentDeviceBatchStep {
+  kind: AgentDeviceBatchKind;
+  input: Record<string, unknown>;
+}
+
+interface PreparedAgentDeviceBatch {
+  nativeSteps: Array<{ command: AgentDeviceBatchKind; input: Record<string, unknown> }>;
+  redactions: string[];
+}
 const SENSITIVE_SEMANTICS = /secure\s*text|securetextfield|password|passcode|verification|one[ -]?time|otp|2fa|密码|口令|验证码|校验码|短信码|生物识别|biometric|face\s?id|touch\s?id|支付|付款|购买|下单|提交订单|确认订单|结算|checkout|payment|purchase|confirm\s+order|bank|card|cvv|身份证/i;
 
 interface AgentDeviceSigningConfig {
@@ -206,8 +220,13 @@ function sessionEnv(input: AssistantPluginActionExecutionInput, record: Interact
     AGENT_DEVICE_SESSION: record.sessionId,
     AGENT_DEVICE_PLATFORM: 'ios',
     AGENT_DEVICE_SESSION_LOCK: 'reject',
-    AGENT_DEVICE_DAEMON_IDLE_TIMEOUT_MS: '5000',
-    AGENT_DEVICE_IOS_RUNNER_RETENTION_MS: '0',
+    // Keep the per-interaction daemon and a healthy XCTest runner warm between
+    // commands. The previous five-second/zero-retention policy forced repeated
+    // cold starts during ordinary multi-step device workflows.
+    AGENT_DEVICE_DAEMON_IDLE_TIMEOUT_MS:
+      process.env.REPO_HARNESS_AGENT_DEVICE_DAEMON_IDLE_TIMEOUT_MS?.trim() || DEFAULT_AGENT_DEVICE_IDLE_MS,
+    AGENT_DEVICE_IOS_RUNNER_IDLE_STOP_MS:
+      process.env.REPO_HARNESS_AGENT_DEVICE_IOS_RUNNER_IDLE_STOP_MS?.trim() || DEFAULT_AGENT_DEVICE_IDLE_MS,
   };
 }
 
@@ -219,8 +238,10 @@ function probeEnv(input: AssistantPluginActionExecutionInput, config?: AgentDevi
     ...signingEnv(config),
     AGENT_DEVICE_STATE_DIR: path,
     AGENT_DEVICE_PLATFORM: 'ios',
-    AGENT_DEVICE_DAEMON_IDLE_TIMEOUT_MS: '5000',
-    AGENT_DEVICE_IOS_RUNNER_RETENTION_MS: '0',
+    AGENT_DEVICE_DAEMON_IDLE_TIMEOUT_MS:
+      process.env.REPO_HARNESS_AGENT_DEVICE_DAEMON_IDLE_TIMEOUT_MS?.trim() || DEFAULT_AGENT_DEVICE_IDLE_MS,
+    AGENT_DEVICE_IOS_RUNNER_IDLE_STOP_MS:
+      process.env.REPO_HARNESS_AGENT_DEVICE_IOS_RUNNER_IDLE_STOP_MS?.trim() || DEFAULT_AGENT_DEVICE_IDLE_MS,
   };
 }
 
@@ -573,6 +594,215 @@ function validateJdQuery(value: unknown): string {
   return query;
 }
 
+function batchInput(value: unknown, index: number): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', `steps[${index}].input must be an object.`, { retryable: false });
+  }
+  return value as Record<string, unknown>;
+}
+
+function assertBatchKeys(
+  input: Record<string, unknown>,
+  allowed: string[],
+  index: number,
+  kind: AgentDeviceBatchKind,
+): void {
+  const unexpected = Object.keys(input).filter((key) => !allowed.includes(key));
+  if (unexpected.length > 0) {
+    throw new AssistantPluginError(
+      'PLUGIN_ACTION_ARGUMENT_INVALID',
+      `steps[${index}] ${kind} contains unsupported fields: ${unexpected.join(', ')}`,
+      { retryable: false },
+    );
+  }
+}
+
+function batchInteger(value: unknown, fallback: number, min: number, max: number): number {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(min, Math.min(max, Math.trunc(value)))
+    : fallback;
+}
+
+function assertPhysicalBatchText(record: InteractionSessionRecord, values: Array<string | undefined>): void {
+  if (record.provider !== DEVICE_PROVIDER) return;
+  if (values.some((value) => value && SENSITIVE_SEMANTICS.test(value))) {
+    throw new AssistantPluginError(
+      'IOS_DEVICE_SENSITIVE_ACTION_BLOCKED',
+      'Batch steps involving credentials, verification, biometrics, checkout, purchase or payment require human interaction.',
+      { retryable: false },
+    );
+  }
+}
+
+function nativeBatchTarget(target: string): Record<string, unknown> {
+  const ref = target.match(/^@?(e\d+(?:~s\d+)?)$/i)?.[1];
+  return ref
+    ? { kind: 'ref', ref }
+    : { kind: 'selector', selector: target };
+}
+
+function prepareAgentDeviceBatch(
+  rawSteps: unknown,
+  record: InteractionSessionRecord,
+): PreparedAgentDeviceBatch {
+  if (!Array.isArray(rawSteps) || rawSteps.length === 0 || rawSteps.length > MAX_BATCH_STEPS) {
+    throw new AssistantPluginError(
+      'PLUGIN_ACTION_ARGUMENT_INVALID',
+      `steps must contain between 1 and ${MAX_BATCH_STEPS} typed entries.`,
+      { retryable: false },
+    );
+  }
+
+  const nativeSteps: PreparedAgentDeviceBatch['nativeSteps'] = [];
+  const redactions: string[] = [];
+  rawSteps.forEach((rawStep, index) => {
+    if (!rawStep || typeof rawStep !== 'object' || Array.isArray(rawStep)) {
+      throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', `steps[${index}] must be an object.`, { retryable: false });
+    }
+    const step = rawStep as Record<string, unknown>;
+    const rawKind = requireString(step.kind, `steps[${index}].kind`);
+    if (!BATCH_KINDS.includes(rawKind as AgentDeviceBatchKind)) {
+      throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', `Unsupported batch step kind: ${rawKind}`, { retryable: false });
+    }
+    const kind = rawKind as AgentDeviceBatchKind;
+    const input = batchInput(step.input ?? {}, index);
+    let nativeInput: Record<string, unknown>;
+
+    switch (kind) {
+      case 'snapshot': {
+        assertBatchKeys(input, ['interactive', 'raw', 'depth', 'scope', 'diff', 'force_full', 'timeout_ms'], index, kind);
+        const scope = optionalString(input.scope);
+        nativeInput = {
+          ...(input.interactive === true ? { interactive: true } : {}),
+          ...(input.raw === true ? { raw: true } : {}),
+          ...(input.diff === true ? { diff: true } : {}),
+          ...(input.force_full === true ? { forceFull: true } : {}),
+          ...(scope ? { scope } : {}),
+          ...(typeof input.depth === 'number'
+            ? { depth: batchInteger(input.depth, 8, 1, 20) }
+            : {}),
+          ...(typeof input.timeout_ms === 'number'
+            ? { timeoutMs: batchInteger(input.timeout_ms, 15_000, 100, 60_000) }
+            : {}),
+        };
+        break;
+      }
+      case 'press': {
+        assertBatchKeys(input, ['target', 'x', 'y'], index, kind);
+        const target = optionalString(input.target);
+        const hasPoint = typeof input.x === 'number' && typeof input.y === 'number';
+        if (!target && !hasPoint) {
+          throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', `steps[${index}] press requires target or x/y.`, { retryable: false });
+        }
+        assertPhysicalBatchText(record, [target]);
+        nativeInput = target
+          ? { target: nativeBatchTarget(target), settle: true }
+          : {
+            target: { kind: 'point', x: Number(input.x), y: Number(input.y) },
+            settle: true,
+          };
+        break;
+      }
+      case 'fill': {
+        assertBatchKeys(input, ['target', 'text', 'delay_ms'], index, kind);
+        const target = requireString(input.target, `steps[${index}].input.target`);
+        if (typeof input.text !== 'string') {
+          throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', `steps[${index}] fill requires text.`, { retryable: false });
+        }
+        const text = input.text;
+        assertPhysicalBatchText(record, [target, text]);
+        redactions.push(text);
+        nativeInput = {
+          target: nativeBatchTarget(target),
+          text,
+          settle: true,
+          ...(typeof input.delay_ms === 'number'
+            ? { delayMs: batchInteger(input.delay_ms, 0, 0, 5_000) }
+            : {}),
+        };
+        break;
+      }
+      case 'scroll': {
+        assertBatchKeys(input, ['direction', 'amount'], index, kind);
+        const direction = requireString(input.direction, `steps[${index}].input.direction`);
+        if (!['up', 'down', 'left', 'right', 'top', 'bottom'].includes(direction)) {
+          throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', `Unsupported batch scroll direction: ${direction}`, { retryable: false });
+        }
+        nativeInput = {
+          direction,
+          ...(typeof input.amount === 'number'
+            ? { amount: batchInteger(input.amount, 1, 1, 100) }
+            : {}),
+        };
+        break;
+      }
+      case 'keyboard': {
+        assertBatchKeys(input, ['action'], index, kind);
+        const action = requireString(input.action, `steps[${index}].input.action`);
+        if (!['status', 'dismiss'].includes(action)) {
+          throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', `Unsupported keyboard action: ${action}`, { retryable: false });
+        }
+        nativeInput = { action };
+        break;
+      }
+      case 'wait': {
+        assertBatchKeys(input, ['wait_type', 'text', 'selector', 'duration_ms', 'quiet_ms', 'timeout_ms'], index, kind);
+        const waitType = optionalString(input.wait_type) ?? 'stable';
+        if (!['stable', 'text', 'selector', 'duration'].includes(waitType)) {
+          throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', `Unsupported wait type: ${waitType}`, { retryable: false });
+        }
+        const timeoutMs = batchInteger(input.timeout_ms, 15_000, 100, 60_000);
+        if (waitType === 'text') {
+          const text = requireString(input.text, `steps[${index}].input.text`);
+          assertPhysicalBatchText(record, [text]);
+          nativeInput = { kind: 'text', text, timeoutMs };
+        } else if (waitType === 'selector') {
+          const selector = requireString(input.selector, `steps[${index}].input.selector`);
+          assertPhysicalBatchText(record, [selector]);
+          nativeInput = { kind: 'selector', selector, timeoutMs };
+        } else if (waitType === 'duration') {
+          nativeInput = {
+            kind: 'duration',
+            durationMs: batchInteger(input.duration_ms, 500, 0, 60_000),
+          };
+        } else {
+          nativeInput = {
+            kind: 'stable',
+            quietMs: batchInteger(input.quiet_ms, 500, 100, 5_000),
+            timeoutMs,
+          };
+        }
+        break;
+      }
+      case 'back': {
+        assertBatchKeys(input, [], index, kind);
+        nativeInput = {};
+        break;
+      }
+    }
+    nativeSteps.push({ command: kind, input: nativeInput });
+  });
+
+  return { nativeSteps, redactions };
+}
+
+function runSessionBatch(
+  input: AssistantPluginActionExecutionInput,
+  record: InteractionSessionRecord,
+  prepared: PreparedAgentDeviceBatch,
+  timeoutMs = 120_000,
+): Record<string, unknown> {
+  let result: unknown = runSessionCommand(input, record, [
+    'batch',
+    '--steps', JSON.stringify(prepared.nativeSteps),
+    '--on-error', 'stop',
+    '--max-steps', String(MAX_BATCH_STEPS),
+    '--cost',
+  ], 'AGENT_DEVICE_BATCH_FAILED', timeoutMs);
+  for (const text of prepared.redactions) result = redactExactText(result, text);
+  return result as Record<string, unknown>;
+}
+
 function subActionInput(
   input: AssistantPluginActionExecutionInput,
   actionId: string,
@@ -592,7 +822,7 @@ async function executeJdSearch(input: AssistantPluginActionExecutionInput): Prom
     });
   }
   const sharedArgs = {
-    device: selected.id,
+    device: selected.name,
     team_id: optionalString(input.args.team_id),
     runner_bundle_id: optionalString(input.args.runner_bundle_id),
     developer_dir: optionalString(input.args.developer_dir),
@@ -600,7 +830,9 @@ async function executeJdSearch(input: AssistantPluginActionExecutionInput): Prom
   const opened = await executeIosAgentDeviceAction(subActionInput(input, 'agent_device_open', {
     ...sharedArgs,
     app: JD_BUNDLE_ID,
-    relaunch: true,
+    // Foreground an already-running app by default. Relaunch is opt-in because
+    // it restarts app state and pays another cold-start/navigation cost.
+    relaunch: input.args.relaunch === true,
   }));
   const interaction = opened.interaction as InteractionSessionRecord | undefined;
   if (!interaction) {
@@ -609,39 +841,73 @@ async function executeJdSearch(input: AssistantPluginActionExecutionInput): Prom
   const interactionId = interaction.interactionId;
   let finalSnapshot: Record<string, unknown> | undefined;
   let screenshot: Record<string, unknown> | undefined;
+  const resultText = optionalString(input.args.result_text);
+  const resultSelector = optionalString(input.args.result_selector);
+  const exactResultWait = Boolean(resultText || resultSelector);
+  const resultScope = optionalString(input.args.result_scope);
+  const snapshotDepth = batchInteger(input.args.snapshot_depth, 20, 1, 20);
   try {
-    const initialSnapshot = await executeIosAgentDeviceAction(subActionInput(input, 'agent_device_snapshot', {
-      interaction_id: interactionId,
-      interactive: true,
-    }));
-    const searchTarget = optionalString(input.args.search_target)
-      ?? interactiveRef(initialSnapshot, /搜索|搜一搜|search|searchfield|请输入/i);
+    let searchTarget = optionalString(input.args.search_target);
+    if (!searchTarget) {
+      const initialSnapshot = await executeIosAgentDeviceAction(subActionInput(input, 'agent_device_snapshot', {
+        interaction_id: interactionId,
+        interactive: true,
+      }));
+      searchTarget = interactiveRef(initialSnapshot, /搜索|搜一搜|search|searchfield|请输入/i);
+    }
     if (!searchTarget) {
       throw new AssistantPluginError('JD_SEARCH_FIELD_NOT_FOUND', 'JD opened, but no bounded accessibility search field was found. Provide search_target from agent_device_snapshot evidence.', {
         retryable: false,
       });
     }
-    await executeIosAgentDeviceAction(subActionInput(input, 'agent_device_fill', {
-      interaction_id: interactionId,
-      target: searchTarget,
-      text: query,
-      delay_ms: 20,
-    }));
-    const record = requireRecord(subActionInput(input, 'agent_device_snapshot', { interaction_id: interactionId }));
+
     const submitTarget = optionalString(input.args.submit_target);
+    const waitStep: AgentDeviceBatchStep = resultText
+      ? { kind: 'wait', input: { wait_type: 'text', text: resultText, timeout_ms: 15_000 } }
+      : resultSelector
+        ? { kind: 'wait', input: { wait_type: 'selector', selector: resultSelector, timeout_ms: 15_000 } }
+        : { kind: 'wait', input: { wait_type: 'stable', quiet_ms: 500, timeout_ms: 15_000 } };
+    const evidenceSteps: AgentDeviceBatchStep[] = exactResultWait
+      ? [waitStep]
+      : [
+        waitStep,
+        {
+          kind: 'snapshot',
+          input: {
+            interactive: true,
+            depth: snapshotDepth,
+            ...(resultScope ? { scope: resultScope } : {}),
+          },
+        },
+      ];
+    const record = requireRecord(subActionInput(input, 'agent_device_batch', { interaction_id: interactionId }));
+    const fillStep: AgentDeviceBatchStep = {
+      kind: 'fill',
+      input: { target: searchTarget, text: query, delay_ms: 20 },
+    };
     if (submitTarget) {
-      if (SENSITIVE_SEMANTICS.test(submitTarget)) {
-        throw new AssistantPluginError('IOS_DEVICE_SENSITIVE_ACTION_BLOCKED', 'The requested submit target has sensitive or purchase semantics.', { retryable: false });
-      }
-      runSessionCommand(input, record, ['press', submitTarget, '--settle'], 'JD_SEARCH_SUBMIT_FAILED');
+      finalSnapshot = runSessionBatch(
+        input,
+        record,
+        prepareAgentDeviceBatch([
+          fillStep,
+          { kind: 'press', input: { target: submitTarget } },
+          ...evidenceSteps,
+        ], record),
+        30_000,
+      );
     } else {
+      // agent-device 0.19.3 exposes keyboard return only through the CLI
+      // command, not the Node batch keyboard schema (status/dismiss only).
+      runSessionBatch(input, record, prepareAgentDeviceBatch([fillStep], record), 20_000);
       runSessionCommand(input, record, ['keyboard', 'return'], 'JD_SEARCH_SUBMIT_FAILED');
+      finalSnapshot = runSessionBatch(
+        input,
+        record,
+        prepareAgentDeviceBatch(evidenceSteps, record),
+        30_000,
+      );
     }
-    runSessionCommand(input, record, ['wait', 'stable', '15000'], 'JD_SEARCH_RESULTS_TIMEOUT', 20_000);
-    finalSnapshot = await executeIosAgentDeviceAction(subActionInput(input, 'agent_device_snapshot', {
-      interaction_id: interactionId,
-      interactive: true,
-    }));
     screenshot = await executeIosAgentDeviceAction(subActionInput(input, 'agent_device_screenshot', {
       interaction_id: interactionId,
       label: 'jd-search-results',
@@ -657,6 +923,15 @@ async function executeJdSearch(input: AssistantPluginActionExecutionInput): Prom
     device: selected,
     query: '<redacted>',
     runnerReadiness: 'verified_by_open',
+    executionPlan: {
+      relaunch: input.args.relaunch === true,
+      nativeBatchRequests: optionalString(input.args.submit_target) ? 1 : 2,
+      nativeBatchSteps: 4,
+      exactResultWait,
+      fullAccessibilitySnapshot: !exactResultWait,
+      resultScope: resultScope ?? null,
+      snapshotDepth: exactResultWait ? null : snapshotDepth,
+    },
     visibleResultText: boundedVisibleText(finalSnapshot, query),
     result: bounded(redactExactText(finalSnapshot, query)),
     artifactCandidates: screenshot?.artifactCandidates,
@@ -734,6 +1009,33 @@ export function iosAgentDeviceActions(): AssistantPluginActionDescriptor[] {
       },
     },
     {
+      actionId: 'agent_device_batch', title: 'Run fast typed iOS action batch',
+      description: `Run up to ${MAX_BATCH_STEPS} allowlisted session steps in one agent-device process and one daemon request. Mutating steps always settle before the next step.`,
+      readOnly: false, risk: 'workspace_write', confirmation: 'authorization', defaultTimeoutMs: 2 * 60_000, cancellable: true, idempotent: false,
+      scopes: ['ios.simulator', 'ios.device'], resourceClaims: write,
+      argumentsSchema: {
+        type: 'object',
+        properties: {
+          ...interactionProperty,
+          steps: {
+            type: 'array', minItems: 1, maxItems: MAX_BATCH_STEPS,
+            items: {
+              type: 'object',
+              properties: {
+                kind: { type: 'string', enum: [...BATCH_KINDS] },
+                input: { type: 'object', additionalProperties: true },
+              },
+              required: ['kind', 'input'],
+              additionalProperties: false,
+            },
+          },
+          timeout_ms: { type: 'number' },
+        },
+        required: ['interaction_id', 'steps'],
+        additionalProperties: false,
+      },
+    },
+    {
       actionId: 'agent_device_jd_search', title: 'Search JD on a physical iPhone',
       description: 'Launch JD, enter one bounded non-sensitive product query, submit it, return visible result text and capture a PNG. Login, verification, checkout, purchase, payment and biometrics remain human-only.',
       readOnly: false, risk: 'workspace_write', confirmation: 'authorization', defaultTimeoutMs: 10 * 60_000, cancellable: true, idempotent: false,
@@ -741,7 +1043,9 @@ export function iosAgentDeviceActions(): AssistantPluginActionDescriptor[] {
       argumentsSchema: {
         type: 'object', properties: {
           device: { type: 'string' }, query: { type: 'string' }, team_id: { type: 'string' }, runner_bundle_id: { type: 'string' }, developer_dir: { type: 'string' },
-          search_target: { type: 'string' }, submit_target: { type: 'string' },
+          search_target: { type: 'string' }, submit_target: { type: 'string' }, relaunch: { type: 'boolean' },
+          result_text: { type: 'string' }, result_selector: { type: 'string' },
+          result_scope: { type: 'string' }, snapshot_depth: { type: 'number' },
         },
         required: ['device', 'query'], additionalProperties: false,
       },
@@ -813,7 +1117,7 @@ export async function executeIosAgentDeviceAction(input: AssistantPluginActionEx
 
   if (input.actionId === 'agent_device_doctor') {
     const selected = selectTarget(input, optionalString(input.args.device));
-    const args = ['doctor', '--platform', 'ios', '--device', selected.id];
+    const args = ['doctor', '--platform', 'ios', '--device', selected.name];
     const app = optionalString(input.args.app);
     if (app) args.push('--app', app);
     args.push('--json');
@@ -835,7 +1139,7 @@ export async function executeIosAgentDeviceAction(input: AssistantPluginActionEx
       provider: 'agent-device', version: IOS_AGENT_DEVICE_VERSION, device: selected,
       physicalDeviceSupported: selected.kind === 'device',
       result: bounded(runJson(input, [
-        'prepare', 'ios-runner', '--platform', 'ios', '--device', selected.id, '--timeout', '600000', '--json',
+        'prepare', 'ios-runner', '--platform', 'ios', '--device', selected.name, '--timeout', '600000', '--json',
       ], {
         signing,
         failureCode: 'AGENT_DEVICE_PREPARE_FAILED',
@@ -879,7 +1183,7 @@ export async function executeIosAgentDeviceAction(input: AssistantPluginActionEx
     };
     writeInteractionSession(input.repoRoot, record);
     writeSigningConfig(input, interactionId, signingFromArgs(input.args));
-    const args = ['open', app, '--device', selected.id];
+    const args = ['open', app, '--device', selected.name];
     if (input.args.relaunch === true) args.push('--relaunch');
     try {
       const result = runJson(input, [...args, '--session', record.sessionId, '--platform', 'ios', '--json'], {
@@ -903,6 +1207,17 @@ export async function executeIosAgentDeviceAction(input: AssistantPluginActionEx
 
   const record = requireRecord(input, input.actionId === 'agent_device_close');
   switch (input.actionId) {
+    case 'agent_device_batch': {
+      const prepared = prepareAgentDeviceBatch(input.args.steps, record);
+      const timeoutMs = batchInteger(input.args.timeout_ms, 120_000, 1_000, 180_000);
+      return {
+        provider: 'agent-device',
+        interaction: record,
+        batched: true,
+        stepCount: prepared.nativeSteps.length,
+        result: bounded(runSessionBatch(input, record, prepared, timeoutMs)),
+      };
+    }
     case 'agent_device_snapshot': {
       const args = ['snapshot'];
       if (input.args.interactive === true) args.push('-i');
