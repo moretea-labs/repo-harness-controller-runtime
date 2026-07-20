@@ -87,7 +87,10 @@ describe('optional agent-device iOS Simulator provider', () => {
     expect(manifest.lifecycle.state).toBe('enabled');
     expect((manifest.health.details?.agentDevice as Record<string, unknown>).available).toBe(false);
     expect(manifest.capabilities.map((capability) => capability.capabilityId)).toContain('ios-agent-device-simulator');
+    expect(manifest.capabilities.map((capability) => capability.capabilityId)).toContain('ios-agent-device-physical');
     expect(manifest.actions.map((action) => action.actionId)).toContain('agent_device_open');
+    expect(manifest.actions.map((action) => action.actionId)).toContain('agent_device_prepare');
+    expect(manifest.actions.map((action) => action.actionId)).toContain('agent_device_jd_search');
     expect(manifest.health.warnings).not.toContain('agent-device is not installed.');
   });
 
@@ -111,7 +114,7 @@ describe('optional agent-device iOS Simulator provider', () => {
     expect(commands).toEqual([['agent-device', '--version']]);
   });
 
-  it('rejects physical, non-booted, and ambiguous simulator selection before open', async () => {
+  it('accepts one exact connected physical iPhone and rejects unavailable or ambiguous targets', async () => {
     const value = fixture();
     readyIosTooling();
     let inventory = [device('PHONE-1', 'Greyson', 'device', true)];
@@ -126,12 +129,13 @@ describe('optional agent-device iOS Simulator provider', () => {
       },
     });
 
-    await expect(executeIosPluginAction(pluginInput(value, 'agent_device_open', { app: 'App', device: 'PHONE-1' })))
-      .rejects.toThrow('Physical iOS devices are not supported');
+    const physical = await executeIosPluginAction(pluginInput(value, 'agent_device_open', { app: 'App', device: 'PHONE-1' }));
+    expect((physical.interaction as Record<string, unknown>).provider).toBe('ios-device');
+    expect(physical.physicalDeviceSupported).toBe(true);
 
     inventory = [device('SIM-OFF', 'iPhone 17 Pro', 'simulator', false)];
     await expect(executeIosPluginAction(pluginInput(value, 'agent_device_open', { app: 'App', device: 'SIM-OFF' })))
-      .rejects.toThrow('already-booted iOS Simulator');
+      .rejects.toThrow('connected physical iPhone or already-booted iOS Simulator');
 
     inventory = [
       device('SIM-1', 'iPhone 17', 'simulator', true),
@@ -139,7 +143,85 @@ describe('optional agent-device iOS Simulator provider', () => {
     ];
     await expect(executeIosPluginAction(pluginInput(value, 'agent_device_open', { app: 'App', device: 'iPhone 17' })))
       .rejects.toThrow('ambiguous');
-    expect(commands.some((command) => command.includes('open'))).toBe(false);
+    expect(commands.filter((command) => command[1] === 'open')).toHaveLength(1);
+  });
+
+  it('prepares a signed physical Runner and completes a bounded JD product search', async () => {
+    const value = fixture();
+    readyIosTooling();
+    const developerDir = join(value.repoRoot, 'Xcode.app', 'Contents', 'Developer');
+    mkdirSync(developerDir, { recursive: true });
+    const commands: Array<{ argv: string[]; env?: NodeJS.ProcessEnv }> = [];
+    let snapshotCount = 0;
+    setIosAgentDeviceRuntimeHooksForTest({
+      platform: () => 'darwin',
+      now: () => new Date('2026-07-20T09:00:00.000Z'),
+      runCommand: (command, args, options) => {
+        commands.push({ argv: [command, ...args], env: options?.env });
+        if (args[0] === '--version') return { ok: true, status: 0, stdout: '0.19.3\n', stderr: '', command: [command, ...args] };
+        if (args[0] === 'devices') {
+          return { ok: true, status: 0, stdout: success({ devices: [device('PHONE-1', 'greyson', 'device', true)] }), stderr: '', command: [command, ...args] };
+        }
+        if (args[0] === 'snapshot') {
+          snapshotCount += 1;
+          const tree = snapshotCount === 1
+            ? '@e1 SearchField label="搜索商品" value=""'
+            : '@e7 StaticText label="爱他美卓傲 1段 800g"\n@e8 StaticText label="奶粉搜索结果"';
+          return { ok: true, status: 0, stdout: success({ tree }), stderr: '', command: [command, ...args] };
+        }
+        if (args[0] === 'screenshot') writeFileSync(args[1]!, 'png');
+        return { ok: true, status: 0, stdout: success({ command: args[0] }), stderr: '', command: [command, ...args] };
+      },
+    });
+
+    const runnerConfig = {
+      device: 'greyson',
+      team_id: 'TEAM123456',
+      runner_bundle_id: 'com.example.agentdevice.runner',
+      developer_dir: developerDir,
+    };
+    const prepared = await executeIosPluginAction(pluginInput(value, 'agent_device_prepare', runnerConfig));
+    expect(prepared.physicalDeviceSupported).toBe(true);
+    const result = await executeIosPluginAction(pluginInput(value, 'agent_device_jd_search', {
+      ...runnerConfig,
+      query: '爱他美卓傲 1段 800g',
+    }));
+
+    expect(result.workflow).toBe('jd_product_search');
+    expect(result.app).toBe('com.360buy.jdmobile');
+    expect(JSON.stringify(result)).not.toContain('爱他美卓傲 1段 800g');
+    expect(JSON.stringify(result.visibleResultText)).toContain('奶粉搜索结果');
+    const artifact = (result.artifactCandidates as Array<Record<string, unknown>>)[0]!;
+    expect(artifact.mediaType).toBe('image/png');
+    expect(existsSync(String(artifact.path))).toBe(true);
+    expect((result.interaction as Record<string, unknown>).status).toBe('closed');
+    expect(readInteractionSession(value.repoRoot, 'ios-device', String((result.interaction as Record<string, unknown>).interactionId))?.status).toBe('closed');
+
+    const prepare = commands.find(({ argv }) => argv[1] === 'prepare')!;
+    expect(prepare.argv).toEqual(expect.arrayContaining(['ios-runner', '--device', 'PHONE-1']));
+    expect(prepare.env?.AGENT_DEVICE_IOS_TEAM_ID).toBe('TEAM123456');
+    expect(prepare.env?.AGENT_DEVICE_IOS_BUNDLE_ID).toBe('com.example.agentdevice.runner');
+    expect(prepare.env?.DEVELOPER_DIR).toBe(developerDir);
+    expect(commands.some(({ argv }) => argv[1] === 'open' && argv.includes('com.360buy.jdmobile'))).toBe(true);
+    expect(commands.some(({ argv }) => argv[1] === 'keyboard' && argv[2] === 'return')).toBe(true);
+    expect(commands.some(({ argv }) => argv[1] === 'close')).toBe(true);
+  });
+
+  it('blocks sensitive JD workflow semantics before touching device inventory', async () => {
+    const value = fixture();
+    readyIosTooling();
+    const commands: string[][] = [];
+    setIosAgentDeviceRuntimeHooksForTest({
+      platform: () => 'darwin',
+      runCommand: (command, args) => {
+        commands.push([command, ...args]);
+        return { ok: true, status: 0, stdout: args[0] === '--version' ? '0.19.3\n' : success(), stderr: '', command: [command, ...args] };
+      },
+    });
+    await expect(executeIosPluginAction(pluginInput(value, 'agent_device_jd_search', {
+      device: 'greyson', query: '提交订单并付款',
+    }))).rejects.toThrow('IOS_DEVICE_SENSITIVE_ACTION_BLOCKED');
+    expect(commands.some((command) => command[1] === 'devices')).toBe(false);
   });
 
   it('runs only typed serial commands in one isolated session and registers bounded artifacts', async () => {

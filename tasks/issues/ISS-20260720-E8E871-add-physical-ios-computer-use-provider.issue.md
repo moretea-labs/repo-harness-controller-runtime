@@ -2,7 +2,7 @@
 id: "ISS-20260720-E8E871"
 kind: "feature"
 status: "in_progress"
-updated_at: "2026-07-20T05:51:02.956Z"
+updated_at: "2026-07-20T06:31:39.055Z"
 source: "repo-harness-controller-v8"
 ---
 
@@ -46,6 +46,15 @@ Implement a bounded physical-iPhone interaction provider on top of CoreDevice an
 - Objective: Add a separate ios-device provider reusing the existing durable interaction-session model. Use xcrun devicectl typed JSON for paired-device inventory, installed-app lookup, foreground app launch, screenshot, events and close/session lifecycle. Add an optional explicitly configured XCTest/WebDriverAgent-compatible HTTP runner adapter for UI source/snapshot, tap/press, non-sensitive fill and scroll. Never download or bootstrap third-party automation tooling at runtime; never persist signing or pairing secrets; report runner prerequisites and fail closed when unavailable. Use exact device identity and bundle identifiers, serialize mutating actions, cap/redact evidence, and maintain simulator-provider backward compatibility. Include focused tests, architecture documentation and a live smoke script or command path for discovery, JD lookup, launch and screenshot.
 - Depends on: none
 - Allowed paths: `src/runtime/plugins/**`, `src/runtime/safe-tooling/**`, `tests/runtime/**`, `docs/architecture/current/**`, `docs/researches/**`, `scripts/**`, `package.json`, `tasks/issues/**`
+- Checks: `package:check:type`, `package:check:runtime-architecture`, `package:check:controller-v8`
+- Execution hint: agent / codex
+
+### T2 — Enable direct JD app information search
+
+- Status: `planned`
+- Objective: Extend the verified physical iOS provider with an operational manifest refresh path and a bounded direct JD search workflow on the paired iPhone. Probe whether the installed agent-device CLI can drive physical iOS; otherwise use the explicitly configured signed local WDA-compatible runner. The workflow must launch JD, enter a non-sensitive product query, submit search, read bounded visible result text and capture a screenshot, while blocking login credentials, verification, checkout, purchase and payment actions.
+- Depends on: `T1`
+- Allowed paths: `src/runtime/plugins/**`, `tests/runtime/**`, `scripts/**`, `docs/architecture/current/**`, `tasks/issues/**`
 - Checks: `package:check:type`, `package:check:runtime-architecture`, `package:check:controller-v8`
 - Execution hint: agent / codex
 

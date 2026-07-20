@@ -177,9 +177,50 @@
         "autoCompleted": false,
         "repoId": "repo_123b7cf58b6b17b5cbe46a56"
       }
+    },
+    {
+      "id": "T2",
+      "title": "Enable direct JD app information search",
+      "objective": "Extend the verified physical iOS provider with an operational manifest refresh path and a bounded direct JD search workflow on the paired iPhone. Probe whether the installed agent-device CLI can drive physical iOS; otherwise use the explicitly configured signed local WDA-compatible runner. The workflow must launch JD, enter a non-sensitive product query, submit search, read bounded visible result text and capture a screenshot, while blocking login credentials, verification, checkout, purchase and payment actions.",
+      "status": "planned",
+      "dependsOn": [
+        "T1"
+      ],
+      "allowedPaths": [
+        "src/runtime/plugins/**",
+        "tests/runtime/**",
+        "scripts/**",
+        "docs/architecture/current/**",
+        "tasks/issues/**"
+      ],
+      "forbiddenPaths": [
+        "_ops/**",
+        ".ai/harness/**",
+        "node_modules/**",
+        "dist/**"
+      ],
+      "checks": [
+        "package:check:type",
+        "package:check:runtime-architecture",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "The persisted iOS plugin manifest can be refreshed deterministically after a runtime release and exposes physical_device_* actions.",
+        "The runtime reports whether agent-device supports the paired physical iPhone and does not claim UI readiness without a working signed runner.",
+        "A typed JD search action accepts only a bounded non-sensitive query, launches com.360buy.jdmobile, performs search through a ready UI engine, returns bounded visible result text, and captures a PNG artifact.",
+        "The JD search workflow blocks login credentials, verification codes, checkout, purchase, payment and biometric confirmation semantics.",
+        "Focused tests, declared checks and a live paired-device JD search smoke pass."
+      ],
+      "risk": "high",
+      "recommendedAgent": "codex",
+      "notes": [],
+      "runIds": [],
+      "createdAt": "2026-07-20T06:31:39.055Z",
+      "updatedAt": "2026-07-20T06:31:39.055Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
     }
   ],
   "createdAt": "2026-07-20T03:51:07.644Z",
-  "updatedAt": "2026-07-20T05:51:02.956Z",
+  "updatedAt": "2026-07-20T06:31:39.055Z",
   "repoId": "repo_123b7cf58b6b17b5cbe46a56"
 }

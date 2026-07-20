@@ -842,7 +842,9 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
       },
       auth: authMode === 'oauth' ? (oauthPassphrase ? 'oauth' : 'missing') : (authToken ? 'required' : 'missing'),
       mcpEndpoint: `${advertisedOrigin}/mcp`,
-      grokEndpoint: `${advertisedOrigin}/mcp-grok`,
+      // Grok now completes standard OAuth dynamic registration + PKCE on the
+      // canonical MCP resource. Keep /mcp-grok below only as a legacy alias.
+      grokEndpoint: `${advertisedOrigin}/mcp`,
       bearerEndpoint: `${advertisedOrigin}/mcp-bearer`,
       sessions: {
         ...sessionSnapshot,
@@ -1030,7 +1032,7 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
     });
   });
 
-  // Grok-compatible MCP path: OAuth resource separate from ChatGPT's /mcp, same tools.
+  // Legacy Grok OAuth resource. New Grok connectors should use canonical /mcp.
   app.use('/mcp-grok', setMcpResponseHeaders);
   app.post('/mcp-grok', requireMcpHttpAuth(authMode, authToken, oauthProvider, configuredPublicOrigin, '/mcp-grok'), express.raw({ type: '*/*', limit: '1mb' }), (req, res) => {
     handleMcpPost(req, res, baseOptions, sessionRegistry, runtimeStats, '/mcp-grok').catch((error: unknown) => {

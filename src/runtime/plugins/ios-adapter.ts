@@ -367,7 +367,7 @@ export function buildIosPluginManifest(previousRevision = 0, previousUpdatedAt?:
     authority: {
       strategy: 'derived',
       duplicateStateAllowed: false,
-      sourceOfTruth: ['local:xcodebuild', 'local:simctl', 'local:devicectl', 'local:agent-device@0.19.3', 'process-env:REPO_HARNESS_IOS_DEVICE_RUNNER_URL', `repo-local:${CONFIG_ROOT}/ios.json`],
+      sourceOfTruth: ['local:xcodebuild', 'local:simctl', 'local:devicectl', 'local:agent-device@0.19.3', 'process-env:DEVELOPER_DIR', 'process-env:AGENT_DEVICE_IOS_TEAM_ID', 'process-env:AGENT_DEVICE_IOS_BUNDLE_ID', 'process-env:REPO_HARNESS_IOS_DEVICE_RUNNER_URL', `repo-local:${CONFIG_ROOT}/ios.json`],
     },
     enabled,
     lifecycle: {

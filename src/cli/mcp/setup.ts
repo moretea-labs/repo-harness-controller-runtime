@@ -272,7 +272,17 @@ The real endpoint stays in ignored local config; the tracked guide stays placeho
 6. Keep write confirmations enabled.
 7. Re-scan tools after updating repo-harness tool schemas.
 
-### Non-OAuth MCP clients (Grok and similar)
+### Grok and other OAuth MCP clients
+
+Current Grok custom connectors support OAuth dynamic client registration + PKCE. Use the same canonical endpoint as ChatGPT:
+
+\`\`\`text
+<https-tunnel-url>/mcp
+\`\`\`
+
+Do not use the legacy \/mcp-grok route for new connectors. Grok's current OAuth callback is \/connectors-oauth-exchange-code\/ on grok.com; repo-harness accepts that callback through dynamic registration or its public-client fallback.
+
+### Non-OAuth MCP clients
 
 Clients that cannot complete OAuth dynamic client registration + PKCE should use the dedicated bearer endpoint instead of \`/mcp\` or \`/authorize\`:
 
@@ -406,7 +416,8 @@ The executor profile remains read-oriented. Controller-dispatched Codex work is 
 ## Troubleshooting
 
 - ChatGPT cannot connect: verify the HTTPS tunnel ends in \`/mcp\` and local \`/health\` responds.
-- Grok or other non-OAuth clients loop on \`/authorize\`: use \`…/mcp-bearer\` with a bearer token from \`controllerHome/mcp/mcp.tokens.json\`; do not use OAuth \`/mcp\` for those clients.
+- Grok cannot connect: recreate it with the canonical \`…/mcp\` URL. The legacy \`…/mcp-grok\` URL is compatibility-only.
+- A genuinely non-OAuth client loops on \`/authorize\`: use \`…/mcp-bearer\` with a bearer token from \`controllerHome/mcp/mcp.tokens.json\`.
 - ChatGPT auth loops: retry authorization and inspect \`controllerHome/mcp/mcp.oauth.json\` first, then legacy \`.repo-harness/mcp.oauth.json\` only when using fallback; do not paste the passphrase into chat.
 - Tool scan misses tools: run \`repo-harness mcp restart --repo .\`, then rescan or recreate the versioned Connector and verify \`controller_capabilities.expectedTools\` includes \`repository_latest_source_diagnose\` and \`repository_bootstrap_local_project\`.
 - Codex cannot see the MCP server: rerun \`repo-harness mcp setup codex --repo . --scope project\`.

@@ -1,0 +1,697 @@
+{
+  "schemaVersion": 5,
+  "id": "ISS-20260719-F77E4C",
+  "title": "Add resumable human interaction plane",
+  "slug": "add-resumable-human-interaction-plane",
+  "kind": "feature",
+  "status": "in_progress",
+  "summary": "Browser foreground human handoff and the optional agent-device 0.19.3 iOS Simulator provider are implemented, locally merged, and verified on final main. Browser and iOS failures remain capability-local; physical devices, automated CAPTCHA solving, nested MCP, arbitrary CLI execution, and tokenized deep links remain outside the capability boundary. Direct-edit tasks are verified but cannot auto-complete because the current task lifecycle requires Agent Run integration/cleanup evidence.",
+  "goals": [
+    "Browser sessions can be presented in the foreground and remain open for manual CAPTCHA/login completion.",
+    "Human handoff state is durable and resumable across plugin actions and Worker lifetimes.",
+    "Existing browser actions refuse conflicting profile use while a handoff host owns the profile.",
+    "The existing iOS plugin gains an optional, version-pinned agent-device simulator provider with typed actions and local evidence.",
+    "Browser and iOS failures remain capability-local and never degrade global Controller readiness."
+  ],
+  "nonGoals": [
+    "No automated CAPTCHA solving.",
+    "No payment, purchase, account deletion, or other irreversible remote action.",
+    "No physical iPhone mutation support in this change.",
+    "No nested MCP server and no Controller dependency on agent-device."
+  ],
+  "acceptanceCriteria": [
+    "Focused browser tests cover foreground presentation, durable handoff state, resume, stale-host recovery, and profile conflict fencing.",
+    "Focused iOS tests cover absent dependency degradation, exact booted simulator selection, command construction, artifact registration, and close-on-failure.",
+    "Typecheck and runtime architecture checks pass.",
+    "Changes are isolated, committed, merged locally, and leave the repository clean."
+  ],
+  "relatedArtifacts": [
+    "docs/architecture/current/human-interaction-plane.md",
+    "src/runtime/plugins/browser-handoff.ts",
+    "src/runtime/plugins/browser-handoff-host.ts",
+    "src/runtime/plugins/ios-agent-device.ts",
+    "tests/runtime/browser-plugin.test.ts",
+    "tests/runtime/ios-agent-device-provider.test.ts"
+  ],
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Implement browser human handoff host",
+      "objective": "Add a provider-neutral interaction session store and a detached browser handoff host. Expose present_session, request_human_handoff, get_handoff_status, resume_session, and cancel_handoff through the browser plugin. Preserve the existing one-action Playwright model outside handoff, fence profile conflicts, use best-effort macOS foreground activation, capture final URL/title, and clean stale hosts safely.",
+      "status": "cancelled",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src/runtime/plugins/**",
+        "tests/runtime/browser-plugin.test.ts",
+        "docs/architecture/current/**"
+      ],
+      "forbiddenPaths": [
+        "src/runtime/gateway/**",
+        "src/runtime/supervisor/**",
+        "_ops/**",
+        ".ai/**"
+      ],
+      "checks": [
+        "package:check:type",
+        "package:check:runtime-architecture",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "The browser stays open while waiting for the user and closes only after resume/cancel/timeout.",
+        "Subsequent automated actions use the updated persistent profile after resume.",
+        "No ordinary browser action can launch the same profile during an active handoff."
+      ],
+      "risk": "medium",
+      "recommendedAgent": "codex",
+      "notes": [
+        "Accepted RUN-iss-20260719-f77e4c-t1-1784450076049-3879ff59 for asynchronous launch.",
+        "RUN-iss-20260719-f77e4c-t1-1784450076049-3879ff59 ended as unknown; explicit retry is required. worker did not start before the startup deadline",
+        "Executor failed before startup and produced no work; discard the empty isolated run and continue with supervised direct edit.",
+        "Discard stale T1 run: executor never started, task is cancelled, worktree no longer exists, and there is no diff or unique work to preserve. Clearing obsolete drift-prevention ownership so T7 can launch from current main."
+      ],
+      "runIds": [
+        "RUN-iss-20260719-f77e4c-t1-1784450076049-3879ff59"
+      ],
+      "createdAt": "2026-07-19T08:34:13.113Z",
+      "updatedAt": "2026-07-20T03:49:02.241Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    },
+    {
+      "id": "T2",
+      "title": "Add optional agent-device simulator provider",
+      "objective": "Integrate the proven agent-device PoC as an optional provider inside the existing iOS plugin. Pin version 0.19.3, reject physical devices, require exact uniquely booted simulator names, expose doctor/open/snapshot/press/fill/scroll/screenshot/events/close actions, keep artifacts local/controller-owned, and close sessions on failure. Do not make agent-device required for existing iOS readiness.",
+      "status": "superseded",
+      "dependsOn": [
+        "T1"
+      ],
+      "allowedPaths": [
+        "src/runtime/plugins/**",
+        "src/runtime/safe-tooling/**",
+        "tests/runtime/**",
+        "docs/architecture/current/**",
+        "package.json"
+      ],
+      "forbiddenPaths": [
+        "src/runtime/gateway/**",
+        "src/runtime/supervisor/**",
+        "_ops/**",
+        ".ai/**"
+      ],
+      "checks": [
+        "package:check:type",
+        "package:check:runtime-architecture",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "Existing Xcode/simulator capability remains ready when agent-device is absent.",
+        "Physical devices and ambiguous simulator selection are rejected before any app action.",
+        "Every mutating UI action is serialized by resource claims and records bounded evidence."
+      ],
+      "risk": "medium",
+      "recommendedAgent": "codex",
+      "notes": [
+        "Superseded because it depends on cancelled T1. A replacement task will target the verified T3 interaction contract and current main."
+      ],
+      "runIds": [],
+      "createdAt": "2026-07-19T08:34:13.113Z",
+      "updatedAt": "2026-07-19T10:45:37.248Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    },
+    {
+      "id": "T3",
+      "title": "Implement browser human handoff by direct edit",
+      "objective": "Replace cancelled T1 without reusing its failed executor run. Add a provider-neutral interaction session store and a detached browser handoff host. Expose present_session, request_human_handoff, get_handoff_status, resume_session, and cancel_handoff through the browser plugin. Preserve the existing one-action Playwright model outside handoff, fence profile conflicts, use best-effort macOS foreground activation, capture final URL/title, and clean stale hosts safely.",
+      "status": "verified",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src/runtime/plugins/**",
+        "tests/runtime/browser-plugin.test.ts",
+        "docs/architecture/current/**"
+      ],
+      "forbiddenPaths": [
+        "src/runtime/gateway/**",
+        "src/runtime/supervisor/**",
+        "_ops/**",
+        ".ai/**"
+      ],
+      "checks": [
+        "package:check:type",
+        "package:check:runtime-architecture",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "The browser stays open while waiting for the user and closes only after resume/cancel/timeout.",
+        "Subsequent automated actions use the updated persistent profile after resume.",
+        "No ordinary browser action can launch the same profile during an active handoff.",
+        "Focused tests cover stale host recovery and no permanent profile lock."
+      ],
+      "risk": "medium",
+      "recommendedAgent": "codex",
+      "notes": [
+        "Integrated into main via merge commit f7afe0e5. Added durable browser interaction sessions, detached visible handoff host, profile fencing, explicit resume/cancel, macOS foreground activation, bounded state, stale-host recovery, architecture documentation, focused regressions, and a real foreground smoke test.",
+        "Required verification evidence passed; integration and cleanup evidence remain required before completion.",
+        "Direct-edit task has passed exact acceptance verification. accept_task cannot synthesize Agent Run integration/cleanup evidence for a task completed without an Agent Run; retain verified status and real merge/check evidence."
+      ],
+      "runIds": [],
+      "createdAt": "2026-07-19T08:37:39.068Z",
+      "updatedAt": "2026-07-19T10:45:20.057Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+      "verification": {
+        "integratedRevision": "f7afe0e58ca7294f1e982dc86ccced2aa378763a",
+        "reviewer": "ChatGPT",
+        "checkResults": [
+          {
+            "checkId": "package:check:type",
+            "ok": true,
+            "summary": "Passed with persisted evidence: .ai/harness/checks/controller/latest-package-check-type.json"
+          },
+          {
+            "checkId": "package:check:runtime-architecture",
+            "ok": true,
+            "summary": "Passed with persisted evidence: .ai/harness/checks/controller/latest-package-check-runtime-architecture.json"
+          },
+          {
+            "checkId": "package:check:controller-v8",
+            "ok": true,
+            "summary": "Passed with persisted evidence: .ai/harness/checks/controller/latest-package-check-controller-v8.json"
+          }
+        ],
+        "commandEvidence": [
+          {
+            "command": [
+              "bun",
+              "test",
+              "tests/runtime/browser-plugin.test.ts"
+            ],
+            "ok": true,
+            "exitCode": 0,
+            "stdout": "15 pass, 0 fail",
+            "reportedBy": "ChatGPT",
+            "executedAt": "2026-07-19T10:45:09.462Z",
+            "source": "reported"
+          },
+          {
+            "command": [
+              "bun",
+              "x",
+              "tsc",
+              "--noEmit"
+            ],
+            "ok": true,
+            "exitCode": 0,
+            "stdout": "passed",
+            "reportedBy": "ChatGPT",
+            "executedAt": "2026-07-19T10:45:09.462Z",
+            "source": "reported"
+          },
+          {
+            "command": [
+              "bun",
+              "run",
+              "check:runtime-architecture"
+            ],
+            "ok": true,
+            "exitCode": 0,
+            "stdout": "24 required modules/documents checked",
+            "reportedBy": "ChatGPT",
+            "executedAt": "2026-07-19T10:45:09.462Z",
+            "source": "reported"
+          },
+          {
+            "command": [
+              "bun",
+              "run",
+              "check:controller-v8"
+            ],
+            "ok": true,
+            "exitCode": 0,
+            "stdout": "full controller-v8 passed on final canonical main",
+            "reportedBy": "ChatGPT",
+            "executedAt": "2026-07-19T10:45:09.462Z",
+            "source": "reported"
+          },
+          {
+            "command": [
+              "bun",
+              "test",
+              "tests/runtime/browser-plugin.test.ts",
+              "--test-name-pattern",
+              "live foreground handoff",
+              "--timeout",
+              "60000"
+            ],
+            "ok": true,
+            "exitCode": 0,
+            "stdout": "Foreground handoff reached waiting_for_user, resumed, completed, and released the persistent profile.",
+            "reportedBy": "ChatGPT",
+            "executedAt": "2026-07-19T10:45:09.462Z",
+            "source": "reported"
+          }
+        ],
+        "acceptanceResults": [
+          {
+            "criterion": "The browser stays open while waiting for the user and closes only after resume/cancel/timeout.",
+            "ok": true,
+            "outcome": "passed",
+            "source": "reported",
+            "evidence": "Detached host survived the requesting action; the real GUI smoke reached waiting_for_user and terminalized only after explicit resume."
+          },
+          {
+            "criterion": "Subsequent automated actions use the updated persistent profile after resume.",
+            "ok": true,
+            "outcome": "passed",
+            "source": "reported",
+            "evidence": "The live smoke resumed, closed the context, released the profile, and a subsequent get_text reused the same saved session."
+          },
+          {
+            "criterion": "No ordinary browser action can launch the same profile during an active handoff.",
+            "ok": true,
+            "outcome": "passed",
+            "source": "reported",
+            "evidence": "Focused regression verifies PLUGIN_RESOURCE_BUSY while starting, waiting_for_user, or closing owns the profile."
+          },
+          {
+            "criterion": "Focused tests cover stale host recovery and no permanent profile lock.",
+            "ok": true,
+            "outcome": "passed",
+            "source": "reported",
+            "evidence": "Browser regressions cover dead host, expiry, closing fencing, final release, and session deletion conflicts."
+          }
+        ],
+        "verifiedAt": "2026-07-19T10:45:09.462Z",
+        "autoCompleted": false,
+        "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+      }
+    },
+    {
+      "id": "T4",
+      "title": "Restore controller-v8 baseline before integration",
+      "objective": "Repair the two controller-v8 failures that independently reproduce on unchanged main and block validation of T3. Diagnose why work_submit(create_issue) fails before the cross-repository request-id conflict assertion; fix the routing or test setup at the true fault. Reconcile the controller full-tool budget with the intentional current surface using a documented exact/derived budget, not a broad unbounded relaxation. Add only focused regression coverage, run package:check:type and package:check:controller-v8, commit and integrate this baseline fix before rebasing T3.",
+      "status": "verified",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src/runtime/gateway/mcp/**",
+        "src/runtime/execution/**",
+        "src/cli/mcp/**",
+        "tests/cli/mcp-controller.test.ts",
+        "scripts/verify-controller-v8.sh",
+        "docs/architecture/current/**"
+      ],
+      "forbiddenPaths": [
+        "src/runtime/plugins/browser-adapter.ts",
+        "src/runtime/plugins/browser-handoff*.ts",
+        "src/runtime/plugins/interaction-session.ts",
+        "tests/runtime/browser-plugin.test.ts"
+      ],
+      "checks": [
+        "package:check:type",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "The first work_submit(create_issue) succeeds for the selected repository.",
+        "Reusing the same request_id in another repository returns REQUEST_ID_REPO_CONFLICT.",
+        "The controller tool-surface budget is explicit and bounded, and does not hide arbitrary growth.",
+        "The full package:check:controller-v8 passes on the baseline branch."
+      ],
+      "risk": "medium",
+      "recommendedAgent": "codex",
+      "notes": [
+        "Integrated as commit 7ea6f180. Durable routing now validates the injected public command schema, and the controller tool surface is explicitly fixed at 130. Focused regressions, typecheck, and full controller-v8 passed on canonical main.",
+        "Verification evidence is incomplete: One or more acceptance criteria are missing or not evaluated.",
+        "Required verification evidence passed; integration and cleanup evidence remain required before completion.",
+        "Direct-edit baseline repair passed exact acceptance verification. accept_task requires Agent Run integration/cleanup evidence that does not exist for this direct-edit path; retain verified status and actual commit/check evidence."
+      ],
+      "runIds": [],
+      "createdAt": "2026-07-19T09:33:57.000Z",
+      "updatedAt": "2026-07-19T10:45:28.157Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+      "verification": {
+        "integratedRevision": "7ea6f1802e7f2ec881326f4dfcbe3f73b32a09a9",
+        "reviewer": "ChatGPT",
+        "checkResults": [
+          {
+            "checkId": "package:check:type",
+            "ok": true,
+            "summary": "Passed with persisted evidence: .ai/harness/checks/controller/latest-package-check-type.json"
+          },
+          {
+            "checkId": "package:check:controller-v8",
+            "ok": true,
+            "summary": "Passed with persisted evidence: .ai/harness/checks/controller/latest-package-check-controller-v8.json"
+          }
+        ],
+        "commandEvidence": [
+          {
+            "command": [
+              "bun",
+              "test",
+              "tests/cli/mcp-controller.test.ts",
+              "--test-name-pattern",
+              "exposes the supervised advanced surface and resumes idempotent Work by request id|rejects cross-repository Work reuse for the same request id"
+            ],
+            "ok": true,
+            "exitCode": 0,
+            "stdout": "2 pass, 0 fail",
+            "reportedBy": "ChatGPT",
+            "executedAt": "2026-07-19T10:43:57.983Z",
+            "source": "reported"
+          },
+          {
+            "command": [
+              "bun",
+              "x",
+              "tsc",
+              "--noEmit"
+            ],
+            "ok": true,
+            "exitCode": 0,
+            "stdout": "passed",
+            "reportedBy": "ChatGPT",
+            "executedAt": "2026-07-19T10:43:57.983Z",
+            "source": "reported"
+          },
+          {
+            "command": [
+              "bun",
+              "run",
+              "check:controller-v8"
+            ],
+            "ok": true,
+            "exitCode": 0,
+            "stdout": "full controller-v8 passed on canonical main",
+            "reportedBy": "ChatGPT",
+            "executedAt": "2026-07-19T10:43:57.983Z",
+            "source": "reported"
+          }
+        ],
+        "acceptanceResults": [
+          {
+            "criterion": "The first work_submit(create_issue) succeeds for the selected repository.",
+            "ok": true,
+            "outcome": "passed",
+            "source": "reported",
+            "evidence": "Focused MCP regression passed after durable routing validated the injected public command schema."
+          },
+          {
+            "criterion": "Reusing the same request_id in another repository returns REQUEST_ID_REPO_CONFLICT.",
+            "ok": true,
+            "outcome": "passed",
+            "source": "reported",
+            "evidence": "Cross-repository Work reuse regression passed."
+          },
+          {
+            "criterion": "The controller tool-surface budget is explicit and bounded, and does not hide arbitrary growth.",
+            "ok": true,
+            "outcome": "passed",
+            "source": "reported",
+            "evidence": "The controller surface contract asserts the exact intentional count of 130."
+          },
+          {
+            "criterion": "The full package:check:controller-v8 passes on the baseline branch.",
+            "ok": true,
+            "outcome": "passed",
+            "source": "reported",
+            "evidence": "The complete controller-v8 check passed on canonical main after integrating the baseline repair."
+          }
+        ],
+        "verifiedAt": "2026-07-19T10:43:57.983Z",
+        "autoCompleted": false,
+        "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+      }
+    },
+    {
+      "id": "T5",
+      "title": "Add optional agent-device simulator provider on verified interaction plane",
+      "objective": "Integrate the existing agent-device PoC as an optional, version-pinned simulator provider under the current iOS plugin and verified interaction-session architecture. Pin 0.19.3, reject physical devices, require an exact uniquely booted simulator, expose bounded doctor/open/snapshot/press/fill/scroll/screenshot/events/close actions, register local artifacts, serialize mutating UI actions, close sessions on failure, and preserve existing Xcode/simulator readiness when the dependency is absent. Do not start a nested MCP server or alter global Controller readiness.",
+      "status": "superseded",
+      "dependsOn": [
+        "T3"
+      ],
+      "allowedPaths": [
+        "src/runtime/plugins/**",
+        "src/runtime/safe-tooling/**",
+        "tests/runtime/**",
+        "docs/architecture/current/**",
+        "docs/researches/20260716-agent-device-ios-poc.md",
+        "scripts/agent-device-ios-poc.sh",
+        "package.json"
+      ],
+      "forbiddenPaths": [
+        "src/runtime/gateway/**",
+        "src/runtime/supervisor/**",
+        "_ops/**",
+        ".ai/**"
+      ],
+      "checks": [
+        "package:check:type",
+        "package:check:runtime-architecture",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "Existing Xcode and simulator capabilities remain ready when agent-device is absent.",
+        "Physical devices and ambiguous or non-booted simulator selection are rejected before any app action.",
+        "The provider is pinned to agent-device 0.19.3 and executes only typed local CLI actions without a nested MCP server.",
+        "Mutating UI actions are serialized, artifacts remain local and bounded, and sessions close on failure.",
+        "Focused iOS tests, typecheck, runtime architecture, and controller-v8 pass on final main."
+      ],
+      "risk": "medium",
+      "recommendedAgent": "codex",
+      "notes": [
+        "Superseded because direct-edit T3 is verified but cannot become dependency-terminal without synthetic Agent Run cleanup evidence. Replacement execution task will use verified main revision f7afe0e5 as its baseline without a false lifecycle dependency."
+      ],
+      "runIds": [],
+      "createdAt": "2026-07-19T10:45:53.948Z",
+      "updatedAt": "2026-07-19T10:46:22.626Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    },
+    {
+      "id": "T6",
+      "title": "Implement optional agent-device simulator provider from verified main",
+      "objective": "Starting from verified main revision f7afe0e58ca7294f1e982dc86ccced2aa378763a, integrate the existing agent-device PoC as an optional, version-pinned simulator provider under the current iOS plugin and interaction-session architecture. Pin 0.19.3, reject physical devices, require an exact uniquely booted simulator, expose bounded doctor/open/snapshot/press/fill/scroll/screenshot/events/close actions, register local artifacts, serialize mutating UI actions, close sessions on failure, and preserve existing Xcode/simulator readiness when the dependency is absent. Do not start a nested MCP server or alter global Controller readiness.",
+      "status": "verified",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src/runtime/plugins/**",
+        "src/runtime/safe-tooling/**",
+        "tests/runtime/**",
+        "docs/architecture/current/**",
+        "docs/researches/20260716-agent-device-ios-poc.md",
+        "scripts/agent-device-ios-poc.sh",
+        "package.json"
+      ],
+      "forbiddenPaths": [
+        "src/runtime/gateway/**",
+        "src/runtime/supervisor/**",
+        "_ops/**",
+        ".ai/**"
+      ],
+      "checks": [
+        "package:check:type",
+        "package:check:runtime-architecture",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "Existing Xcode and simulator capabilities remain ready when agent-device is absent.",
+        "Physical devices and ambiguous or non-booted simulator selection are rejected before any app action.",
+        "The provider is pinned to agent-device 0.19.3 and executes only typed local CLI actions without a nested MCP server.",
+        "Mutating UI actions are serialized, artifacts remain local and bounded, and sessions close on failure.",
+        "Focused iOS tests, typecheck, runtime architecture, and controller-v8 pass on final main."
+      ],
+      "risk": "medium",
+      "recommendedAgent": "codex",
+      "notes": [
+        "Integrated into main via merge commit 03343d57108cc1ae1dce4971e23e1c9d726506a2; feature commit a4564ebd52df5ebc2f91f14a11c7d1c59ebfe9c2. Final main passed interaction-provider regressions, TypeScript, runtime architecture, full controller-v8, and a real read-only agent-device 0.19.3 CLI/device-contract smoke. Managed worktree is clean; automatic cleanup is blocked because the Work handle expectedHead did not advance after the controlled commit, and broad maintenance would affect unrelated stale jobs.",
+        "Required verification evidence passed; integration and cleanup evidence remain required before completion."
+      ],
+      "runIds": [],
+      "createdAt": "2026-07-19T10:46:39.346Z",
+      "updatedAt": "2026-07-19T11:22:08.823Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56",
+      "verification": {
+        "integratedRevision": "03343d57108cc1ae1dce4971e23e1c9d726506a2",
+        "reviewer": "ChatGPT",
+        "checkResults": [
+          {
+            "checkId": "package:check:type",
+            "ok": true,
+            "summary": "Passed with persisted evidence: .ai/harness/checks/controller/latest-package-check-type.json"
+          },
+          {
+            "checkId": "package:check:runtime-architecture",
+            "ok": true,
+            "summary": "Passed with persisted evidence: .ai/harness/checks/controller/latest-package-check-runtime-architecture.json"
+          },
+          {
+            "checkId": "package:check:controller-v8",
+            "ok": true,
+            "summary": "Passed with persisted evidence: .ai/harness/checks/controller/latest-package-check-controller-v8.json"
+          }
+        ],
+        "commandEvidence": [
+          {
+            "command": [
+              "bun",
+              "test",
+              "tests/runtime/ios-agent-device-provider.test.ts",
+              "tests/runtime/ios-smoke-review.test.ts",
+              "tests/runtime/browser-plugin.test.ts"
+            ],
+            "ok": true,
+            "exitCode": 0,
+            "stdout": "32 pass, 0 fail on final main",
+            "reportedBy": "ChatGPT",
+            "executedAt": "2026-07-19T11:22:08.821Z",
+            "source": "reported"
+          },
+          {
+            "command": [
+              "bun",
+              "x",
+              "tsc",
+              "--noEmit"
+            ],
+            "ok": true,
+            "exitCode": 0,
+            "stdout": "passed on final main",
+            "reportedBy": "ChatGPT",
+            "executedAt": "2026-07-19T11:22:08.821Z",
+            "source": "reported"
+          },
+          {
+            "command": [
+              "bun",
+              "run",
+              "check:runtime-architecture"
+            ],
+            "ok": true,
+            "exitCode": 0,
+            "stdout": "24 required modules/documents checked on final main",
+            "reportedBy": "ChatGPT",
+            "executedAt": "2026-07-19T11:22:08.821Z",
+            "source": "reported"
+          },
+          {
+            "command": [
+              "bun",
+              "run",
+              "check:controller-v8"
+            ],
+            "ok": true,
+            "exitCode": 0,
+            "stdout": "full controller-v8 passed on final main",
+            "reportedBy": "ChatGPT",
+            "executedAt": "2026-07-19T11:22:08.821Z",
+            "source": "reported"
+          },
+          {
+            "command": [
+              "npm",
+              "exec",
+              "--yes",
+              "--package=agent-device@0.19.3",
+              "--",
+              "agent-device",
+              "devices",
+              "--platform",
+              "ios",
+              "--json"
+            ],
+            "ok": true,
+            "exitCode": 0,
+            "stdout": "agent-device 0.19.3 returned the expected typed device inventory shape; the host contains ambiguous booted simulator names and physical devices, validating strict selection gates",
+            "reportedBy": "ChatGPT",
+            "executedAt": "2026-07-19T11:22:08.821Z",
+            "source": "reported"
+          }
+        ],
+        "acceptanceResults": [
+          {
+            "criterion": "Existing Xcode and simulator capabilities remain ready when agent-device is absent.",
+            "ok": true,
+            "outcome": "passed",
+            "source": "reported",
+            "evidence": "Provider health is independent; focused manifest regression verifies base iOS health remains ready when CLI probing fails."
+          },
+          {
+            "criterion": "Physical devices and ambiguous or non-booted simulator selection are rejected before any app action.",
+            "ok": true,
+            "outcome": "passed",
+            "source": "reported",
+            "evidence": "Focused tests cover physical device, shutdown simulator, and duplicate exact-name rejection before open; real inventory contains two booted iPhone 17 simulators and two physical iPhones."
+          },
+          {
+            "criterion": "The provider is pinned to agent-device 0.19.3 and executes only typed local CLI actions without a nested MCP server.",
+            "ok": true,
+            "outcome": "passed",
+            "source": "reported",
+            "evidence": "Exact version probe is required; action schemas expose a fixed allowlist and tests assert no arbitrary command/args or mcp invocation."
+          },
+          {
+            "criterion": "Mutating UI actions are serialized, artifacts remain local and bounded, and sessions close on failure.",
+            "ok": true,
+            "outcome": "passed",
+            "source": "reported",
+            "evidence": "Resource claims serialize stateful actions; screenshots use Controller-owned storage; JSON is capped/redacted; cleanup failure remains closing and fenced until idempotent close succeeds."
+          },
+          {
+            "criterion": "Focused iOS tests, typecheck, runtime architecture, and controller-v8 pass on final main.",
+            "ok": true,
+            "outcome": "passed",
+            "source": "reported",
+            "evidence": "All declared final-main checks passed, including full controller-v8."
+          }
+        ],
+        "verifiedAt": "2026-07-19T11:22:08.821Z",
+        "autoCompleted": false,
+        "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+      }
+    },
+    {
+      "id": "T7",
+      "title": "Add bounded physical iOS device interaction provider",
+      "objective": "Extend the verified iOS plugin and provider-neutral interaction-session architecture with an optional physical-device provider for paired iPhones. Reuse CoreDevice/devicectl for discovery, installed-app lookup, launch and process lifecycle. Establish a signed XCTest/WebDriverAgent-style runner only when required for UI automation. Expose exact-device open/snapshot/press/fill/scroll/screenshot/events/close actions without weakening the existing simulator provider. Support third-party App Store apps such as JD where platform APIs permit it. Keep credentials, pairing records and signing material outside repository state. Serialize mutating actions, redact sensitive fields, require manual handoff for passwords, verification codes, biometric prompts, purchases and payments, and fail closed when screen capture or accessibility control is unavailable. Do not jailbreak, bypass iOS security controls, automate payment confirmation, or claim capabilities not proven on the paired device.",
+      "status": "ready",
+      "dependsOn": [],
+      "allowedPaths": [
+        "src/runtime/plugins/**",
+        "src/runtime/safe-tooling/**",
+        "tests/runtime/**",
+        "docs/architecture/current/**",
+        "docs/researches/**",
+        "scripts/**",
+        "package.json",
+        "tasks/issues/ISS-20260719-F77E4C-add-resumable-human-interaction-plane.issue.*"
+      ],
+      "forbiddenPaths": [
+        "_ops/**",
+        ".ai/harness/**",
+        "node_modules/**",
+        "dist/**"
+      ],
+      "checks": [
+        "package:check:type",
+        "package:check:runtime-architecture",
+        "package:check:controller-v8"
+      ],
+      "acceptanceCriteria": [
+        "The iOS plugin lists paired physical devices separately from simulators and reports exact readiness and limitations.",
+        "The provider can open an exact paired device session and launch an installed third-party app by bundle identifier without accepting ambiguous device names.",
+        "When a supported signed automation runner is available, snapshot, press, non-sensitive fill, scroll and screenshot operate through one serialized interaction session and produce bounded evidence.",
+        "When the runner, screen capture, developer mode, trust or signing prerequisites are unavailable, actions fail with actionable typed errors rather than silently falling back or claiming success.",
+        "Passwords, verification codes, biometrics, purchasing, checkout submission and payment remain human-only and are blocked or handed off explicitly.",
+        "Existing simulator agent-device behavior and optional dependency readiness remain backward compatible.",
+        "Focused tests and declared package checks pass, and one live smoke test proves at least physical-device discovery, installed-app lookup and JD launch on the paired iPhone."
+      ],
+      "risk": "high",
+      "recommendedAgent": "codex",
+      "notes": [],
+      "runIds": [],
+      "createdAt": "2026-07-20T03:44:59.322Z",
+      "updatedAt": "2026-07-20T03:44:59.322Z",
+      "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+    }
+  ],
+  "createdAt": "2026-07-19T08:34:13.113Z",
+  "updatedAt": "2026-07-20T03:49:02.241Z",
+  "repoId": "repo_123b7cf58b6b17b5cbe46a56"
+}

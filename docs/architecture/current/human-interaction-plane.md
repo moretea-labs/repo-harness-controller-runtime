@@ -52,26 +52,29 @@ The browser plugin exposes three actions:
 
 The small surface limits additional plugin schema growth and avoids alias actions with overlapping semantics.
 
-## Optional iOS Simulator Provider
+## Optional agent-device iOS Provider
 
 The existing `ios` plugin includes an optional `agent-device` provider with these boundaries:
 
 - The local CLI must report exactly version `0.19.3`; Repo Harness never downloads it at runtime or adds it as a required package dependency.
 - CLI absence or version mismatch degrades only the optional provider. Existing Xcode, `simctl`, build, launch, screenshot, and smoke-review readiness remains unchanged.
-- Device inventory comes from typed `agent-device devices --platform ios --json` output. Selection must resolve to exactly one already-booted simulator; physical devices, shutdown simulators, and ambiguous names are rejected before app actions.
+- Device inventory comes from typed `agent-device devices --platform ios --json` output. Simulator selection resolves to exactly one already-booted simulator. A physical iPhone is accepted only through an explicit exact name or UDID and must be connected; unavailable targets and ambiguous names are rejected before app actions.
+- Physical sessions use the existing `ios-device` ownership fence while simulator sessions continue to use `ios-simulator`. Signing inputs are limited to non-secret team and reverse-DNS bundle identifiers, are stored beside the Controller-owned interaction state, and are mapped to agent-device environment variables without persisting certificates, profiles, pairing records, or credentials.
+- `agent_device_prepare` explicitly builds, signs, installs, and health-checks the XCTest Runner. Readiness is never inferred from inventory alone: a paired phone can be listed while Runner preparation still fails because the phone is locked, the developer tunnel is unreachable, or signing is incomplete.
+- `agent_device_jd_search` is a narrow physical-device workflow for `com.360buy.jdmobile`. It accepts a bounded product-information query, uses accessibility evidence to locate the search field, submits through an explicit target or keyboard return, returns bounded visible result text, writes one Controller-owned PNG, and closes the session. Credentials, verification, biometrics, checkout, purchase, order submission, and payment semantics are rejected before mutation.
 - Each interaction receives an isolated `AGENT_DEVICE_STATE_DIR` and explicit session name. Stateful actions are serialized through repository resource claims and only a fixed argv allowlist is exposed; the provider never invokes `agent-device mcp` or arbitrary commands.
 - Screenshots stay in Controller-owned artifact storage. JSON responses are capped before entering evidence; event payload fields and direct fill results are redacted.
 - Open accepts only an app name or bundle identifier, not a URL or token-bearing deep link. `fill` is limited to non-sensitive text; passwords and verification codes must be entered manually.
 - Command failure, explicit close, or the next access after expiry attempts to close the provider session. Terminal state is written only after close succeeds; cleanup failure remains `closing`, keeps simulator ownership fenced, and can be retried through the idempotent close action. Fill arguments and diagnostics are redacted from failure evidence. Provider daemons use a five-second idle timeout and zero iOS runner retention after close.
-- Physical iPhone mutation remains outside this provider and requires a separate device-authorization and safety review.
+- Physical iPhone mutation is limited to an explicitly selected device, a healthy signed Runner, authorized typed actions, and the same cleanup/redaction fence. Closing never shuts down a physical phone.
 
 
 ## Physical iOS Computer Use boundary
 
-The iOS plugin treats a paired physical iPhone as a separate `ios-device` provider rather than widening the simulator-only `agent-device` contract.
+The iOS plugin treats a paired physical iPhone as a separate `ios-device` ownership provider. CoreDevice remains the baseline path, while agent-device is an optional signed XCTest engine for bounded direct UI automation.
 
 The CoreDevice layer is authoritative for bounded device discovery, exact installed-app lookup, foreground application launch, and native PNG screen capture. Device selection is exact by CoreDevice identifier, UDID, or an unambiguous exact name. Responses omit serial numbers, ECIDs, application container paths, pairing records, and signing material.
 
-UI-tree inspection and input injection are optional. They require a separately installed, correctly signed WebDriverAgent-compatible runner already forwarded to an unauthenticated localhost HTTP endpoint configured through `REPO_HARNESS_IOS_DEVICE_RUNNER_URL`. Repo Harness does not download, build, sign, install, or persist that runner automatically. A missing or unhealthy runner leaves CoreDevice launch and screenshot available while `snapshot`, `press`, `fill`, and `scroll` fail closed with typed prerequisite errors.
+UI-tree inspection and input injection are optional. They can use either a separately installed WebDriverAgent-compatible runner forwarded to the configured unauthenticated localhost endpoint, or the pinned local agent-device XCTest Runner prepared with an explicitly supplied Apple team and unique runner bundle identifier. Repo Harness never downloads automation tooling at action time or persists signing credentials. A missing or unhealthy runner leaves CoreDevice launch and screenshot available while UI actions fail closed with typed prerequisite errors.
 
 Every physical-device mutation is serialized through the interaction session. Text input is removed from results and event evidence. Passwords, passcodes, verification codes, biometric prompts, account recovery, purchases, checkout submission, order confirmation, and payment semantics are human-only. The provider does not jailbreak devices, bypass device locks, solve CAPTCHAs, accept tokenized deep links, or shut down or erase the phone when a session closes.

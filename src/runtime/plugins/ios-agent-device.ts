@@ -1,8 +1,9 @@
 import { randomUUID } from 'crypto';
 import { existsSync, mkdirSync } from 'fs';
-import { join } from 'path';
+import { isAbsolute, join } from 'path';
 import { spawnSync } from 'child_process';
 import { repositoryControllerRoot } from '../../cli/repositories/controller-home';
+import { readJsonFile, writeJsonAtomic } from '../shared/json-files';
 import { AssistantPluginError, toAssistantPluginError } from './errors';
 import {
   isInteractionSessionActive,
@@ -11,6 +12,7 @@ import {
   pruneInteractionSessions,
   readInteractionSession,
   writeInteractionSession,
+  type InteractionProvider,
   type InteractionSessionRecord,
 } from './interaction-session';
 import type {
@@ -20,10 +22,22 @@ import type {
 } from './types';
 
 export const IOS_AGENT_DEVICE_VERSION = '0.19.3';
-const PROVIDER = 'ios-simulator' as const;
+const SIMULATOR_PROVIDER = 'ios-simulator' as const;
+const DEVICE_PROVIDER = 'ios-device' as const;
+const PROVIDERS: InteractionProvider[] = [SIMULATOR_PROVIDER, DEVICE_PROVIDER];
 const STATUS_TTL_MS = 60_000;
 const MAX_JSON_BYTES = 64 * 1024;
 const SESSION_EXPIRY_MS = 2 * 60 * 60_000;
+const JD_BUNDLE_ID = 'com.360buy.jdmobile';
+const MAX_JD_QUERY_LENGTH = 120;
+const SENSITIVE_SEMANTICS = /secure\s*text|securetextfield|password|passcode|verification|one[ -]?time|otp|2fa|密码|口令|验证码|校验码|短信码|生物识别|biometric|face\s?id|touch\s?id|支付|付款|购买|下单|提交订单|确认订单|结算|checkout|payment|purchase|confirm\s+order|bank|card|cvv|身份证/i;
+
+interface AgentDeviceSigningConfig {
+  schemaVersion: 1;
+  teamId?: string;
+  bundleId?: string;
+  developerDir?: string;
+}
 
 interface CommandResult {
   ok: boolean;
@@ -97,7 +111,7 @@ function probeStatus() {
       available: false,
       expectedVersion: IOS_AGENT_DEVICE_VERSION,
       platform: hooks.platform(),
-      reason: 'agent-device iOS Simulator support requires macOS.',
+      reason: 'agent-device iOS support requires macOS.',
     };
   }
   const result = hooks.runCommand(executable(), ['--version'], { timeoutMs: 3_000 });
@@ -149,6 +163,34 @@ function stateDir(input: AssistantPluginActionExecutionInput, interactionId: str
   return path;
 }
 
+function signingConfigPath(input: AssistantPluginActionExecutionInput, interactionId: string): string {
+  return join(interactionRoot(input, interactionId), 'signing.json');
+}
+
+function readSigningConfig(
+  input: AssistantPluginActionExecutionInput,
+  interactionId: string,
+): AgentDeviceSigningConfig | undefined {
+  const value = readJsonFile<AgentDeviceSigningConfig | undefined>(signingConfigPath(input, interactionId), undefined);
+  return value?.schemaVersion === 1 ? value : undefined;
+}
+
+function writeSigningConfig(
+  input: AssistantPluginActionExecutionInput,
+  interactionId: string,
+  config: AgentDeviceSigningConfig,
+): void {
+  writeJsonAtomic(signingConfigPath(input, interactionId), config);
+}
+
+function signingEnv(config?: AgentDeviceSigningConfig): NodeJS.ProcessEnv {
+  return {
+    ...(config?.teamId ? { AGENT_DEVICE_IOS_TEAM_ID: config.teamId } : {}),
+    ...(config?.bundleId ? { AGENT_DEVICE_IOS_BUNDLE_ID: config.bundleId } : {}),
+    ...(config?.developerDir ? { DEVELOPER_DIR: config.developerDir } : {}),
+  };
+}
+
 function artifactDir(input: AssistantPluginActionExecutionInput, interactionId: string): string {
   const path = join(controllerRoot(input), 'artifacts', 'ios', 'agent-device', sanitize(interactionId));
   mkdirSync(path, { recursive: true });
@@ -156,8 +198,10 @@ function artifactDir(input: AssistantPluginActionExecutionInput, interactionId: 
 }
 
 function sessionEnv(input: AssistantPluginActionExecutionInput, record: InteractionSessionRecord): NodeJS.ProcessEnv {
+  const config = readSigningConfig(input, record.interactionId);
   return {
     ...process.env,
+    ...signingEnv(config),
     AGENT_DEVICE_STATE_DIR: stateDir(input, record.interactionId),
     AGENT_DEVICE_SESSION: record.sessionId,
     AGENT_DEVICE_PLATFORM: 'ios',
@@ -167,11 +211,12 @@ function sessionEnv(input: AssistantPluginActionExecutionInput, record: Interact
   };
 }
 
-function probeEnv(input: AssistantPluginActionExecutionInput): NodeJS.ProcessEnv {
+function probeEnv(input: AssistantPluginActionExecutionInput, config?: AgentDeviceSigningConfig): NodeJS.ProcessEnv {
   const path = join(controllerRoot(input), 'interactions', 'ios-agent-device', 'probe-state');
   mkdirSync(path, { recursive: true });
   return {
     ...process.env,
+    ...signingEnv(config),
     AGENT_DEVICE_STATE_DIR: path,
     AGENT_DEVICE_PLATFORM: 'ios',
     AGENT_DEVICE_DAEMON_IDLE_TIMEOUT_MS: '5000',
@@ -255,12 +300,17 @@ function parseJsonResult(result: CommandResult, failureCode: string): Record<str
 function runJson(
   input: AssistantPluginActionExecutionInput,
   args: string[],
-  options: { record?: InteractionSessionRecord; timeoutMs?: number; failureCode: string },
+  options: {
+    record?: InteractionSessionRecord;
+    signing?: AgentDeviceSigningConfig;
+    timeoutMs?: number;
+    failureCode: string;
+  },
 ): Record<string, unknown> {
   const result = hooks.runCommand(executable(), args, {
     cwd: input.repoRoot,
     timeoutMs: options.timeoutMs,
-    env: options.record ? sessionEnv(input, options.record) : probeEnv(input),
+    env: options.record ? sessionEnv(input, options.record) : probeEnv(input, options.signing),
   });
   return parseJsonResult(result, options.failureCode);
 }
@@ -295,32 +345,34 @@ function devices(input: AssistantPluginActionExecutionInput): AgentDeviceEntry[]
     .filter((entry) => entry.platform === 'ios' && entry.id && entry.name);
 }
 
-function selectSimulator(input: AssistantPluginActionExecutionInput, selector?: string): AgentDeviceEntry {
+function providerForDevice(device: AgentDeviceEntry): InteractionProvider {
+  return device.kind === 'simulator' ? SIMULATOR_PROVIDER : DEVICE_PROVIDER;
+}
+
+function selectTarget(input: AssistantPluginActionExecutionInput, selector?: string): AgentDeviceEntry {
   const inventory = devices(input);
   const exact = selector
     ? inventory.filter((entry) => entry.id === selector || entry.name === selector)
     : inventory.filter((entry) => entry.booted && entry.kind === 'simulator');
-  const physical = exact.filter((entry) => entry.kind !== 'simulator');
-  if (physical.length > 0) {
-    throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', 'Physical iOS devices are not supported by this provider.', {
+  const ready = exact.filter((entry) => entry.booted && (entry.kind === 'simulator' || entry.kind === 'device'));
+  if (ready.length === 0) {
+    throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', selector
+      ? 'Select one connected physical iPhone or already-booted iOS Simulator by exact name or UDID.'
+      : 'Select one already-booted iOS Simulator, or provide an exact physical iPhone name or UDID.', {
       retryable: false,
-      details: { selector, deviceIds: physical.map((entry) => entry.id) },
+      details: {
+        selector,
+        matches: exact.map((entry) => ({ id: entry.id, name: entry.name, kind: entry.kind, booted: entry.booted })),
+      },
     });
   }
-  const booted = exact.filter((entry) => entry.kind === 'simulator' && entry.booted);
-  if (booted.length === 0) {
-    throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', 'Select one already-booted iOS Simulator by exact name or UDID.', {
+  if (ready.length !== 1) {
+    throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', 'The iOS target selection is ambiguous; provide the exact UDID.', {
       retryable: false,
-      details: { selector, matches: exact.map((entry) => ({ id: entry.id, name: entry.name, booted: entry.booted })) },
+      details: { selector, matches: ready.map((entry) => ({ id: entry.id, name: entry.name, kind: entry.kind })) },
     });
   }
-  if (booted.length !== 1) {
-    throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', 'The iOS Simulator selection is ambiguous; provide the exact UDID.', {
-      retryable: false,
-      details: { selector, matches: booted.map((entry) => ({ id: entry.id, name: entry.name })) },
-    });
-  }
-  return booted[0]!;
+  return ready[0]!;
 }
 
 function requireString(value: unknown, name: string): string {
@@ -332,9 +384,44 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
+function signingFromArgs(args: Record<string, unknown>): AgentDeviceSigningConfig {
+  const developerDir = optionalString(args.developer_dir);
+  if (developerDir && (!isAbsolute(developerDir) || !developerDir.endsWith('/Contents/Developer') || !existsSync(developerDir))) {
+    throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', 'developer_dir must be an existing absolute Xcode Contents/Developer directory.', { retryable: false });
+  }
+  return {
+    schemaVersion: 1,
+    teamId: optionalString(args.team_id),
+    bundleId: optionalString(args.runner_bundle_id),
+    developerDir,
+  };
+}
+
+function isAgentDeviceInteraction(record: InteractionSessionRecord): boolean {
+  return record.interactionId.startsWith('ios_agent_device_')
+    && (record.reason === 'ios_simulator_automation' || record.reason === 'ios_physical_device_automation');
+}
+
+function readAgentDeviceInteraction(repoRoot: string, interactionId: string): InteractionSessionRecord | undefined {
+  for (const provider of PROVIDERS) {
+    const record = readInteractionSession(repoRoot, provider, interactionId);
+    if (record && isAgentDeviceInteraction(record)) return record;
+  }
+  return undefined;
+}
+
+function listAgentDeviceInteractions(repoRoot: string): InteractionSessionRecord[] {
+  return PROVIDERS.flatMap((provider) => listInteractionSessions(repoRoot, provider))
+    .filter(isAgentDeviceInteraction);
+}
+
+function listAllIosInteractions(repoRoot: string): InteractionSessionRecord[] {
+  return PROVIDERS.flatMap((provider) => listInteractionSessions(repoRoot, provider));
+}
+
 function requireRecord(input: AssistantPluginActionExecutionInput, allowTerminal = false): InteractionSessionRecord {
   const interactionId = requireString(input.args.interaction_id, 'interaction_id');
-  const record = readInteractionSession(input.repoRoot, PROVIDER, interactionId);
+  const record = readAgentDeviceInteraction(input.repoRoot, interactionId);
   if (!record) {
     throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', `Unknown iOS agent-device interaction: ${interactionId}`, { retryable: false });
   }
@@ -347,7 +434,7 @@ function requireRecord(input: AssistantPluginActionExecutionInput, allowTerminal
   }
   if (hooks.now().getTime() >= Date.parse(record.expiresAt)) {
     const closed = bestEffortClose(input, record);
-    patchInteractionSession(input.repoRoot, PROVIDER, interactionId, closed
+    patchInteractionSession(input.repoRoot, record.provider, interactionId, closed
       ? {
         status: 'failed',
         error: { code: 'AGENT_DEVICE_SESSION_EXPIRED', message: 'The agent-device session expired and was closed.' },
@@ -382,10 +469,10 @@ function bestEffortClose(input: AssistantPluginActionExecutionInput, record: Int
 
 function reconcileExpiredSessions(input: AssistantPluginActionExecutionInput): void {
   const nowMs = hooks.now().getTime();
-  for (const record of listInteractionSessions(input.repoRoot, PROVIDER)) {
+  for (const record of listAgentDeviceInteractions(input.repoRoot)) {
     if (!isInteractionSessionActive(record.status) || nowMs < Date.parse(record.expiresAt)) continue;
     const closed = bestEffortClose(input, record);
-    patchInteractionSession(input.repoRoot, PROVIDER, record.interactionId, closed
+    patchInteractionSession(input.repoRoot, record.provider, record.interactionId, closed
       ? {
         status: 'failed',
         error: { code: 'AGENT_DEVICE_SESSION_EXPIRED', message: 'The agent-device session expired and was closed before opening another session.' },
@@ -404,7 +491,7 @@ function failSession(input: AssistantPluginActionExecutionInput, record: Interac
     message: 'The agent-device command failed.',
     retryable: false,
   });
-  patchInteractionSession(input.repoRoot, PROVIDER, record.interactionId, closed
+  patchInteractionSession(input.repoRoot, record.provider, record.interactionId, closed
     ? {
       status: 'failed',
       error: { code: normalized.code, message: normalized.message },
@@ -440,18 +527,169 @@ function runSessionCommand(
   }
 }
 
+function stringEvidence(value: unknown, output: string[] = []): string[] {
+  if (typeof value === 'string') output.push(value);
+  else if (Array.isArray(value)) value.forEach((entry) => stringEvidence(entry, output));
+  else if (value && typeof value === 'object') {
+    Object.values(value as Record<string, unknown>).forEach((entry) => stringEvidence(entry, output));
+  }
+  return output;
+}
+
+function interactiveRef(value: unknown, terms: RegExp): string | undefined {
+  for (const text of stringEvidence(value)) {
+    for (const line of text.split('\n')) {
+      if (!terms.test(line)) continue;
+      const match = line.match(/@e\d+(?:~s\d+)?/);
+      if (match) return match[0];
+    }
+  }
+  return undefined;
+}
+
+function boundedVisibleText(value: unknown, query: string): string[] {
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  for (const text of stringEvidence(value)) {
+    for (const rawLine of text.split('\n')) {
+      const line = rawLine.trim().split(query).join('<query>');
+      if (!line || line.length > 500 || seen.has(line)) continue;
+      seen.add(line);
+      lines.push(line);
+      if (Buffer.byteLength(lines.join('\n'), 'utf8') >= 8_000) return lines;
+    }
+  }
+  return lines;
+}
+
+function validateJdQuery(value: unknown): string {
+  const query = requireString(value, 'query');
+  if (query.length > MAX_JD_QUERY_LENGTH || /[\u0000-\u001f\u007f]/.test(query)) {
+    throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', `query must be at most ${MAX_JD_QUERY_LENGTH} printable characters.`, { retryable: false });
+  }
+  if (SENSITIVE_SEMANTICS.test(query)) {
+    throw new AssistantPluginError('IOS_DEVICE_SENSITIVE_ACTION_BLOCKED', 'JD search accepts product-information queries only; credentials, verification, checkout, purchase and payment semantics are blocked.', { retryable: false });
+  }
+  return query;
+}
+
+function subActionInput(
+  input: AssistantPluginActionExecutionInput,
+  actionId: string,
+  args: Record<string, unknown>,
+): AssistantPluginActionExecutionInput {
+  return { ...input, actionId, args, requestId: `${input.requestId}:${actionId}` };
+}
+
+async function executeJdSearch(input: AssistantPluginActionExecutionInput): Promise<Record<string, unknown>> {
+  const query = validateJdQuery(input.args.query);
+  const deviceSelector = requireString(input.args.device, 'device');
+  const selected = selectTarget(input, deviceSelector);
+  if (selected.kind !== 'device') {
+    throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', 'agent_device_jd_search requires one exact connected physical iPhone.', {
+      retryable: false,
+      details: { device: { id: selected.id, name: selected.name, kind: selected.kind } },
+    });
+  }
+  const sharedArgs = {
+    device: selected.id,
+    team_id: optionalString(input.args.team_id),
+    runner_bundle_id: optionalString(input.args.runner_bundle_id),
+    developer_dir: optionalString(input.args.developer_dir),
+  };
+  const opened = await executeIosAgentDeviceAction(subActionInput(input, 'agent_device_open', {
+    ...sharedArgs,
+    app: JD_BUNDLE_ID,
+    relaunch: true,
+  }));
+  const interaction = opened.interaction as InteractionSessionRecord | undefined;
+  if (!interaction) {
+    throw new AssistantPluginError('AGENT_DEVICE_OPEN_FAILED', 'agent-device did not return an interaction for JD.', { retryable: false });
+  }
+  const interactionId = interaction.interactionId;
+  let finalSnapshot: Record<string, unknown> | undefined;
+  let screenshot: Record<string, unknown> | undefined;
+  try {
+    const initialSnapshot = await executeIosAgentDeviceAction(subActionInput(input, 'agent_device_snapshot', {
+      interaction_id: interactionId,
+      interactive: true,
+    }));
+    const searchTarget = optionalString(input.args.search_target)
+      ?? interactiveRef(initialSnapshot, /搜索|搜一搜|search|searchfield|请输入/i);
+    if (!searchTarget) {
+      throw new AssistantPluginError('JD_SEARCH_FIELD_NOT_FOUND', 'JD opened, but no bounded accessibility search field was found. Provide search_target from agent_device_snapshot evidence.', {
+        retryable: false,
+      });
+    }
+    await executeIosAgentDeviceAction(subActionInput(input, 'agent_device_fill', {
+      interaction_id: interactionId,
+      target: searchTarget,
+      text: query,
+      delay_ms: 20,
+    }));
+    const record = requireRecord(subActionInput(input, 'agent_device_snapshot', { interaction_id: interactionId }));
+    const submitTarget = optionalString(input.args.submit_target);
+    if (submitTarget) {
+      if (SENSITIVE_SEMANTICS.test(submitTarget)) {
+        throw new AssistantPluginError('IOS_DEVICE_SENSITIVE_ACTION_BLOCKED', 'The requested submit target has sensitive or purchase semantics.', { retryable: false });
+      }
+      runSessionCommand(input, record, ['press', submitTarget, '--settle'], 'JD_SEARCH_SUBMIT_FAILED');
+    } else {
+      runSessionCommand(input, record, ['keyboard', 'return'], 'JD_SEARCH_SUBMIT_FAILED');
+    }
+    runSessionCommand(input, record, ['wait', 'stable', '15000'], 'JD_SEARCH_RESULTS_TIMEOUT', 20_000);
+    finalSnapshot = await executeIosAgentDeviceAction(subActionInput(input, 'agent_device_snapshot', {
+      interaction_id: interactionId,
+      interactive: true,
+    }));
+    screenshot = await executeIosAgentDeviceAction(subActionInput(input, 'agent_device_screenshot', {
+      interaction_id: interactionId,
+      label: 'jd-search-results',
+      max_size: 1600,
+    }));
+  } finally {
+    await executeIosAgentDeviceAction(subActionInput(input, 'agent_device_close', { interaction_id: interactionId }));
+  }
+  return {
+    provider: 'agent-device',
+    workflow: 'jd_product_search',
+    app: JD_BUNDLE_ID,
+    device: selected,
+    query: '<redacted>',
+    runnerReadiness: 'verified_by_open',
+    visibleResultText: boundedVisibleText(finalSnapshot, query),
+    result: bounded(redactExactText(finalSnapshot, query)),
+    artifactCandidates: screenshot?.artifactCandidates,
+    interaction: readAgentDeviceInteraction(input.repoRoot, interactionId),
+    safety: {
+      allowed: 'product_information_search',
+      blocked: ['credentials', 'verification', 'biometrics', 'checkout', 'purchase', 'payment'],
+    },
+  };
+}
+
 export function isIosAgentDeviceAction(actionId: string): boolean {
   return actionId.startsWith('agent_device_');
 }
 
 export function iosAgentDeviceCapabilities(): AssistantPluginCapability[] {
-  return [{
-    capabilityId: 'ios-agent-device-simulator',
-    title: 'agent-device iOS Simulator',
-    description: `Optional agent-device ${IOS_AGENT_DEVICE_VERSION} sessions for bounded iOS Simulator inspection and interaction.`,
-    scopes: ['ios.discover', 'ios.simulator'],
-    actions: iosAgentDeviceActions().map((action) => action.actionId),
-  }];
+  const actions = iosAgentDeviceActions().map((action) => action.actionId);
+  return [
+    {
+      capabilityId: 'ios-agent-device-simulator',
+      title: 'agent-device iOS Simulator',
+      description: `Optional agent-device ${IOS_AGENT_DEVICE_VERSION} sessions for bounded iOS Simulator inspection and interaction.`,
+      scopes: ['ios.discover', 'ios.simulator'],
+      actions,
+    },
+    {
+      capabilityId: 'ios-agent-device-physical',
+      title: 'agent-device physical iPhone',
+      description: `Optional signed agent-device ${IOS_AGENT_DEVICE_VERSION} XCTest sessions for one exact connected physical iPhone.`,
+      scopes: ['ios.discover', 'ios.device'],
+      actions,
+    },
+  ];
 }
 
 export function iosAgentDeviceActions(): AssistantPluginActionDescriptor[] {
@@ -472,66 +710,89 @@ export function iosAgentDeviceActions(): AssistantPluginActionDescriptor[] {
       actionId: 'agent_device_doctor', title: 'agent-device doctor',
       description: 'Run the typed local iOS doctor command. This may warm the local XCTest runner cache.',
       readOnly: false, risk: 'workspace_write', confirmation: 'authorization', defaultTimeoutMs: 4 * 60_000, cancellable: true, idempotent: false,
-      scopes: ['ios.discover', 'ios.simulator'], resourceClaims: write,
-      argumentsSchema: { type: 'object', properties: { app: { type: 'string' }, device: { type: 'string' } }, additionalProperties: false },
+      scopes: ['ios.discover', 'ios.simulator', 'ios.device'], resourceClaims: write,
+      argumentsSchema: { type: 'object', properties: { app: { type: 'string' }, device: { type: 'string' }, team_id: { type: 'string' }, runner_bundle_id: { type: 'string' }, developer_dir: { type: 'string' } }, additionalProperties: false },
     },
     {
-      actionId: 'agent_device_open', title: 'Open agent-device iOS Simulator session',
-      description: 'Open an app on one exact already-booted iOS Simulator. Physical devices are rejected.',
-      readOnly: false, risk: 'workspace_write', confirmation: 'authorization', defaultTimeoutMs: 4 * 60_000, cancellable: true, idempotent: false,
-      scopes: ['ios.simulator'], resourceClaims: write,
+      actionId: 'agent_device_prepare', title: 'Prepare signed iOS Runner',
+      description: 'Build, sign, install and health-check the agent-device XCTest Runner for one exact iOS target.',
+      readOnly: false, risk: 'workspace_write', confirmation: 'authorization', defaultTimeoutMs: 10 * 60_000, cancellable: true, idempotent: false,
+      scopes: ['ios.discover', 'ios.simulator', 'ios.device'], resourceClaims: write,
       argumentsSchema: {
-        type: 'object', properties: { app: { type: 'string' }, device: { type: 'string' }, relaunch: { type: 'boolean' } },
+        type: 'object', properties: { device: { type: 'string' }, team_id: { type: 'string' }, runner_bundle_id: { type: 'string' }, developer_dir: { type: 'string' } },
+        required: ['device'], additionalProperties: false,
+      },
+    },
+    {
+      actionId: 'agent_device_open', title: 'Open agent-device iOS session',
+      description: 'Open an app on one exact connected physical iPhone or already-booted iOS Simulator.',
+      readOnly: false, risk: 'workspace_write', confirmation: 'authorization', defaultTimeoutMs: 4 * 60_000, cancellable: true, idempotent: false,
+      scopes: ['ios.simulator', 'ios.device'], resourceClaims: write,
+      argumentsSchema: {
+        type: 'object', properties: { app: { type: 'string' }, device: { type: 'string' }, relaunch: { type: 'boolean' }, team_id: { type: 'string' }, runner_bundle_id: { type: 'string' }, developer_dir: { type: 'string' } },
         required: ['app'], additionalProperties: false,
       },
     },
     {
+      actionId: 'agent_device_jd_search', title: 'Search JD on a physical iPhone',
+      description: 'Launch JD, enter one bounded non-sensitive product query, submit it, return visible result text and capture a PNG. Login, verification, checkout, purchase, payment and biometrics remain human-only.',
+      readOnly: false, risk: 'workspace_write', confirmation: 'authorization', defaultTimeoutMs: 10 * 60_000, cancellable: true, idempotent: false,
+      scopes: ['ios.device'], resourceClaims: write,
+      argumentsSchema: {
+        type: 'object', properties: {
+          device: { type: 'string' }, query: { type: 'string' }, team_id: { type: 'string' }, runner_bundle_id: { type: 'string' }, developer_dir: { type: 'string' },
+          search_target: { type: 'string' }, submit_target: { type: 'string' },
+        },
+        required: ['device', 'query'], additionalProperties: false,
+      },
+    },
+    {
       actionId: 'agent_device_snapshot', title: 'Snapshot agent-device session',
-      description: 'Capture bounded accessibility state from an active iOS Simulator session.',
+      description: 'Capture bounded accessibility state from an active agent-device iOS session.',
       readOnly: true, risk: 'readonly', confirmation: 'none', defaultTimeoutMs: 60_000, cancellable: true, idempotent: true,
-      scopes: ['ios.simulator'], resourceClaims: read,
+      scopes: ['ios.simulator', 'ios.device'], resourceClaims: read,
       argumentsSchema: { type: 'object', properties: { ...interactionProperty, interactive: { type: 'boolean' }, raw: { type: 'boolean' }, depth: { type: 'number' } }, required: ['interaction_id'], additionalProperties: false },
     },
     {
       actionId: 'agent_device_press', title: 'Press agent-device target',
       description: 'Press one ref, selector, or explicit coordinate pair and return a settled bounded diff.',
       readOnly: false, risk: 'workspace_write', confirmation: 'authorization', defaultTimeoutMs: 60_000, cancellable: true, idempotent: false,
-      scopes: ['ios.simulator'], resourceClaims: write,
+      scopes: ['ios.simulator', 'ios.device'], resourceClaims: write,
       argumentsSchema: { type: 'object', properties: { ...interactionProperty, target: { type: 'string' }, x: { type: 'number' }, y: { type: 'number' } }, required: ['interaction_id'], additionalProperties: false },
     },
     {
       actionId: 'agent_device_fill', title: 'Fill agent-device target',
       description: 'Replace non-sensitive text in one ref or selector and return a redacted settled diff. Use manual UI entry for passwords or verification codes.',
       readOnly: false, risk: 'workspace_write', confirmation: 'authorization', defaultTimeoutMs: 60_000, cancellable: true, idempotent: false,
-      scopes: ['ios.simulator'], resourceClaims: write,
+      scopes: ['ios.simulator', 'ios.device'], resourceClaims: write,
       argumentsSchema: { type: 'object', properties: { ...interactionProperty, target: { type: 'string' }, text: { type: 'string' }, delay_ms: { type: 'number' } }, required: ['interaction_id', 'target', 'text'], additionalProperties: false },
     },
     {
       actionId: 'agent_device_scroll', title: 'Scroll agent-device session',
-      description: 'Scroll one active iOS Simulator session serially.',
+      description: 'Scroll one active agent-device iOS session serially.',
       readOnly: false, risk: 'workspace_write', confirmation: 'authorization', defaultTimeoutMs: 60_000, cancellable: true, idempotent: false,
-      scopes: ['ios.simulator'], resourceClaims: write,
+      scopes: ['ios.simulator', 'ios.device'], resourceClaims: write,
       argumentsSchema: { type: 'object', properties: { ...interactionProperty, direction: { type: 'string', enum: ['up', 'down', 'left', 'right', 'top', 'bottom'] }, amount: { type: 'number' } }, required: ['interaction_id', 'direction'], additionalProperties: false },
     },
     {
       actionId: 'agent_device_screenshot', title: 'Capture agent-device screenshot',
       description: 'Capture a bounded PNG into Controller-owned iOS artifact storage.',
       readOnly: false, risk: 'workspace_write', confirmation: 'none', defaultTimeoutMs: 60_000, cancellable: true, idempotent: false,
-      scopes: ['ios.simulator'], resourceClaims: write,
+      scopes: ['ios.simulator', 'ios.device'], resourceClaims: write,
       argumentsSchema: { type: 'object', properties: { ...interactionProperty, label: { type: 'string' }, overlay_refs: { type: 'boolean' }, max_size: { type: 'number' } }, required: ['interaction_id'], additionalProperties: false },
     },
     {
       actionId: 'agent_device_events', title: 'Read agent-device events',
       description: 'Read a bounded page of daemon-owned session events.',
       readOnly: true, risk: 'readonly', confirmation: 'none', defaultTimeoutMs: 30_000, cancellable: true, idempotent: true,
-      scopes: ['ios.simulator'], resourceClaims: read,
+      scopes: ['ios.simulator', 'ios.device'], resourceClaims: read,
       argumentsSchema: { type: 'object', properties: { ...interactionProperty, limit: { type: 'number' }, cursor: { type: 'string' } }, required: ['interaction_id'], additionalProperties: false },
     },
     {
       actionId: 'agent_device_close', title: 'Close agent-device session',
-      description: 'Close the provider session, optionally shutting down the selected simulator.',
+      description: 'Close the provider session. Shutdown applies only to simulators; physical iPhones are never shut down.',
       readOnly: false, risk: 'workspace_write', confirmation: 'authorization', defaultTimeoutMs: 60_000, cancellable: true, idempotent: true,
-      scopes: ['ios.simulator'], resourceClaims: write,
+      scopes: ['ios.simulator', 'ios.device'], resourceClaims: write,
       argumentsSchema: { type: 'object', properties: { ...interactionProperty, shutdown_simulator: { type: 'boolean' } }, required: ['interaction_id'], additionalProperties: false },
     },
   ];
@@ -541,22 +802,45 @@ export async function executeIosAgentDeviceAction(input: AssistantPluginActionEx
   if (input.actionId === 'agent_device_status') return { provider: 'agent-device', ...iosAgentDeviceStatus() };
   if (input.actionId === 'agent_device_close') {
     const interactionId = requireString(input.args.interaction_id, 'interaction_id');
-    const existing = readInteractionSession(input.repoRoot, PROVIDER, interactionId);
+    const existing = readAgentDeviceInteraction(input.repoRoot, interactionId);
     if (existing && !isInteractionSessionActive(existing.status)) {
       return { provider: 'agent-device', interaction: existing, alreadyClosed: true };
     }
   }
   requireDependency();
 
+  if (input.actionId === 'agent_device_jd_search') return executeJdSearch(input);
+
   if (input.actionId === 'agent_device_doctor') {
-    const selected = selectSimulator(input, optionalString(input.args.device));
+    const selected = selectTarget(input, optionalString(input.args.device));
     const args = ['doctor', '--platform', 'ios', '--device', selected.id];
     const app = optionalString(input.args.app);
     if (app) args.push('--app', app);
     args.push('--json');
     return {
       provider: 'agent-device', version: IOS_AGENT_DEVICE_VERSION, device: selected,
-      result: bounded(runJson(input, args, { failureCode: 'AGENT_DEVICE_DOCTOR_FAILED', timeoutMs: 4 * 60_000 })),
+      physicalDeviceSupported: selected.kind === 'device',
+      result: bounded(runJson(input, args, {
+        signing: signingFromArgs(input.args),
+        failureCode: 'AGENT_DEVICE_DOCTOR_FAILED',
+        timeoutMs: 4 * 60_000,
+      })),
+    };
+  }
+
+  if (input.actionId === 'agent_device_prepare') {
+    const selected = selectTarget(input, requireString(input.args.device, 'device'));
+    const signing = signingFromArgs(input.args);
+    return {
+      provider: 'agent-device', version: IOS_AGENT_DEVICE_VERSION, device: selected,
+      physicalDeviceSupported: selected.kind === 'device',
+      result: bounded(runJson(input, [
+        'prepare', 'ios-runner', '--platform', 'ios', '--device', selected.id, '--timeout', '600000', '--json',
+      ], {
+        signing,
+        failureCode: 'AGENT_DEVICE_PREPARE_FAILED',
+        timeoutMs: 10 * 60_000,
+      })),
     };
   }
 
@@ -566,26 +850,27 @@ export async function executeIosAgentDeviceAction(input: AssistantPluginActionEx
     if (/^[a-z][a-z0-9+.-]*:\/\//i.test(app)) {
       throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', 'agent_device_open accepts an app name or bundle identifier, not a URL or tokenized deep link.', { retryable: false });
     }
-    const selected = selectSimulator(input, optionalString(input.args.device));
-    const conflict = listInteractionSessions(input.repoRoot, PROVIDER).find((entry) =>
+    const selected = selectTarget(input, optionalString(input.args.device));
+    const provider = providerForDevice(selected);
+    const conflict = listAllIosInteractions(input.repoRoot).find((entry) =>
       isInteractionSessionActive(entry.status) && entry.targetId === selected.id);
     if (conflict) {
-      throw new AssistantPluginError('PLUGIN_RESOURCE_BUSY', 'The selected iOS Simulator already has an active agent-device interaction.', {
+      throw new AssistantPluginError('PLUGIN_RESOURCE_BUSY', 'The selected iOS target already has an active interaction.', {
         retryable: true,
         details: { interactionId: conflict.interactionId, targetId: conflict.targetId },
       });
     }
-    pruneInteractionSessions(input.repoRoot, PROVIDER, 100);
+    pruneInteractionSessions(input.repoRoot, provider, 100);
     const interactionId = `ios_agent_device_${randomUUID()}`;
     const createdAt = timestamp();
     const record: InteractionSessionRecord = {
       schemaVersion: 1,
       interactionId,
-      provider: PROVIDER,
+      provider,
       sessionId: `repo-harness-${sanitize(interactionId).slice(-40)}`,
       targetId: selected.id,
       status: 'starting',
-      reason: 'ios_simulator_automation',
+      reason: selected.kind === 'simulator' ? 'ios_simulator_automation' : 'ios_physical_device_automation',
       instructions: app,
       owner: { repoId: input.repoId, requestId: input.requestId, jobId: input.jobId },
       createdAt,
@@ -593,6 +878,7 @@ export async function executeIosAgentDeviceAction(input: AssistantPluginActionEx
       expiresAt: new Date(hooks.now().getTime() + SESSION_EXPIRY_MS).toISOString(),
     };
     writeInteractionSession(input.repoRoot, record);
+    writeSigningConfig(input, interactionId, signingFromArgs(input.args));
     const args = ['open', app, '--device', selected.id];
     if (input.args.relaunch === true) args.push('--relaunch');
     try {
@@ -601,12 +887,13 @@ export async function executeIosAgentDeviceAction(input: AssistantPluginActionEx
         timeoutMs: 4 * 60_000,
         failureCode: 'AGENT_DEVICE_OPEN_FAILED',
       });
-      const active = patchInteractionSession(input.repoRoot, PROVIDER, interactionId, { status: 'waiting_for_user' }) ?? record;
+      const active = patchInteractionSession(input.repoRoot, provider, interactionId, { status: 'waiting_for_user' }) ?? record;
       return {
         provider: 'agent-device',
         version: IOS_AGENT_DEVICE_VERSION,
         interaction: active,
         device: selected,
+        physicalDeviceSupported: selected.kind === 'device',
         result: bounded(result),
       };
     } catch (error) {
@@ -627,6 +914,9 @@ export async function executeIosAgentDeviceAction(input: AssistantPluginActionEx
       const target = optionalString(input.args.target);
       const hasPoint = typeof input.args.x === 'number' && typeof input.args.y === 'number';
       if (!target && !hasPoint) throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', 'target or x/y is required.', { retryable: false });
+      if (record.provider === DEVICE_PROVIDER && target && SENSITIVE_SEMANTICS.test(target)) {
+        throw new AssistantPluginError('IOS_DEVICE_SENSITIVE_ACTION_BLOCKED', 'Press targets involving credentials, verification, biometrics, checkout, purchase or payment require human interaction.', { retryable: false });
+      }
       const args = ['press', ...(target ? [target] : [String(input.args.x), String(input.args.y)]), '--settle'];
       return { provider: 'agent-device', interaction: record, result: bounded(runSessionCommand(input, record, args, 'AGENT_DEVICE_PRESS_FAILED')) };
     }
@@ -634,6 +924,9 @@ export async function executeIosAgentDeviceAction(input: AssistantPluginActionEx
       const target = requireString(input.args.target, 'target');
       const text = typeof input.args.text === 'string' ? input.args.text : undefined;
       if (text === undefined) throw new AssistantPluginError('PLUGIN_ACTION_ARGUMENT_INVALID', 'text is required.', { retryable: false });
+      if (record.provider === DEVICE_PROVIDER && (SENSITIVE_SEMANTICS.test(target) || SENSITIVE_SEMANTICS.test(text))) {
+        throw new AssistantPluginError('IOS_DEVICE_SENSITIVE_ACTION_BLOCKED', 'Sensitive text and credential, verification, checkout, purchase or payment targets require human interaction.', { retryable: false });
+      }
       const args = ['fill', target, text, '--settle'];
       if (typeof input.args.delay_ms === 'number') args.push('--delay-ms', String(Math.max(0, Math.min(5_000, Math.trunc(input.args.delay_ms)))));
       const result = runSessionCommand(input, record, args, 'AGENT_DEVICE_FILL_FAILED');
@@ -676,15 +969,15 @@ export async function executeIosAgentDeviceAction(input: AssistantPluginActionEx
         return { provider: 'agent-device', interaction: record, alreadyClosed: true };
       }
       const args = ['close'];
-      if (input.args.shutdown_simulator === true) args.push('--shutdown');
-      patchInteractionSession(input.repoRoot, PROVIDER, record.interactionId, { status: 'closing' });
+      if (record.provider === SIMULATOR_PROVIDER && input.args.shutdown_simulator === true) args.push('--shutdown');
+      patchInteractionSession(input.repoRoot, record.provider, record.interactionId, { status: 'closing' });
       try {
         const result = runJson(input, [...args, '--session', record.sessionId, '--platform', 'ios', '--json'], {
           record,
           timeoutMs: 60_000,
           failureCode: 'AGENT_DEVICE_CLOSE_FAILED',
         });
-        const closed = patchInteractionSession(input.repoRoot, PROVIDER, record.interactionId, { status: 'closed' }) ?? record;
+        const closed = patchInteractionSession(input.repoRoot, record.provider, record.interactionId, { status: 'closed' }) ?? record;
         return { provider: 'agent-device', interaction: closed, result: bounded(result) };
       } catch (error) {
         return failSession(input, record, error);
