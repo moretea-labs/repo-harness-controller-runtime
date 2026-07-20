@@ -1,27 +1,42 @@
-import { createHash, randomUUID } from 'crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs';
-import { dirname, join } from 'path';
-import { repositoryControllerRoot } from '../../../cli/repositories/controller-home';
-import { listActiveLeases } from '../../resources/leases/store';
+/**
+ * Checkout Mutation Ownership backed by the shared Execution Lease arbiter.
+ *
+ * Fast Path and Durable Work both claim `workspace:<checkoutId>` (write mode)
+ * through acquireExecutionLeases — no separate file-gate race, no one-way
+ * observation. Heartbeat renew keeps long batches alive; release is
+ * compare-and-delete via fencing tokens.
+ */
+import { createHash } from 'crypto';
+import {
+  acquireExecutionLeases,
+  assertFencingToken,
+  releaseExecutionLeases,
+  renewExecutionLeases,
+} from '../../resources/leases/store';
+import type { ExecutionLease } from '../../resources/leases/types';
 import { runBoundedGit } from './async-process';
 
 export interface CheckoutMutationGate {
+  /** Alias of ownerJobId used for lease ownership. */
   gateId: string;
+  owner: string;
+  ownerJobId: string;
   repoId: string;
   checkoutId: string;
-  owner: string;
+  resourceKey: string;
+  leaseId: string;
   fencingToken: number;
   baseHead: string | null;
   baseStatusHash: string | null;
   acquiredAt: string;
   expiresAt: string;
-  path: string;
+  ttlMs: number;
 }
 
 export interface MutationGateBusy {
   busy: true;
   reason: string;
-  blockers: Array<{ kind: 'fast_gate' | 'durable_lease'; owner: string; resourceKey?: string }>;
+  blockers: Array<{ kind: 'fast_gate' | 'durable_lease'; owner: string; resourceKey?: string; leaseId?: string }>;
 }
 
 export type MutationGateAcquireResult =
@@ -29,14 +44,11 @@ export type MutationGateAcquireResult =
   | MutationGateBusy;
 
 const DEFAULT_TTL_MS = 30_000;
+const MIN_TTL_MS = 5_000;
+const MAX_TTL_MS = 120_000;
 
-function gateDir(controllerHome: string, repoId: string): string {
-  return join(repositoryControllerRoot(controllerHome, repoId), 'mutation-gates');
-}
-
-function gatePath(controllerHome: string, repoId: string, checkoutId: string): string {
-  const safe = checkoutId.replace(/[^a-zA-Z0-9._-]+/g, '-').slice(0, 80) || 'default';
-  return join(gateDir(controllerHome, repoId), `${safe}.json`);
+export function checkoutMutationResourceKey(checkoutId: string): string {
+  return `workspace:${checkoutId}`;
 }
 
 async function snapshotHash(repoRoot: string): Promise<{ head: string | null; statusHash: string | null }> {
@@ -52,59 +64,23 @@ async function snapshotHash(repoRoot: string): Promise<{ head: string | null; st
       maxOutputBytes: 128 * 1024,
     }),
   ]);
+  if (!headResult.ok && !headResult.stdout.trim()) {
+    // Unborn HEAD is ok (empty repo); hard failures still produce empty status.
+  }
   const head = headResult.ok ? (headResult.stdout.trim() || null) : null;
-  const status = statusResult.ok ? statusResult.stdout : '';
+  if (!statusResult.ok && !statusResult.cancelled) {
+    throw new Error(`MUTATION_SNAPSHOT_FAILED: git status failed: ${statusResult.stderr || statusResult.exitCode}`);
+  }
+  const status = statusResult.stdout;
   return {
     head,
     statusHash: createHash('sha256').update(status).digest('hex'),
   };
 }
 
-function readGate(path: string): CheckoutMutationGate | undefined {
-  if (!existsSync(path)) return undefined;
-  try {
-    const gate = JSON.parse(readFileSync(path, 'utf8')) as CheckoutMutationGate;
-    if (Date.parse(gate.expiresAt) <= Date.now()) {
-      rmSync(path, { force: true });
-      return undefined;
-    }
-    return gate;
-  } catch {
-    try {
-      rmSync(path, { force: true });
-    } catch {
-      /* ignore */
-    }
-    return undefined;
-  }
-}
-
-function durableWriteBlockers(controllerHome: string, repoId: string, checkoutId: string): MutationGateBusy['blockers'] {
-  const active = listActiveLeases(controllerHome, repoId);
-  const blockers: MutationGateBusy['blockers'] = [];
-  for (const lease of active) {
-    const key = lease.resourceKey;
-    const writeMode = lease.mode === 'write' || lease.mode === 'exclusive';
-    if (!writeMode) continue;
-    const hitsCheckout = key === `workspace:${checkoutId}`
-      || key === 'repo-content:*'
-      || key.startsWith('path:')
-      || key.startsWith('workspace:')
-      || key.startsWith('git-ref:');
-    if (hitsCheckout) {
-      blockers.push({
-        kind: 'durable_lease',
-        owner: lease.ownerJobId,
-        resourceKey: key,
-      });
-    }
-  }
-  return blockers;
-}
-
 /**
- * Shared checkout mutation ownership for Fast Path and coordination with Durable leases.
- * Does not create ExecutionJob; uses the same conceptual resource keys as durable workspace writes.
+ * Acquire exclusive checkout mutation ownership via the durable lease store.
+ * Does not create ExecutionJob. Durable writers claiming the same workspace key conflict atomically.
  */
 export async function acquireCheckoutMutationGate(input: {
   controllerHome: string;
@@ -114,103 +90,132 @@ export async function acquireCheckoutMutationGate(input: {
   owner: string;
   ttlMs?: number;
 }): Promise<MutationGateAcquireResult> {
-  const path = gatePath(input.controllerHome, input.repoId, input.checkoutId);
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const ttlMs = Math.max(MIN_TTL_MS, Math.min(input.ttlMs ?? DEFAULT_TTL_MS, MAX_TTL_MS));
+  const resourceKey = checkoutMutationResourceKey(input.checkoutId);
+  const ownerJobId = input.owner.startsWith('fast:') || input.owner.startsWith('JOB-')
+    ? input.owner
+    : `fast:${input.owner}`;
 
-  const durable = durableWriteBlockers(input.controllerHome, input.repoId, input.checkoutId);
-  if (durable.length > 0) {
-    return {
-      busy: true,
-      reason: 'durable_writer_active',
-      blockers: durable,
-    };
-  }
-
-  const existing = readGate(path);
-  if (existing && existing.owner !== input.owner) {
-    return {
-      busy: true,
-      reason: 'fast_mutation_active',
-      blockers: [{ kind: 'fast_gate', owner: existing.owner }],
-    };
-  }
-
-  const snap = await snapshotHash(input.repoRoot);
-  const acquiredAt = new Date().toISOString();
-  const ttl = Math.max(1_000, input.ttlMs ?? DEFAULT_TTL_MS);
-  const gate: CheckoutMutationGate = {
-    gateId: `mg_${Date.now()}_${randomUUID().slice(0, 8)}`,
-    repoId: input.repoId,
-    checkoutId: input.checkoutId,
-    owner: input.owner,
-    fencingToken: Date.now(),
-    baseHead: snap.head,
-    baseStatusHash: snap.statusHash,
-    acquiredAt,
-    expiresAt: new Date(Date.now() + ttl).toISOString(),
-    path,
-  };
-
-  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  let snap: { head: string | null; statusHash: string | null };
   try {
-    writeFileSync(temporary, `${JSON.stringify(gate, null, 2)}\n`, { encoding: 'utf8', flag: 'w' });
-    // Exclusive create when possible
-    if (existsSync(path) && !existing) {
-      const raced = readGate(path);
-      if (raced && raced.owner !== input.owner) {
-        rmSync(temporary, { force: true });
-        return {
-          busy: true,
-          reason: 'fast_mutation_active',
-          blockers: [{ kind: 'fast_gate', owner: raced.owner }],
-        };
-      }
-    }
-    renameSync(temporary, path);
+    snap = await snapshotHash(input.repoRoot);
   } catch (error) {
-    try {
-      rmSync(temporary, { force: true });
-    } catch {
-      /* ignore */
-    }
-    const raced = readGate(path);
-    if (raced && raced.owner !== input.owner) {
-      return {
-        busy: true,
-        reason: 'fast_mutation_active',
-        blockers: [{ kind: 'fast_gate', owner: raced.owner }],
-      };
-    }
-    throw error;
-  }
-
-  // Re-check durable after acquire to reduce race window.
-  const durableAfter = durableWriteBlockers(input.controllerHome, input.repoId, input.checkoutId);
-  if (durableAfter.length > 0) {
-    releaseCheckoutMutationGate(input.controllerHome, input.repoId, input.checkoutId, gate.gateId);
     return {
       busy: true,
-      reason: 'durable_writer_active',
-      blockers: durableAfter,
+      reason: 'snapshot_failed',
+      blockers: [{
+        kind: 'fast_gate',
+        owner: error instanceof Error ? error.message : String(error),
+      }],
     };
   }
 
-  return { acquired: true, gate };
+  const result = acquireExecutionLeases(
+    input.controllerHome,
+    input.repoId,
+    ownerJobId,
+    [{ resourceKey, mode: 'write' }],
+    ttlMs,
+  );
+
+  if (!result.acquired || result.leases.length === 0) {
+    return {
+      busy: true,
+      reason: 'mutation_ownership_busy',
+      blockers: result.blockers.map((blocker) => ({
+        kind: blocker.ownerJobId.startsWith('fast:') ? 'fast_gate' as const : 'durable_lease' as const,
+        owner: blocker.ownerJobId,
+        resourceKey: blocker.resourceKey,
+        leaseId: blocker.leaseId,
+      })),
+    };
+  }
+
+  const lease = result.leases[0]!;
+  return {
+    acquired: true,
+    gate: {
+      gateId: ownerJobId,
+      owner: ownerJobId,
+      ownerJobId,
+      repoId: input.repoId,
+      checkoutId: input.checkoutId,
+      resourceKey,
+      leaseId: lease.leaseId,
+      fencingToken: lease.fencingToken,
+      baseHead: snap.head,
+      baseStatusHash: snap.statusHash,
+      acquiredAt: lease.acquiredAt,
+      expiresAt: lease.expiresAt,
+      ttlMs,
+    },
+  };
+}
+
+export function renewCheckoutMutationGate(
+  controllerHome: string,
+  gate: CheckoutMutationGate,
+  ttlMs?: number,
+): CheckoutMutationGate {
+  const nextTtl = Math.max(MIN_TTL_MS, Math.min(ttlMs ?? gate.ttlMs, MAX_TTL_MS));
+  const renewed = renewExecutionLeases(
+    controllerHome,
+    gate.repoId,
+    gate.ownerJobId,
+    nextTtl,
+    [{ leaseId: gate.leaseId, fencingToken: gate.fencingToken }],
+  );
+  const lease = renewed.find((entry) => entry.leaseId === gate.leaseId);
+  if (!lease) {
+    throw new Error(`MUTATION_RENEW_FAILED: lease ${gate.leaseId} missing after renew`);
+  }
+  return {
+    ...gate,
+    expiresAt: lease.expiresAt,
+    fencingToken: lease.fencingToken,
+    ttlMs: nextTtl,
+  };
+}
+
+export function assertCheckoutMutationGate(
+  controllerHome: string,
+  gate: CheckoutMutationGate,
+): ExecutionLease {
+  return assertFencingToken(controllerHome, gate.repoId, gate.leaseId, gate.fencingToken);
 }
 
 export function releaseCheckoutMutationGate(
   controllerHome: string,
   repoId: string,
-  checkoutId: string,
-  gateId?: string,
+  _checkoutId: string,
+  gateIdOrOwner?: string,
+  fencing?: { leaseId: string; fencingToken: number },
 ): void {
-  const path = gatePath(controllerHome, repoId, checkoutId);
-  const current = readGate(path);
-  if (!current) return;
-  if (gateId && current.gateId !== gateId) return;
-  rmSync(path, { force: true });
+  if (!gateIdOrOwner) return;
+  releaseExecutionLeases(
+    controllerHome,
+    repoId,
+    gateIdOrOwner,
+    fencing ? [{ leaseId: fencing.leaseId, fencingToken: fencing.fencingToken }] : undefined,
+  );
 }
 
+export function releaseCheckoutMutationGateOwned(
+  controllerHome: string,
+  gate: CheckoutMutationGate,
+): void {
+  releaseExecutionLeases(
+    controllerHome,
+    gate.repoId,
+    gate.ownerJobId,
+    [{ leaseId: gate.leaseId, fencingToken: gate.fencingToken }],
+  );
+}
+
+/**
+ * Hold mutation ownership for the duration of operation with automatic heartbeat renew.
+ * Renew interval = ttl/3. Renew failure aborts by throwing after operation cancellation is signalled.
+ */
 export async function withCheckoutMutationGate<T>(
   input: {
     controllerHome: string;
@@ -220,17 +225,48 @@ export async function withCheckoutMutationGate<T>(
     owner: string;
     ttlMs?: number;
   },
-  operation: (gate: CheckoutMutationGate) => Promise<T>,
+  operation: (gate: CheckoutMutationGate, helpers: {
+    renew: () => CheckoutMutationGate;
+    assert: () => void;
+  }) => Promise<T>,
 ): Promise<{ ok: true; value: T; gate: CheckoutMutationGate } | { ok: false; busy: MutationGateBusy }> {
   const acquired = await acquireCheckoutMutationGate(input);
   if (!('acquired' in acquired) || !acquired.acquired) {
     return { ok: false, busy: acquired as MutationGateBusy };
   }
+
+  let gate = acquired.gate;
+  let renewFailed: Error | undefined;
+  const renewIntervalMs = Math.max(1_000, Math.floor(gate.ttlMs / 3));
+  const timer = setInterval(() => {
+    try {
+      gate = renewCheckoutMutationGate(input.controllerHome, gate);
+    } catch (error) {
+      renewFailed = error instanceof Error ? error : new Error(String(error));
+    }
+  }, renewIntervalMs);
+  timer.unref?.();
+
   try {
-    const value = await operation(acquired.gate);
-    return { ok: true, value, gate: acquired.gate };
+    const value = await operation(gate, {
+      renew: () => {
+        gate = renewCheckoutMutationGate(input.controllerHome, gate);
+        return gate;
+      },
+      assert: () => {
+        if (renewFailed) throw renewFailed;
+        assertCheckoutMutationGate(input.controllerHome, gate);
+      },
+    });
+    if (renewFailed) throw renewFailed;
+    return { ok: true, value, gate };
   } finally {
-    releaseCheckoutMutationGate(input.controllerHome, input.repoId, input.checkoutId, acquired.gate.gateId);
+    clearInterval(timer);
+    try {
+      releaseCheckoutMutationGateOwned(input.controllerHome, gate);
+    } catch {
+      /* best-effort release */
+    }
   }
 }
 

@@ -2,8 +2,12 @@ import { classifyRepositoryCommand } from '../../../cli/repositories/command-cla
 import { normalizeRepositoryCommand } from '../../../cli/repositories/command-normalization';
 import {
   FAST_BATCH_MAX_STEPS,
+  FAST_BATCH_MAX_TOTAL_MS,
   FAST_PATH_MAX_TIMEOUT_MS,
+  READONLY_EFFECTS,
+  WORKSPACE_WRITE_EFFECTS,
   type ExecutionDecision,
+  type ExecutionEffects,
   type ExecutionRisk,
   type FastOperationKind,
   type RepositoryBatchStep,
@@ -80,6 +84,17 @@ const DURABLE_OPERATIONS = new Set<string>([
   'work_finalize',
 ]);
 
+const WRITE_OPERATIONS = new Set([
+  'apply_patch',
+  'stage_paths',
+  'commit_paths',
+  'repository_safe_patch_apply',
+  'git_stage_paths',
+  'git_commit_paths',
+  'apply_edit_operations',
+  'repository_git_commit',
+]);
+
 const DESTRUCTIVE_HINTS = [
   'rm -rf',
   'git reset --hard',
@@ -97,9 +112,48 @@ function riskFromClassification(risk: string): ExecutionRisk {
   return 'unknown';
 }
 
+function effectsForRisk(risk: ExecutionRisk, operation: string): ExecutionEffects {
+  if (risk === 'remote_write') {
+    return {
+      readsWorkspace: true,
+      mutatesWorkspace: true,
+      mutatesGitRefs: true,
+      remoteWrite: true,
+    };
+  }
+  if (risk === 'destructive' || risk === 'workspace_write') {
+    return {
+      readsWorkspace: true,
+      mutatesWorkspace: true,
+      mutatesGitRefs: operation.includes('commit') || operation.includes('stage') || operation.includes('git'),
+      remoteWrite: false,
+    };
+  }
+  if (WRITE_OPERATIONS.has(operation)) {
+    return {
+      ...WORKSPACE_WRITE_EFFECTS,
+      mutatesGitRefs: operation.includes('commit') || operation.includes('stage'),
+    };
+  }
+  return { ...READONLY_EFFECTS };
+}
+
+function decisionBase(
+  partial: Omit<ExecutionDecision, 'effects'> & { effects?: ExecutionEffects },
+  operation: string,
+): ExecutionDecision {
+  return {
+    ...partial,
+    effects: partial.effects ?? effectsForRisk(partial.risk, operation),
+  };
+}
+
 /**
  * Strict focused-check gate: typed argv only, explicit file/filter required.
  * Bare package-test commands always fail this check.
+ *
+ * Focused checks that are not known-readonly still carry mutatesWorkspace=true
+ * because package tests may write snapshots/caches/artifacts.
  */
 export function isFocusedCheckCommand(command: string | readonly string[] | undefined): boolean {
   if (command === undefined) return false;
@@ -116,11 +170,9 @@ export function isFocusedCheckCommand(command: string | readonly string[] | unde
 
   if (joined.includes('--coverage') || joined.includes('./...')) return false;
 
-  // Skip the first non-flag token when it is a known test verb (e.g. `bun test`, `cargo test`).
   const VERBS = new Set(['test', 'check', 'run']);
   const pathCandidates = rest.filter((word, index) => {
     if (word.startsWith('-')) return false;
-    // First positional after program is often the verb, not a path.
     if (index === 0 && VERBS.has(word.toLowerCase())) return false;
     return true;
   });
@@ -145,7 +197,6 @@ export function isFocusedCheckCommand(command: string | readonly string[] | unde
     || word.startsWith('--package='));
 
   if (program === 'bun' && lowerRest[0] === 'test') {
-    // Require an explicit file/filter beyond bare `bun test`.
     return pathCandidates.length >= 1 && (hasPathLike || hasNameFilter);
   }
   if (program === 'node' && lowerRest.some((w) => w === '--test' || w.startsWith('--test='))) {
@@ -158,15 +209,36 @@ export function isFocusedCheckCommand(command: string | readonly string[] | unde
     return hasPathLike || hasNameFilter;
   }
   if (program === 'cargo' && (lowerRest[0] === 'test' || lowerRest[0] === 'check')) {
-    // Bare `cargo test` runs the full suite — require package/filter/target.
     return hasPathLike || hasNameFilter || lowerRest.includes('--lib') || lowerRest.includes('--bin')
       || lowerRest.some((w) => w.startsWith('--bin=') || w.startsWith('--package') || w.startsWith('--test'));
   }
-  // npm/pnpm/yarn test are never focused — arbitrary package scripts.
   if (['npm', 'pnpm', 'yarn'].includes(program) && lowerRest[0] === 'test') {
     return false;
   }
   return false;
+}
+
+/**
+ * Focused package tests may write snapshots/caches; treat as potential workspace mutation.
+ * Pure readonly argv commands do not.
+ */
+export function commandEffects(
+  command: string | readonly string[] | undefined,
+  defaultBranch?: string,
+): ExecutionEffects {
+  if (command === undefined) return { ...READONLY_EFFECTS };
+  const classification = classifyRepositoryCommand(command, defaultBranch);
+  if (classification.risk === 'remote_write') {
+    return { readsWorkspace: true, mutatesWorkspace: true, mutatesGitRefs: true, remoteWrite: true };
+  }
+  if (classification.risk === 'destructive' || classification.risk === 'workspace_write') {
+    return { readsWorkspace: true, mutatesWorkspace: true, mutatesGitRefs: false, remoteWrite: false };
+  }
+  // Even "readonly" focused checks can write snapshots; only pure read programs stay non-mutating.
+  if (isFocusedCheckCommand(command)) {
+    return { readsWorkspace: true, mutatesWorkspace: true, mutatesGitRefs: false, remoteWrite: false };
+  }
+  return { ...READONLY_EFFECTS };
 }
 
 function commandLooksDestructive(command: string | readonly string[] | undefined): boolean {
@@ -215,6 +287,7 @@ export function extractPatchPaths(operations: unknown): string[] {
 /**
  * Small, explicit execution router. Returns fast | durable | reject only.
  * Never silently upgrades mid-execution — callers must re-issue durable requests.
+ * Decision always includes typed effects for mutation ownership.
  */
 export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
   const reasons: string[] = [];
@@ -226,7 +299,7 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
   ];
 
   if (requested === 'durable') {
-    return {
+    return decisionBase({
       mode: 'durable',
       reasons: ['caller_requested_durable'],
       risk: 'unknown',
@@ -234,11 +307,11 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
       requiresIsolation: input.requiresIsolation === true,
       requiresRecovery: input.requiresRecovery === true,
       suggestedOperation: durableSuggestion(operation),
-    };
+    }, operation);
   }
 
   if (commandLooksDestructive(input.command) || operation.includes('destructive')) {
-    return {
+    return decisionBase({
       mode: 'reject',
       reasons: ['destructive_operation_requires_strong_confirmation'],
       risk: 'destructive',
@@ -247,11 +320,17 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
       requiresRecovery: false,
       rejectCode: 'DESTRUCTIVE_REJECTED',
       suggestedOperation: 'repository_command_preview + explicit strong confirmation via Durable Work',
-    };
+      effects: {
+        readsWorkspace: true,
+        mutatesWorkspace: true,
+        mutatesGitRefs: true,
+        remoteWrite: false,
+      },
+    }, operation);
   }
 
   if (pathsOutOfScope(scopedPaths, input.allowedPaths)) {
-    return {
+    return decisionBase({
       mode: 'reject',
       reasons: ['paths_outside_declared_scope'],
       risk: 'workspace_write',
@@ -259,7 +338,8 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
       requiresIsolation: false,
       requiresRecovery: false,
       rejectCode: 'PATH_SCOPE_REJECTED',
-    };
+      effects: { ...WORKSPACE_WRITE_EFFECTS },
+    }, operation);
   }
 
   if (input.background === true) reasons.push('background_execution_requested');
@@ -276,16 +356,19 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
   }
   if (DURABLE_OPERATIONS.has(operation)) reasons.push(`operation_${operation}_is_durable_by_policy`);
 
+  let commandEffectsValue: ExecutionEffects | undefined;
+
   if (operation === 'repository_command_execute' || operation === 'run_short_command' || operation === 'run_focused_check') {
     if (input.command !== undefined) {
       const classification = classifyRepositoryCommand(input.command, input.defaultBranch);
       const canonical = normalizeRepositoryCommand(input.command);
+      commandEffectsValue = commandEffects(input.command, input.defaultBranch);
       if (canonical.kind !== 'argv' && (operation === 'run_focused_check' || operation === 'run_short_command')) {
         reasons.push('shell_command_not_allowed_on_fast_path');
       }
       if (classification.risk === 'remote_write') reasons.push('command_classified_remote_write');
       if (classification.risk === 'destructive') {
-        return {
+        return decisionBase({
           mode: 'reject',
           reasons: ['command_classified_destructive', ...classification.reasons],
           risk: 'destructive',
@@ -294,7 +377,8 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
           requiresRecovery: false,
           rejectCode: 'DESTRUCTIVE_COMMAND',
           suggestedOperation: 'repository_command_preview',
-        };
+          effects: commandEffectsValue,
+        }, operation);
       }
       const focused = isFocusedCheckCommand(input.command);
       if (operation === 'run_focused_check' && !focused) {
@@ -315,7 +399,7 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
 
   if (operation === 'batch' && input.steps) {
     if (input.steps.length === 0) {
-      return {
+      return decisionBase({
         mode: 'reject',
         reasons: ['batch_requires_at_least_one_step'],
         risk: 'unknown',
@@ -323,11 +407,13 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
         requiresIsolation: false,
         requiresRecovery: false,
         rejectCode: 'EMPTY_BATCH',
-      };
+      }, operation);
     }
     if (input.steps.length > FAST_BATCH_MAX_STEPS) {
       reasons.push(`batch_exceeds_max_steps_${FAST_BATCH_MAX_STEPS}`);
     }
+    let batchMutates = false;
+    let estimatedTotal = 0;
     for (const step of input.steps) {
       const stepDecision = routeExecution({
         operation: step.kind,
@@ -340,14 +426,28 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
         patchOperationCount: Array.isArray(step.input.operations) ? step.input.operations.length : undefined,
         defaultBranch: input.defaultBranch,
       });
+      if (stepDecision.effects.mutatesWorkspace || stepDecision.effects.mutatesGitRefs) batchMutates = true;
+      // Only count explicit timeouts toward the batch budget. Implicit defaults are
+      // wall-clock bounded by FAST_BATCH_MAX_TOTAL_MS at runtime, not by summing caps.
+      const explicitTimeout = typeof step.input.timeout_ms === 'number'
+        ? step.input.timeout_ms
+        : typeof input.timeoutMs === 'number'
+          ? input.timeoutMs
+          : undefined;
+      if (explicitTimeout !== undefined) {
+        estimatedTotal += Math.min(explicitTimeout, FAST_PATH_MAX_TIMEOUT_MS);
+      } else {
+        // Conservative per-step estimate for budget (not the hard timeout cap).
+        estimatedTotal += stepDecision.effects.mutatesWorkspace ? 5_000 : 2_000;
+      }
       if (stepDecision.mode === 'reject') {
-        return {
+        return decisionBase({
           ...stepDecision,
           reasons: [`batch_step_${step.kind}_rejected`, ...stepDecision.reasons],
-        };
+        }, operation);
       }
       if (stepDecision.mode === 'durable') {
-        return {
+        return decisionBase({
           mode: 'durable',
           reasons: [`batch_step_${step.kind}_requires_durable`, ...stepDecision.reasons],
           risk: stepDecision.risk,
@@ -355,14 +455,38 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
           requiresIsolation: stepDecision.requiresIsolation,
           requiresRecovery: stepDecision.requiresRecovery,
           suggestedOperation: stepDecision.suggestedOperation ?? 'create durable work / run_check',
-        };
+          effects: stepDecision.effects,
+        }, operation);
       }
+    }
+    if (estimatedTotal > FAST_BATCH_MAX_TOTAL_MS) {
+      return decisionBase({
+        mode: 'durable',
+        reasons: [`batch_estimated_total_exceeds_${FAST_BATCH_MAX_TOTAL_MS}`, `estimatedMs=${estimatedTotal}`],
+        risk: batchMutates ? 'workspace_write' : 'readonly',
+        estimatedClass: 'long',
+        requiresIsolation: false,
+        requiresRecovery: false,
+        suggestedOperation: 'Durable Work batch',
+        effects: batchMutates ? { ...WORKSPACE_WRITE_EFFECTS } : { ...READONLY_EFFECTS },
+      }, operation);
+    }
+    if (reasons.length === 0) {
+      return decisionBase({
+        mode: 'fast',
+        reasons: requested === 'fast' ? ['caller_requested_fast', 'policy_allows_fast'] : ['auto_selected_fast'],
+        risk: batchMutates ? 'workspace_write' : 'readonly',
+        estimatedClass: 'short',
+        requiresIsolation: false,
+        requiresRecovery: false,
+        effects: batchMutates ? { ...WORKSPACE_WRITE_EFFECTS } : { ...READONLY_EFFECTS },
+      }, operation);
     }
   }
 
   if (reasons.length > 0) {
     if (requested === 'fast') {
-      return {
+      return decisionBase({
         mode: 'durable',
         reasons: ['fast_requested_but_policy_requires_durable', ...reasons],
         risk: 'unknown',
@@ -370,9 +494,10 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
         requiresIsolation: input.requiresIsolation === true,
         requiresRecovery: input.requiresRecovery === true,
         suggestedOperation: durableSuggestion(operation),
-      };
+        effects: commandEffectsValue,
+      }, operation);
     }
-    return {
+    return decisionBase({
       mode: 'durable',
       reasons,
       risk: input.remoteWrite ? 'remote_write' : 'unknown',
@@ -380,11 +505,12 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
       requiresIsolation: input.requiresIsolation === true || input.requiresWorktree === true,
       requiresRecovery: input.requiresRecovery === true,
       suggestedOperation: durableSuggestion(operation),
-    };
+      effects: commandEffectsValue,
+    }, operation);
   }
 
   if (!FAST_OPERATIONS.has(operation) && operation !== 'repository_command_execute') {
-    return {
+    return decisionBase({
       mode: 'durable',
       reasons: ['operation_not_in_fast_allowlist'],
       risk: 'unknown',
@@ -392,12 +518,12 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
       requiresIsolation: false,
       requiresRecovery: false,
       suggestedOperation: durableSuggestion(operation),
-    };
+    }, operation);
   }
 
   if (operation === 'repository_command_execute' || operation === 'run_short_command' || operation === 'run_focused_check') {
     if (input.command === undefined) {
-      return {
+      return decisionBase({
         mode: 'durable',
         reasons: ['repository_command_requires_classification'],
         risk: 'unknown',
@@ -405,13 +531,14 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
         requiresIsolation: false,
         requiresRecovery: false,
         suggestedOperation: 'repository_command_execute via Durable Work',
-      };
+      }, operation);
     }
     const classification = classifyRepositoryCommand(input.command, input.defaultBranch);
     const focused = isFocusedCheckCommand(input.command);
     const canonical = normalizeRepositoryCommand(input.command);
+    const effects = commandEffects(input.command, input.defaultBranch);
     if (canonical.kind !== 'argv') {
-      return {
+      return decisionBase({
         mode: 'durable',
         reasons: ['shell_command_requires_durable'],
         risk: riskFromClassification(classification.risk),
@@ -419,19 +546,23 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
         requiresIsolation: false,
         requiresRecovery: false,
         suggestedOperation: 'repository_command_execute via Durable Work / Local Job',
-      };
+        effects,
+      }, operation);
     }
     if (classification.risk === 'readonly' || focused) {
-      return {
+      return decisionBase({
         mode: 'fast',
         reasons: focused ? ['strict_focused_check_command'] : ['readonly_allowlisted_command'],
-        risk: riskFromClassification(classification.risk),
+        risk: riskFromClassification(classification.risk === 'readonly' && focused && effects.mutatesWorkspace
+          ? 'workspace_write'
+          : classification.risk),
         estimatedClass: 'short',
         requiresIsolation: false,
         requiresRecovery: false,
-      };
+        effects,
+      }, operation);
     }
-    return {
+    return decisionBase({
       mode: 'durable',
       reasons: ['command_not_eligible_for_fast', ...classification.reasons],
       risk: riskFromClassification(classification.risk),
@@ -439,15 +570,21 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
       requiresIsolation: false,
       requiresRecovery: false,
       suggestedOperation: 'repository_command_execute via Durable Work / Local Job',
-    };
+      effects,
+    }, operation);
   }
 
   let risk: ExecutionRisk = 'readonly';
-  if (['apply_patch', 'stage_paths', 'commit_paths', 'repository_safe_patch_apply', 'git_stage_paths', 'git_commit_paths', 'apply_edit_operations'].includes(operation)) {
+  let effects: ExecutionEffects = { ...READONLY_EFFECTS };
+  if (WRITE_OPERATIONS.has(operation)) {
     risk = 'workspace_write';
+    effects = {
+      ...WORKSPACE_WRITE_EFFECTS,
+      mutatesGitRefs: operation.includes('commit') || operation.includes('stage'),
+    };
   }
   if (typeof input.patchOperationCount === 'number' && input.patchOperationCount > 100) {
-    return {
+    return decisionBase({
       mode: 'durable',
       reasons: ['patch_too_large_for_fast_path'],
       risk: 'workspace_write',
@@ -455,17 +592,19 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
       requiresIsolation: false,
       requiresRecovery: false,
       suggestedOperation: 'repository_safe_patch_apply with apply_mode=async',
-    };
+      effects,
+    }, operation);
   }
 
-  return {
+  return decisionBase({
     mode: 'fast',
     reasons: requested === 'fast' ? ['caller_requested_fast', 'policy_allows_fast'] : ['auto_selected_fast'],
     risk,
     estimatedClass: 'short',
     requiresIsolation: false,
     requiresRecovery: false,
-  };
+    effects,
+  }, operation);
 }
 
 function durableSuggestion(operation: string): string {

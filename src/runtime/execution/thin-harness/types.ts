@@ -28,6 +28,28 @@ export type FastOperationKind =
   | 'read_lanes'
   | 'patch_proposal_validate';
 
+/** Typed workspace effects used for mutation ownership and lane eligibility. */
+export interface ExecutionEffects {
+  readsWorkspace: boolean;
+  mutatesWorkspace: boolean;
+  mutatesGitRefs: boolean;
+  remoteWrite: boolean;
+}
+
+export const READONLY_EFFECTS: ExecutionEffects = {
+  readsWorkspace: true,
+  mutatesWorkspace: false,
+  mutatesGitRefs: false,
+  remoteWrite: false,
+};
+
+export const WORKSPACE_WRITE_EFFECTS: ExecutionEffects = {
+  readsWorkspace: true,
+  mutatesWorkspace: true,
+  mutatesGitRefs: false,
+  remoteWrite: false,
+};
+
 export interface ExecutionDecision {
   mode: ExecutionMode;
   reasons: string[];
@@ -35,6 +57,7 @@ export interface ExecutionDecision {
   estimatedClass: EstimatedClass;
   requiresIsolation: boolean;
   requiresRecovery: boolean;
+  effects: ExecutionEffects;
   /** Present when mode is durable — caller must open a new durable request. */
   suggestedOperation?: string;
   /** Present when mode is reject. */
@@ -260,8 +283,10 @@ export interface LightweightLanesResult {
 /** Caps shared by Fast Path. */
 export const FAST_PATH_MAX_TIMEOUT_MS = 15_000;
 export const FAST_PATH_DEFAULT_TIMEOUT_MS = 10_000;
+/** Hard budget for an entire write batch (not per-step). */
+export const FAST_BATCH_MAX_TOTAL_MS = 45_000;
 export const FAST_PATH_MAX_OUTPUT_BYTES = 128 * 1024;
-export const FAST_PATH_MAX_FILE_BYTES = 512 * 1024;
+export const FAST_PATH_MAX_FILE_BYTES = 256 * 1024;
 export const FAST_BATCH_MAX_STEPS = 20;
 export const FAST_LANE_MAX_CONCURRENCY = 4;
 export const FAST_RECEIPT_RETENTION = 200;

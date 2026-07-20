@@ -1,27 +1,32 @@
-import { existsSync, readFileSync, statSync } from 'fs';
-import { join } from 'path';
-import { getMcpPolicy } from '../../../cli/mcp/policy';
+import { existsSync, readFileSync, statSync, writeFileSync, unlinkSync, mkdirSync } from 'fs';
+import { dirname, join } from 'path';
 import { applySafePatch } from '../../../cli/repositories/safe-patch';
 import { repositoryGitCommit } from '../../../cli/repositories/structured-git';
 import { withControllerLockAsync } from '../../../cli/repositories/locks';
 import {
   executeRepositoryCommandAsync,
-  previewRepositoryCommandExecution,
+  previewRepositoryCommandExecutionAsync,
+  type RepositoryCommandSnapshot,
 } from '../../../cli/repositories/command-executor';
+import { getMcpPolicy } from '../../../cli/mcp/policy';
 import { readRepositoryRange, searchRepository } from '../../../cli/repository/inspector';
 import type { RepositoryRecord } from '../../../cli/repositories/types';
 import { runBoundedGit, runBoundedProcess } from './async-process';
 import { extractPatchPaths, pathAllowed, routeExecution } from './execution-router';
 import { LatencyTrace } from './latency-trace';
 import {
-  findFastReceiptByRequestId,
   hashRequestInput,
   writeFastReceipt,
 } from './fast-receipt';
 import {
   mutationGateBusyMessage,
   withCheckoutMutationGate,
+  type CheckoutMutationGate,
 } from './mutation-gate';
+import {
+  beginFastRequest,
+  completeFastRequest,
+} from './request-ledger';
 import {
   FAST_PATH_DEFAULT_TIMEOUT_MS,
   FAST_PATH_MAX_FILE_BYTES,
@@ -55,6 +60,8 @@ export interface FastExecuteInput {
   signal?: AbortSignal;
   /** When set, reuses outer mutation gate (batch). */
   externalMutation?: boolean;
+  /** Outer gate fencing for batch steps. */
+  externalGate?: CheckoutMutationGate;
 }
 
 export interface FastExecuteResult {
@@ -110,7 +117,29 @@ function zeroSideEffects() {
   };
 }
 
-async function asyncGitStatus(repoRoot: string, repoId: string, checkoutId: string, timeoutMs: number, signal?: AbortSignal) {
+function emptyDecision(partial: Partial<ExecutionDecision> & Pick<ExecutionDecision, 'mode' | 'reasons'>): ExecutionDecision {
+  return {
+    risk: 'unknown',
+    estimatedClass: 'short',
+    requiresIsolation: false,
+    requiresRecovery: false,
+    effects: {
+      readsWorkspace: true,
+      mutatesWorkspace: false,
+      mutatesGitRefs: false,
+      remoteWrite: false,
+    },
+    ...partial,
+  };
+}
+
+async function asyncGitStatus(
+  repoRoot: string,
+  repoId: string,
+  checkoutId: string,
+  timeoutMs: number,
+  signal?: AbortSignal,
+) {
   const [porcelain, branch, head, shortStatus] = await Promise.all([
     runBoundedGit(repoRoot, ['status', '--porcelain=v1', '--branch', '--untracked-files=all', '--', '.', ':(exclude).ai/harness/**'], {
       timeoutMs, maxOutputBytes: FAST_PATH_MAX_OUTPUT_BYTES, signal,
@@ -121,6 +150,16 @@ async function asyncGitStatus(repoRoot: string, repoId: string, checkoutId: stri
       timeoutMs, maxOutputBytes: FAST_PATH_MAX_OUTPUT_BYTES, signal,
     }),
   ]);
+
+  const required = [porcelain, head];
+  for (const result of required) {
+    if (result.cancelled) throw new Error('CANCELLED: git status cancelled');
+    if (result.timedOut) throw new Error('GIT_STATUS_TIMEOUT: git status timed out');
+    if (!result.ok && result.exitCode !== 0) {
+      throw new Error(`GIT_STATUS_FAILED: ${result.stderr || `exit ${result.exitCode}`}`);
+    }
+  }
+
   const lines = porcelain.stdout.split(/\r?\n/);
   const staged: string[] = [];
   const unstaged: string[] = [];
@@ -143,7 +182,7 @@ async function asyncGitStatus(repoRoot: string, repoId: string, checkoutId: stri
       head: head.ok ? head.stdout.trim() || null : null,
       upstream: null,
       porcelain: porcelain.stdout,
-      shortStatus: shortStatus.stdout,
+      shortStatus: shortStatus.ok ? shortStatus.stdout : porcelain.stdout,
       staged,
       unstaged,
       untracked,
@@ -172,6 +211,15 @@ async function asyncGitDiff(
     runBoundedGit(repoRoot, ['branch', '--show-current'], { timeoutMs, maxOutputBytes: 4_096, signal }),
     runBoundedGit(repoRoot, ['rev-parse', '--verify', 'HEAD'], { timeoutMs, maxOutputBytes: 4_096, signal }),
   ]);
+
+  for (const result of [nameOnly, patch, head]) {
+    if (result.cancelled) throw new Error('CANCELLED: git diff cancelled');
+    if (result.timedOut) throw new Error('GIT_DIFF_TIMEOUT: git diff timed out');
+    if (!result.ok && result.exitCode !== 0) {
+      throw new Error(`GIT_DIFF_FAILED: ${result.stderr || `exit ${result.exitCode}`}`);
+    }
+  }
+
   return {
     diff: {
       repoId,
@@ -195,7 +243,6 @@ async function runSearchInWorker(
   maxFiles: number,
   signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
-  // Prefer rg when available (async child); fall back to inspector in a worker-thread-like yield.
   const rg = await runBoundedProcess('rg', [
     '--line-number',
     '--no-heading',
@@ -214,7 +261,6 @@ async function runSearchInWorker(
     signal,
   });
   if (rg.ok || rg.exitCode === 1) {
-    // exit 1 = no matches for rg
     const results = rg.stdout
       .split(/\r?\n/)
       .filter(Boolean)
@@ -236,19 +282,20 @@ async function runSearchInWorker(
       engine: 'rg',
     };
   }
-  // Fallback: yield to event loop then run inspector (still sync but after await points for lanes).
+  // Fallback: isolate sync inspector behind setImmediate yield points.
+  // True Worker Thread offload remains a follow-up; do not claim concurrent offload here.
   await new Promise((resolve) => setImmediate(resolve));
   if (signal?.aborted) throw new Error('CANCELLED: search aborted');
-  return searchRepository(repoRoot, policyFor(repoRoot), {
+  const result = searchRepository(repoRoot, policyFor(repoRoot), {
     query,
     maxResults,
     maxFiles,
   }) as unknown as Record<string, unknown>;
+  return { ...result, engine: 'inspector_sync_fallback' };
 }
 
 /**
  * Execute one Fast Path operation without ExecutionJob / Local Job / Worker / Campaign.
- * Blocking work runs via async spawn / yielded search; write ops use Checkout Mutation Gate.
  */
 export async function executeFast(
   ctx: FastExecutorContext,
@@ -259,29 +306,7 @@ export async function executeFast(
   const receiptMode = request.receiptMode ?? 'standalone';
   const requestId = request.requestId?.trim() || undefined;
   const inputHash = hashRequestInput({ operation: request.operation, input: request.input });
-
-  if (requestId) {
-    const prior = findFastReceiptByRequestId(ctx.controllerHome, ctx.repository.repoId, requestId);
-    if (prior && prior.inputHash === inputHash && prior.outcome === 'succeeded') {
-      return {
-        ok: true,
-        decision: {
-          mode: 'fast',
-          reasons: ['idempotent_replay'],
-          risk: 'unknown',
-          estimatedClass: 'short',
-          requiresIsolation: false,
-          requiresRecovery: false,
-        },
-        receipt: prior,
-        receiptPersisted: true,
-        operationSucceeded: true,
-        result: { replayed: true, executionId: prior.executionId },
-        latency: trace.snapshot(ctx.includeLatencyBreakdown === true),
-        durableSideEffects: zeroSideEffects(),
-      };
-    }
-  }
+  const owner = `fast:${ctx.sessionId ?? 'anon'}:${request.operation}:${requestId ?? Date.now()}`;
 
   const patchPaths = extractPatchPaths(request.input.operations);
   const decision = trace.measureSync('routingMs', () => routeExecution({
@@ -345,11 +370,124 @@ export async function executeFast(
   }
 
   const operation = request.operation;
+  const needsMutation = decision.effects.mutatesWorkspace || decision.effects.mutatesGitRefs;
+  const isExplicitWriteOp = [
+    'apply_patch', 'repository_safe_patch_apply', 'apply_edit_operations',
+    'stage_paths', 'git_stage_paths', 'commit_paths', 'git_commit_paths', 'repository_git_commit',
+  ].includes(String(operation));
+
+  // Mutations without requestId must not default to Fast for non-idempotent ops.
+  if (needsMutation && isExplicitWriteOp && !requestId && receiptMode === 'standalone' && !request.externalMutation) {
+    if (['commit_paths', 'git_commit_paths', 'repository_git_commit', 'stage_paths', 'git_stage_paths'].includes(String(operation))) {
+      return {
+        ok: false,
+        decision: emptyDecision({
+          mode: 'durable',
+          reasons: ['mutation_requires_request_id_for_idempotency'],
+          risk: 'workspace_write',
+          effects: decision.effects,
+          suggestedOperation: 're-issue with request_id or Durable Work',
+        }),
+        operationSucceeded: false,
+        latency: trace.snapshot(ctx.includeLatencyBreakdown === true),
+        durableSideEffects: zeroSideEffects(),
+        escalation: {
+          reason: 'stage/commit require request_id for Fast Path idempotency',
+          suggestedOperation: 'provide request_id or use Durable Work',
+        },
+        result: {
+          error: {
+            code: 'REQUEST_ID_REQUIRED',
+            message: 'stage/commit on Fast Path require request_id',
+          },
+        },
+      };
+    }
+  }
+
+  // Atomic request ledger before mutation.
+  let ledgerEntry: ReturnType<typeof beginFastRequest> | undefined;
+  if (requestId && needsMutation && receiptMode === 'standalone' && !request.externalMutation) {
+    ledgerEntry = beginFastRequest({
+      controllerHome: ctx.controllerHome,
+      repoId: ctx.repository.repoId,
+      checkoutId: ctx.repository.activeCheckoutId,
+      requestId,
+      inputHash,
+      operation: String(operation),
+      owner,
+    });
+    if (ledgerEntry.kind === 'replay') {
+      return {
+        ok: true,
+        decision: emptyDecision({
+          mode: 'fast',
+          reasons: ['idempotent_replay'],
+          effects: decision.effects,
+        }),
+        receiptPersisted: true,
+        operationSucceeded: true,
+        result: {
+          replayed: true,
+          requestId,
+          entryId: ledgerEntry.entry.entryId,
+          resultSummary: ledgerEntry.entry.resultSummary,
+          receiptExecutionId: ledgerEntry.entry.receiptExecutionId,
+        },
+        latency: trace.snapshot(ctx.includeLatencyBreakdown === true),
+        durableSideEffects: zeroSideEffects(),
+      };
+    }
+    if (ledgerEntry.kind === 'in_progress') {
+      return {
+        ok: false,
+        decision: emptyDecision({
+          mode: 'fast',
+          reasons: ['idempotent_in_progress'],
+          effects: decision.effects,
+        }),
+        operationSucceeded: false,
+        result: {
+          error: {
+            code: 'REQUEST_IN_PROGRESS',
+            message: `requestId ${requestId} is already in progress`,
+            entryId: ledgerEntry.entry.entryId,
+          },
+        },
+        latency: trace.snapshot(ctx.includeLatencyBreakdown === true),
+        durableSideEffects: zeroSideEffects(),
+      };
+    }
+    if (ledgerEntry.kind === 'conflict') {
+      return {
+        ok: false,
+        decision: emptyDecision({
+          mode: 'reject',
+          reasons: ['idempotency_conflict'],
+          rejectCode: 'IDEMPOTENCY_CONFLICT',
+          effects: decision.effects,
+        }),
+        operationSucceeded: false,
+        result: {
+          error: {
+            code: 'IDEMPOTENCY_CONFLICT',
+            message: ledgerEntry.message,
+          },
+        },
+        latency: trace.snapshot(ctx.includeLatencyBreakdown === true),
+        durableSideEffects: zeroSideEffects(),
+      };
+    }
+  }
+
   const timeoutMs = boundedTimeout(request.timeoutMs ?? (typeof request.input.timeout_ms === 'number' ? request.input.timeout_ms : undefined));
   const root = ctx.repository.canonicalRoot;
-  const isWrite = ['apply_patch', 'repository_safe_patch_apply', 'apply_edit_operations', 'stage_paths', 'git_stage_paths', 'commit_paths', 'git_commit_paths', 'repository_git_commit'].includes(String(operation));
 
-  const runBody = async (fencingToken?: number, baseHead?: string | null): Promise<{
+  const runBody = async (
+    fencingToken?: number,
+    baseHead?: string | null,
+    helpers?: { assert: () => void },
+  ): Promise<{
     ok: boolean;
     outcome: FastOutcome;
     changedPaths: string[];
@@ -367,6 +505,7 @@ export async function executeFast(
     let ok = true;
 
     try {
+      helpers?.assert();
       if (operation === 'read_file' || operation === 'read_file_range') {
         const path = String(request.input.path ?? '');
         const absolute = join(root, path);
@@ -395,7 +534,6 @@ export async function executeFast(
           request.signal,
         ));
       } else if (operation === 'git_status' || operation === 'repository_git_status') {
-        // Git status is the repository snapshot; count under snapshotMs only (no double-count).
         resultPayload = await trace.measure('snapshotMs', async () => asyncGitStatus(
           root,
           ctx.repository.repoId,
@@ -413,6 +551,7 @@ export async function executeFast(
           request.signal,
         ));
       } else if (operation === 'apply_patch' || operation === 'repository_safe_patch_apply' || operation === 'apply_edit_operations') {
+        helpers?.assert();
         const allowed = request.allowedPaths ?? stringList(request.input.allowed_paths);
         const opPaths = extractPatchPaths(request.input.operations);
         if (allowed?.length) {
@@ -421,11 +560,11 @@ export async function executeFast(
             throw new Error(`PATH_SCOPE_REJECTED: operations target paths outside allowed scope: ${bad.join(', ')}`);
           }
         }
-        // Snapshot files before apply for rollback if post-check fails.
-        const beforeSnapshots = new Map<string, string | null>();
+        // Pre-apply binary-safe snapshots via Buffer.
+        const beforeSnapshots = new Map<string, Buffer | null>();
         for (const path of opPaths) {
           const absolute = join(root, path);
-          beforeSnapshots.set(path, existsSync(absolute) ? readFileSync(absolute, 'utf8') : null);
+          beforeSnapshots.set(path, existsSync(absolute) ? readFileSync(absolute) : null);
         }
         const applied = await trace.measure('executionMs', async () => applySafePatch(ctx.repository, {
           sessionId: request.input.session_id,
@@ -446,9 +585,7 @@ export async function executeFast(
         if (ok && allowed?.length) {
           const outOfScope = changedPaths.filter((path) => !pathAllowed(path, allowed));
           if (outOfScope.length > 0) {
-            // Rollback file contents from pre-apply snapshots.
-            const { writeFileSync: write, unlinkSync, mkdirSync } = await import('fs');
-            const { dirname } = await import('path');
+            let rollbackOk = true;
             for (const [path, content] of beforeSnapshots) {
               const absolute = join(root, path);
               try {
@@ -456,22 +593,25 @@ export async function executeFast(
                   if (existsSync(absolute)) unlinkSync(absolute);
                 } else {
                   mkdirSync(dirname(absolute), { recursive: true });
-                  write(absolute, content, 'utf8');
+                  writeFileSync(absolute, content);
                 }
               } catch {
-                /* best-effort rollback */
+                rollbackOk = false;
               }
             }
             ok = false;
             outcome = 'failed';
-            policyDecision = 'path_scope_violation_rolled_back';
-            repositoryChanged = false;
-            changedPaths = [];
+            policyDecision = rollbackOk ? 'path_scope_violation_rolled_back' : 'path_scope_violation_cleanup_required';
+            repositoryChanged = !rollbackOk;
+            changedPaths = rollbackOk ? [] : outOfScope;
             resultPayload = {
               error: {
-                code: 'PATH_SCOPE_VIOLATION',
-                message: `changed paths outside declared scope; rolled back: ${outOfScope.join(', ')}`,
+                code: rollbackOk ? 'PATH_SCOPE_VIOLATION' : 'PATH_SCOPE_VIOLATION_CLEANUP_REQUIRED',
+                message: rollbackOk
+                  ? `changed paths outside declared scope; rolled back: ${outOfScope.join(', ')}`
+                  : `changed paths outside scope; rollback incomplete: ${outOfScope.join(', ')}`,
                 outOfScope,
+                cleanupRequired: !rollbackOk,
               },
             };
           } else {
@@ -481,6 +621,7 @@ export async function executeFast(
           resultPayload = { applied, changedPaths, fencingToken };
         }
       } else if (operation === 'stage_paths' || operation === 'git_stage_paths') {
+        helpers?.assert();
         const paths = stringList(request.input.paths) ?? [];
         if (paths.length === 0) throw new Error('STAGE_PATHS_REQUIRED: paths must be non-empty');
         resultPayload = await trace.measure('executionMs', async () => {
@@ -489,11 +630,14 @@ export async function executeFast(
             maxOutputBytes: FAST_PATH_MAX_OUTPUT_BYTES,
             signal: request.signal,
           });
+          if (git.cancelled) throw new Error('CANCELLED: git add cancelled');
+          if (git.timedOut) throw new Error('GIT_STAGE_TIMEOUT: git add timed out');
+          if (!git.ok) throw new Error(`GIT_STAGE_FAILED: ${git.stderr || `exit ${git.exitCode}`}`);
           return {
-            ok: git.ok,
+            ok: true,
             exitCode: git.exitCode,
-            timedOut: git.timedOut,
-            cancelled: git.cancelled,
+            timedOut: false,
+            cancelled: false,
             stdout: git.stdout,
             stderr: git.stderr,
             fencingToken,
@@ -503,12 +647,10 @@ export async function executeFast(
         });
         changedPaths = paths;
         repositoryChanged = true;
-        ok = resultPayload.ok === true;
-        outcome = resultPayload.cancelled ? 'cancelled' : resultPayload.timedOut ? 'timed_out' : ok ? 'succeeded' : 'failed';
+        ok = true;
+        outcome = 'succeeded';
       } else if (operation === 'commit_paths' || operation === 'git_commit_paths' || operation === 'repository_git_commit') {
-        if (!requestId && receiptMode === 'standalone') {
-          // commits without request_id are still allowed but marked non-idempotent in result
-        }
+        helpers?.assert();
         resultPayload = await trace.measure('executionMs', async () => {
           const commit = repositoryGitCommit(ctx.controllerHome, ctx.repository, {
             message: request.input.message,
@@ -526,7 +668,7 @@ export async function executeFast(
         || operation === 'repository_command_execute'
       ) {
         const command = request.input.command as string | string[];
-        const preview = await trace.measure('policyMs', async () => previewRepositoryCommandExecution(ctx.repository, {
+        const preview = await trace.measure('policyMs', async () => previewRepositoryCommandExecutionAsync(ctx.repository, {
           command,
           cwd: typeof request.input.cwd === 'string' ? request.input.cwd : undefined,
           authorization: 'confirmed_plan',
@@ -536,13 +678,16 @@ export async function executeFast(
           maxOutputBytes: FAST_PATH_MAX_OUTPUT_BYTES,
           sessionId: ctx.sessionId,
           principalId: ctx.principalId,
+          signal: request.signal,
         }, ctx.controllerHome));
         const approvalToken = typeof request.input.approval_token === 'string' && request.input.approval_token.trim()
           ? request.input.approval_token.trim()
           : preview.execution.approvalToken;
-        const sealed = preview.executable
-          ? preview
-          : previewRepositoryCommandExecution(ctx.repository, {
+        let sealed = preview;
+        let reuseSnapshot: RepositoryCommandSnapshot | undefined = preview.before;
+        if (!preview.executable) {
+          // Second seal only when approval token was injected; reuse snapshot.
+          sealed = await previewRepositoryCommandExecutionAsync(ctx.repository, {
             command,
             cwd: typeof request.input.cwd === 'string' ? request.input.cwd : undefined,
             authorization: 'confirmed_plan',
@@ -552,7 +697,11 @@ export async function executeFast(
             maxOutputBytes: FAST_PATH_MAX_OUTPUT_BYTES,
             sessionId: ctx.sessionId,
             principalId: ctx.principalId,
+            signal: request.signal,
+            reuseSnapshot: preview.before,
           }, ctx.controllerHome);
+          reuseSnapshot = sealed.before;
+        }
         if (!sealed.executable) {
           throw Object.assign(
             new Error(sealed.execution.policyDecision === 'rejected'
@@ -564,6 +713,7 @@ export async function executeFast(
         authorizationDecision = String(sealed.execution.authorizationDecision?.decision
           ?? sealed.execution.authorization
           ?? (sealed.execution.classification.risk === 'readonly' ? 'readonly' : 'confirmed_plan'));
+        helpers?.assert();
         const execution = await trace.measure('executionMs', async () => executeRepositoryCommandAsync(
           ctx.controllerHome,
           ctx.repository,
@@ -577,11 +727,18 @@ export async function executeFast(
             maxOutputBytes: FAST_PATH_MAX_OUTPUT_BYTES,
             sessionId: ctx.sessionId,
             principalId: ctx.principalId,
+            signal: request.signal,
+            reuseSnapshot,
           },
         ));
-        ok = execution.ok === true && execution.status === 'executed';
-        outcome = execution.timedOut ? 'timed_out' : ok ? 'succeeded' : 'failed';
-        if (request.signal?.aborted) outcome = 'cancelled';
+        ok = execution.ok === true && execution.status === 'executed' && !execution.cancelled;
+        outcome = execution.cancelled
+          ? 'cancelled'
+          : execution.timedOut
+            ? 'timed_out'
+            : ok
+              ? 'succeeded'
+              : 'failed';
         changedPaths = execution.changedPaths ?? [];
         repositoryChanged = execution.repositoryChanged === true;
         policyDecision = execution.policyDecision ?? 'allowed';
@@ -590,6 +747,7 @@ export async function executeFast(
           ok: execution.ok,
           exitCode: execution.exitCode,
           timedOut: execution.timedOut,
+          cancelled: execution.cancelled,
           stdout: execution.stdout,
           stderr: execution.stderr,
           repositoryChanged: execution.repositoryChanged,
@@ -625,40 +783,44 @@ export async function executeFast(
   let fencingToken: number | undefined;
   let baseHead: string | null | undefined;
 
-  if (isWrite && !request.externalMutation) {
+  if (needsMutation && !request.externalMutation) {
     const gated = await withCheckoutMutationGate(
       {
         controllerHome: ctx.controllerHome,
         repoId: ctx.repository.repoId,
         checkoutId: ctx.repository.activeCheckoutId,
         repoRoot: root,
-        owner: `fast:${ctx.sessionId ?? 'anon'}:${operation}:${requestId ?? Date.now()}`,
-        ttlMs: timeoutMs + 5_000,
+        owner,
+        ttlMs: timeoutMs + 10_000,
       },
-      async (gate) => {
+      async (gate, helpers) => {
         fencingToken = gate.fencingToken;
         baseHead = gate.baseHead;
         return withControllerLockAsync(
           ctx.controllerHome,
           { scope: 'repository', repoId: ctx.repository.repoId, resource: 'fast-write' },
           'thin-harness:fast-write',
-          () => runBody(gate.fencingToken, gate.baseHead),
-          timeoutMs + 5_000,
+          () => runBody(gate.fencingToken, gate.baseHead, helpers),
+          timeoutMs + 10_000,
         );
       },
     );
     if (!gated.ok) {
+      if (ledgerEntry?.kind === 'acquired') {
+        completeFastRequest(ctx.controllerHome, ledgerEntry.entry, {
+          status: 'failed',
+          error: mutationGateBusyMessage(gated.busy),
+        });
+      }
       return {
         ok: false,
-        decision: {
+        decision: emptyDecision({
           mode: 'durable',
           reasons: ['checkout_mutation_busy', gated.busy.reason],
           risk: 'workspace_write',
-          estimatedClass: 'short',
-          requiresIsolation: false,
-          requiresRecovery: false,
+          effects: decision.effects,
           suggestedOperation: 'retry after durable writer finishes, or use Durable Work',
-        },
+        }),
         operationSucceeded: false,
         latency: trace.snapshot(ctx.includeLatencyBreakdown === true),
         durableSideEffects: zeroSideEffects(),
@@ -676,14 +838,26 @@ export async function executeFast(
       };
     }
     bodyResult = gated.value;
-  } else if (isWrite) {
+  } else if (needsMutation && request.externalMutation) {
     bodyResult = await withControllerLockAsync(
       ctx.controllerHome,
       { scope: 'repository', repoId: ctx.repository.repoId, resource: 'fast-write' },
       'thin-harness:fast-write-external-gate',
-      () => runBody(),
+      () => runBody(
+        request.externalGate?.fencingToken,
+        request.externalGate?.baseHead,
+        request.externalGate
+          ? {
+            assert: () => {
+              // Batch holds outer ownership; step-level assert is best-effort.
+            },
+          }
+          : undefined,
+      ),
       timeoutMs + 5_000,
     );
+    fencingToken = request.externalGate?.fencingToken;
+    baseHead = request.externalGate?.baseHead;
   } else {
     bodyResult = await runBody();
   }
@@ -693,6 +867,10 @@ export async function executeFast(
   let receiptPersisted: boolean | undefined;
   let receiptWarning: string | undefined;
 
+  // Snapshot latency before receipt so persisted duration is complete for op time.
+  const preReceiptLatency = trace.snapshot(false);
+  const durationForReceipt = preReceiptLatency.totalMs;
+
   if (receiptMode === 'standalone') {
     const receiptStarted = performance.now();
     const written = writeFastReceipt(ctx.controllerHome, {
@@ -701,7 +879,7 @@ export async function executeFast(
       operation: String(operation),
       startedAt,
       finishedAt,
-      durationMs: 0,
+      durationMs: durationForReceipt,
       outcome: bodyResult.outcome,
       changedPaths: bodyResult.changedPaths,
       repositoryChanged: bodyResult.repositoryChanged,
@@ -722,11 +900,28 @@ export async function executeFast(
 
   const latency = trace.snapshot(ctx.includeLatencyBreakdown === true);
   if (receipt) {
-    receipt.durationMs = latency.totalMs;
-    if (ctx.includeLatencyBreakdown === true) receipt.latency = latency;
+    // Keep memory and disk aligned for duration when possible; disk already has pre-receipt duration.
+    receipt.durationMs = durationForReceipt;
+    if (ctx.includeLatencyBreakdown === true) {
+      receipt.latency = {
+        ...latency,
+        // Persist pre-receipt total in latency.totalMs consistency with durationMs.
+        totalMs: durationForReceipt + (latency.receiptMs || 0),
+      };
+    }
   }
 
-  // Receipt persistence failure must not flip a successful mutation to failed.
+  if (ledgerEntry?.kind === 'acquired') {
+    completeFastRequest(ctx.controllerHome, ledgerEntry.entry, {
+      status: bodyResult.ok ? 'succeeded' : 'failed',
+      resultSummary: summaryFrom(bodyResult.resultPayload, 1_024),
+      error: bodyResult.ok
+        ? undefined
+        : (bodyResult.resultPayload.error as { message?: string } | undefined)?.message,
+      receiptExecutionId: receipt?.executionId,
+    });
+  }
+
   return {
     ok: bodyResult.ok,
     decision,

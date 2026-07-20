@@ -1,8 +1,9 @@
 import { createHash } from 'crypto';
-import { spawn, spawnSync } from 'child_process';
+import { spawn, spawnSync, type ChildProcess } from 'child_process';
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync } from 'fs';
 import { dirname, join, resolve } from 'path';
 import { capProcessOutput, redactProcessOutput } from '../../effects/process-runner';
+import { terminateProcessTree } from '../../runtime/shared/process-tree';
 import { MAX_AGENT_TIMEOUT_MS, MIN_AGENT_TIMEOUT_MS } from '../controller/runtime-config';
 import { repositoryControllerRoot } from './controller-home';
 import {
@@ -43,6 +44,13 @@ export interface ExecuteRepositoryCommandInput {
   sessionId?: string;
   principalId?: string;
   workId?: string;
+  /** When set, cancel spawn via process-tree kill. Async path only. */
+  signal?: AbortSignal;
+  /**
+   * Reuse a precomputed snapshot (e.g. from preview) so Fast Path does not
+   * re-run multiple sync/async git snapshots for the same command.
+   */
+  reuseSnapshot?: RepositoryCommandSnapshot;
 }
 
 export interface RepositoryCommandSnapshot {
@@ -68,6 +76,7 @@ export interface RepositoryCommandExecution {
   ok?: boolean;
   exitCode?: number;
   timedOut?: boolean;
+  cancelled?: boolean;
   stdout?: string;
   stderr?: string;
   before: RepositoryCommandSnapshot;
@@ -92,6 +101,7 @@ interface SpawnCommandResult {
   ok: boolean;
   exitCode: number;
   timedOut: boolean;
+  cancelled: boolean;
   stdout: string;
   stderr: string;
 }
@@ -100,6 +110,7 @@ export interface RepositoryCommandAsyncHooks {
   onSpawn?: (pid: number) => void;
   onStdout?: (chunk: string) => void;
   onStderr?: (chunk: string) => void;
+  signal?: AbortSignal;
 }
 
 /** Sensible interactive default for ordinary repository commands. */
@@ -176,6 +187,25 @@ function collectOutput(maxOutputBytes: number): {
   };
 }
 
+async function killCommandTree(child: ChildProcess): Promise<void> {
+  const pid = child.pid;
+  if (!pid) return;
+  try {
+    if (process.platform !== 'win32') {
+      try {
+        process.kill(-pid, 'SIGTERM');
+      } catch {
+        child.kill('SIGTERM');
+      }
+    } else {
+      child.kill();
+    }
+  } catch {
+    /* already exited */
+  }
+  await terminateProcessTree(pid, { gracePeriodMs: 200, killAfterMs: 1_000, pollIntervalMs: 25 });
+}
+
 async function runCanonicalCommand(
   command: CanonicalRepositoryCommand,
   cwd: string,
@@ -183,6 +213,17 @@ async function runCanonicalCommand(
   maxOutputBytes: number,
   hooks: RepositoryCommandAsyncHooks = {},
 ): Promise<SpawnCommandResult> {
+  if (hooks.signal?.aborted) {
+    return {
+      ok: false,
+      exitCode: 1,
+      timedOut: false,
+      cancelled: true,
+      stdout: '',
+      stderr: 'cancelled before spawn',
+    };
+  }
+
   const executable = command.kind === 'argv'
     ? command.executable!
     : process.platform === 'win32' ? 'cmd.exe' : '/bin/sh';
@@ -192,16 +233,19 @@ async function runCanonicalCommand(
   const display = typeof command.value === 'string' ? command.value : JSON.stringify(command.value);
   const stdoutCollector = collectOutput(maxOutputBytes);
   const stderrCollector = collectOutput(maxOutputBytes);
+  const useProcessGroup = process.platform !== 'win32';
 
   return await new Promise<SpawnCommandResult>((resolve) => {
     const child = spawn(executable, args, {
       cwd,
       env: commandEnvironment(),
       stdio: ['ignore', 'pipe', 'pipe'],
+      detached: useProcessGroup,
     });
     if (child.pid) hooks.onSpawn?.(child.pid);
     let settled = false;
     let timedOut = false;
+    let cancelled = false;
     let spawnError = '';
     let timeoutHandle: NodeJS.Timeout | undefined;
 
@@ -209,26 +253,33 @@ async function runCanonicalCommand(
       if (settled) return;
       settled = true;
       if (timeoutHandle) clearTimeout(timeoutHandle);
+      hooks.signal?.removeEventListener('abort', onAbort);
       const stderrParts = [stderrCollector.complete()];
       if (timedOut) stderrParts.push(`process timed out after ${timeoutMs}ms: ${redactProcessOutput(display)}`);
+      if (cancelled) stderrParts.push('process cancelled');
       if (spawnError) stderrParts.push(redactProcessOutput(spawnError));
       resolve({
-        ok: exitCode === 0 && !timedOut && !spawnError,
+        ok: exitCode === 0 && !timedOut && !cancelled && !spawnError,
         exitCode,
         timedOut,
+        cancelled,
         stdout: stdoutCollector.complete(),
         stderr: capProcessOutput(stderrParts.filter(Boolean).join('\n'), maxOutputBytes),
       });
     };
 
+    const onAbort = () => {
+      cancelled = true;
+      void killCommandTree(child).finally(() => finish(1));
+    };
+
     timeoutHandle = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGTERM');
-      setTimeout(() => {
-        if (!settled) child.kill('SIGKILL');
-      }, 1_000).unref();
+      void killCommandTree(child).finally(() => finish(1));
     }, timeoutMs);
     timeoutHandle.unref();
+
+    hooks.signal?.addEventListener('abort', onAbort, { once: true });
 
     child.stdout?.on('data', (chunk) => {
       stdoutCollector.write(chunk);
@@ -301,11 +352,13 @@ function repositoryPathFingerprint(root: string, relativePath: string, statusLin
   return hash.digest('hex');
 }
 
-function repositorySnapshot(root: string): RepositoryCommandSnapshot {
-  const head = gitText(root, ['rev-parse', '--verify', 'HEAD']) || null;
-  const branch = gitText(root, ['branch', '--show-current']) || null;
-  const status = gitText(root, ['status', '--porcelain=v1', '--branch', '--untracked-files=all', '--', ...REPOSITORY_SNAPSHOT_PATHS]);
-  const refs = gitText(root, ['show-ref']);
+function buildSnapshotFromGitTexts(
+  root: string,
+  head: string | null,
+  branch: string | null,
+  status: string,
+  refs: string,
+): RepositoryCommandSnapshot {
   const lines = status.split(/\r?\n/).filter((line) => line && !line.startsWith('##'));
   const statusByPath = new Map<string, string[]>();
   for (const line of lines) {
@@ -329,6 +382,86 @@ function repositorySnapshot(root: string): RepositoryCommandSnapshot {
     paths,
     pathFingerprints,
   };
+}
+
+function repositorySnapshot(root: string): RepositoryCommandSnapshot {
+  const head = gitText(root, ['rev-parse', '--verify', 'HEAD']) || null;
+  const branch = gitText(root, ['branch', '--show-current']) || null;
+  const status = gitText(root, ['status', '--porcelain=v1', '--branch', '--untracked-files=all', '--', ...REPOSITORY_SNAPSHOT_PATHS]);
+  const refs = gitText(root, ['show-ref']);
+  return buildSnapshotFromGitTexts(root, head, branch, status, refs);
+}
+
+async function gitTextAsync(root: string, args: string[], signal?: AbortSignal): Promise<string> {
+  if (signal?.aborted) throw new Error('CANCELLED: repository snapshot aborted');
+  return await new Promise<string>((resolve, reject) => {
+    const child = spawn('git', ['-C', root, ...args], {
+      cwd: root,
+      env: commandEnvironment(),
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
+    });
+    const stdout = collectOutput(256 * 1024);
+    const stderr = collectOutput(64 * 1024);
+    let settled = false;
+    const timeout = setTimeout(() => {
+      void killCommandTree(child).finally(() => {
+        if (!settled) {
+          settled = true;
+          reject(new Error(`git ${args.join(' ')} timed out`));
+        }
+      });
+    }, 10_000);
+    timeout.unref();
+    const onAbort = () => {
+      void killCommandTree(child).finally(() => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timeout);
+          reject(new Error('CANCELLED: repository snapshot aborted'));
+        }
+      });
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    child.stdout?.on('data', (chunk) => stdout.write(chunk));
+    child.stderr?.on('data', (chunk) => stderr.write(chunk));
+    child.on('error', (error) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timeout);
+        signal?.removeEventListener('abort', onAbort);
+        reject(error);
+      }
+    });
+    child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      signal?.removeEventListener('abort', onAbort);
+      if (code === 0) resolve(stdout.complete().trim());
+      else resolve('');
+    });
+  });
+}
+
+/**
+ * Async repository snapshot for Fast Path — Git via async spawn.
+ * Path fingerprints remain local fs reads (bounded by dirty path count).
+ */
+export async function repositorySnapshotAsync(
+  root: string,
+  signal?: AbortSignal,
+): Promise<RepositoryCommandSnapshot> {
+  const [head, branch, status, refs] = await Promise.all([
+    gitTextAsync(root, ['rev-parse', '--verify', 'HEAD'], signal),
+    gitTextAsync(root, ['branch', '--show-current'], signal),
+    gitTextAsync(root, ['status', '--porcelain=v1', '--branch', '--untracked-files=all', '--', ...REPOSITORY_SNAPSHOT_PATHS], signal),
+    gitTextAsync(root, ['show-ref'], signal),
+  ]);
+  // Yield once before fingerprinting dirty files so concurrent MCP requests can progress.
+  await new Promise((resolve) => setImmediate(resolve));
+  if (signal?.aborted) throw new Error('CANCELLED: repository snapshot aborted');
+  return buildSnapshotFromGitTexts(root, head || null, branch || null, status, refs);
 }
 
 function approvalToken(
@@ -365,17 +498,28 @@ function snapshotChanged(before: RepositoryCommandSnapshot, after: RepositoryCom
     || changedSnapshotPaths(before, after).length > 0;
 }
 
-function prepareRepositoryCommandExecution(
+function finalizePreparedExecution(
   repository: RepositoryRecord,
   input: ExecuteRepositoryCommandInput,
-  controllerHome?: string,
-): { root: string; cwd: string; command: CanonicalRepositoryCommand; timeoutMs: number; maxOutputBytes: number; before: RepositoryCommandSnapshot; execution: RepositoryCommandExecution; executable: boolean; externalPathUsages: RepositoryCommandExternalPathUsage[] } {
-  const { root, cwd, relativeCwd } = resolveRepositoryCommandCwd(repository, input.cwd);
-  const command = assertRepositoryCommandInputAllowed(input.command);
-  const externalGrants = loadExternalFilesystemGrants(root).grants;
-  const externalPathUsages = assertCommandPathOperandsStayInRepository(command, cwd, root, externalGrants);
-  const classification = classifyRepositoryCommand(command, repository.defaultBranch);
-  const before = repositorySnapshot(root);
+  controllerHome: string | undefined,
+  root: string,
+  cwd: string,
+  relativeCwd: string,
+  command: CanonicalRepositoryCommand,
+  externalPathUsages: RepositoryCommandExternalPathUsage[],
+  classification: RepositoryCommandClassification,
+  before: RepositoryCommandSnapshot,
+): {
+  root: string;
+  cwd: string;
+  command: CanonicalRepositoryCommand;
+  timeoutMs: number;
+  maxOutputBytes: number;
+  before: RepositoryCommandSnapshot;
+  execution: RepositoryCommandExecution;
+  executable: boolean;
+  externalPathUsages: RepositoryCommandExternalPathUsage[];
+} {
   const commandForPersistence = commandValue(command);
   const token = approvalToken(repository, relativeCwd, commandForPersistence, classification, before, externalPathUsages);
   const permission = controllerHome ? readRepositoryAccessPolicy(controllerHome, repository.repoId) : undefined;
@@ -437,12 +581,96 @@ function prepareRepositoryCommandExecution(
   };
 }
 
+function prepareRepositoryCommandExecution(
+  repository: RepositoryRecord,
+  input: ExecuteRepositoryCommandInput,
+  controllerHome?: string,
+): {
+  root: string;
+  cwd: string;
+  command: CanonicalRepositoryCommand;
+  timeoutMs: number;
+  maxOutputBytes: number;
+  before: RepositoryCommandSnapshot;
+  execution: RepositoryCommandExecution;
+  executable: boolean;
+  externalPathUsages: RepositoryCommandExternalPathUsage[];
+} {
+  const { root, cwd, relativeCwd } = resolveRepositoryCommandCwd(repository, input.cwd);
+  const command = assertRepositoryCommandInputAllowed(input.command);
+  const externalGrants = loadExternalFilesystemGrants(root).grants;
+  const externalPathUsages = assertCommandPathOperandsStayInRepository(command, cwd, root, externalGrants);
+  const classification = classifyRepositoryCommand(command, repository.defaultBranch);
+  const before = input.reuseSnapshot ?? repositorySnapshot(root);
+  return finalizePreparedExecution(
+    repository,
+    input,
+    controllerHome,
+    root,
+    cwd,
+    relativeCwd,
+    command,
+    externalPathUsages,
+    classification,
+    before,
+  );
+}
+
+async function prepareRepositoryCommandExecutionAsync(
+  repository: RepositoryRecord,
+  input: ExecuteRepositoryCommandInput,
+  controllerHome?: string,
+): Promise<{
+  root: string;
+  cwd: string;
+  command: CanonicalRepositoryCommand;
+  timeoutMs: number;
+  maxOutputBytes: number;
+  before: RepositoryCommandSnapshot;
+  execution: RepositoryCommandExecution;
+  executable: boolean;
+  externalPathUsages: RepositoryCommandExternalPathUsage[];
+}> {
+  const { root, cwd, relativeCwd } = resolveRepositoryCommandCwd(repository, input.cwd);
+  const command = assertRepositoryCommandInputAllowed(input.command);
+  const externalGrants = loadExternalFilesystemGrants(root).grants;
+  const externalPathUsages = assertCommandPathOperandsStayInRepository(command, cwd, root, externalGrants);
+  const classification = classifyRepositoryCommand(command, repository.defaultBranch);
+  const before = input.reuseSnapshot ?? await repositorySnapshotAsync(root, input.signal);
+  return finalizePreparedExecution(
+    repository,
+    input,
+    controllerHome,
+    root,
+    cwd,
+    relativeCwd,
+    command,
+    externalPathUsages,
+    classification,
+    before,
+  );
+}
+
 export function previewRepositoryCommandExecution(
   repository: RepositoryRecord,
   input: ExecuteRepositoryCommandInput,
   controllerHome?: string,
 ): PreparedRepositoryCommandExecution {
   const prepared = prepareRepositoryCommandExecution(repository, input, controllerHome);
+  return {
+    before: prepared.before,
+    executable: prepared.executable,
+    execution: prepared.execution,
+  };
+}
+
+/** Async preview — preferred on Fast Path to avoid blocking Gateway with sync git snapshots. */
+export async function previewRepositoryCommandExecutionAsync(
+  repository: RepositoryRecord,
+  input: ExecuteRepositoryCommandInput,
+  controllerHome?: string,
+): Promise<PreparedRepositoryCommandExecution> {
+  const prepared = await prepareRepositoryCommandExecutionAsync(repository, input, controllerHome);
   return {
     before: prepared.before,
     executable: prepared.executable,
@@ -533,7 +761,12 @@ export async function executeRepositoryCommandAsync(
   input: ExecuteRepositoryCommandInput,
   hooks: RepositoryCommandAsyncHooks = {},
 ): Promise<RepositoryCommandExecution> {
-  const prepared = prepareRepositoryCommandExecution(repository, input, controllerHome);
+  const signal = hooks.signal ?? input.signal;
+  const prepared = await prepareRepositoryCommandExecutionAsync(
+    repository,
+    { ...input, signal },
+    controllerHome,
+  );
   const { root, cwd, command, timeoutMs, maxOutputBytes, before, execution: base, executable, externalPathUsages } = prepared;
 
   if (input.dryRun === true) {
@@ -545,14 +778,38 @@ export async function executeRepositoryCommandAsync(
     auditCommand(controllerHome, repository, base);
     return base;
   }
-  const result = await runCanonicalCommand(command, cwd, timeoutMs, maxOutputBytes, hooks);
-  const after = repositorySnapshot(root);
+  if (signal?.aborted) {
+    const cancelled: RepositoryCommandExecution = {
+      ...base,
+      status: 'executed',
+      ok: false,
+      exitCode: 1,
+      timedOut: false,
+      cancelled: true,
+      stdout: '',
+      stderr: 'cancelled before spawn',
+      after: before,
+      repositoryChanged: false,
+      changedPaths: [],
+      policyDecision: 'allowed',
+      infrastructureError: { code: 'COMMAND_CANCELLED', message: 'cancelled before spawn' },
+    };
+    auditCommand(controllerHome, repository, cancelled);
+    return cancelled;
+  }
+
+  const result = await runCanonicalCommand(command, cwd, timeoutMs, maxOutputBytes, {
+    ...hooks,
+    signal,
+  });
+  const after = await repositorySnapshotAsync(root, signal?.aborted ? undefined : signal);
   const execution: RepositoryCommandExecution = {
     ...base,
     status: 'executed',
     ok: result.ok,
     exitCode: result.exitCode,
     timedOut: result.timedOut,
+    cancelled: result.cancelled,
     stdout: result.stdout,
     stderr: result.stderr,
     after,
@@ -560,10 +817,17 @@ export async function executeRepositoryCommandAsync(
     changedPaths: changedSnapshotPaths(before, after),
     policyDecision: 'allowed',
     externalPathUsages: externalPathUsages.length > 0 ? externalPathUsages : undefined,
-    infrastructureError: result.timedOut ? {
-      code: 'COMMAND_TIMED_OUT',
-      message: result.stderr || `repository command timed out after ${timeoutMs}ms`,
-    } : undefined,
+    infrastructureError: result.timedOut
+      ? {
+        code: 'COMMAND_TIMED_OUT',
+        message: result.stderr || `repository command timed out after ${timeoutMs}ms`,
+      }
+      : result.cancelled
+        ? {
+          code: 'COMMAND_CANCELLED',
+          message: result.stderr || 'repository command cancelled',
+        }
+        : undefined,
   };
   auditCommand(controllerHome, repository, execution);
   return execution;

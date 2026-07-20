@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'crypto';
 import type { RepositoryRecord } from '../../../cli/repositories/types';
 import { runBoundedGit } from './async-process';
+import { routeExecution } from './execution-router';
 import { executeFast } from './fast-executor';
 import { LatencyTrace } from './latency-trace';
 import { writeFastReceipt } from './fast-receipt';
@@ -189,6 +190,26 @@ export async function executeLightweightLanes(
         if (!['search', 'read_file', 'git_status', 'git_diff', 'run_short_command'].includes(lane.kind)) {
           throw new Error(`READ_LANE_KIND_INVALID: ${lane.kind}`);
         }
+        // Strict readonly gate: only risk=readonly && mutatesWorkspace=false.
+        const decision = routeExecution({
+          operation: lane.kind,
+          mode: 'auto',
+          command: lane.input.command as string | string[] | undefined,
+          defaultBranch: ctx.repository.defaultBranch,
+        });
+        if (decision.mode !== 'fast' || decision.effects.mutatesWorkspace || decision.effects.remoteWrite) {
+          return {
+            id: lane.id,
+            ok: false,
+            durationMs: Math.round((performance.now() - laneStarted) * 100) / 100,
+            startedAtMs,
+            finishedAtMs: performance.now() - wallStart,
+            error: {
+              code: 'READ_LANE_NOT_READONLY',
+              message: `read lane rejected non-readonly effect: ${decision.reasons.join('; ') || decision.risk}`,
+            },
+          } satisfies ReadLaneResult;
+        }
         const executed = await executeFast(
           {
             controllerHome: ctx.controllerHome,
@@ -205,11 +226,7 @@ export async function executeLightweightLanes(
             signal: request.signal,
           },
         );
-        if (executed.operationSucceeded === false && executed.result?.error) {
-          /* fall through */
-        }
-        // Mutation from a read lane is a hard failure
-        const repoChanged = Boolean(
+        const repoChanged = executed.repositoryChanged === true || Boolean(
           (executed.result as { repositoryChanged?: boolean } | undefined)?.repositoryChanged,
         );
         if (repoChanged) {
@@ -219,7 +236,7 @@ export async function executeLightweightLanes(
             durationMs: Math.round((performance.now() - laneStarted) * 100) / 100,
             startedAtMs,
             finishedAtMs: performance.now() - wallStart,
-            error: { code: 'READ_LANE_MUTATION', message: 'read lane attempted repository mutation' },
+            error: { code: 'READ_LANE_MUTATION', message: 'read lane mutated repository (no automatic rollback)' },
           } satisfies ReadLaneResult;
         }
         return {
@@ -323,7 +340,8 @@ export async function executeLightweightLanes(
   const ok = readResults.every((entry) => entry.ok)
     && proposalResults.every((entry) => entry.ok || entry.analysisOnly);
 
-  // True concurrency: multiple lanes started before others finished.
+  // Overlap heuristic for benchmarks only — not a proof of offloaded concurrency.
+  // Do not treat this as production "true concurrent" evidence when inspector fallback is sync.
   const concurrent = readResults.length >= 2 && readResults.some((left, i) =>
     readResults.some((right, j) => i !== j
       && left.startedAtMs !== undefined

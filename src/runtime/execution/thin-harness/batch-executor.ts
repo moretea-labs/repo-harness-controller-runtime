@@ -5,8 +5,12 @@ import { executeFast } from './fast-executor';
 import { LatencyTrace } from './latency-trace';
 import { writeFastReceipt } from './fast-receipt';
 import { mutationGateBusyMessage, withCheckoutMutationGate } from './mutation-gate';
+import { beginFastRequest, completeFastRequest } from './request-ledger';
+import { hashRequestInput } from './fast-receipt';
 import {
   FAST_BATCH_MAX_STEPS,
+  FAST_BATCH_MAX_TOTAL_MS,
+  FAST_PATH_MAX_TIMEOUT_MS,
   type FastOutcome,
   type RepositoryBatchRequest,
   type RepositoryBatchResult,
@@ -21,20 +25,22 @@ export interface BatchExecutorContext {
 }
 
 const MAX_INLINE_BATCH_BYTES = 64 * 1024;
-const WRITE_KINDS = new Set(['apply_patch', 'stage_paths', 'commit_paths']);
 
 /**
  * Typed multi-step batch on Fast Path.
- * One parent receipt only. Write batches hold one Checkout Mutation Gate for the whole batch.
+ * One parent receipt only. Write batches hold one Mutation Ownership for the whole batch.
  */
 export async function executeRepositoryBatch(
   ctx: BatchExecutorContext,
   request: RepositoryBatchRequest,
 ): Promise<RepositoryBatchResult> {
   const startedAt = new Date().toISOString();
+  const wallStart = performance.now();
   const trace = new LatencyTrace('fast');
   const stopOnError = request.stopOnError !== false;
   const steps = request.steps ?? [];
+  const requestId = request.requestId?.trim() || undefined;
+  const inputHash = hashRequestInput({ steps, mode: request.mode, allowedPaths: request.allowedPaths });
 
   const decision = trace.measureSync('routingMs', () => routeExecution({
     operation: 'batch',
@@ -68,6 +74,7 @@ export async function executeRepositoryBatch(
         estimatedClass: 'long',
         requiresIsolation: false,
         requiresRecovery: false,
+        effects: decision.effects,
         suggestedOperation: 'Durable Work batch / individual durable tools',
       },
       steps: [],
@@ -92,6 +99,7 @@ export async function executeRepositoryBatch(
         estimatedClass: 'short',
         requiresIsolation: false,
         requiresRecovery: false,
+        effects: decision.effects,
         rejectCode: 'BATCH_TOO_LARGE',
       },
       steps: [],
@@ -101,7 +109,11 @@ export async function executeRepositoryBatch(
     };
   }
 
+  // Precheck each step and compute mutation effect from router, not kind name alone.
+  let hasWrite = decision.effects.mutatesWorkspace || decision.effects.mutatesGitRefs;
+  let hasCommit = false;
   for (const step of steps) {
+    if (step.kind === 'commit_paths') hasCommit = true;
     const stepDecision = routeExecution({
       operation: step.kind,
       mode: 'auto',
@@ -113,6 +125,7 @@ export async function executeRepositoryBatch(
       patchOperationCount: Array.isArray(step.input.operations) ? step.input.operations.length : undefined,
       defaultBranch: ctx.repository.defaultBranch,
     });
+    if (stepDecision.effects.mutatesWorkspace || stepDecision.effects.mutatesGitRefs) hasWrite = true;
     if (stepDecision.mode !== 'fast') {
       return {
         ok: false,
@@ -135,10 +148,102 @@ export async function executeRepositoryBatch(
     }
   }
 
-  const hasWrite = steps.some((step) => WRITE_KINDS.has(step.kind));
-  const hasCommit = steps.some((step) => step.kind === 'commit_paths');
+  if (hasWrite && !requestId) {
+    return {
+      ok: false,
+      mode: 'durable',
+      decision: {
+        mode: 'durable',
+        reasons: ['write_batch_requires_request_id'],
+        risk: 'workspace_write',
+        estimatedClass: 'short',
+        requiresIsolation: false,
+        requiresRecovery: false,
+        effects: decision.effects,
+        suggestedOperation: 're-issue write batch with request_id',
+      },
+      steps: [],
+      stoppedEarly: true,
+      partialFailure: false,
+      latency: trace.snapshot(request.includeLatencyBreakdown === true),
+      escalation: {
+        reason: 'write batch requires request_id for idempotency',
+        suggestedOperation: 'provide request_id',
+      },
+    };
+  }
 
-  const runSteps = async (): Promise<{
+  let ledger: ReturnType<typeof beginFastRequest> | undefined;
+  if (requestId && hasWrite) {
+    ledger = beginFastRequest({
+      controllerHome: ctx.controllerHome,
+      repoId: ctx.repository.repoId,
+      checkoutId: ctx.repository.activeCheckoutId,
+      requestId,
+      inputHash,
+      operation: 'batch',
+      owner: `fast-batch:${requestId}`,
+    });
+    if (ledger.kind === 'replay') {
+      return {
+        ok: true,
+        mode: 'fast',
+        decision,
+        steps: [],
+        stoppedEarly: false,
+        partialFailure: false,
+        latency: trace.snapshot(request.includeLatencyBreakdown === true),
+        receipt: undefined,
+        resultRef: ledger.entry.resultRef,
+      };
+    }
+    if (ledger.kind === 'in_progress') {
+      return {
+        ok: false,
+        mode: 'busy',
+        decision: {
+          mode: 'durable',
+          reasons: ['batch_request_in_progress'],
+          risk: 'workspace_write',
+          estimatedClass: 'short',
+          requiresIsolation: false,
+          requiresRecovery: false,
+          effects: decision.effects,
+        },
+        steps: [],
+        stoppedEarly: true,
+        partialFailure: false,
+        latency: trace.snapshot(request.includeLatencyBreakdown === true),
+      };
+    }
+    if (ledger.kind === 'conflict') {
+      return {
+        ok: false,
+        mode: 'reject',
+        decision: {
+          mode: 'reject',
+          reasons: ['idempotency_conflict'],
+          risk: 'workspace_write',
+          estimatedClass: 'short',
+          requiresIsolation: false,
+          requiresRecovery: false,
+          effects: decision.effects,
+          rejectCode: 'IDEMPOTENCY_CONFLICT',
+        },
+        steps: [],
+        stoppedEarly: true,
+        partialFailure: false,
+        latency: trace.snapshot(request.includeLatencyBreakdown === true),
+      };
+    }
+  }
+
+  const batchDeadlineMs = Math.min(
+    request.timeoutMs ?? FAST_BATCH_MAX_TOTAL_MS,
+    FAST_BATCH_MAX_TOTAL_MS,
+  );
+
+  const runSteps = async (helpers?: { assert: () => void; renew: () => unknown }): Promise<{
     stepResults: RepositoryBatchStepResult[];
     stoppedEarly: boolean;
     partialFailure: boolean;
@@ -157,8 +262,49 @@ export async function executeRepositoryBatch(
         partialFailure = true;
         break;
       }
+      if (performance.now() - wallStart > batchDeadlineMs) {
+        stoppedEarly = true;
+        partialFailure = stepResults.length > 0;
+        stepResults.push({
+          id: `deadline`,
+          kind: steps[index]!.kind,
+          ok: false,
+          outcome: 'timed_out',
+          durationMs: 0,
+          error: {
+            code: 'BATCH_DEADLINE',
+            message: `batch exceeded overall deadline ${batchDeadlineMs}ms`,
+          },
+        });
+        break;
+      }
+      try {
+        helpers?.assert();
+      } catch (error) {
+        stoppedEarly = true;
+        partialFailure = true;
+        stepResults.push({
+          id: steps[index]!.id?.trim() || `step_${index + 1}`,
+          kind: steps[index]!.kind,
+          ok: false,
+          outcome: 'failed',
+          durationMs: 0,
+          error: {
+            code: 'MUTATION_OWNERSHIP_LOST',
+            message: error instanceof Error ? error.message : String(error),
+          },
+        });
+        break;
+      }
+
       const step = steps[index]!;
       const stepId = step.id?.trim() || `step_${index + 1}`;
+      const remainingMs = Math.max(100, batchDeadlineMs - (performance.now() - wallStart));
+      const stepTimeout = Math.min(
+        typeof step.input.timeout_ms === 'number' ? step.input.timeout_ms : request.timeoutMs ?? FAST_PATH_MAX_TIMEOUT_MS,
+        remainingMs,
+        FAST_PATH_MAX_TIMEOUT_MS,
+      );
       const stepStarted = performance.now();
       const executed = await executeFast(
         {
@@ -172,13 +318,14 @@ export async function executeRepositoryBatch(
           operation: step.kind,
           mode: 'fast',
           input: step.input,
-          timeoutMs: typeof step.input.timeout_ms === 'number' ? step.input.timeout_ms : request.timeoutMs,
+          timeoutMs: stepTimeout,
           allowedPaths: request.allowedPaths,
           receiptMode: 'none',
           signal: request.signal,
           externalMutation: hasWrite,
         },
       );
+      helpers?.renew();
       const durationMs = Math.round((performance.now() - stepStarted) * 100) / 100;
       const outcome: FastOutcome = executed.ok
         ? (executed.outcome ?? 'succeeded')
@@ -248,12 +395,18 @@ export async function executeRepositoryBatch(
         repoId: ctx.repository.repoId,
         checkoutId: ctx.repository.activeCheckoutId,
         repoRoot: ctx.repository.canonicalRoot,
-        owner: `fast-batch:${request.requestId ?? Date.now()}`,
-        ttlMs: (request.timeoutMs ?? 15_000) + 10_000,
+        owner: `fast-batch:${requestId ?? Date.now()}`,
+        ttlMs: batchDeadlineMs + 15_000,
       },
-      async () => runSteps(),
+      async (_gate, helpers) => runSteps(helpers),
     );
     if (!gated.ok) {
+      if (ledger?.kind === 'acquired') {
+        completeFastRequest(ctx.controllerHome, ledger.entry, {
+          status: 'failed',
+          error: mutationGateBusyMessage(gated.busy),
+        });
+      }
       return {
         ok: false,
         mode: 'busy',
@@ -264,6 +417,7 @@ export async function executeRepositoryBatch(
           estimatedClass: 'short',
           requiresIsolation: false,
           requiresRecovery: false,
+          effects: decision.effects,
           suggestedOperation: 'retry after durable writer finishes',
         },
         steps: [],
@@ -292,9 +446,7 @@ export async function executeRepositoryBatch(
 
   const ok = stepResults.length > 0 && stepResults.every((entry) => entry.ok) && !stoppedEarly;
   const finishedAt = new Date().toISOString();
-  const latency = trace.snapshot(request.includeLatencyBreakdown === true);
-  latency.executionMs = Math.round(stepResults.reduce((sum, entry) => sum + entry.durationMs, 0) * 100) / 100;
-
+  const preReceipt = trace.snapshot(false);
   const receiptStarted = performance.now();
   const written = writeFastReceipt(ctx.controllerHome, {
     repoId: ctx.repository.repoId,
@@ -302,20 +454,34 @@ export async function executeRepositoryBatch(
     operation: 'batch',
     startedAt,
     finishedAt,
-    durationMs: latency.totalMs,
+    durationMs: preReceipt.totalMs,
     outcome: ok ? 'succeeded' : 'failed',
     changedPaths: allChangedPaths,
     repositoryChanged,
     authorizationDecision: 'batch_precheck',
     policyDecision: ok ? 'allowed' : 'failed',
     outputSummary: `batch steps=${stepResults.length} ok=${stepResults.filter((s) => s.ok).length} failed=${stepResults.filter((s) => !s.ok).length}`,
-    latency: request.includeLatencyBreakdown === true ? latency : undefined,
     stepCount: stepResults.length,
     reasons: decision.reasons,
-    requestId: request.requestId,
+    requestId,
+    inputHash,
   });
-  latency.receiptMs = Math.round((performance.now() - receiptStarted) * 100) / 100;
-  if (written.receipt) written.receipt.durationMs = latency.totalMs;
+  trace.add('receiptMs', performance.now() - receiptStarted);
+  const latency = trace.snapshot(request.includeLatencyBreakdown === true);
+  latency.executionMs = Math.round(stepResults.reduce((sum, entry) => sum + entry.durationMs, 0) * 100) / 100;
+  if (written.receipt) {
+    written.receipt.durationMs = preReceipt.totalMs;
+    if (request.includeLatencyBreakdown === true) written.receipt.latency = latency;
+  }
+
+  if (ledger?.kind === 'acquired') {
+    completeFastRequest(ctx.controllerHome, ledger.entry, {
+      status: ok ? 'succeeded' : 'failed',
+      resultSummary: `batch ok=${ok} steps=${stepResults.length}`,
+      receiptExecutionId: written.receipt?.executionId,
+      error: ok ? undefined : 'batch failed or partial',
+    });
+  }
 
   let payload: RepositoryBatchResult = {
     ok,

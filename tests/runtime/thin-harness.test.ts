@@ -465,13 +465,17 @@ describe('Thin Harness fast execution', () => {
           operation: 'stage_paths',
           mode: 'fast',
           input: { paths: ['src/sample.ts'] },
+          requestId: 'stage-while-gate-held',
         },
       );
       expect(competing.ok).toBe(false);
       expect((competing.result?.error as { code?: string } | undefined)?.code).toBe('MUTATION_BUSY');
     } finally {
       if ('acquired' in gate && gate.acquired) {
-        releaseCheckoutMutationGate(controllerHome, repository.repoId, repository.activeCheckoutId, gate.gate.gateId);
+        releaseCheckoutMutationGate(controllerHome, repository.repoId, repository.activeCheckoutId, gate.gate.ownerJobId, {
+          leaseId: gate.gate.leaseId,
+          fencingToken: gate.gate.fencingToken,
+        });
       }
     }
   });
@@ -489,6 +493,142 @@ describe('Thin Harness fast execution', () => {
     const result = await pending;
     expect(result.cancelled || result.ok === false).toBe(true);
     expect(result.exitCode).not.toBe(0);
+  });
+
+  test('AbortSignal cancels Fast repository_command_execute mid-flight', async () => {
+    const { controllerHome, repository } = fixture();
+    const controller = new AbortController();
+    const pending = executeFast(
+      { controllerHome, repository },
+      {
+        operation: 'repository_command_execute',
+        mode: 'auto',
+        input: { command: ['sleep', '3'] },
+        timeoutMs: 10_000,
+        signal: controller.signal,
+      },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    controller.abort();
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    expect(result.outcome === 'cancelled' || (result.result as { cancelled?: boolean } | undefined)?.cancelled === true
+      || (result.result?.error as { code?: string } | undefined)?.code === 'CANCELLED').toBe(true);
+  });
+
+  test('two concurrent fast writers only one acquires mutation ownership', async () => {
+    const { controllerHome, repository } = fixture();
+    const [a, b] = await Promise.all([
+      executeFast(
+        { controllerHome, repository },
+        {
+          operation: 'apply_patch',
+          mode: 'fast',
+          input: {
+            operations: [{
+              type: 'replace',
+              path: 'src/sample.ts',
+              old_text: 'export const answer = 42;',
+              new_text: 'export const answer = 100;',
+            }],
+            allowed_paths: ['src/**'],
+          },
+          allowedPaths: ['src/**'],
+          requestId: 'concurrent-writer-a',
+        },
+      ),
+      executeFast(
+        { controllerHome, repository },
+        {
+          operation: 'apply_patch',
+          mode: 'fast',
+          input: {
+            operations: [{
+              type: 'replace',
+              path: 'src/sample.ts',
+              old_text: 'export const answer = 42;',
+              new_text: 'export const answer = 200;',
+            }],
+            allowed_paths: ['src/**'],
+          },
+          allowedPaths: ['src/**'],
+          requestId: 'concurrent-writer-b',
+        },
+      ),
+    ]);
+    const successes = [a, b].filter((entry) => entry.ok);
+    const busy = [a, b].filter((entry) =>
+      (entry.result?.error as { code?: string } | undefined)?.code === 'MUTATION_BUSY'
+      || entry.decision.reasons.some((reason) => reason.includes('mutation_busy') || reason.includes('busy')));
+    // At most one success; the other should be busy or fail on content mismatch after first write.
+    expect(successes.length).toBeLessThanOrEqual(1);
+    expect(successes.length + busy.length + [a, b].filter((e) => !e.ok).length).toBeGreaterThanOrEqual(2);
+  });
+
+  test('fast mutation ownership blocks durable lease acquire', async () => {
+    const { controllerHome, repository, repoRoot } = fixture();
+    const gate = await acquireCheckoutMutationGate({
+      controllerHome,
+      repoId: repository.repoId,
+      checkoutId: repository.activeCheckoutId,
+      repoRoot,
+      owner: 'fast:hold-for-durable-test',
+      ttlMs: 15_000,
+    });
+    expect('acquired' in gate && gate.acquired).toBe(true);
+    try {
+      const durable = acquireExecutionLeases(
+        controllerHome,
+        repository.repoId,
+        'JOB-durable-blocked-by-fast',
+        [{ resourceKey: `workspace:${repository.activeCheckoutId}`, mode: 'write' }],
+        10_000,
+      );
+      expect(durable.acquired).toBe(false);
+      expect(durable.blockers.some((blocker) => blocker.ownerJobId.includes('fast:'))).toBe(true);
+    } finally {
+      if ('acquired' in gate && gate.acquired) {
+        releaseCheckoutMutationGate(controllerHome, repository.repoId, repository.activeCheckoutId, gate.gate.ownerJobId, {
+          leaseId: gate.gate.leaseId,
+          fencingToken: gate.gate.fencingToken,
+        });
+      }
+    }
+  });
+
+  test('concurrent same requestId only one mutation; second is in_progress or replay', async () => {
+    const { controllerHome, repository, repoRoot } = fixture();
+    const requestId = 'same-request-concurrent';
+    const input = {
+      operations: [{
+        type: 'replace',
+        path: 'src/sample.ts',
+        old_text: 'export const answer = 42;',
+        new_text: 'export const answer = 333;',
+      }],
+      allowed_paths: ['src/**'],
+    };
+    const [first, second] = await Promise.all([
+      executeFast(
+        { controllerHome, repository },
+        { operation: 'apply_patch', mode: 'fast', input, allowedPaths: ['src/**'], requestId },
+      ),
+      executeFast(
+        { controllerHome, repository },
+        { operation: 'apply_patch', mode: 'fast', input, allowedPaths: ['src/**'], requestId },
+      ),
+    ]);
+    const outcomes = [first, second];
+    const applied = outcomes.filter((entry) => entry.ok && entry.result?.replayed !== true && entry.operationSucceeded);
+    const replayOrInProgress = outcomes.filter((entry) =>
+      entry.result?.replayed === true
+      || (entry.result?.error as { code?: string } | undefined)?.code === 'REQUEST_IN_PROGRESS'
+      || entry.decision.reasons.includes('idempotent_in_progress')
+      || entry.decision.reasons.includes('idempotent_replay'));
+    // Only one should fully execute the mutation path as primary success without replay.
+    expect(applied.length).toBeLessThanOrEqual(1);
+    expect(replayOrInProgress.length + applied.length).toBeGreaterThanOrEqual(1);
+    expect(readFileSync(join(repoRoot, 'src/sample.ts'), 'utf8')).toMatch(/333|42/);
   });
 });
 

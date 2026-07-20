@@ -2,7 +2,7 @@
 
 > Status: **Runtime Authority (additive)**  
 > Baseline revision: feature branch `grok/thin-harness-v1`  
-> Review remediation: P0/P1 async Fast Path + mutation gate (post REQUEST_CHANGES)
+> Review remediation: round-2 P0.1/P0.2/P1.1 — lease-backed Mutation Ownership, async cancel, typed effects
 
 ## Purpose
 
@@ -26,12 +26,14 @@ Use Campaign only for multiple truly independent, long-lived deliverables.
 | Execution Router | `src/runtime/execution/thin-harness/execution-router.ts` | Decide `fast` / `durable` / `reject` |
 | Latency Trace | `src/runtime/execution/thin-harness/latency-trace.ts` | Mutually exclusive Fast Path segments |
 | Async Process | `src/runtime/execution/thin-harness/async-process.ts` | Bounded async spawn + process-tree kill + AbortSignal |
-| Mutation Gate | `src/runtime/execution/thin-harness/mutation-gate.ts` | Shared checkout write fencing with durable leases |
+| Mutation Ownership | `src/runtime/execution/thin-harness/mutation-gate.ts` | Fast/Durable shared ownership via Execution Lease arbiter (`workspace:<checkoutId>`) |
+| Request Ledger | `src/runtime/execution/thin-harness/request-ledger.ts` | Atomic create-if-absent idempotency before mutation |
 | Fast Executor | `src/runtime/execution/thin-harness/fast-executor.ts` | Async Fast Path execution |
 | Fast Receipt | `src/runtime/execution/thin-harness/fast-receipt.ts` | Bounded receipt; failures do not mask mutation success |
-| Batch Executor | `src/runtime/execution/thin-harness/batch-executor.ts` | Typed multi-step batch (≤20); one parent receipt; whole-batch write gate |
-| Lightweight Lanes | `src/runtime/execution/thin-harness/lightweight-lanes.ts` | Concurrent read lanes + patch_proposal_validate |
+| Batch Executor | `src/runtime/execution/thin-harness/batch-executor.ts` | Typed multi-step batch (≤20); one parent receipt; whole-batch write ownership |
+| Lightweight Lanes | `src/runtime/execution/thin-harness/lightweight-lanes.ts` | Read lanes (strict readonly effects) + patch_proposal_validate |
 | MCP integration | `src/cli/mcp/repository-tools.ts` | Fast path for eligible `repository_command_execute`; optional batch/lanes tools |
+| Command executor | `src/cli/repositories/command-executor.ts` | `repositorySnapshotAsync`, AbortSignal, process-group kill on async path |
 
 ### Execution modes
 
@@ -121,21 +123,26 @@ bounded child process (process group) / yielded search
 - Timeout/cancel: SIGTERM process group → grace → SIGKILL via `terminateProcessTree`.
 - stdout/stderr collectors cap while streaming.
 
-## Checkout Mutation Gate (P1)
+## Checkout Mutation Ownership (round-2)
 
-Shared fencing for Fast and Durable writers:
+Fast and Durable share the **same** Execution Lease arbiter:
 
 ```text
-repoId + checkoutId
-active durable write leases (workspace:*, repo-content:*, path:*, git-ref:*)
-active fast mutation gate
-Git base head + status hash (fencing metadata)
+resourceKey = workspace:<checkoutId>
+mode = write
+ownerJobId = fast:<session>:<op>:<requestId> | JOB-<durable>
+fencingToken = per-resource monotonic counter (lease store)
 ```
 
-- Fast writes acquire a lightweight gate (not an ExecutionJob).
-- Durable workers with write leases block Fast writes (`MUTATION_BUSY` / escalate durable).
-- Write batches hold **one** gate for the entire batch.
-- Stage uses `withControllerLockAsync` so the lock is not released before the Promise settles.
+- Fast mutation calls `acquireExecutionLeases` — **no** separate file-gate rename race.
+- Durable lease acquire conflicts with Fast ownership and vice versa (atomic under controller lock).
+- Heartbeat renew every TTL/3 while holding ownership; renew failure stops further writes.
+- Release is compare-and-delete via leaseId + fencingToken.
+- Write batches hold **one** ownership for the entire batch wall-clock deadline (`FAST_BATCH_MAX_TOTAL_MS`).
+- Router decision carries typed `effects` (`mutatesWorkspace`, etc.); ownership is based on effects, not operation name lists alone.
+- Focused checks that may write (snapshots/caches) set `mutatesWorkspace=true` and take ownership.
+- Read lanes reject any step with `mutatesWorkspace` / non-readonly effect before execution.
+- stage/commit and write batches require `request_id` + Request Ledger (atomic O_EXCL) for Fast Path.
 
 ## Batch API (typed)
 
