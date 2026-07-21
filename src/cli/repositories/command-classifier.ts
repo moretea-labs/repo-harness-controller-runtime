@@ -185,7 +185,7 @@ function isReadOnlySegment(segment: string): boolean {
   if (program === 'find') return !/(?:-delete|-exec|-execdir|-ok|-okdir)\b/.test(segment);
   if (program === 'sed') return !isSedInPlaceSegment(segment);
   if (program === 'gh') {
-    return /\bgh\s+(?:repo\s+view|pr\s+(?:list|view|status|checks|diff)|issue\s+(?:list|view)|run\s+(?:list|view|watch))(?:\s|$)/.test(segment);
+    return /\bgh\s+(?:repo\s+view|pr\s+(?:list|view|status|checks|diff)|issue\s+(?:list|view)|run\s+(?:list|view|watch)|release\s+(?:list|view|download))(?:\s|$)/.test(segment);
   }
   return READ_ONLY_PROGRAMS.has(program);
 }
@@ -394,6 +394,20 @@ function classifyArgvCommand(
   if (program === 'git' && subcommand === 'push') return { risk: 'remote_write', confirmation: 'authorization', reasons: ['writes Git refs to a remote'] };
   if (program === 'git' && isReadOnlyGitCommand(argv)) {
     return { risk: 'readonly', confirmation: 'none', reasons: ['the argv command is a recognized repository-local read operation'] };
+  }
+  // Explicit readonly GitHub CLI observations (must not be treated as workspace write).
+  if (program === 'gh') {
+    const group = subcommand ?? '';
+    const action = (argv[2] ?? '').toLowerCase();
+    const readonlyGh =
+      (group === 'repo' && action === 'view')
+      || (group === 'pr' && ['list', 'view', 'status', 'checks', 'diff'].includes(action))
+      || (group === 'issue' && ['list', 'view'].includes(action))
+      || (group === 'run' && ['list', 'view', 'watch'].includes(action))
+      || (group === 'release' && ['list', 'view', 'download'].includes(action));
+    if (readonlyGh) {
+      return { risk: 'readonly', confirmation: 'none', reasons: ['the argv command is a recognized GitHub read operation'] };
+    }
   }
   if (program === 'git' && ['add', 'commit', 'pull', 'fetch', 'merge', 'rebase', 'checkout', 'switch', 'cherry-pick', 'revert', 'stash', 'mv', 'restore', 'apply', 'am', 'bisect'].includes(subcommand ?? '')) {
     return { risk: 'workspace_write', confirmation: 'authorization', reasons: ['changes the checkout, local refs, index, or working tree'] };

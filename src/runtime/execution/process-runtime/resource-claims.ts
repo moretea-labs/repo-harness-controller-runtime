@@ -26,12 +26,23 @@ function checkoutScope(checkoutId?: string): string {
   return checkoutId?.trim() || 'active';
 }
 
+/**
+ * Workspace read uses the same resource key as workspace write.
+ * Conflict is expressed via mode (read vs write), not a separate key.
+ * Legacy workspace-read:* keys are normalized in claims/conflicts.ts.
+ */
 export function claimWorkspaceRead(checkoutId?: string): ResourceClaimSpec {
-  return { resourceKey: `workspace-read:${checkoutScope(checkoutId)}`, mode: 'read' };
+  return { resourceKey: `workspace:${checkoutScope(checkoutId)}`, mode: 'read' };
 }
 
 export function claimPathWrite(path: string, checkoutId?: string): ResourceClaimSpec {
-  const normalized = path.replace(/^\.\//, '').replace(/\\/g, '/');
+  // Import path normalizer lazily to avoid circular imports in tests.
+  const { normalizeClaimPath } = require('../../resources/claims/conflicts') as typeof import('../../resources/claims/conflicts');
+  const normalized = normalizeClaimPath(path);
+  if (!normalized) {
+    // Unsafe / ambiguous path → escalate to whole-checkout workspace write.
+    return claimWorkspaceWrite(checkoutId);
+  }
   return { resourceKey: `path:${checkoutScope(checkoutId)}:${normalized}`, mode: 'write' };
 }
 

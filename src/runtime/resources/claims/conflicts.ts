@@ -1,6 +1,27 @@
 import type { ResourceClaimSpec } from '../../execution/jobs/types';
 import type { ExecutionLease } from '../leases/types';
 
+/**
+ * Resource claim conflict model.
+ *
+ * Workspace is one resource key per checkout:
+ *   workspace:<checkoutId>  mode=read|write|exclusive
+ *
+ * Multiple reads may share; any write/exclusive conflicts with other modes
+ * on the same resource (see claimsConflict).
+ *
+ * Legacy keys:
+ *   workspace-read:<checkoutId>  → treated as workspace:<checkoutId> mode=read
+ */
+
+function normalizeResourceKey(key: string): string {
+  const trimmed = key.trim();
+  if (trimmed.startsWith('workspace-read:')) {
+    return `workspace:${trimmed.slice('workspace-read:'.length)}`;
+  }
+  return trimmed;
+}
+
 function pathValue(key: string): string | undefined {
   if (!key.startsWith('path:')) return undefined;
   const raw = key.slice('path:'.length).replace(/^\.\//, '');
@@ -24,7 +45,8 @@ function pathCheckoutId(key: string): string | undefined {
 }
 
 function workspaceCheckoutId(key: string): string | undefined {
-  return key.startsWith('workspace:') ? key.slice('workspace:'.length) : undefined;
+  const normalized = normalizeResourceKey(key);
+  return normalized.startsWith('workspace:') ? normalized.slice('workspace:'.length) : undefined;
 }
 
 function gitIndexCheckoutId(key: string): string | undefined {
@@ -37,9 +59,36 @@ function isGitRefKey(key: string): boolean {
   return key.startsWith('git-ref:') || key.startsWith('git-refs:');
 }
 
-function pathOverlaps(left: string, right: string): boolean {
-  const a = left.replace(/\*\*?$/, '').replace(/\/$/, '');
-  const b = right.replace(/\*\*?$/, '').replace(/\/$/, '');
+/**
+ * Normalize path for overlap checks.
+ * Returns null when the path cannot be safely compared (symlink markers,
+ * case-fold ambiguity markers, empty, absolute escape). Callers must treat
+ * null as "overlap unknown" → conflict conservatively.
+ */
+export function normalizeClaimPath(raw: string): string | null {
+  if (!raw || typeof raw !== 'string') return null;
+  let path = raw.replace(/\\/g, '/').replace(/^\.\//, '');
+  // Reject absolute and parent-escape for claim paths (workspace write instead).
+  if (path.startsWith('/') || path.startsWith('~/') || path.includes('\0')) return null;
+  const segments = path.split('/').filter((s) => s.length > 0 && s !== '.');
+  const out: string[] = [];
+  for (const seg of segments) {
+    if (seg === '..') return null;
+    // Symlink-ish or case-ambiguous markers we cannot prove safe.
+    if (seg.includes('->') || seg === '*') return null;
+    out.push(seg);
+  }
+  if (out.length === 0) return null;
+  return out.join('/');
+}
+
+export function pathOverlaps(left: string, right: string): boolean {
+  const aNorm = normalizeClaimPath(left);
+  const bNorm = normalizeClaimPath(right);
+  // Unsafe / un-normalizable paths: conservative overlap.
+  if (aNorm === null || bNorm === null) return true;
+  const a = aNorm.replace(/\*\*?$/, '').replace(/\/$/, '');
+  const b = bNorm.replace(/\*\*?$/, '').replace(/\/$/, '');
   return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
 }
 
@@ -47,8 +96,13 @@ function pathOverlaps(left: string, right: string): boolean {
  * Resource key overlap for mutation ownership.
  * workspace:<checkoutId> conflicts with same-checkout path/index/head and with
  * unscoped path:/git-ref claims (legacy keys lack checkout identity).
+ *
+ * Note: same-key overlap is true even when modes differ; mode policy lives in
+ * claimsConflict (read+read allowed).
  */
-export function resourceKeysOverlap(left: string, right: string): boolean {
+export function resourceKeysOverlap(leftRaw: string, rightRaw: string): boolean {
+  const left = normalizeResourceKey(leftRaw);
+  const right = normalizeResourceKey(rightRaw);
   if (left === right) return true;
 
   if (left === 'repo-content:*') {
@@ -108,8 +162,10 @@ export function resourceKeysOverlap(left: string, right: string): boolean {
 }
 
 export function claimsConflict(claim: ResourceClaimSpec, lease: ExecutionLease): boolean {
-  const claimRelease = claim.resourceKey.startsWith('release:');
-  const leaseRelease = lease.resourceKey.startsWith('release:');
+  const claimKey = normalizeResourceKey(claim.resourceKey);
+  const leaseKey = normalizeResourceKey(lease.resourceKey);
+  const claimRelease = claimKey.startsWith('release:');
+  const leaseRelease = leaseKey.startsWith('release:');
   if (claimRelease || leaseRelease) {
     if (claimRelease && leaseRelease) return true;
     // Release Freeze blocks mutations and external effects but intentionally
@@ -117,7 +173,8 @@ export function claimsConflict(claim: ResourceClaimSpec, lease: ExecutionLease):
     const nonReleaseMode = claimRelease ? lease.mode : claim.mode;
     return nonReleaseMode !== 'read';
   }
-  if (!resourceKeysOverlap(claim.resourceKey, lease.resourceKey)) return false;
+  if (!resourceKeysOverlap(claimKey, leaseKey)) return false;
+  // Read + read may share; any write/exclusive conflicts.
   return claim.mode !== 'read' || lease.mode !== 'read';
 }
 
@@ -127,7 +184,7 @@ export function normalizeClaims(claims: ResourceClaimSpec[], options: { readOnly
   }
   const map = new Map<string, ResourceClaimSpec>();
   for (const claim of claims) {
-    const key = claim.resourceKey.trim();
+    const key = normalizeResourceKey(claim.resourceKey);
     if (!key) continue;
     const existing = map.get(key);
     if (!existing || existing.mode === 'read' && claim.mode !== 'read' || existing.mode === 'write' && claim.mode === 'exclusive') {
