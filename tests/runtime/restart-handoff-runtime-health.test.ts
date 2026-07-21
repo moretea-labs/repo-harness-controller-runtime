@@ -69,7 +69,7 @@ describe('restart handoff and runtime health hardening', () => {
     }
   });
 
-  test('only the active slot inherits writer credentials from Supervisor', () => {
+  test('active and passive slots inherit complete claims, while passive remains fenced by slot', async () => {
     const home = mkdtempSync(join(tmpdir(), 'repo-harness-writer-env-'));
     try {
       const authority = publishWriterAuthority(home, {
@@ -77,13 +77,29 @@ describe('restart handoff and runtime health hardening', () => {
         generation: 'generation-blue',
         reason: 'test-writer-env',
       });
-      expect(runtimeWriterEnvironment(home, 'green')).toEqual({});
+      expect(runtimeWriterEnvironment(home, 'green')).toEqual({
+        REPO_HARNESS_WRITER_SLOT: 'green',
+        REPO_HARNESS_WRITER_EPOCH: authority.epoch,
+        REPO_HARNESS_WRITER_FENCING_TOKEN: authority.fencingToken,
+        REPO_HARNESS_WRITER_GENERATION: 'generation-blue',
+      });
       expect(runtimeWriterEnvironment(home, 'blue')).toEqual({
         REPO_HARNESS_WRITER_SLOT: 'blue',
         REPO_HARNESS_WRITER_EPOCH: authority.epoch,
         REPO_HARNESS_WRITER_FENCING_TOKEN: authority.fencingToken,
         REPO_HARNESS_WRITER_GENERATION: 'generation-blue',
       });
+      const { assertWriterAuthority } = await import('../../src/cli/controller/stable-state/writer-authority');
+      expect(assertWriterAuthority(home, {
+        slot: 'green',
+        epoch: authority.epoch,
+        fencingToken: authority.fencingToken,
+      }).allowed).toBe(false);
+      expect(assertWriterAuthority(home, {
+        slot: 'blue',
+        epoch: authority.epoch,
+        fencingToken: authority.fencingToken,
+      }).allowed).toBe(true);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

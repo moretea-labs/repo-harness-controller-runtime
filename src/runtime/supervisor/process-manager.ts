@@ -59,7 +59,11 @@ function processCommand(command: string, args: string[]): string {
 
 export function runtimeWriterEnvironment(controllerHome: string, slot: RuntimeSlotId): NodeJS.ProcessEnv {
   const authority = readWriterAuthority(controllerHome);
-  if (!authority || authority.activeSlot !== slot) return {};
+  if (!authority) return {};
+  // Passive candidates still need a complete inherited claim so they can boot
+  // and serve readiness. The child slot intentionally differs from the active
+  // authority slot, so every mutation remains fenced until cutover commits and
+  // the candidate is restarted with the new authority.
   return {
     REPO_HARNESS_WRITER_SLOT: slot,
     REPO_HARNESS_WRITER_EPOCH: authority.epoch,
