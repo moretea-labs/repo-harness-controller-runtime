@@ -18,8 +18,35 @@ import { buildAcceptedQueuedDigest, buildJobOperationDigest } from '../../contro
 import { claimsForMcpOperation } from './resource-policy';
 import { commandValue, normalizeRepositoryCommand } from '../../../cli/repositories/command-normalization';
 import { classifyRepositoryCommand, classifyRepositoryCommandReplay } from '../../../cli/repositories/command-classifier';
+import {
+  isFastEligibleTool,
+  routeExecution,
+  type ExecutionDecision,
+} from '../../execution/thin-harness';
 
 const DIRECT_REPOSITORY_TOOLS = new Set(['repository_list', 'repository_get', 'repository_workbench', 'repository_command_preview']);
+
+/**
+ * Tools whose Fast/Durable boundary is owned by Thin Harness classification.
+ * Gateway must classify BEFORE creating an ExecutionJob so short readonly
+ * repository commands do not pay queue/worker overhead.
+ */
+const THIN_ROUTED_TOOLS = new Set([
+  'repository_command_execute',
+  'repository_safe_patch_apply',
+  'repository_safe_patch_plan',
+  'repository_git_status',
+  'repository_git_diff',
+  'repository_git_commit',
+  'git_stage_paths',
+  'git_commit_paths',
+  'git_diff_paths',
+  'apply_patch',
+  'apply_edit_operations',
+  'search_repository',
+  'read_file_range',
+  'read_repository_file',
+]);
 
 /** Blocking native host tools must never execute on the public MCP event loop. */
 const GATEWAY_ISOLATED_TOOLS = new Set([
@@ -80,7 +107,11 @@ const P0_TOOLS = new Set(['run_check', 'verify_edit_session', 'repository_comman
 const P2_TOOLS = new Set(['write_prd', 'write_sprint', 'write_plan', 'publish_issue_to_github']);
 
 function wantsAsyncExecution(args: Record<string, unknown>): boolean {
-  return args.apply_mode === 'async' || args.mode === 'async' || args.async === true;
+  return args.apply_mode === 'async'
+    || args.mode === 'async'
+    || args.mode === 'durable'
+    || args.async === true
+    || args.background === true;
 }
 
 export function runsAsInteractiveSyncWrite(
@@ -115,7 +146,93 @@ function toolDefinition(ctx: MultiRepositoryMcpToolContext, name: string): McpTo
     .find((tool) => tool.name === name);
 }
 
-function shouldCreateDurableJob(
+/**
+ * Classify Gateway execution path before any ExecutionJob is created.
+ * Fast decisions short-circuit durable queueing so Thin Harness owns the request.
+ */
+export function classifyGatewayExecutionPath(
+  name: string,
+  args: Record<string, unknown> = {},
+  opts: { allowReadOnly?: boolean; forceDurable?: boolean } = {},
+): {
+  path: 'direct' | 'fast' | 'durable' | 'reject';
+  reasons: string[];
+  decision?: ExecutionDecision;
+} {
+  if (opts.forceDurable === true || isGatewayIsolatedTool(name)) {
+    return {
+      path: 'durable',
+      reasons: opts.forceDurable ? ['force_durable'] : ['gateway_isolated_tool'],
+    };
+  }
+  if (wantsAsyncExecution(args)) {
+    return {
+      path: 'durable',
+      reasons: ['caller_requested_async_or_durable'],
+    };
+  }
+  if (name.startsWith('repository_') && DIRECT_REPOSITORY_TOOLS.has(name)) {
+    return { path: 'direct', reasons: ['direct_repository_tool'] };
+  }
+  if (isDirectHotReadTool(name)) {
+    return { path: 'direct', reasons: ['direct_hot_read'] };
+  }
+  if (runsAsInteractiveSyncWrite(name, args)) {
+    return { path: 'direct', reasons: ['interactive_sync_write'] };
+  }
+  if (isSelfManagedDurableTool(name)) {
+    return { path: 'direct', reasons: ['self_managed_durable_boundary'] };
+  }
+  if (THIN_ROUTED_TOOLS.has(name) || name === 'repository_command_execute') {
+    const decision = routeExecution({
+      operation: name,
+      mode: args.mode === 'fast' ? 'fast' : 'auto',
+      background: args.background === true || args.apply_mode === 'async' || args.async === true,
+      requiresRecovery: args.requires_recovery === true,
+      requiresIsolation: args.isolation === 'new_worktree' || args.requires_isolation === true,
+      requiresWorktree: args.isolation === 'new_worktree',
+      agentRun: name === 'quick_agent_session' || name === 'dispatch_task',
+      remoteWrite: name.includes('push') || name === 'publish_issue_to_github',
+      timeoutMs: typeof args.timeout_ms === 'number' ? args.timeout_ms : undefined,
+      command: args.command as string | string[] | undefined,
+      paths: Array.isArray(args.paths) ? args.paths.map(String) : undefined,
+      allowedPaths: Array.isArray(args.allowed_paths) ? args.allowed_paths.map(String) : undefined,
+      patchOperationCount: Array.isArray(args.operations) ? args.operations.length : undefined,
+      patchPaths: Array.isArray(args.operations)
+        ? args.operations
+          .filter((entry): entry is Record<string, unknown> => typeof entry === 'object' && entry !== null)
+          .map((entry) => String(entry.path ?? '').trim())
+          .filter(Boolean)
+        : undefined,
+    });
+    if (decision.mode === 'fast') {
+      return {
+        path: 'fast',
+        reasons: decision.reasons,
+        decision,
+      };
+    }
+    if (decision.mode === 'reject') {
+      return { path: 'reject', reasons: decision.reasons, decision };
+    }
+    // Keep isFastEligibleTool as a secondary guard for tools whose operation
+    // name maps to a Fast allowlist entry but routeExecution used a durable alias.
+    if (isFastEligibleTool(name, args)) {
+      return {
+        path: 'fast',
+        reasons: ['thin_router_fast_eligible'],
+      };
+    }
+    return {
+      path: 'durable',
+      reasons: decision.reasons.length > 0 ? decision.reasons : ['thin_router_requires_durable'],
+      decision,
+    };
+  }
+  return { path: 'durable', reasons: ['default_durable_for_mutating_or_unknown_tool'] };
+}
+
+export function shouldCreateDurableJob(
   ctx: MultiRepositoryMcpToolContext,
   name: string,
   args: Record<string, unknown> = {},
@@ -130,6 +247,11 @@ function shouldCreateDurableJob(
   if (isDirectHotReadTool(name)) return false;
   // Interactive development path: sync by default unless caller opts into async queueing.
   if (runsAsInteractiveSyncWrite(name, args)) return false;
+  // Thin Harness classification must happen before ExecutionJob creation.
+  const classification = classifyGatewayExecutionPath(name, args, opts);
+  if (classification.path === 'fast' || classification.path === 'direct' || classification.path === 'reject') {
+    return false;
+  }
   return true;
 }
 
@@ -276,7 +398,31 @@ export async function routeDurableMcpCall(
   opts: { allowReadOnly?: boolean; forceDurable?: boolean } = {},
 ): Promise<CallToolResult | undefined> {
   const definition = toolDefinition(ctx, name);
-  if (!definition || !shouldCreateDurableJob(ctx, name, args, opts)) return undefined;
+  if (!definition) return undefined;
+
+  // Classify BEFORE creating any ExecutionJob / LocalJob / Worker.
+  const classification = classifyGatewayExecutionPath(name, args, opts);
+  if (classification.path === 'reject' && classification.decision) {
+    return result({
+      accepted: false,
+      mode: 'reject',
+      path: 'reject',
+      routing: {
+        path: 'reject',
+        reasons: classification.reasons,
+        decision: classification.decision,
+      },
+      rejectCode: classification.decision.rejectCode,
+      message: classification.reasons.join('; ') || 'operation rejected by Thin Harness routing',
+      suggestedOperation: classification.decision.suggestedOperation,
+    });
+  }
+  if (!shouldCreateDurableJob(ctx, name, args, opts)) {
+    // Fast/direct: leave execution to repository facade / runtime tool handlers.
+    // Returning undefined lets the MCP server call the direct tool path without
+    // durable side effects (no ExecutionJob, LocalJob, Worker, or Scheduler wake).
+    return undefined;
+  }
 
   const restoringDisabledRepository = name === 'repository_update'
     && typeof args.repo_id === 'string'
@@ -408,6 +554,13 @@ export async function routeDurableMcpCall(
   });
   return result({
     accepted: true,
+    mode: 'durable',
+    path: 'durable',
+    routing: {
+      path: 'durable',
+      reasons: classification.reasons,
+      ...(classification.decision ? { decision: classification.decision } : {}),
+    },
     jobId: created.job.jobId,
     repoId,
     checkoutId,

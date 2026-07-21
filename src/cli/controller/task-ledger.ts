@@ -293,13 +293,34 @@ function statusProjection(input: {
   }
 
   if (review) {
+    const status = review.effectiveStatus ?? review.latestRunClosureState ?? 'review';
+    const readyToIntegrate = status === 'ready_to_integrate' || review.latestRunClosureState === 'ready_to_integrate';
+    const integrationBlocked = status === 'integration_blocked' || review.latestRunClosureState === 'integration_blocked';
+    const cleanupPending = status === 'cleanup_pending' || review.latestRunClosureState === 'cleanup_pending';
+    const alreadyIntegrated = status === 'integrated' || review.latestRunClosureState === 'integrated';
+    let label = 'Review required';
+    let reason = `A Task is awaiting lifecycle review (${status}).`;
+    let nextAction = `Review Task ${review.issueId}/${review.taskId}; inspect raw diff and evidence before accepting or requesting changes.`;
+    if (readyToIntegrate) {
+      label = 'Ready to integrate';
+      reason = 'Work is complete and validated; integration is the next step (not finalization wait).';
+      nextAction = `Integrate Task ${review.issueId}/${review.taskId}, then run owned cleanup for branch/worktree/edit session.`;
+    } else if (integrationBlocked) {
+      label = 'Integration blocked';
+      reason = 'Integration cannot proceed until conflicts, ownership, or evidence blockers are resolved.';
+      nextAction = `Resolve integration blocker for Task ${review.issueId}/${review.taskId}; do not mark ready_to_integrate until blockers clear.`;
+    } else if (cleanupPending || alreadyIntegrated) {
+      label = alreadyIntegrated ? 'Cleanup after integration' : 'Cleanup pending';
+      reason = 'Integration finished or is recorded; owned branch/worktree/temp resources still need cleanup before close.';
+      nextAction = `Cleanup owned resources for Task ${review.issueId}/${review.taskId}, then close the Task.`;
+    }
     return {
       kind: "needs_review",
       severity: "action",
-      label: "Review required",
-      reason: `A Task is awaiting lifecycle finalization (${review.latestRunClosureState ?? review.effectiveStatus ?? 'review'}).`,
+      label,
+      reason,
       ...taskReference(review),
-      nextAction: `Review Task ${review.issueId}/${review.taskId}; inspect raw diff and evidence before accepting or requesting changes.`,
+      nextAction,
     };
   }
 

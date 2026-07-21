@@ -1054,6 +1054,11 @@ function controllerContextAssessment(args: Record<string, unknown>) {
     requiresParallelism: args.requires_parallelism === true,
     requiresLongRunningChecks: args.requires_long_running_checks === true,
     needsDependencies: args.needs_dependencies === true,
+    requiresIndependentDeliverables: args.requires_independent_deliverables === true,
+    independentTaskCount: typeof args.independent_task_count === 'number' ? args.independent_task_count : undefined,
+    requiresRemoteWrite: args.requires_remote_write === true || args.remote_write === true,
+    requiresRecovery: args.requires_recovery === true,
+    requiresWorkerIsolation: args.requires_worker === true || args.requires_worker_isolation === true,
     risk: typeof args.risk === 'string' ? args.risk as TaskRisk : undefined,
   });
 }

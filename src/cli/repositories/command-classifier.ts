@@ -128,27 +128,53 @@ function firstWords(segment: string): string[] {
     .map((word) => word.replace(/^['"]|['"]$/g, ''));
 }
 
-function readOnlyGitSegment(words: string[], segment: string): boolean {
+function hasGitFlag(words: string[], ...flags: string[]): boolean {
+  return words.some((word) => flags.includes(word));
+}
+
+/**
+ * Shared Git readonly subcommand gate for shell segments and typed argv.
+ * Mutating branch/tag/remote/config/worktree flags stay non-readonly.
+ */
+function isReadOnlyGitCommand(words: string[]): boolean {
   const subcommand = words[1]?.toLowerCase();
   if (!subcommand) return false;
   if (READ_ONLY_GIT_SUBCOMMANDS.has(subcommand)) return true;
   if (subcommand === 'branch') {
-    if (/(?:^|\s)(?:-[dDmM]|--delete|--move|--copy|--set-upstream-to|--unset-upstream)(?:\s|$)/.test(segment)) return false;
+    if (hasGitFlag(words, '-d', '-D', '-m', '-M', '--delete', '--move', '--copy', '--set-upstream-to', '--unset-upstream')
+      || words.some((word) => word.startsWith('--set-upstream-to='))) {
+      return false;
+    }
     return words.length === 2
-      || /(?:^|\s)(?:-a|--all|-r|--remotes|-l|--list|-v|-vv|--merged|--no-merged|--contains|--no-contains|--points-at|--show-current)(?:\s|$)/.test(segment);
+      || hasGitFlag(
+        words,
+        '-a', '--all', '-r', '--remotes', '-l', '--list', '-v', '-vv',
+        '--merged', '--no-merged', '--contains', '--no-contains', '--points-at', '--show-current',
+      )
+      || words.some((word) => word.startsWith('--contains=') || word.startsWith('--points-at='));
   }
   if (subcommand === 'tag') {
     return words.length === 2
-      || /(?:^|\s)(?:-l|--list|--points-at|--contains|--no-contains)(?:\s|$)/.test(segment);
+      || hasGitFlag(words, '-l', '--list', '--points-at', '--contains', '--no-contains')
+      || words.some((word) => word.startsWith('--contains=') || word.startsWith('--points-at='));
   }
   if (subcommand === 'remote') {
-    return words.length === 2 || /\bgit\s+remote\s+(?:-v|show|get-url)(?:\s|$)/.test(segment);
+    return words.length === 2
+      || hasGitFlag(words, '-v', '--verbose')
+      || words[2]?.toLowerCase() === 'show'
+      || words[2]?.toLowerCase() === 'get-url';
   }
   if (subcommand === 'config') {
-    return /\bgit\s+config\s+(?:--get|--get-all|--get-regexp|--list|-l)(?:\s|$)/.test(segment);
+    return hasGitFlag(words, '--get', '--get-all', '--get-regexp', '--list', '-l');
   }
-  if (subcommand === 'worktree') return /\bgit\s+worktree\s+list(?:\s|$)/.test(segment);
+  if (subcommand === 'worktree') {
+    return words[2]?.toLowerCase() === 'list';
+  }
   return false;
+}
+
+function readOnlyGitSegment(words: string[], _segment: string): boolean {
+  return isReadOnlyGitCommand(words);
 }
 
 function isReadOnlySegment(segment: string): boolean {
@@ -275,12 +301,23 @@ function classifyArgvCommand(
     return { risk: 'destructive', confirmation: 'authorization', reasons: ['deletes repository files'] };
   }
   if (program === 'git' && subcommand === 'push') return { risk: 'remote_write', confirmation: 'authorization', reasons: ['writes Git refs to a remote'] };
+  if (program === 'git' && isReadOnlyGitCommand(argv)) {
+    return { risk: 'readonly', confirmation: 'none', reasons: ['the argv command is a recognized repository-local read operation'] };
+  }
   if (program === 'git' && ['add', 'commit', 'pull', 'fetch', 'merge', 'rebase', 'checkout', 'switch', 'cherry-pick', 'revert', 'stash', 'mv', 'restore', 'apply', 'am', 'bisect'].includes(subcommand ?? '')) {
     return { risk: 'workspace_write', confirmation: 'authorization', reasons: ['changes the checkout, local refs, index, or working tree'] };
   }
   if (['touch', 'mkdir', 'cp', 'mv', 'install', 'tee', 'truncate', 'patch'].includes(program)
     || (['npm', 'bun', 'pnpm', 'yarn'].includes(program) && ['install', 'add', 'remove', 'update', 'run'].includes(subcommand ?? ''))) {
     return { risk: 'workspace_write', confirmation: 'authorization', reasons: ['writes repository files'] };
+  }
+  // Lightweight project script info queries stay readonly when they only request help/version.
+  if (['bun', 'node', 'npm', 'pnpm', 'yarn', 'python', 'python3', 'cargo', 'go', 'swift'].includes(program)
+    && argv.slice(1).some((word) => word === '--help' || word === '-h' || word === '--version' || word === '-V' || word === 'version' || word === 'help')) {
+    const mutating = argv.slice(1).some((word) => ['install', 'add', 'remove', 'update', 'publish', 'run', 'test', 'build'].includes(word.toLowerCase()));
+    if (!mutating) {
+      return { risk: 'readonly', confirmation: 'none', reasons: ['the argv command only requests help or version information'] };
+    }
   }
   if (program === 'git' && READ_ONLY_GIT_SUBCOMMANDS.has(subcommand ?? '')) {
     return { risk: 'readonly', confirmation: 'none', reasons: ['the argv command is a recognized repository-local read operation'] };

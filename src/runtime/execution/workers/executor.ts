@@ -330,7 +330,15 @@ export async function executeExecutionJob(controllerHome: string, job: Execution
       throw new Error('CONTROLLER_JOB_INVALID: controller-scoped Jobs must use a typed controller plugin or an existing controller repository-tool operation');
     }
     if (job.payload.target === 'repository-tool') {
-      const output = await callRepositoryTool(controllerHome, job.payload.operation, job.payload.arguments ?? {});
+      // Mark worker-owned calls so repository tools never create a nested
+      // ExecutionJob (or re-enter Gateway durable routing) while settling this job.
+      const workerArgs = {
+        ...(job.payload.arguments ?? {}),
+        __from_durable_worker: true,
+        __execution_job_id: job.jobId,
+        mode: 'durable',
+      };
+      const output = await callRepositoryTool(controllerHome, job.payload.operation, workerArgs);
       if (!output) throw new Error(`UNKNOWN_REPOSITORY_TOOL: ${job.payload.operation}`);
       let record = toolResultRecord(output);
       if (output.isError) {

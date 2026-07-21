@@ -39,6 +39,7 @@ import {
   readFastReceipt,
   routeExecution,
 } from '../../runtime/execution/thin-harness';
+import { assessWorkMode } from '../controller/work-mode';
 import type { CallToolResult, McpToolDefinition } from './tools';
 
 export type RepositoryToolResult = CallToolResult;
@@ -110,18 +111,18 @@ export const repositoryToolDefinitions: McpToolDefinition[] = [
   definition('repository_remove', 'Soft-remove a repository while retaining audit history.', {
     repo_id: repoId,
   }, ['repo_id'], true),
-  definition('repository_workbench', 'Return Workbench state or invoke one bounded Thin Harness operation without adding top-level MCP tools.', {
+  definition('repository_workbench', 'Return Workbench state or invoke one bounded Thin Harness operation without adding top-level MCP tools. Prefer batch_execute for multi-step status→search→read→diff or read→patch→check flows so ChatGPT pays one routing/receipt ownership cycle.', {
     repo_id: repoId,
     checkout_id: { type: 'string', description: 'Optional checkout identity for repository-scoped operations.' },
     include_removed: { type: 'boolean' },
     operation: {
       type: 'string',
-      enum: ['summary', 'batch_execute', 'lanes_execute', 'lanes_integrate', 'fast_receipt_get', 'fast_receipt_list', 'execution_route'],
-      description: 'Defaults to summary. Thin Harness operations use the payload object.',
+      enum: ['summary', 'batch_execute', 'lanes_execute', 'lanes_integrate', 'fast_receipt_get', 'fast_receipt_list', 'execution_route', 'assess_work_mode'],
+      description: 'Defaults to summary. Use batch_execute for multi-step Fast Path (one parent receipt). Use lanes_execute for limited parallel reads. Use assess_work_mode for Fast/Durable/Campaign routing advice.',
     },
     payload: {
       type: 'object',
-      description: 'Operation-specific bounded arguments. Batch and write operations should include request_id.',
+      description: 'Operation-specific bounded arguments. Batch write operations should include request_id. For batch_execute: { steps:[{id?, kind, input}], stop_on_error?, allowed_paths?, timeout_ms?, request_id?, purpose? }. For assess_work_mode: { description, known_paths?, expected_files?, requires_parallelism?, independent_task_count? }.',
       additionalProperties: true,
     },
   }),
@@ -354,6 +355,41 @@ export async function callRepositoryTool(
             includeRemoved: args.include_removed === true,
           }) });
         }
+        const payload = typeof args.payload === 'object' && args.payload !== null
+          ? args.payload as Record<string, unknown>
+          : {};
+        if (operation === 'assess_work_mode') {
+          const description = typeof payload.description === 'string'
+            ? payload.description
+            : typeof args.description === 'string' ? args.description : '';
+          const assessment = assessWorkMode({
+            description,
+            knownPaths: Array.isArray(payload.known_paths) ? payload.known_paths.map(String) : undefined,
+            expectedFiles: typeof payload.expected_files === 'number' ? payload.expected_files : undefined,
+            expectedChangedLines: typeof payload.expected_changed_lines === 'number' ? payload.expected_changed_lines : undefined,
+            requiresInvestigation: payload.requires_investigation === true,
+            requiresParallelism: payload.requires_parallelism === true,
+            requiresLongRunningChecks: payload.requires_long_running_checks === true,
+            needsDependencies: payload.needs_dependencies === true,
+            requiresIndependentDeliverables: payload.requires_independent_deliverables === true,
+            independentTaskCount: typeof payload.independent_task_count === 'number' ? payload.independent_task_count : undefined,
+            requiresRemoteWrite: payload.requires_remote_write === true || payload.remote_write === true,
+            requiresRecovery: payload.requires_recovery === true,
+            requiresWorkerIsolation: payload.requires_worker === true || payload.requires_worker_isolation === true,
+            risk: typeof payload.risk === 'string' ? payload.risk as 'low' | 'medium' | 'high' | 'destructive' : undefined,
+          });
+          return result({
+            assessment,
+            routing: {
+              path: assessment.executionPath,
+              reasons: assessment.reasons,
+              recommendedMode: assessment.recommendedMode,
+              issueRequired: assessment.issueRequired,
+              campaignRequired: assessment.campaignRequired,
+            },
+            nextTools: assessment.nextTools,
+          });
+        }
         const internalTool = {
           batch_execute: 'repository_batch_execute',
           lanes_execute: 'repository_lanes_execute',
@@ -365,9 +401,6 @@ export async function callRepositoryTool(
         if (!internalTool) {
           return failure(new Error(`REPOSITORY_WORKBENCH_OPERATION_INVALID: ${operation}`));
         }
-        const payload = typeof args.payload === 'object' && args.payload !== null
-          ? args.payload as Record<string, unknown>
-          : {};
         return callRepositoryTool(controllerHome, internalTool, {
           ...payload,
           repo_id: repoIdValue || payload.repo_id,
@@ -551,9 +584,25 @@ export async function callRepositoryTool(
           : typeof args.max_output_bytes === 'string'
             ? Number(args.max_output_bytes)
             : undefined;
+        // Worker-owned durable executions must not re-enter Fast Path or create a
+        // nested ExecutionJob. Local Job remains the worker settlement surface.
+        const fromDurableWorker = args.__from_durable_worker === true
+          || typeof args.__execution_job_id === 'string';
         // Thin Harness: short readonly / focused-check commands skip Local Job when eligible.
-        const forceDurable = args.apply_mode === 'async' || args.mode === 'durable' || args.async === true || args.background === true;
-        if (!forceDurable && isFastEligibleTool('repository_command_execute', {
+        const forceDurable = fromDurableWorker
+          || args.apply_mode === 'async'
+          || args.mode === 'durable'
+          || args.async === true
+          || args.background === true;
+        const routingDecision = routeExecution({
+          operation: 'repository_command_execute',
+          mode: forceDurable ? 'durable' : args.mode === 'fast' ? 'fast' : 'auto',
+          command: args.command as string | string[] | undefined,
+          timeoutMs,
+          background: args.background === true || args.async === true,
+          defaultBranch: repository.defaultBranch,
+        });
+        if (!forceDurable && routingDecision.mode === 'fast' && isFastEligibleTool('repository_command_execute', {
           command: args.command,
           timeout_ms: timeoutMs,
           mode: typeof args.mode === 'string' ? args.mode : 'auto',
@@ -576,6 +625,12 @@ export async function callRepositoryTool(
           if (fast.escalation) {
             return result({
               mode: 'durable',
+              path: 'durable',
+              routing: {
+                path: 'durable',
+                reasons: fast.decision.reasons,
+                decision: fast.decision,
+              },
               reason: fast.escalation.reason,
               suggestedOperation: fast.escalation.suggestedOperation,
               decision: fast.decision,
@@ -587,6 +642,12 @@ export async function callRepositoryTool(
             ? result({
               accepted: true,
               mode: 'fast',
+              path: 'fast',
+              routing: {
+                path: 'fast',
+                reasons: fast.decision.reasons,
+                decision: fast.decision,
+              },
               repoId: repository.repoId,
               checkoutId: repository.activeCheckoutId,
               receipt: fast.receipt,
@@ -597,11 +658,66 @@ export async function callRepositoryTool(
             })
             : { ...result({
               mode: 'fast',
+              path: 'fast',
+              routing: {
+                path: 'fast',
+                reasons: fast.decision.reasons,
+                decision: fast.decision,
+              },
               repoId: repository.repoId,
               checkoutId: repository.activeCheckoutId,
               receipt: fast.receipt,
               execution: fast.result,
               latency: args.include_latency_breakdown === true ? fast.latency : { totalMs: fast.latency.totalMs },
+            }), isError: true };
+        }
+        // Durable Worker already owns this request: execute the repository command
+        // directly instead of submitting another Local Bridge projection that could
+        // recurse into ExecutionJob ownership.
+        if (fromDurableWorker) {
+          const execution = executeRepositoryCommand(controllerHome, repository, {
+            command: args.command as string | string[],
+            cwd: typeof args.cwd === 'string' ? args.cwd : undefined,
+            authorization: 'confirmed_plan',
+            approvalToken: typeof args.approval_token === 'string' ? args.approval_token : undefined,
+            approvalRequestId: typeof args.approval_request_id === 'string' ? args.approval_request_id : undefined,
+            timeoutMs,
+            maxOutputBytes,
+          });
+          const ok = execution.ok === true && execution.status === 'executed';
+          return ok
+            ? result({
+              accepted: true,
+              mode: 'durable',
+              path: 'durable_worker_inline',
+              routing: {
+                path: 'durable',
+                reasons: ['durable_worker_inline_no_nested_job', ...routingDecision.reasons],
+                decision: routingDecision,
+              },
+              repoId: repository.repoId,
+              checkoutId: repository.activeCheckoutId,
+              execution,
+              durableSideEffects: {
+                executionJobCount: 0,
+                localJobCount: 0,
+                workerSpawnCount: 0,
+                projectionUpdateCount: 0,
+                schedulerWakeCount: 0,
+              },
+              next: 'Durable Worker executed the repository command inline without a nested ExecutionJob.',
+            })
+            : { ...result({
+              mode: 'durable',
+              path: 'durable_worker_inline',
+              routing: {
+                path: 'durable',
+                reasons: ['durable_worker_inline_no_nested_job', ...routingDecision.reasons],
+                decision: routingDecision,
+              },
+              repoId: repository.repoId,
+              checkoutId: repository.activeCheckoutId,
+              execution,
             }), isError: true };
         }
         const preview = previewRepositoryCommandExecution(repository, {
@@ -639,6 +755,12 @@ export async function callRepositoryTool(
         return result({
           accepted: true,
           mode: 'durable',
+          path: 'durable',
+          routing: {
+            path: 'durable',
+            reasons: routingDecision.reasons.length > 0 ? routingDecision.reasons : ['policy_requires_durable'],
+            decision: routingDecision,
+          },
           repoId: repository.repoId,
           checkoutId: repository.activeCheckoutId,
           jobId: accepted.jobId,
