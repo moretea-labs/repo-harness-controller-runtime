@@ -32,13 +32,11 @@ import { readRuntimeGeneration } from '../../runtime/control-plane/runtime-gener
 import { createExecutionJob, getExecutionJob } from '../../runtime/execution/jobs/store';
 import { CONTROLLER_SCOPE_REPO_ID } from '../repositories/controller-home';
 import { randomUUID } from 'crypto';
-import { isStableSupervisorInstalled, readPreviousRelease } from '../../runtime/supervisor/paths';
-import { publishSupervisorRelease, stageSupervisorRelease } from '../../runtime/supervisor/installer';
+import { isStableSupervisorInstalled } from '../../runtime/supervisor/paths';
+import { stageSupervisorRelease } from '../../runtime/supervisor/installer';
 import { resolveControllerRuntimeSourceRoot } from '../../runtime/control-plane/runtime-generation';
 import { sendSupervisorCommand } from '../../runtime/supervisor/control-server';
 import { readStableSupervisorState } from '../../runtime/supervisor/bridge';
-import type { SupervisorOperation, SupervisorOperationKind } from '../../runtime/supervisor/types';
-import { scheduleServiceActivation, waitForServiceActivation } from '../commands/supervisor';
 import { restartRequestNeedsDetachedCoordinator } from './restart-coordinator';
 
 export interface BlueGreenRolloutOptions {
@@ -51,53 +49,20 @@ export interface BlueGreenRolloutOptions {
   skipDurableJob?: boolean;
   skipRestartDurability?: boolean;
   reason?: string;
+  /**
+   * When true, the caller explicitly requests synchronous wait for the
+   * Supervisor operation to reach a terminal phase. This is ONLY safe from
+   * an external CLI process that is NOT a child of the managed runtime.
+   * When omitted or false, the rollout submits the operation and returns
+   * an accepted result immediately (out-of-band contract).
+   */
+  wait?: boolean;
 }
 
 const TERMINAL_SUPERVISOR_PHASES = new Set(['succeeded', 'failed', 'locked_out']);
 
 function operationTimeoutMs(opts: BlueGreenRolloutOptions): number {
   return Math.max(180_000, (opts.startTimeoutMs ?? 60_000) * 3);
-}
-
-async function submitAndWaitSupervisorOperation(input: {
-  rootHome: string;
-  kind: SupervisorOperationKind;
-  reason?: string;
-  candidateReleasePath?: string;
-  timeoutMs: number;
-}): Promise<SupervisorOperation> {
-  const requestId = `controller-${input.kind}-${Date.now()}-${randomUUID().slice(0, 10)}`;
-  const submitted = await sendSupervisorCommand(input.rootHome, {
-    command: 'operation_submit',
-    requestId,
-    kind: input.kind,
-    actor: 'controller-bluegreen-rollout',
-    reason: input.reason,
-    candidateReleasePath: input.candidateReleasePath,
-  });
-  if (!submitted.ok || !submitted.operation) {
-    throw new Error(submitted.error?.message ?? 'SUPERVISOR_OPERATION_REJECTED');
-  }
-  if (input.candidateReleasePath && submitted.operation.candidateReleasePath !== input.candidateReleasePath) {
-    throw new Error('SUPERVISOR_STAGED_ROLLOUT_CAPABILITY_MISMATCH');
-  }
-  let operation = submitted.operation;
-  const deadline = Date.now() + input.timeoutMs;
-  while (!TERMINAL_SUPERVISOR_PHASES.has(operation.phase)) {
-    if (Date.now() >= deadline) {
-      throw new Error(`SUPERVISOR_OPERATION_TIMEOUT: ${operation.operationId} phase=${operation.phase}`);
-    }
-    await new Promise((resolveWait) => setTimeout(resolveWait, 250));
-    const polled = await sendSupervisorCommand(input.rootHome, {
-      command: 'operation_get',
-      operationId: operation.operationId,
-    });
-    if (!polled.ok || !polled.operation) {
-      throw new Error(polled.error?.message ?? 'SUPERVISOR_OPERATION_READ_FAILED');
-    }
-    operation = polled.operation;
-  }
-  return operation;
 }
 
 function partialResult(input: {
@@ -163,139 +128,142 @@ async function stableSupervisorRollout(
     });
   }
 
-  let operation: SupervisorOperation;
+  // Determine whether synchronous wait is safe. If the caller is inside the
+  // managed runtime ancestry (Gateway child, Durable Worker, MCP handler),
+  // waiting would be suicidal because cutover kills the old slot processes.
+  const wantsWait = opts.wait === true;
+  const insideManagedAncestry = restartRequestNeedsDetachedCoordinator(repoRoot, rootHome);
+  const safeToWait = wantsWait && !insideManagedAncestry;
+
+  // Submit the operation to the root Stable Supervisor.
+  const requestId = `controller-rollout-${Date.now()}-${randomUUID().slice(0, 10)}`;
+  let submitted;
   try {
-    operation = await submitAndWaitSupervisorOperation({
-      rootHome,
+    submitted = await sendSupervisorCommand(rootHome, {
+      command: 'operation_submit',
+      requestId,
       kind: 'rollout',
+      actor: 'controller-bluegreen-rollout',
       reason: opts.reason,
       candidateReleasePath: staged.releasePath,
-      timeoutMs: operationTimeoutMs(opts),
     });
   } catch (error) {
     return compositeFailed({
       phase: 'supervisor-rollout',
-      summary: 'Root Stable Supervisor did not complete candidate rollout',
-      failedCheck: 'supervisor_operation',
+      summary: 'Failed to submit rollout operation to the root Stable Supervisor',
+      failedCheck: 'supervisor_operation_submit',
       keyOutput: error instanceof Error ? error.message : String(error),
-      nextAction: 'inspect the durable Supervisor operation; the staged release was never published',
+      nextAction: 'inspect Supervisor control socket connectivity and retry',
       details: { stagedRelease: staged },
     });
   }
-  if (operation.phase !== 'succeeded') {
+  if (!submitted.ok || !submitted.operation) {
     return compositeFailed({
-      phase: operation.phase,
-      summary: 'Candidate verification or cutover failed; active release publication was skipped',
-      failedCheck: operation.failureClass ?? 'supervisor_rollout',
-      keyOutput: operation.error ?? `operation ${operation.operationId} ended in ${operation.phase}`,
-      nextAction: 'inspect candidate evidence and retry after fixing the release',
-      details: { operation, stagedRelease: staged },
+      phase: 'supervisor-rollout',
+      summary: 'Root Stable Supervisor rejected the rollout operation',
+      failedCheck: 'supervisor_operation_rejected',
+      keyOutput: submitted.error?.message ?? 'SUPERVISOR_OPERATION_REJECTED',
+      nextAction: 'inspect Supervisor operation lock and retry',
+      details: { stagedRelease: staged },
+    });
+  }
+  if (staged.releasePath && submitted.operation.candidateReleasePath !== staged.releasePath) {
+    return compositeFailed({
+      phase: 'supervisor-rollout',
+      summary: 'Supervisor did not accept the staged candidate release path',
+      failedCheck: 'staged_rollout_capability_mismatch',
+      keyOutput: 'SUPERVISOR_STAGED_ROLLOUT_CAPABILITY_MISMATCH',
+      nextAction: 'verify the running Supervisor supports staged_rollout_release',
+      details: { stagedRelease: staged, operation: submitted.operation },
     });
   }
 
-  let publication;
-  try {
-    publication = publishSupervisorRelease({
-      controllerHome: rootHome,
-      repoRoot,
-      releasePath: staged.releasePath,
-    });
-  } catch (error) {
-    let rollback: SupervisorOperation | undefined;
-    try {
-      rollback = await submitAndWaitSupervisorOperation({
-        rootHome,
-        kind: 'rollback',
-        reason: 'candidate cutover succeeded but release publication failed',
-        timeoutMs: operationTimeoutMs(opts),
+  const operation = submitted.operation;
+
+  // Out-of-band default: return accepted immediately. The Supervisor owns
+  // the full rollout lifecycle including release publication.
+  if (!safeToWait) {
+    return {
+      status: 'partial',
+      phase: 'accepted',
+      summary: wantsWait && insideManagedAncestry
+        ? 'Rollout submitted; synchronous wait was refused because the caller is inside managed runtime ancestry'
+        : 'Rollout operation submitted to the root Stable Supervisor',
+      keyOutput: boundKeyOutput([
+        `accepted=true`,
+        `operationId=${operation.operationId}`,
+        `requestId=${requestId}`,
+        `reconnectContract=stable_domain_retry`,
+        `stagedRelease=${staged.releaseRevision}`,
+        `nextAction=poll supervisor operation or controller_ready`,
+      ].join('\n')),
+      evidenceRefs: [],
+      retryable: false,
+      nextAction: 'poll supervisor operation or controller_ready',
+      details: {
+        accepted: true,
+        operationId: operation.operationId,
+        requestId,
+        reconnectContract: 'stable_domain_retry',
+        stagedRelease: staged,
+        ...(wantsWait && insideManagedAncestry ? { waitRefused: 'managed_runtime_ancestry' } : {}),
+      },
+    } as CompositeToolResult;
+  }
+
+  // Synchronous wait path (external CLI only).
+  let finalOperation = operation;
+  const deadline = Date.now() + operationTimeoutMs(opts);
+  while (!TERMINAL_SUPERVISOR_PHASES.has(finalOperation.phase)) {
+    if (Date.now() >= deadline) {
+      return partialResult({
+        phase: finalOperation.phase,
+        summary: `Rollout operation ${finalOperation.operationId} has not reached a terminal phase within the timeout`,
+        keyOutput: `operationId=${finalOperation.operationId}\nphase=${finalOperation.phase}`,
+        nextAction: 'poll supervisor operation status; do not repeat rollout while this operation is active',
+        details: { operation: finalOperation, stagedRelease: staged },
       });
-    } catch {
-      // Report both the publication failure and best-effort rollback uncertainty.
     }
-    return compositeFailed({
-      phase: 'release-publish',
-      summary: 'Candidate cutover succeeded but root release publication failed',
-      failedCheck: 'release_publish',
-      keyOutput: error instanceof Error ? error.message : String(error),
-      nextAction: 'inspect Supervisor authority and rollback outcome before retrying',
-      details: { operation, rollback, stagedRelease: staged },
+    await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+    const polled = await sendSupervisorCommand(rootHome, {
+      command: 'operation_get',
+      operationId: operation.operationId,
     });
+    if (!polled.ok || !polled.operation) {
+      return partialResult({
+        phase: 'polling',
+        summary: 'Lost contact with the Supervisor while polling rollout operation',
+        keyOutput: polled.error?.message ?? 'SUPERVISOR_OPERATION_READ_FAILED',
+        nextAction: 'reconnect and poll the operation; the Supervisor owns execution',
+        details: { operation: finalOperation, stagedRelease: staged },
+      });
+    }
+    finalOperation = polled.operation;
   }
 
-  let activation: ReturnType<typeof scheduleServiceActivation> | { skipped: true };
-  try {
-    activation = opts.skipRestartDurability
-      ? { skipped: true }
-      : scheduleServiceActivation(repoRoot, rootHome, 3_000);
-  } catch (error) {
-    return partialResult({
-      phase: 'activation-schedule',
-      summary: 'Rollout and release publication succeeded, but Supervisor self-activation was not scheduled',
-      keyOutput: error instanceof Error ? error.message : String(error),
-      nextAction: 'run supervisor install --register-service for the published release; do not repeat rollout',
-      details: { operation, publication },
+  if (finalOperation.phase !== 'succeeded') {
+    return compositeFailed({
+      phase: finalOperation.phase,
+      summary: 'Candidate verification or cutover failed',
+      failedCheck: finalOperation.failureClass ?? 'supervisor_rollout',
+      keyOutput: finalOperation.error ?? `operation ${finalOperation.operationId} ended in ${finalOperation.phase}`,
+      nextAction: 'inspect candidate evidence and retry after fixing the release',
+      details: { operation: finalOperation, stagedRelease: staged },
     });
   }
 
   const authority = readActiveSlotAuthority(rootHome);
-  let activationState: unknown;
-  if (!('skipped' in activation)) {
-    if (restartRequestNeedsDetachedCoordinator(repoRoot, rootHome)) {
-      return partialResult({
-        phase: 'activation_pending',
-        summary: `Candidate cutover and release publication succeeded on ${authority.activeSlot}; detached Supervisor activation is still pending`,
-        keyOutput: [
-          `operation=${operation.operationId}`,
-          `active=${authority.activeSlot}`,
-          `generation=${authority.generation ?? 'unknown'}`,
-          `release=${publication.releaseRevision}`,
-          `activation=${activation.activationId}`,
-          `state=${activation.statePath}`,
-        ].join('\n'),
-        nextAction: 'reconnect to the stable domain and inspect activation state; do not repeat rollout while this activation is pending',
-        details: { authority, operation, publication, activation },
-      });
-    }
-    try {
-      activationState = await waitForServiceActivation({
-        home: rootHome,
-        activationId: activation.activationId,
-        expectedReleaseRevision: publication.releaseRevision,
-        timeoutMs: operationTimeoutMs(opts),
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message.startsWith('SUPERVISOR_ACTIVATION_TIMEOUT')) {
-        return partialResult({
-          phase: 'activation_pending',
-          summary: `Candidate cutover and release publication succeeded on ${authority.activeSlot}; activation has not reached a terminal state`,
-          keyOutput: `${message}\nstate=${activation.statePath}`,
-          nextAction: 'inspect activation state before retrying or rolling back',
-          details: { authority, operation, publication, activation },
-        });
-      }
-      return compositeFailed({
-        phase: 'activation',
-        summary: 'Candidate cutover succeeded, but Stable Supervisor activation failed or restored the previous release',
-        failedCheck: 'supervisor_activation',
-        keyOutput: message,
-        nextAction: 'inspect activation recovery evidence and current release pointers before retrying',
-        details: { authority, operation, publication, activation },
-      });
-    }
-  }
   return compositeSucceeded({
     phase: 'cutover',
-    summary: `Rollout and Stable Supervisor activation complete: active slot is ${authority.activeSlot}`,
+    summary: `Rollout complete: active slot is ${authority.activeSlot}`,
     keyOutput: [
-      `operation=${operation.operationId}`,
+      `operation=${finalOperation.operationId}`,
       `active=${authority.activeSlot}`,
       `generation=${authority.generation ?? 'unknown'}`,
-      `release=${publication.releaseRevision}`,
-      `activation=${'skipped' in activation ? 'skipped' : activation.activationId}`,
+      `release=${staged.releaseRevision}`,
     ].join('\n'),
     nextAction: 'use controller status to confirm the active immutable release and runtime generation',
-    details: { authority, operation, publication, activation, activationState },
+    details: { authority, operation: finalOperation, stagedRelease: staged },
   });
 }
 
@@ -307,132 +275,126 @@ async function stableSupervisorRollback(
   const supervisorState = readStableSupervisorState(rootHome);
   const rollbackAuthority = readActiveSlotAuthority(rootHome);
   const rollbackMode = supervisorState?.standby && isRollbackWindowOpen(rollbackAuthority) ? 'hot' : 'cold';
-  const rollbackReleasePath = supervisorState?.standby?.controllerDaemon.releasePath
-    ?? readPreviousRelease(rootHome);
-  let operation: SupervisorOperation;
+
+  // Determine whether synchronous wait is safe.
+  const wantsWait = opts.wait === true;
+  const insideManagedAncestry = restartRequestNeedsDetachedCoordinator(repoRoot, rootHome);
+  const safeToWait = wantsWait && !insideManagedAncestry;
+
+  // Submit the rollback operation to the root Stable Supervisor.
+  const requestId = `controller-rollback-${Date.now()}-${randomUUID().slice(0, 10)}`;
+  let submitted;
   try {
-    operation = await submitAndWaitSupervisorOperation({
-      rootHome,
+    submitted = await sendSupervisorCommand(rootHome, {
+      command: 'operation_submit',
+      requestId,
       kind: 'rollback',
+      actor: 'controller-bluegreen-rollout',
       reason: opts.reason,
-      timeoutMs: operationTimeoutMs(opts),
     });
   } catch (error) {
     return compositeFailed({
       phase: 'supervisor-rollback',
-      summary: 'Root Stable Supervisor did not complete rollback',
-      failedCheck: 'supervisor_operation',
+      summary: 'Failed to submit rollback operation to the root Stable Supervisor',
+      failedCheck: 'supervisor_operation_submit',
       keyOutput: error instanceof Error ? error.message : String(error),
-      nextAction: 'inspect the durable Supervisor rollback operation',
+      nextAction: 'inspect Supervisor control socket connectivity and retry',
     });
   }
-  if (operation.phase !== 'succeeded') {
+  if (!submitted.ok || !submitted.operation) {
     return compositeFailed({
-      phase: operation.phase,
+      phase: 'supervisor-rollback',
+      summary: 'Root Stable Supervisor rejected the rollback operation',
+      failedCheck: 'supervisor_operation_rejected',
+      keyOutput: submitted.error?.message ?? 'SUPERVISOR_OPERATION_REJECTED',
+      nextAction: 'inspect Supervisor operation lock and retry',
+    });
+  }
+
+  const operation = submitted.operation;
+
+  // Out-of-band default: return accepted immediately.
+  if (!safeToWait) {
+    return {
+      status: 'partial',
+      phase: 'accepted',
+      summary: wantsWait && insideManagedAncestry
+        ? 'Rollback submitted; synchronous wait was refused because the caller is inside managed runtime ancestry'
+        : `Rollback operation submitted to the root Stable Supervisor (${rollbackMode} mode)`,
+      keyOutput: boundKeyOutput([
+        `accepted=true`,
+        `operationId=${operation.operationId}`,
+        `requestId=${requestId}`,
+        `reconnectContract=stable_domain_retry`,
+        `rollbackMode=${rollbackMode}`,
+        `nextAction=poll supervisor operation or controller_ready`,
+      ].join('\n')),
+      evidenceRefs: [],
+      retryable: false,
+      nextAction: 'poll supervisor operation or controller_ready',
+      details: {
+        accepted: true,
+        operationId: operation.operationId,
+        requestId,
+        reconnectContract: 'stable_domain_retry',
+        rollbackMode,
+        ...(wantsWait && insideManagedAncestry ? { waitRefused: 'managed_runtime_ancestry' } : {}),
+      },
+    } as CompositeToolResult;
+  }
+
+  // Synchronous wait path (external CLI only).
+  let finalOperation = operation;
+  const deadline = Date.now() + operationTimeoutMs(opts);
+  while (!TERMINAL_SUPERVISOR_PHASES.has(finalOperation.phase)) {
+    if (Date.now() >= deadline) {
+      return partialResult({
+        phase: finalOperation.phase,
+        summary: `Rollback operation ${finalOperation.operationId} has not reached a terminal phase within the timeout`,
+        keyOutput: `operationId=${finalOperation.operationId}\nphase=${finalOperation.phase}`,
+        nextAction: 'poll supervisor operation status; do not repeat rollback while this operation is active',
+        details: { operation: finalOperation },
+      });
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+    const polled = await sendSupervisorCommand(rootHome, {
+      command: 'operation_get',
+      operationId: operation.operationId,
+    });
+    if (!polled.ok || !polled.operation) {
+      return partialResult({
+        phase: 'polling',
+        summary: 'Lost contact with the Supervisor while polling rollback operation',
+        keyOutput: polled.error?.message ?? 'SUPERVISOR_OPERATION_READ_FAILED',
+        nextAction: 'reconnect and poll the operation; the Supervisor owns execution',
+        details: { operation: finalOperation },
+      });
+    }
+    finalOperation = polled.operation;
+  }
+
+  if (finalOperation.phase !== 'succeeded') {
+    return compositeFailed({
+      phase: finalOperation.phase,
       summary: 'Supervisor rollback failed',
-      failedCheck: operation.failureClass ?? 'supervisor_rollback',
-      keyOutput: operation.error ?? `operation ${operation.operationId} ended in ${operation.phase}`,
+      failedCheck: finalOperation.failureClass ?? 'supervisor_rollback',
+      keyOutput: finalOperation.error ?? `operation ${finalOperation.operationId} ended in ${finalOperation.phase}`,
       nextAction: 'inspect rollback evidence before retrying',
-      details: { operation },
-    });
-  }
-  if (!rollbackReleasePath) {
-    return partialResult({
-      phase: 'rollback-release',
-      summary: 'Slot rollback succeeded, but the previous immutable release could not be identified',
-      keyOutput: `operation=${operation.operationId}`,
-      nextAction: 'inspect slot identity and Supervisor release pointers before restarting',
-      details: { operation },
-    });
-  }
-
-  let publication;
-  try {
-    publication = publishSupervisorRelease({ controllerHome: rootHome, repoRoot, releasePath: rollbackReleasePath });
-  } catch (error) {
-    return partialResult({
-      phase: 'rollback-release',
-      summary: 'Slot rollback succeeded, but the previous release could not be republished',
-      keyOutput: error instanceof Error ? error.message : String(error),
-      nextAction: 'repair the current/previous release pointers before Supervisor restart',
-      details: { operation, rollbackReleasePath },
-    });
-  }
-
-  let activation: ReturnType<typeof scheduleServiceActivation> | { skipped: true };
-  try {
-    activation = opts.skipRestartDurability
-      ? { skipped: true }
-      : scheduleServiceActivation(repoRoot, rootHome, 3_000);
-  } catch (error) {
-    return partialResult({
-      phase: 'rollback-activation',
-      summary: 'Rollback and release publication succeeded, but Supervisor self-activation was not scheduled',
-      keyOutput: error instanceof Error ? error.message : String(error),
-      nextAction: 'activate the published previous release without repeating rollback',
-      details: { operation, publication },
+      details: { operation: finalOperation },
     });
   }
 
   const authority = readActiveSlotAuthority(rootHome);
-  let activationState: unknown;
-  if (!('skipped' in activation)) {
-    if (restartRequestNeedsDetachedCoordinator(repoRoot, rootHome)) {
-      return partialResult({
-        phase: 'activation_pending',
-        summary: `${rollbackMode === 'hot' ? 'Hot' : 'Cold'} slot rollback and release publication succeeded; detached Supervisor activation is still pending`,
-        keyOutput: [
-          `operation=${operation.operationId}`,
-          `active=${authority.activeSlot}`,
-          `release=${publication.releaseRevision}`,
-          `rollbackMode=${rollbackMode}`,
-          `activation=${activation.activationId}`,
-          `state=${activation.statePath}`,
-        ].join('\n'),
-        nextAction: 'reconnect to the stable domain and inspect activation state; do not repeat rollback while activation is pending',
-        details: { authority, operation, publication, activation, rollbackMode },
-      });
-    }
-    try {
-      activationState = await waitForServiceActivation({
-        home: rootHome,
-        activationId: activation.activationId,
-        expectedReleaseRevision: publication.releaseRevision,
-        timeoutMs: operationTimeoutMs(opts),
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message.startsWith('SUPERVISOR_ACTIVATION_TIMEOUT')) {
-        return partialResult({
-          phase: 'activation_pending',
-          summary: `${rollbackMode === 'hot' ? 'Hot' : 'Cold'} rollback publication succeeded; activation has not reached a terminal state`,
-          keyOutput: `${message}\nstate=${activation.statePath}`,
-          nextAction: 'inspect activation state before retrying rollback',
-          details: { authority, operation, publication, activation, rollbackMode },
-        });
-      }
-      return compositeFailed({
-        phase: 'rollback-activation',
-        summary: `${rollbackMode === 'hot' ? 'Hot' : 'Cold'} rollback cutover succeeded, but Stable Supervisor activation failed`,
-        failedCheck: 'supervisor_activation',
-        keyOutput: message,
-        nextAction: 'inspect activation recovery and release pointers before retrying rollback',
-        details: { authority, operation, publication, activation, rollbackMode },
-      });
-    }
-  }
   return compositeSucceeded({
     phase: 'rollback',
-    summary: `${rollbackMode === 'hot' ? 'Hot' : 'Cold'} rollback and Stable Supervisor activation complete: active slot is ${authority.activeSlot}`,
+    summary: `${rollbackMode === 'hot' ? 'Hot' : 'Cold'} rollback complete: active slot is ${authority.activeSlot}`,
     keyOutput: [
-      `operation=${operation.operationId}`,
+      `operation=${finalOperation.operationId}`,
       `active=${authority.activeSlot}`,
-      `release=${publication.releaseRevision}`,
       `rollbackMode=${rollbackMode}`,
-      `activation=${'skipped' in activation ? 'skipped' : activation.activationId}`,
     ].join('\n'),
     nextAction: 'use controller status to confirm the restored immutable release and runtime generation',
-    details: { authority, operation, publication, activation, activationState, rollbackMode },
+    details: { authority, operation: finalOperation, rollbackMode },
   });
 }
 

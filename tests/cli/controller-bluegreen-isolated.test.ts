@@ -243,6 +243,7 @@ describe('blue/green isolated lifecycle (level 2)', () => {
         startTimeoutMs: 60_000,
         skipDurableJob: false,
         skipRestartDurability: true,
+        wait: true,
       });
       if (rollout.status !== 'succeeded') {
         throw new Error(`stable rollout failed: ${rollout.phase} ${rollout.summary}\n${rollout.keyOutput}\n${JSON.stringify(rollout.details, null, 2)}`);
@@ -266,6 +267,7 @@ describe('blue/green isolated lifecycle (level 2)', () => {
         controllerHome: fixture.controllerHome,
         startTimeoutMs: 60_000,
         skipRestartDurability: true,
+        wait: true,
       });
       if (rollback.status !== 'succeeded') {
         throw new Error(`stable rollback failed: ${rollback.phase} ${rollback.summary}\n${rollback.keyOutput}\n${JSON.stringify(rollback.details, null, 2)}`);

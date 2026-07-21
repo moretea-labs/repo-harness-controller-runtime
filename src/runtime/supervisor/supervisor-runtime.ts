@@ -26,6 +26,7 @@ import { DEFAULT_RESTART_POLICY, decideRestart, lockout, newRestartBudgetRecord,
 import { SupervisorProcessManager, type SpawnedSupervisorProcess, type SupervisorProcessManagerOptions } from './process-manager';
 import { createSupervisorState, readSupervisorState, writeSupervisorState } from './state-store';
 import { readCurrentSupervisorRelease, readPreviousSupervisorRelease, readSupervisorRelease, supervisorControlSocketPath, supervisorReleasesRoot, type SupervisorReleaseDescriptor } from './paths';
+import { publishSupervisorRelease } from './installer';
 import type { RestartBudgetRecord, SupervisorComponentName, SupervisorManagedProcess, SupervisorOperation, SupervisorOperationKind, SupervisorState } from './types';
 
 export interface StableSupervisorRuntimeOptions extends SupervisorProcessManagerOptions {
@@ -870,6 +871,30 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
       });
       const previousIdentity = readSlotIdentity(this.options.controllerHome, previousSlot);
       if (previousIdentity) writeSlotIdentity(this.options.controllerHome, { ...previousIdentity, role: 'standby' });
+      // Publish the candidate release as the new current release so the
+      // supervisor, daemon, and gateway all reference the same immutable
+      // release. This MUST happen inside the supervisor process (which
+      // survives cutover) rather than in the calling CLI/Worker (which may
+      // be killed when the old slot is stopped).
+      if (candidateRelease) {
+        try {
+          publishSupervisorRelease({
+            controllerHome: this.options.controllerHome,
+            repoRoot: this.options.repoRoot,
+            releasePath: candidateRelease.releasePath,
+          });
+        } catch (publishError) {
+          // Publication failure is non-fatal for the cutover itself but is
+          // recorded so operators can repair the current/previous pointers.
+          this.persist({
+            lastIncident: {
+              at: new Date().toISOString(),
+              reason: `rollout release publication failed: ${publishError instanceof Error ? publishError.message : String(publishError)}`,
+              operationId,
+            },
+          });
+        }
+      }
       updateSupervisorOperation(this.options.controllerHome, operationId, { phase: 'cutover' });
     } catch (error) {
       let restoredDaemon = previousDaemon;
@@ -1011,6 +1036,26 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
     if (targetIdentity) writeSlotIdentity(this.options.controllerHome, { ...targetIdentity, role: 'active' });
     const failedIdentity = readSlotIdentity(this.options.controllerHome, currentSlot);
     if (failedIdentity) writeSlotIdentity(this.options.controllerHome, { ...failedIdentity, role: 'failed' });
+    // Publish the rollback target release as current so release pointers stay
+    // coherent. Same rationale as rollout: the supervisor survives cutover.
+    const rollbackReleasePath = activatedTarget.controllerDaemon.releasePath;
+    if (rollbackReleasePath) {
+      try {
+        publishSupervisorRelease({
+          controllerHome: this.options.controllerHome,
+          repoRoot: this.options.repoRoot,
+          releasePath: rollbackReleasePath,
+        });
+      } catch (publishError) {
+        this.persist({
+          lastIncident: {
+            at: new Date().toISOString(),
+            reason: `rollback release publication failed: ${publishError instanceof Error ? publishError.message : String(publishError)}`,
+            operationId,
+          },
+        });
+      }
+    }
     updateSupervisorOperation(this.options.controllerHome, operationId, { phase: 'cutover' });
   }
 
