@@ -239,20 +239,35 @@ export function markCutoverAuthority(
   rollbackWindowMs = DEFAULT_ROLLBACK_WINDOW_MS,
 ): ActiveSlotAuthority {
   const current = readActiveSlotAuthority(controllerHome);
+  let authority: ActiveSlotAuthority;
   if (current.activeSlot === nextActive) {
-    return writeActiveSlotAuthority(controllerHome, {
+    authority = writeActiveSlotAuthority(controllerHome, {
       ...current,
       generation: generation ?? current.generation,
       reason: 'cutover-idempotent',
     });
+  } else {
+    authority = writeActiveSlotAuthority(controllerHome, {
+      activeSlot: nextActive,
+      previousSlot: current.activeSlot,
+      generation,
+      reason: 'cutover',
+      rollbackUntil: new Date(Date.now() + Math.max(0, rollbackWindowMs)).toISOString(),
+    });
   }
-  return writeActiveSlotAuthority(controllerHome, {
-    activeSlot: nextActive,
-    previousSlot: current.activeSlot,
-    generation,
-    reason: 'cutover',
-    rollbackUntil: new Date(Date.now() + Math.max(0, rollbackWindowMs)).toISOString(),
-  });
+  // Stable Bootstrap writer fencing: new epoch so the previous slot loses write
+  // authority immediately even if its processes are still alive.
+  try {
+    const { atomicActivateRuntime } = require('../../runtime/bootstrap/stable-bootstrap') as typeof import('../../runtime/bootstrap/stable-bootstrap');
+    atomicActivateRuntime(controllerHome, {
+      activeSlot: authority.activeSlot,
+      generation: authority.generation,
+      reason: authority.reason,
+    });
+  } catch {
+    /* additive — active-slot.json remains the compatibility authority */
+  }
+  return authority;
 }
 
 export function markRollbackAuthority(
@@ -261,13 +276,24 @@ export function markRollbackAuthority(
 ): ActiveSlotAuthority {
   const current = readActiveSlotAuthority(controllerHome);
   const previous = current.previousSlot ?? oppositeSlot(current.activeSlot);
-  return writeActiveSlotAuthority(controllerHome, {
+  const authority = writeActiveSlotAuthority(controllerHome, {
     activeSlot: previous,
     previousSlot: current.activeSlot,
     generation,
     reason: 'rollback',
     rollbackUntil: undefined,
   });
+  try {
+    const { atomicActivateRuntime } = require('../../runtime/bootstrap/stable-bootstrap') as typeof import('../../runtime/bootstrap/stable-bootstrap');
+    atomicActivateRuntime(controllerHome, {
+      activeSlot: authority.activeSlot,
+      generation: authority.generation,
+      reason: authority.reason,
+    });
+  } catch {
+    /* additive */
+  }
+  return authority;
 }
 
 export function isRollbackWindowOpen(authority: ActiveSlotAuthority, now = Date.now()): boolean {
