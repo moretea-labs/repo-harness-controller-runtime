@@ -168,8 +168,8 @@ describe('stable bootstrap control socket and ports', () => {
     const fx = homeFixture();
     ensureStableLayout(fx.controllerHome);
     const path = join(fx.controllerHome, 'bootstrap', 'control.sock');
+    // Regular file at socket path must be refused (not blindly unlinked).
     writeFileSync(path, '');
-    // Owner missing → stale cleanup allowed
     const self = {
       pid: process.pid,
       instanceId: 'bootstrap-test',
@@ -183,8 +183,11 @@ describe('stable bootstrap control socket and ports', () => {
       command: () => undefined,
       startTime: () => undefined,
     };
-    const result = ensureControlSocketReady(fx.controllerHome, self, probe);
-    expect(result.removedStale).toBe(true);
+    expect(() => ensureControlSocketReady(fx.controllerHome, self, probe as any)).toThrow(/CONTROL_SOCKET_REFUSES_REGULAR_FILE|CONTROL_SOCKET/);
+    // Fresh path with no existing node claims ownership without removal.
+    rmSync(path, { force: true });
+    const result = ensureControlSocketReady(fx.controllerHome, self, probe as any);
+    expect(result.removedStale).toBe(false);
     expect(result.path).toContain('control.sock');
   });
 

@@ -110,8 +110,9 @@ describe('Gateway Thin Harness routing before ExecutionJob', () => {
     });
     expect(direct?.isError).not.toBe(true);
     const payload = direct?.structuredContent as Record<string, unknown>;
-    expect(payload.mode).toBe('fast');
-    expect(payload.path).toBe('fast');
+    // Unified Process Runtime Direct is an acceptable Fast Path successor for readonly commands.
+    expect(['fast', 'process_direct', 'process_managed']).toContain(String(payload.mode));
+    expect(['fast', 'process_direct', 'process_managed']).toContain(String(payload.path));
     expect((payload.durableSideEffects as { executionJobCount?: number } | undefined)?.executionJobCount ?? 0).toBe(0);
     expect((payload.durableSideEffects as { localJobCount?: number } | undefined)?.localJobCount ?? 0).toBe(0);
     expect((payload.durableSideEffects as { workerSpawnCount?: number } | undefined)?.workerSpawnCount ?? 0).toBe(0);

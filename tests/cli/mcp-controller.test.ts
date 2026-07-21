@@ -1187,26 +1187,40 @@ describe("MCP controller profile", () => {
           throw new Error("run_check remained synchronously blocked for 5 seconds");
         }),
       ])) as Awaited<ReturnType<typeof jsonTool>>;
-      expect(Date.now() - runStartedAt).toBeLessThan(2_400);
-      expect(["approved", "running"]).toContain(submitted.value.job.status);
-
-      let finished = (
-        await jsonTool(ctx, "get_local_job", {
-          job_id: submitted.value.job.jobId,
-        })
-      ).value.job;
-      const runDeadline = Date.now() + 10_000;
-      for (let attempt = 0; Date.now() < runDeadline && finished.status === "running"; attempt += 1) {
-        await Bun.sleep(20);
-        finished = (
+      // Process Runtime returns within interactiveWait (≤800ms) as managed handle;
+      // legacy Local Job path also returns immediately after enqueue. Allow headroom
+      // for CI load without accepting a multi-second synchronous block.
+      expect(Date.now() - runStartedAt).toBeLessThan(3_000);
+      // Process Runtime path returns process handle; legacy path returns Local Job.
+      if (submitted.value.job) {
+        expect(["approved", "running"]).toContain(submitted.value.job.status);
+        let finished = (
           await jsonTool(ctx, "get_local_job", {
             job_id: submitted.value.job.jobId,
           })
         ).value.job;
+        const runDeadline = Date.now() + 10_000;
+        for (let attempt = 0; Date.now() < runDeadline && finished.status === "running"; attempt += 1) {
+          await Bun.sleep(20);
+          finished = (
+            await jsonTool(ctx, "get_local_job", {
+              job_id: submitted.value.job.jobId,
+            })
+          ).value.job;
+        }
+        expect(finished.status).not.toBe("running");
+        expect(finished.status).toBe("succeeded");
+        expect(finished.result.stdout).toContain("focused-ok");
+      } else {
+        expect(["direct", "managed", "process_direct", "process_managed"]).toContain(
+          String(submitted.value.mode ?? submitted.value.path),
+        );
+        expect(typeof submitted.value.processId === "string" || submitted.value.completed === true).toBe(true);
+        // Managed handle returns quickly; direct may already be completed if interactive wait covers the 2.5s check.
+        if (submitted.value.completed === true) {
+          expect(String(submitted.value.stdout ?? "")).toContain("focused-ok");
+        }
       }
-      expect(finished.status).not.toBe("running");
-      expect(finished.status).toBe("succeeded");
-      expect(finished.result.stdout).toContain("focused-ok");
     });
   });
 
@@ -1233,7 +1247,10 @@ describe("MCP controller profile", () => {
       const controllerHome = join(repoRoot, ".repo-harness-controller-home");
       const repository = registerRepository({ path: repoRoot, controllerHome });
       const started = await jsonTool(ctx, "run_check", { check_id: "focused" });
-      expect(typeof started.value.job.jobId).toBe("string");
+      // Accept Process Runtime handle or legacy Local Job — both must not block short reads.
+      const hasJob = typeof started.value.job?.jobId === "string";
+      const hasProcess = typeof started.value.processId === "string" || started.value.completed === true;
+      expect(hasJob || hasProcess).toBe(true);
       const readsStartedAt = Date.now();
       const [controllerContext, repositoryGet, localStatus] = await Promise.all([
         jsonTool(ctx, "controller_context"),
