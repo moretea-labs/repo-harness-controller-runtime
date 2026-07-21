@@ -661,6 +661,22 @@ function recordToHandle(
   };
 }
 
+export function processRunnerEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const sanitized = { ...env };
+  // Repository commands are untrusted relative to the Controller authority
+  // boundary. Never leak the Gateway's writer identity or Supervisor-child
+  // marker into Process Runner / actual command environments.
+  delete sanitized.REPO_HARNESS_WRITER_SLOT;
+  delete sanitized.REPO_HARNESS_WRITER_EPOCH;
+  delete sanitized.REPO_HARNESS_WRITER_FENCING_TOKEN;
+  delete sanitized.REPO_HARNESS_WRITER_GENERATION;
+  delete sanitized.REPO_HARNESS_SUPERVISOR_CHILD;
+  delete sanitized.REPO_HARNESS_SUPERVISOR_EPOCH;
+  delete sanitized.REPO_HARNESS_CONTROLLER_LIFECYCLE_OWNER;
+  delete sanitized.REPO_HARNESS_DAEMON_INSTANCE_ID;
+  return sanitized;
+}
+
 function spawnProcessRunner(descriptor: ProcessCommandDescriptor, descriptorPath: string): ChildProcess {
   mkdirSync(dirname(descriptorPath), { recursive: true });
   writeFileSync(descriptorPath, `${JSON.stringify(descriptor, null, 2)}\n`, 'utf8');
@@ -676,7 +692,7 @@ function spawnProcessRunner(descriptor: ProcessCommandDescriptor, descriptorPath
   return spawn(process.execPath, args, {
     cwd: descriptor.command.cwd,
     env: {
-      ...process.env,
+      ...processRunnerEnvironment(),
       REPO_HARNESS_PROCESS_RUNNER: '1',
     },
     stdio: ['ignore', 'ignore', 'ignore'],

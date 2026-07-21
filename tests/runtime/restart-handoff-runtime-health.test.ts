@@ -89,3 +89,58 @@ describe('restart handoff and runtime health hardening', () => {
     }
   });
 });
+
+
+describe('Gateway writer claim inheritance and child environment isolation', () => {
+  test('supervised Gateway binds only a complete inherited claim', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'repo-harness-gateway-writer-'));
+    try {
+      const { bindInheritedRuntimeWriterClaimFromEnvironment, clearRuntimeWriterClaimForTests, assertThisRuntimeMayWrite } = await import('../../src/cli/controller/stable-state/runtime-writer-context');
+      const authority = publishWriterAuthority(home, {
+        activeSlot: 'green',
+        generation: 'generation-green',
+        reason: 'gateway-bind-test',
+      });
+      clearRuntimeWriterClaimForTests();
+      bindInheritedRuntimeWriterClaimFromEnvironment({
+        REPO_HARNESS_SUPERVISOR_CHILD: '1',
+        REPO_HARNESS_CONTROLLER_HOME: join(home, 'runtime-slots', 'green'),
+        REPO_HARNESS_RUNTIME_SLOT: 'green',
+        REPO_HARNESS_WRITER_SLOT: 'green',
+        REPO_HARNESS_WRITER_EPOCH: authority.epoch,
+        REPO_HARNESS_WRITER_FENCING_TOKEN: authority.fencingToken,
+        REPO_HARNESS_WRITER_GENERATION: authority.generation,
+      });
+      expect(assertThisRuntimeMayWrite('renew_lease', home).allowed).toBe(true);
+      clearRuntimeWriterClaimForTests();
+      expect(() => bindInheritedRuntimeWriterClaimFromEnvironment({
+        REPO_HARNESS_SUPERVISOR_CHILD: '1',
+        REPO_HARNESS_CONTROLLER_HOME: join(home, 'runtime-slots', 'green'),
+        REPO_HARNESS_RUNTIME_SLOT: 'green',
+      })).toThrow('stable authority present but process did not inherit full writer claim');
+    } finally {
+      const { clearRuntimeWriterClaimForTests } = await import('../../src/cli/controller/stable-state/runtime-writer-context');
+      clearRuntimeWriterClaimForTests();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test('Process Runner environment strips active-writer credentials', async () => {
+    const { processRunnerEnvironment } = await import('../../src/runtime/execution/process-runtime/runtime');
+    const result = processRunnerEnvironment({
+      PATH: '/bin',
+      REPO_HARNESS_WRITER_SLOT: 'blue',
+      REPO_HARNESS_WRITER_EPOCH: 'epoch-secret',
+      REPO_HARNESS_WRITER_FENCING_TOKEN: 'token-secret',
+      REPO_HARNESS_WRITER_GENERATION: 'generation-secret',
+      REPO_HARNESS_SUPERVISOR_CHILD: '1',
+      REPO_HARNESS_SUPERVISOR_EPOCH: '123',
+      REPO_HARNESS_CONTROLLER_LIFECYCLE_OWNER: '1',
+      REPO_HARNESS_DAEMON_INSTANCE_ID: 'daemon-secret',
+    });
+    expect(result.PATH).toBe('/bin');
+    expect(result.REPO_HARNESS_WRITER_EPOCH).toBeUndefined();
+    expect(result.REPO_HARNESS_WRITER_FENCING_TOKEN).toBeUndefined();
+    expect(result.REPO_HARNESS_SUPERVISOR_CHILD).toBeUndefined();
+  });
+});

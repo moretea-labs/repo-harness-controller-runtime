@@ -36,8 +36,10 @@ import type { Location } from './installer/types';
 import type { HookEvent, RouteId } from './hook/route-registry';
 import type { AdoptionMode } from '../core/adoption/modes';
 import { bootstrapManagedRuntimeEnv } from '../runtime/shared/managed-env';
+import { bindInheritedRuntimeWriterClaimFromEnvironment } from './controller/stable-state/runtime-writer-context';
 
 bootstrapManagedRuntimeEnv();
+bindInheritedRuntimeWriterClaimFromEnvironment();
 
 export const SUBCOMMANDS = [
   'init',

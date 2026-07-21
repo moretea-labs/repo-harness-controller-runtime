@@ -43,6 +43,31 @@ export function clearRuntimeWriterClaimForTests(): void {
 }
 
 /**
+ * Bind the explicit writer identity inherited by a Supervisor-managed CLI
+ * child (the Gateway host). Authority presence with a partial/missing claim
+ * fails closed; legacy homes without authority remain compatible.
+ */
+export function bindInheritedRuntimeWriterClaimFromEnvironment(
+  env: NodeJS.ProcessEnv = process.env,
+): RuntimeWriterClaim | undefined {
+  if (env.REPO_HARNESS_SUPERVISOR_CHILD !== '1') return undefined;
+  const controllerHome = env.REPO_HARNESS_CONTROLLER_HOME?.trim();
+  if (!controllerHome) {
+    throw new Error('WRITER_CLAIM_BIND_FAILED: supervised child missing controller home');
+  }
+  const rawSlot = env.REPO_HARNESS_WRITER_SLOT?.trim() ?? env.REPO_HARNESS_RUNTIME_SLOT?.trim();
+  const slot = rawSlot === 'blue' || rawSlot === 'green' ? rawSlot : undefined;
+  return bindRuntimeWriterClaim({
+    controllerHome,
+    slot,
+    generation: env.REPO_HARNESS_WRITER_GENERATION?.trim(),
+    epoch: env.REPO_HARNESS_WRITER_EPOCH?.trim(),
+    fencingToken: env.REPO_HARNESS_WRITER_FENCING_TOKEN?.trim(),
+    allowLegacyMissing: true,
+  });
+}
+
+/**
  * Capture writer identity for this process. Prefer explicit values from
  * activation / spawn args (inherited parent claim). Subsequent write checks
  * use the captured claim only — never re-read authority and treat it as "mine".
