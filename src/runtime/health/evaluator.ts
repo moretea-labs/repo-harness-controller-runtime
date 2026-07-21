@@ -169,8 +169,17 @@ function evaluateScheduler(
   const heartbeatStale = observation.heartbeatAgeMs !== undefined
     && observation.heartbeatAgeMs > RUNTIME_HEALTH_THRESHOLDS.schedulerHeartbeatStaleMs;
   const queueWaiting = (workers.queueDepth ?? 0) > 0;
-  if (status === 'degraded' || status === 'not_ready' || heartbeatStale && queueWaiting) {
-    blockers.push(reason('scheduler', 'SCHEDULER_NOT_PROGRESSING', 'Scheduler heartbeat is stale or degraded while work is waiting.', {
+  const explicitlyNotReady = status === 'not_ready';
+  const degradedWithWaitingWork = status === 'degraded' && queueWaiting;
+  const staleWithWaitingWork = heartbeatStale && queueWaiting;
+  if (explicitlyNotReady || degradedWithWaitingWork || staleWithWaitingWork) {
+    blockers.push(reason('scheduler', 'SCHEDULER_NOT_PROGRESSING', 'Scheduler is not progressing while durable work is waiting.', {
+      status: observation.status,
+      heartbeatAgeMs: observation.heartbeatAgeMs,
+      queueDepth: workers.queueDepth ?? 0,
+    }));
+  } else if (status === 'degraded') {
+    warnings.push(reason('scheduler', 'SCHEDULER_DEGRADED_IDLE', 'Scheduler reported a degraded recovery state, but its heartbeat is current and no work is waiting.', {
       status: observation.status,
       heartbeatAgeMs: observation.heartbeatAgeMs,
       queueDepth: workers.queueDepth ?? 0,

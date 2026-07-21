@@ -37,6 +37,16 @@ export interface StableSupervisorRuntimeOptions extends SupervisorProcessManager
   onStopped?: () => void;
 }
 
+interface StartedRuntimeSlot {
+  slot: RuntimeSlotId;
+  generation?: string;
+  manager: SupervisorProcessManager;
+  controllerDaemon: SupervisorManagedProcess;
+  gatewayHost: SupervisorManagedProcess;
+  localControllerPort: number;
+  durableJobId: string;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 }
@@ -644,15 +654,7 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
     throw new Error(`SUPERVISOR_${component.toUpperCase()}_READINESS_TIMEOUT`);
   }
 
-  private async startSlot(slot: RuntimeSlotId, release?: SupervisorReleaseDescriptor): Promise<{
-    slot: RuntimeSlotId;
-    generation?: string;
-    manager: SupervisorProcessManager;
-    controllerDaemon: SupervisorManagedProcess;
-    gatewayHost: SupervisorManagedProcess;
-    localControllerPort: number;
-    durableJobId: string;
-  }> {
+  private async startSlot(slot: RuntimeSlotId, release?: SupervisorReleaseDescriptor): Promise<StartedRuntimeSlot> {
     const prepared = this.prepareSlotConfig(slot, release);
     let daemon: SupervisorManagedProcess | undefined;
     let gateway: SupervisorManagedProcess | undefined;
@@ -751,6 +753,41 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
     await this.managerForManaged(input.controllerDaemon, input.slot).stop(input.controllerDaemon).catch(() => undefined);
   }
 
+  /**
+   * A passive candidate starts before authority cutover and therefore holds a
+   * deliberately stale writer claim. Once the activation transaction commits,
+   * restart the candidate pair so both processes inherit the committed
+   * slot/epoch/token before stable ingress is switched.
+   */
+  private async refreshSlotWriterClaim(input: StartedRuntimeSlot): Promise<StartedRuntimeSlot> {
+    const stoppedGateway = await input.manager.stop(input.gatewayHost);
+    if (!stoppedGateway.stopped) throw new Error('SUPERVISOR_GATEWAY_WRITER_REFRESH_STOP_INCOMPLETE');
+    const stoppedDaemon = await input.manager.stop(input.controllerDaemon);
+    if (!stoppedDaemon.stopped) throw new Error('SUPERVISOR_DAEMON_WRITER_REFRESH_STOP_INCOMPLETE');
+
+    let daemon: SupervisorManagedProcess | undefined;
+    let gateway: SupervisorManagedProcess | undefined;
+    try {
+      daemon = processState(await input.manager.startDaemon(), input.controllerDaemon);
+      await this.waitForManagedReady(input.manager, 'controllerDaemon', daemon);
+      gateway = processState(await input.manager.startGateway(), input.gatewayHost);
+      await this.waitForManagedReady(input.manager, 'gatewayHost', gateway);
+      const generation = readRuntimeGeneration(daemon.controllerHome)?.generation ?? daemon.generation;
+      const gatewayRuntime = loadMcpServiceRuntimeState(gateway.controllerHome, this.options.repoRoot);
+      if (!generation || generation !== input.generation) {
+        throw new Error(`SUPERVISOR_ACTIVATED_GENERATION_MISMATCH: observed=${generation ?? 'missing'} expected=${input.generation ?? 'missing'}`);
+      }
+      if (gatewayRuntime?.generation !== generation || gatewayRuntime.server.generation !== generation) {
+        throw new Error('SUPERVISOR_ACTIVATED_GATEWAY_GENERATION_MISMATCH');
+      }
+      return { ...input, generation, controllerDaemon: daemon, gatewayHost: gateway };
+    } catch (error) {
+      if (gateway) await input.manager.stop(gateway).catch(() => undefined);
+      if (daemon) await input.manager.stop(daemon).catch(() => undefined);
+      throw error;
+    }
+  }
+
   private async rollout(operation: SupervisorOperation): Promise<void> {
     const operationId = operation.operationId;
     const authority = readActiveSlotAuthority(this.options.controllerHome);
@@ -795,26 +832,37 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
       },
     });
     updateSupervisorOperation(this.options.controllerHome, operationId, { phase: 'switching_ingress' });
-    const nextAuthority = markCutoverAuthority(this.options.controllerHome, candidateSlot, candidate.generation);
-    this.persist({
-      previousSlot,
-      standby: this.state.standby ? { ...this.state.standby, retainedUntil: nextAuthority.rollbackUntil } : undefined,
-      ingress: {
-        ...this.state.ingress,
-        activeUpstreamSlot: candidateSlot,
-        activeUpstreamPort: candidate.manager.gatewayBinding(candidateSlot).port,
-      },
-    });
+
+    let activatedCandidate = candidate;
+    let authorityCommitted = false;
     try {
-      await this.verifyStableIngress(candidate.generation);
+      const nextAuthority = markCutoverAuthority(this.options.controllerHome, candidateSlot, candidate.generation);
+      authorityCommitted = true;
+      // The candidate was intentionally passive before commit. Restart it with
+      // the committed claim while ingress still routes to the previous slot.
+      activatedCandidate = await this.refreshSlotWriterClaim(candidate);
+      this.persist({
+        activeSlot: candidateSlot,
+        activeGeneration: activatedCandidate.generation,
+        controllerDaemon: activatedCandidate.controllerDaemon,
+        gatewayHost: activatedCandidate.gatewayHost,
+        previousSlot,
+        standby: this.state.standby ? { ...this.state.standby, retainedUntil: nextAuthority.rollbackUntil } : undefined,
+        ingress: {
+          ...this.state.ingress,
+          activeUpstreamSlot: candidateSlot,
+          activeUpstreamPort: activatedCandidate.manager.gatewayBinding(candidateSlot).port,
+        },
+      });
+      await this.verifyStableIngress(activatedCandidate.generation);
       writeSlotIdentity(this.options.controllerHome, {
         ...(readSlotIdentity(this.options.controllerHome, candidateSlot) ?? {
           schemaVersion: 1,
           slot: candidateSlot,
           controllerHome: this.options.controllerHome,
-          slotHome: candidate.controllerDaemon.controllerHome,
-          mcpPort: candidate.manager.gatewayBinding(candidateSlot).port,
-          localControllerPort: candidate.localControllerPort,
+          slotHome: activatedCandidate.controllerDaemon.controllerHome,
+          mcpPort: activatedCandidate.manager.gatewayBinding(candidateSlot).port,
+          localControllerPort: activatedCandidate.localControllerPort,
           updatedAt: new Date().toISOString(),
           logDir: dirname(this.options.logPath),
         }),
@@ -824,21 +872,37 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
       if (previousIdentity) writeSlotIdentity(this.options.controllerHome, { ...previousIdentity, role: 'standby' });
       updateSupervisorOperation(this.options.controllerHome, operationId, { phase: 'cutover' });
     } catch (error) {
-      markRollbackAuthority(this.options.controllerHome, previousGeneration);
+      let restoredDaemon = previousDaemon;
+      let restoredGateway = previousGateway;
+      if (authorityCommitted) {
+        markRollbackAuthority(this.options.controllerHome, previousGeneration);
+        const previousTarget: StartedRuntimeSlot = {
+          slot: previousSlot,
+          generation: previousGeneration,
+          manager: this.managerForManaged(previousDaemon, previousSlot),
+          controllerDaemon: previousDaemon,
+          gatewayHost: previousGateway,
+          localControllerPort: loadMcpServiceLocalConfig(previousDaemon.controllerHome, this.options.repoRoot)?.localController?.port ?? 8766,
+          durableJobId: 'cutover-rollback-restore',
+        };
+        const restored = await this.refreshSlotWriterClaim(previousTarget);
+        restoredDaemon = restored.controllerDaemon;
+        restoredGateway = restored.gatewayHost;
+      }
       this.persist({
         activeSlot: previousSlot,
         previousSlot: candidateSlot,
         activeGeneration: previousGeneration,
-        controllerDaemon: previousDaemon,
-        gatewayHost: previousGateway,
+        controllerDaemon: restoredDaemon,
+        gatewayHost: restoredGateway,
         standby: undefined,
         ingress: {
           ...this.state.ingress,
           activeUpstreamSlot: previousSlot,
-          activeUpstreamPort: this.managerForSlot(previousSlot).gatewayBinding(previousSlot).port,
+          activeUpstreamPort: this.managerForManaged(restoredGateway, previousSlot).gatewayBinding(previousSlot).port,
         },
       });
-      await this.stopSlotProcesses(candidate);
+      await this.stopSlotProcesses(activatedCandidate);
       const identity = readSlotIdentity(this.options.controllerHome, candidateSlot);
       if (identity) writeSlotIdentity(this.options.controllerHome, { ...identity, role: 'failed' });
       throw error;
@@ -853,22 +917,12 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
     const failedDaemon = this.state.controllerDaemon;
     const failedGateway = this.state.gatewayHost;
     if (!failedDaemon || !failedGateway) throw new Error('SUPERVISOR_ACTIVE_RUNTIME_MISSING');
-    let targetWasExistingStandby = false;
-    let target: {
-      slot: RuntimeSlotId;
-      generation?: string;
-      manager: SupervisorProcessManager;
-      controllerDaemon: SupervisorManagedProcess;
-      gatewayHost: SupervisorManagedProcess;
-      localControllerPort: number;
-      durableJobId: string;
-    };
+    let target: StartedRuntimeSlot;
     if (
       this.state.standby?.slot === targetSlot
       && this.manager.observe(this.state.standby.controllerDaemon) === 'alive'
       && this.manager.observe(this.state.standby.gatewayHost) === 'alive'
     ) {
-      targetWasExistingStandby = true;
       const manager = this.managerForManaged(this.state.standby.controllerDaemon, targetSlot);
       target = {
         slot: targetSlot,
@@ -898,38 +952,57 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
       },
     });
     updateSupervisorOperation(this.options.controllerHome, operationId, { phase: 'rolling_back' });
-    markRollbackAuthority(this.options.controllerHome, target.generation);
-    this.persist({
-      previousSlot: currentSlot,
-      ingress: {
-        ...this.state.ingress,
-        activeUpstreamSlot: targetSlot,
-        activeUpstreamPort: target.manager.gatewayBinding(targetSlot).port,
-      },
-    });
+
+    let activatedTarget = target;
+    let rollbackAuthorityCommitted = false;
     try {
-      await this.verifyStableIngress(target.generation);
+      markRollbackAuthority(this.options.controllerHome, target.generation);
+      rollbackAuthorityCommitted = true;
+      activatedTarget = await this.refreshSlotWriterClaim(target);
+      this.persist({
+        activeSlot: targetSlot,
+        activeGeneration: activatedTarget.generation,
+        controllerDaemon: activatedTarget.controllerDaemon,
+        gatewayHost: activatedTarget.gatewayHost,
+        previousSlot: currentSlot,
+        ingress: {
+          ...this.state.ingress,
+          activeUpstreamSlot: targetSlot,
+          activeUpstreamPort: activatedTarget.manager.gatewayBinding(targetSlot).port,
+        },
+      });
+      await this.verifyStableIngress(activatedTarget.generation);
     } catch (error) {
-      markRollbackAuthority(this.options.controllerHome, failedDaemon.generation ?? this.state.activeGeneration);
+      let restoredDaemon = failedDaemon;
+      let restoredGateway = failedGateway;
+      if (rollbackAuthorityCommitted) {
+        markRollbackAuthority(this.options.controllerHome, failedDaemon.generation ?? this.state.activeGeneration);
+        const failedTarget: StartedRuntimeSlot = {
+          slot: currentSlot,
+          generation: failedDaemon.generation ?? this.state.activeGeneration,
+          manager: this.managerForManaged(failedDaemon, currentSlot),
+          controllerDaemon: failedDaemon,
+          gatewayHost: failedGateway,
+          localControllerPort: loadMcpServiceLocalConfig(failedDaemon.controllerHome, this.options.repoRoot)?.localController?.port ?? 8766,
+          durableJobId: 'rollback-failure-restore',
+        };
+        const restored = await this.refreshSlotWriterClaim(failedTarget);
+        restoredDaemon = restored.controllerDaemon;
+        restoredGateway = restored.gatewayHost;
+      }
       this.persist({
         activeSlot: currentSlot,
         activeGeneration: failedDaemon.generation,
-        controllerDaemon: failedDaemon,
-        gatewayHost: failedGateway,
-        standby: targetWasExistingStandby ? {
-          slot: targetSlot,
-          ...(target.generation ? { generation: target.generation } : {}),
-          controllerDaemon: target.controllerDaemon,
-          gatewayHost: target.gatewayHost,
-          retainedUntil: new Date(Date.now() + 15 * 60_000).toISOString(),
-        } : undefined,
+        controllerDaemon: restoredDaemon,
+        gatewayHost: restoredGateway,
+        standby: undefined,
         ingress: {
           ...this.state.ingress,
           activeUpstreamSlot: currentSlot,
-          activeUpstreamPort: this.managerForSlot(currentSlot).gatewayBinding(currentSlot).port,
+          activeUpstreamPort: this.managerForManaged(restoredGateway, currentSlot).gatewayBinding(currentSlot).port,
         },
       });
-      if (!targetWasExistingStandby) await this.stopSlotProcesses(target);
+      await this.stopSlotProcesses(activatedTarget);
       throw error;
     }
     await this.stopSlotProcesses({ slot: currentSlot, controllerDaemon: failedDaemon, gatewayHost: failedGateway });

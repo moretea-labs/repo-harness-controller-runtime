@@ -5,6 +5,7 @@ import { randomUUID } from 'crypto';
 import { loadLocalBridgeConfig } from '../../cli/local-bridge/job-store';
 import { loadMcpServiceLocalConfig } from '../../cli/mcp/auth';
 import { ensureSlotHome, readActiveSlotAuthority, readSlotIdentity, type RuntimeSlotId } from '../../cli/controller/runtime-slots';
+import { readWriterAuthority } from '../../cli/controller/stable-state/writer-authority';
 import { terminateProcessTree } from '../shared/process-tree';
 import { captureProcessIdentity, defaultProcessIdentityProbe, executableFingerprint, newProcessInstanceId, processIdentityMatches, type ProcessIdentityProbe } from './identity';
 import type { ProcessIdentity, SupervisorComponentName } from './types';
@@ -56,6 +57,17 @@ function processCommand(command: string, args: string[]): string {
   return [command, ...args].join(' ');
 }
 
+export function runtimeWriterEnvironment(controllerHome: string, slot: RuntimeSlotId): NodeJS.ProcessEnv {
+  const authority = readWriterAuthority(controllerHome);
+  if (!authority || authority.activeSlot !== slot) return {};
+  return {
+    REPO_HARNESS_WRITER_SLOT: slot,
+    REPO_HARNESS_WRITER_EPOCH: authority.epoch,
+    REPO_HARNESS_WRITER_FENCING_TOKEN: authority.fencingToken,
+    ...(authority.generation ? { REPO_HARNESS_WRITER_GENERATION: authority.generation } : {}),
+  };
+}
+
 export class SupervisorProcessManager {
   readonly options: SupervisorProcessManagerOptions;
   private readonly probe: ProcessIdentityProbe;
@@ -103,6 +115,7 @@ export class SupervisorProcessManager {
           REPO_HARNESS_CONTROLLER_RUNTIME_SOURCE_ROOT: this.options.runtimeSourceRoot,
           REPO_HARNESS_DAEMON_INSTANCE_ID: instanceId,
           REPO_HARNESS_RUNTIME_SLOT: slot,
+          ...runtimeWriterEnvironment(this.options.controllerHome, slot),
         },
       });
       child.unref();

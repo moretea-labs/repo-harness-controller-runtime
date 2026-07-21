@@ -31,6 +31,13 @@ function processIdOption(name: string): number {
   return Number.isSafeInteger(value) && value > 0 ? value : 0;
 }
 
+export function resolveStableIngressSlot(controllerHome: string): 'blue' | 'green' {
+  const stateSlot = readSupervisorState(controllerHome)?.ingress.activeUpstreamSlot;
+  return stateSlot === 'blue' || stateSlot === 'green'
+    ? stateSlot
+    : readActiveSlotAuthority(controllerHome).activeSlot;
+}
+
 export async function runStableIngressChild(): Promise<void> {
   const repoRoot = resolveMcpRepoRoot(option('--repo') ?? process.cwd());
   const controllerHome = ensureControllerHome(option('--controller-home'));
@@ -49,7 +56,10 @@ export async function runStableIngressChild(): Promise<void> {
     rescueHost,
     rescuePort,
     upstream: () => {
-      const slot = readActiveSlotAuthority(controllerHome).activeSlot;
+      // Routing is switched only after the newly-authoritative runtime has
+      // restarted with the committed writer claim and passed readiness. The
+      // activation authority may change earlier to fence the old writer.
+      const slot = resolveStableIngressSlot(controllerHome);
       return {
         host: '127.0.0.1',
         port: slot === 'green' ? greenUpstreamPort : blueUpstreamPort,

@@ -1182,6 +1182,25 @@ export async function stopControllerService(opts: ControllerServiceOptions = {})
       if (!stopped.stopped || stableSupervisorIsAlive(config.controllerHome, readStableSupervisorState(config.controllerHome))) {
         throw new Error('CONTROLLER_STABLE_SUPERVISOR_STOP_INCOMPLETE');
       }
+
+      // A control-socket stop acknowledges before every managed descendant has
+      // necessarily released its listener. Sweep only identity-proven
+      // repo-harness processes for this Controller Home, then prove the stack is
+      // fully gone before a replacement Supervisor is allowed to bind 8765,
+      // 8766, or 8770.
+      const residual = collectControllerServiceProcesses(repoRoot, state, config.controllerHome, {
+        protectCallerAncestry: false,
+      }).filter((entry) => MANAGED_CONTROLLER_PROCESS_KINDS.has(entry.kind));
+      const residualPids = residual.length > 0
+        ? await stopProcesses(residual, stopTimeoutMs)
+        : [];
+      if (residual.length > 0) await sleep(PROCESS_STOP_POLL_MS);
+      const survivors = collectControllerServiceProcesses(repoRoot, state, config.controllerHome, {
+        protectCallerAncestry: false,
+      }).filter((entry) => MANAGED_CONTROLLER_PROCESS_KINDS.has(entry.kind));
+      if (survivors.length > 0) {
+        throw new Error(`CONTROLLER_STABLE_FULL_STOP_INCOMPLETE: ${survivors.map((entry) => `${entry.kind}:${entry.pid}`).join(', ')}`);
+      }
       if (state) {
         writeControllerServiceState(repoRoot, {
           ...state,
@@ -1193,7 +1212,10 @@ export async function stopControllerService(opts: ControllerServiceOptions = {})
       }
       return {
         action: "stopped",
-        cleanedPids: stableState?.supervisor.pid ? [stableState.supervisor.pid] : [],
+        cleanedPids: [
+          ...(stableState?.supervisor.pid ? [stableState.supervisor.pid] : []),
+          ...residualPids,
+        ],
         status: await controllerServiceStatus({
           repo: repoRoot,
           logFile: config.logPath,
