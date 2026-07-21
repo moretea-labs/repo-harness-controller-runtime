@@ -603,6 +603,62 @@ export async function callRepositoryTool(
           background: args.background === true || args.async === true,
           defaultBranch: repository.defaultBranch,
         });
+        // Unified Process Runtime for local commands (Direct/Managed) when not forced durable.
+        if (!forceDurable && !fromDurableWorker) {
+          try {
+            const {
+              classifyRepositoryCommandRoute,
+              executeRepositoryCommandViaProcessRuntime,
+            } = require('../../runtime/execution/process-runtime/command-facade') as typeof import('../../runtime/execution/process-runtime/command-facade');
+            const routeClass = classifyRepositoryCommandRoute(args.command as string | string[], {
+              forceDurable: false,
+              defaultBranch: repository.defaultBranch,
+              timeoutMs,
+            });
+            if (routeClass.route === 'process_direct' || routeClass.route === 'process_managed') {
+              const processResult = await executeRepositoryCommandViaProcessRuntime({
+                controllerHome,
+                repository,
+                command: args.command as string | string[],
+                cwd: typeof args.cwd === 'string' ? args.cwd : undefined,
+                timeoutMs,
+                maxOutputBytes,
+                requestId: typeof args.request_id === 'string' ? args.request_id : undefined,
+              });
+              if (processResult.route === 'process_direct' || processResult.route === 'process_managed') {
+                const handle = processResult.process;
+                return result({
+                  accepted: true,
+                  mode: processResult.route,
+                  path: processResult.route,
+                  route: processResult.route,
+                  routing: {
+                    path: processResult.route,
+                    reasons: [processResult.reason ?? routeClass.reason, ...routingDecision.reasons],
+                    decision: routingDecision,
+                  },
+                  repoId: repository.repoId,
+                  checkoutId: repository.activeCheckoutId,
+                  processId: handle?.processId,
+                  process: handle,
+                  ok: processResult.ok,
+                  exitCode: processResult.exitCode,
+                  stdout: processResult.stdout,
+                  stderr: processResult.stderr,
+                  durableSideEffects: processResult.durableSideEffects,
+                  next: processResult.route === 'process_managed'
+                    ? 'Use process status/wait/logs/cancel tools with processId; command was not re-spawned.'
+                    : 'Process Runtime Direct completed without Local Job / ExecutionJob / Worker.',
+                });
+              }
+            }
+          } catch (error) {
+            // Fall through to existing Fast/Durable paths on unexpected errors.
+            if (process.env.REPO_HARNESS_DEBUG_PROCESS_RUNTIME === '1') {
+              console.error('[repository_command_execute] process runtime error', error);
+            }
+          }
+        }
         if (!forceDurable && routingDecision.mode === 'fast' && isFastEligibleTool('repository_command_execute', {
           command: args.command,
           timeout_ms: timeoutMs,
