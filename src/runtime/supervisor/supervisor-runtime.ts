@@ -672,41 +672,34 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
       if (gatewayRuntime.server.profile !== 'controller') throw new Error('SUPERVISOR_CANDIDATE_PROFILE_MISMATCH');
       const toolFingerprint = gatewayRuntime.server.toolSurfaceFingerprint ?? gatewayRuntime.server.runtimeToolSurfaceFingerprint;
       if (!toolFingerprint) throw new Error('SUPERVISOR_CANDIDATE_TOOL_FINGERPRINT_MISSING');
+      // Candidate slots are passive writers until cutover. They must not drain the
+      // shared durable queue. Verify durable-store write/read paths only (queued is OK),
+      // matching bluegreen-rollout verifySlotHealth, and rely on daemon/Gateway readiness
+      // + generation/tool-surface checks above for process health.
       const requestId = `supervisor-slot-smoke-${Date.now()}-${randomUUID().slice(0, 8)}`;
-      const created = createExecutionJob(daemon.controllerHome, {
-        repoId: CONTROLLER_SCOPE_REPO_ID,
-        type: 'mcp-tool',
-        requestId,
-        semanticKey: `supervisor-slot-smoke:${requestId}`,
-        payload: {
-          operation: 'plugin_action_execute',
-          arguments: {
-            pluginId: 'local_system',
-            actionId: 'system_snapshot',
-            actionArguments: {},
+      let durableJobId: string;
+      try {
+        const created = createExecutionJob(daemon.controllerHome, {
+          repoId: CONTROLLER_SCOPE_REPO_ID,
+          type: 'mcp-tool',
+          requestId,
+          semanticKey: `supervisor-slot-smoke:${requestId}`,
+          payload: {
+            operation: 'controller_ready',
+            arguments: { repo: this.options.repoRoot },
+            target: 'runtime',
           },
-          target: 'runtime',
-        },
-        origin: { surface: 'system', actor: 'stable-supervisor-slot-verify' },
-        timeoutMs: 30_000,
-        maxAttempts: 1,
-      });
-      const durableJobId = created.job.jobId;
-      const durableDeadline = Date.now() + 30_000;
-      let durableJob = getExecutionJob(daemon.controllerHome, CONTROLLER_SCOPE_REPO_ID, durableJobId);
-      let durableStatus = durableJob?.status;
-      while (Date.now() < durableDeadline && durableStatus && !['succeeded', 'failed', 'timed_out', 'cancelled', 'orphaned', 'stale', 'human_attention_required'].includes(durableStatus)) {
-        await sleep(100);
-        durableJob = getExecutionJob(daemon.controllerHome, CONTROLLER_SCOPE_REPO_ID, durableJobId);
-        durableStatus = durableJob?.status;
-      }
-      if (!durableStatus) throw new Error('SUPERVISOR_CANDIDATE_DURABLE_JOB_UNREADABLE');
-      if (durableStatus !== 'succeeded') {
-        const detail = [durableJob?.error?.code, durableJob?.error?.message]
-          .filter((value): value is string => Boolean(value))
-          .join(': ')
-          .slice(0, 500);
-        throw new Error(`SUPERVISOR_CANDIDATE_DURABLE_JOB_${durableStatus.toUpperCase()}${detail ? `: ${detail}` : ''}`);
+          origin: { surface: 'system', actor: 'stable-supervisor-slot-verify' },
+          timeoutMs: 30_000,
+          maxAttempts: 1,
+        });
+        durableJobId = created.job.jobId;
+        const loaded = getExecutionJob(daemon.controllerHome, CONTROLLER_SCOPE_REPO_ID, durableJobId);
+        if (!loaded?.jobId) throw new Error('SUPERVISOR_CANDIDATE_DURABLE_JOB_UNREADABLE');
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith('SUPERVISOR_CANDIDATE_')) throw error;
+        const detail = (error instanceof Error ? error.message : String(error)).slice(0, 500);
+        throw new Error(`SUPERVISOR_CANDIDATE_DURABLE_STORE_FAILED: ${detail}`);
       }
       writeSlotIdentity(this.options.controllerHome, {
         schemaVersion: 1,
@@ -786,7 +779,7 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
     const candidate = await this.startSlot(candidateSlot, candidateRelease);
     updateSupervisorOperation(this.options.controllerHome, operationId, {
       phase: 'verifying',
-      evidence: [{ kind: 'candidate_verification', summary: `Candidate ${candidateSlot} passed generation, tool-surface, daemon/Gateway readiness, and durable-store verification (${candidate.durableJobId}).`, at: new Date().toISOString() }],
+      evidence: [{ kind: 'candidate_verification', summary: `Candidate ${candidateSlot} passed generation, tool-surface, daemon/Gateway readiness, and durable-store write/read verification (${candidate.durableJobId}; consumption deferred until active writer).`, at: new Date().toISOString() }],
     });
     const previousGeneration = previousDaemon.generation ?? this.state.activeGeneration;
     this.persist({
