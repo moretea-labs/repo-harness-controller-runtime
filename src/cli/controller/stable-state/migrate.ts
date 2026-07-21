@@ -281,10 +281,12 @@ export function resolveRepositoryStatePath(
   repoId: string,
   options: { activeSlot?: 'blue' | 'green' } = {},
 ): { path: string; source: 'stable' | 'slot-blue' | 'slot-green' | 'missing' } {
-  const stable = join(resolve(controllerHome), 'repositories', repoId);
+  const { resolveStableControllerHome } = require('./stable-home') as typeof import('./stable-home');
+  const root = resolveStableControllerHome(controllerHome);
+  const stable = join(root, 'repositories', repoId);
   if (existsSync(stable)) return { path: stable, source: 'stable' };
   for (const slot of [options.activeSlot, 'green', 'blue'].filter(Boolean) as Array<'blue' | 'green'>) {
-    const candidate = join(resolve(controllerHome), 'runtime-slots', slot, 'repositories', repoId);
+    const candidate = join(root, 'runtime-slots', slot, 'repositories', repoId);
     if (existsSync(candidate)) return { path: candidate, source: slot === 'blue' ? 'slot-blue' : 'slot-green' };
   }
   return { path: stable, source: 'missing' };

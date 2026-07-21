@@ -48,9 +48,13 @@ export function controllerSystemRoot(controllerHome: string): string {
 }
 
 export function repositoryControllerRoot(controllerHome: string, repoId: string): string {
+  // Durable repository state always lives under the stable root controller home,
+  // even when the caller passes a blue/green slot runtime home.
+  const { resolveStableControllerHome } = require('../controller/stable-state/stable-home') as typeof import('../controller/stable-state/stable-home');
+  const durableHome = resolveStableControllerHome(controllerHome);
   return repoId === CONTROLLER_SCOPE_REPO_ID
-    ? controllerSystemRoot(controllerHome)
-    : join(resolveControllerHome(controllerHome), 'repositories', repoId);
+    ? controllerSystemRoot(durableHome)
+    : join(resolveControllerHome(durableHome), 'repositories', repoId);
 }
 
 export function ensureRepositoryControllerLayout(controllerHome: string, repoId: string): string {
