@@ -838,6 +838,19 @@ export function executeRepositoryCommand(
     auditCommand(controllerHome, repository, base);
     return base;
   }
+
+  // Final effect executor fencing for remote / destructive writes.
+  // Classifier alone is not sufficient — passive runtimes must not execute side effects.
+  const risk = base.classification?.risk;
+  if (risk === 'remote_write' || risk === 'destructive') {
+    try {
+      const { assertThisRuntimeMayWriteOrThrow } = require('../controller/stable-state/runtime-writer-context') as typeof import('../controller/stable-state/runtime-writer-context');
+      assertThisRuntimeMayWriteOrThrow('remote_side_effect', controllerHome);
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith('WRITER_FENCED:')) throw error;
+      /* unbound legacy */
+    }
+  }
   const executableName = command.kind === 'argv'
     ? command.executable!
     : process.platform === 'win32' ? 'cmd.exe' : '/bin/sh';
@@ -906,6 +919,18 @@ export async function executeRepositoryCommandAsync(
     auditCommand(controllerHome, repository, base);
     return base;
   }
+
+  const asyncRisk = base.classification?.risk;
+  if (asyncRisk === 'remote_write' || asyncRisk === 'destructive') {
+    try {
+      const { assertThisRuntimeMayWriteOrThrow } = require('../controller/stable-state/runtime-writer-context') as typeof import('../controller/stable-state/runtime-writer-context');
+      assertThisRuntimeMayWriteOrThrow('remote_side_effect', controllerHome);
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith('WRITER_FENCED:')) throw error;
+      /* unbound legacy */
+    }
+  }
+
   if (signal?.aborted) {
     const cancelled: RepositoryCommandExecution = {
       ...base,

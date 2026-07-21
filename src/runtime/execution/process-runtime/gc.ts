@@ -101,7 +101,22 @@ export function gcTerminalProcesses(options: ProcessGcOptions): ProcessGcResult 
         continue;
       }
       const record = getProcessRecord(options.controllerHome, options.repoId, processId);
-      if (!record || !TERMINAL.has(record.status)) continue;
+      if (!record) continue;
+      // Skip still-alive identity matches even if status drifted.
+      if (record.identity && !record.identityUntrusted && !record.identity.processStartTime.startsWith('untrusted:')) {
+        try {
+          const { isProcessAlive } = require('../../shared/process-tree') as typeof import('../../shared/process-tree');
+          if (isProcessAlive(record.identity.pid)) {
+            skippedActive += 1;
+            continue;
+          }
+        } catch {
+          /* ignore probe failures */
+        }
+      }
+      if (!TERMINAL.has(record.status)) continue;
+      // Do not delete terminal evidence that has never been read when maxAge is not exceeded
+      // unless we are strictly over maxTerminalRecords budget (handled by sort below).
       const finished = Date.parse(record.finishedAt ?? record.updatedAt);
       terminal.push({
         processId,

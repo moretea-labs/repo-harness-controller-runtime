@@ -224,6 +224,15 @@ export function releaseExecutionLeases(
   expected?: ExpectedLeaseRef[],
   options?: Pick<LeaseAcquisitionOptions, 'visibility' | 'notifyScheduler' | 'invalidateProjection' | 'emitRuntimeEvent'>,
 ): void {
+  // Writer fencing: passive / fenced runtimes must not release leases belonging
+  // to (or managed by) the active runtime, even if they still hold matching lease tokens.
+  try {
+    const { assertThisRuntimeMayWriteOrThrow } = require('../../../cli/controller/stable-state/runtime-writer-context') as typeof import('../../../cli/controller/stable-state/runtime-writer-context');
+    assertThisRuntimeMayWriteOrThrow('release_lease', controllerHome);
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('WRITER_FENCED:')) throw error;
+    /* unbound legacy */
+  }
   withControllerLock(controllerHome, { scope: 'repository', repoId }, `lease-release:${ownerJobId}`, () => {
     const expectedTokens = expectedLeaseMap(expected);
     let released = false;

@@ -173,6 +173,8 @@ export function atomicActivateRuntime(
     previousEpoch: input.previousEpoch,
     previousSlot: input.previousSlot,
     rollbackUntil: input.rollbackUntil,
+    // Bootstrap is the authority holder/updater — do not require the about-to-be-replaced claim.
+    bootstrapMutation: true,
   });
   const authority: WriterAuthority = {
     schemaVersion: 1,

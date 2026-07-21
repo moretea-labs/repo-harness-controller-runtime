@@ -63,9 +63,14 @@ export interface ManagedProcessRecord {
   stderrTail?: string;
   stdoutBytes?: number;
   stderrBytes?: number;
+  /** Bytes actually stored on disk (may be < stdoutBytes when quota truncates). */
+  stdoutStoredBytes?: number;
+  stderrStoredBytes?: number;
   logPath?: string;
   stdoutPath?: string;
   stderrPath?: string;
+  /** Structured command descriptor for the independent Process Runner. */
+  commandDescriptorPath?: string;
   /** Fencing token — only the owner with this token may write terminal status. */
   terminalFenceToken: number;
   terminalWritten?: boolean;

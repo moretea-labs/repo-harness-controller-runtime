@@ -44,8 +44,15 @@ export function clearRuntimeWriterClaimForTests(): void {
 
 /**
  * Capture writer identity for this process. Prefer explicit values from
- * activation / spawn args; fall back to reading authority once at bind time.
- * Subsequent write checks use the captured claim only.
+ * activation / spawn args (inherited parent claim). Subsequent write checks
+ * use the captured claim only — never re-read authority and treat it as "mine".
+ *
+ * Fail-closed rules:
+ * - When explicit epoch+fencingToken are provided, bind that inherited claim
+ *   (even if it is already stale vs current authority — fencing happens at write time).
+ * - When stable authority exists and the process did not inherit a full claim,
+ *   refuse to bind by re-reading current authority (cutover fencing bypass).
+ * - Legacy single-runtime homes without authority may still bind a synthetic claim.
  */
 export function bindRuntimeWriterClaim(input: {
   controllerHome: string;
@@ -55,6 +62,12 @@ export function bindRuntimeWriterClaim(input: {
   fencingToken?: string;
   /** When true and authority is missing, bind a synthetic legacy claim. */
   allowLegacyMissing?: boolean;
+  /**
+   * When true, process is allowed to adopt the current authority once at bind
+   * (daemon / bootstrap that IS the active writer). Workers must not set this —
+   * they must inherit the parent's captured claim explicitly.
+   */
+  adoptCurrentAuthority?: boolean;
 }): RuntimeWriterClaim {
   const root = resolveStableControllerHome(input.controllerHome);
   const authority = readWriterAuthority(root);
@@ -66,11 +79,18 @@ export function bindRuntimeWriterClaim(input: {
       ? undefined
       : /\/runtime-slots\/(blue|green)(?:\/|$)/.exec(input.controllerHome.replace(/\\/g, '/'));
     if (match?.[1] === 'blue' || match?.[1] === 'green') slot = match[1];
-    else if (authority) slot = authority.activeSlot;
+    else if (authority && input.adoptCurrentAuthority) slot = authority.activeSlot;
   }
-  if (!slot) slot = authority?.activeSlot ?? 'green';
+  if (!slot) {
+    if (authority && input.adoptCurrentAuthority) slot = authority.activeSlot;
+    else if (!authority) slot = 'green';
+  }
 
+  // Explicit inherited claim always wins — never overwrite with current authority.
   if (input.epoch && input.fencingToken) {
+    if (!slot) {
+      throw new Error('WRITER_CLAIM_BIND_FAILED: inherited claim missing slot');
+    }
     processClaim = {
       rootControllerHome: root,
       slot,
@@ -82,10 +102,19 @@ export function bindRuntimeWriterClaim(input: {
     return processClaim;
   }
 
-  if (authority) {
+  // Partial claim while authority exists → fail closed (worker must inherit full claim).
+  if (authority && !input.adoptCurrentAuthority) {
+    throw new Error(
+      'WRITER_CLAIM_BIND_FAILED: stable authority present but process did not inherit full writer claim '
+      + '(slot/epoch/fencingToken); refusing to adopt current active authority',
+    );
+  }
+
+  if (authority && input.adoptCurrentAuthority) {
+    if (!slot) slot = authority.activeSlot;
     processClaim = {
       rootControllerHome: root,
-      slot: input.slot ?? authority.activeSlot,
+      slot,
       generation: input.generation ?? authority.generation,
       epoch: authority.epoch,
       fencingToken: authority.fencingToken,
@@ -94,7 +123,8 @@ export function bindRuntimeWriterClaim(input: {
     return processClaim;
   }
 
-  if (input.allowLegacyMissing) {
+  if (input.allowLegacyMissing && !authority) {
+    if (!slot) slot = 'green';
     processClaim = {
       rootControllerHome: root,
       slot,
@@ -146,6 +176,7 @@ export function assertThisRuntimeMayWrite(
       slot: claim.slot,
       epoch: claim.epoch,
       fencingToken: claim.fencingToken,
+      allowLegacyMissing: claim.legacy === true,
     }, action);
   }
   return assertWriterAuthority(home, {

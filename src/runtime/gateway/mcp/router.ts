@@ -8,6 +8,7 @@ import {
 import { repositoryToolDefinitions } from '../../../cli/mcp/repository-tools';
 import { runtimeToolDefinitions } from './runtime-tools';
 import { executionToolDefinitions } from './execution-tools';
+import { processToolDefinitions } from './process-tools';
 import { resolveRepositorySelection } from '../../../cli/repositories/registry';
 import { ensureRepositoryRuntimeStorage } from '../../../cli/repositories/runtime-storage';
 import { createExecutionJob, getExecutionJob } from '../../execution/jobs/store';
@@ -148,7 +149,7 @@ function result(value: Record<string, unknown>): CallToolResult {
 }
 
 function toolDefinition(ctx: MultiRepositoryMcpToolContext, name: string): McpToolDefinition | undefined {
-  return [...runtimeToolDefinitions, ...executionToolDefinitions, ...repositoryToolDefinitions, ...buildMultiRepositoryToolDefinitions(ctx)]
+  return [...runtimeToolDefinitions, ...executionToolDefinitions, ...processToolDefinitions, ...repositoryToolDefinitions, ...buildMultiRepositoryToolDefinitions(ctx)]
     .find((tool) => tool.name === name);
 }
 
@@ -535,7 +536,7 @@ export async function routeDurableMcpCall(
       durableSideEffects: facade.durableSideEffects,
       next: handle?.completed
         ? 'Check finished on Process Runtime without ExecutionJob / LocalBridgeJob / Worker.'
-        : `Check still running as managed process ${handle?.processId}. Use process_get / process_wait; do not re-run the same check.`,
+        : `Check still running as managed process ${handle?.processId}. Use process_get / process_wait / process_logs; do not re-run the same check.`,
     });
   }
 

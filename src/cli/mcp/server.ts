@@ -14,6 +14,7 @@ import { callAccessTool } from './access-tools';
 import { callRepositoryTool } from './repository-tools';
 import { callRuntimeTool } from '../../runtime/gateway/mcp/runtime-tools';
 import { callExecutionTool } from '../../runtime/gateway/mcp/execution-tools';
+import { callProcessTool } from '../../runtime/gateway/mcp/process-tools';
 import { injectDurableCommandFields, isGatewayIsolatedTool, routeDurableMcpCall } from '../../runtime/gateway/mcp/router';
 import {
   controllerExposureSnapshot,
@@ -67,6 +68,8 @@ export function createRepoHarnessMcpServerFromContext(ctx: ServerToolContext): S
       if (accessResult) return accessResult;
       const executionResult = await callExecutionTool(ctx, name, args);
       if (executionResult) return executionResult;
+      const processResult = await callProcessTool(ctx, name, args);
+      if (processResult) return processResult;
       if (isGatewayIsolatedTool(name)) {
         const isolatedResult = await routeDurableMcpCall(ctx, name, args, { allowReadOnly: true, forceDurable: true });
         if (isolatedResult) return isolatedResult;

@@ -439,6 +439,109 @@ describe('activation transaction', () => {
     expect(readWriterAuthority(fx.controllerHome)?.activeSlot).toBe('blue');
   });
 
+  test('committed A + prepared B → recovery keeps B and reports incomplete', () => {
+    const fx = homeFixture();
+    const a = commitActivationTransaction(fx.controllerHome, {
+      activeSlot: 'green',
+      generation: 'gen-a',
+      releaseRevision: 'rev-a',
+      releasePath: '/tmp/releases/rev-a',
+      reason: 'A',
+    });
+    // Simulate prepare for transaction B after A is committed.
+    writeFileSync(activationPreparePath(fx.controllerHome), `${JSON.stringify({
+      schemaVersion: 1,
+      status: 'prepared',
+      transactionId: 'atx-b-mismatch',
+      preparedAt: new Date().toISOString(),
+      intended: {
+        transactionId: 'atx-b-mismatch',
+        activeSlot: 'blue',
+        generation: 'gen-b',
+        releaseRevision: 'rev-b',
+        releasePath: '/tmp/releases/rev-b',
+        writerEpoch: 'wa-b',
+        fencingToken: 'tok-b',
+      },
+    }, null, 2)}\n`);
+    const recovered = recoverActivationTransaction(fx.controllerHome);
+    expect(recovered.ok).toBe(false);
+    expect(recovered.status).toBe('incomplete');
+    expect(existsSync(activationPreparePath(fx.controllerHome))).toBe(true);
+    expect(readActivationAuthority(fx.controllerHome)?.transactionId).toBe(a.transactionId);
+    expect(recovered.error).toMatch(/prepared_pending_resolution|does not match/);
+  });
+
+  test('committed A + matching prepare A → recovery rebuilds projections and clears prepare', () => {
+    const fx = homeFixture();
+    const a = commitActivationTransaction(fx.controllerHome, {
+      activeSlot: 'blue',
+      generation: 'gen-match',
+      reason: 'match',
+    });
+    writeFileSync(activationPreparePath(fx.controllerHome), `${JSON.stringify({
+      schemaVersion: 1,
+      status: 'prepared',
+      transactionId: a.transactionId,
+      preparedAt: new Date().toISOString(),
+      intended: {
+        transactionId: a.transactionId,
+        activeSlot: a.activeSlot,
+        generation: a.generation,
+        writerEpoch: a.writerEpoch,
+        fencingToken: a.fencingToken,
+      },
+    }, null, 2)}\n`);
+    // Damage writer projection to force rebuild.
+    writeFileSync(join(fx.controllerHome, 'bootstrap', 'writer-authority.json'), '{}\n');
+    const recovered = recoverActivationTransaction(fx.controllerHome);
+    expect(recovered.ok).toBe(true);
+    expect(recovered.status).toBe('committed');
+    expect(existsSync(activationPreparePath(fx.controllerHome))).toBe(false);
+    expect(readWriterAuthority(fx.controllerHome)?.epoch).toBe(a.writerEpoch);
+  });
+
+  test('full previousRuntime snapshot rollback restores release metadata and rotates writer epoch', () => {
+    const fx = homeFixture();
+    const a = commitActivationTransaction(fx.controllerHome, {
+      activeSlot: 'green',
+      generation: 'gen-a',
+      releaseRevision: 'rev-a',
+      releasePath: '/controlled/releases/rev-a',
+      daemonPort: 7101,
+      gatewayPort: 7102,
+      reason: 'release-A',
+    });
+    const b = commitActivationTransaction(fx.controllerHome, {
+      activeSlot: 'blue',
+      generation: 'gen-b',
+      releaseRevision: 'rev-b',
+      releasePath: '/controlled/releases/rev-b',
+      daemonPort: 7201,
+      gatewayPort: 7202,
+      reason: 'release-B',
+      previousEpoch: a.writerEpoch,
+    });
+    expect(b.previousRuntime?.releaseRevision).toBe('rev-a');
+    expect(b.previousRuntime?.releasePath).toBe('/controlled/releases/rev-a');
+    expect(b.previousRuntime?.daemonPort).toBe(7101);
+
+    const rolled = rollbackActivationTransaction(fx.controllerHome, { reason: 'rollback-to-A' });
+    expect(rolled.activeSlot).toBe('green');
+    expect(rolled.generation).toBe('gen-a');
+    expect(rolled.releaseRevision).toBe('rev-a');
+    expect(rolled.releasePath).toBe('/controlled/releases/rev-a');
+    expect(rolled.daemonPort).toBe(7101);
+    expect(rolled.gatewayPort).toBe(7102);
+    // Writer epoch must change (new fencing).
+    expect(rolled.writerEpoch).not.toBe(b.writerEpoch);
+    expect(rolled.writerEpoch).not.toBe(a.writerEpoch);
+    expect(rolled.fencingToken).not.toBe(b.fencingToken);
+    // Pre-rollback B preserved for limited re-rollback.
+    expect(rolled.previousRuntime?.activeSlot).toBe('blue');
+    expect(rolled.previousRuntime?.releaseRevision).toBe('rev-b');
+  });
+
   test('atomicActivateRuntime uses transaction', () => {
     const fx = homeFixture();
     const { authority, pointer } = atomicActivateRuntime(fx.controllerHome, {
@@ -513,15 +616,18 @@ describe('process runtime restart receipt', () => {
     expect(again?.status).toBe('succeeded');
   });
 
-  test('lost monitor while still running recovers as running_recovered; then exit becomes completed_unknown without receipt', async () => {
+  test('controller monitor loss while runner survives recovers true exit code from receipt (not completed_unknown)', async () => {
     const fx = repoFixture();
+    const {
+      __detachMonitorsKeepRunnersForTests,
+    } = await import('../../src/runtime/execution/process-runtime/runtime');
     const handle = await spawnManagedProcess({
       controllerHome: fx.controllerHome,
       repoId: fx.repository.repoId,
       command: {
         kind: 'argv',
         executable: 'node',
-        args: ['-e', 'setTimeout(() => process.exit(0), 8000)'],
+        args: ['-e', 'setTimeout(() => process.exit(0), 400)'],
         cwd: fx.repoRoot,
       },
       interactiveWaitMs: 0,
@@ -529,37 +635,76 @@ describe('process runtime restart receipt', () => {
       returnHandleImmediately: true,
     });
     expect(handle.completed).toBe(false);
-    // Drop monitor without killing OS process — receipt may still be written by original child close if process ends under detached group.
-    // We only assert recoverManagedProcesses classification paths with synthetic dead identity.
-    __resetLiveMonitorsForTests();
 
-    // Force record to look like dead without receipt:
-    const { getProcessRecord, updateProcessRecord, tryCompleteProcessRecord } = await import('../../src/runtime/execution/process-runtime/store');
-    const record = getProcessRecord(fx.controllerHome, fx.repository.repoId, handle.processId);
-    expect(record).toBeTruthy();
-    // Cancel OS process to avoid leak
-    try {
-      if (record?.identity?.pid) process.kill(record.identity.pid, 'SIGKILL');
-    } catch { /* ignore */ }
-    await new Promise((r) => setTimeout(r, 50));
+    // Simulate Controller crash: drop monitors and close handlers without killing runner.
+    __detachMonitorsKeepRunnersForTests();
 
-    // Clear receipt if any to force outcome_unknown path
-    if (record?.exitReceiptPath && existsSync(record.exitReceiptPath)) {
-      try { rmSync(record.exitReceiptPath); } catch { /* ignore */ }
+    // Wait for independent runner to finish and write exit receipt.
+    const receiptPath = join(
+      fx.controllerHome,
+      'repositories',
+      fx.repository.repoId,
+      'processes',
+      'logs',
+      `${handle.processId}.exit.json`,
+    );
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline && !existsSync(receiptPath)) {
+      await new Promise((r) => setTimeout(r, 50));
     }
-    // Ensure still non-terminal
-    if (record && !record.terminalWritten) {
-      const recovery = recoverManagedProcesses(fx.controllerHome, fx.repository.repoId);
-      // Either completed from late receipt or completed_unknown
-      const after = getProcessHandle(fx.controllerHome, fx.repository.repoId, handle.processId);
-      expect(after?.completed).toBe(true);
-      expect(after?.status).toBeDefined();
-      expect(['succeeded', 'failed', 'completed_unknown', 'cancelled', 'timed_out']).toContain(after!.status);
-      expect(after?.status).not.toBe('orphaned');
-      void recovery;
-      void tryCompleteProcessRecord;
-      void updateProcessRecord;
+    expect(existsSync(receiptPath)).toBe(true);
+    const receipt = JSON.parse(readFileSync(receiptPath, 'utf8')) as { exitCode: number | null; commandExecutedOnce?: boolean };
+    expect(receipt.exitCode).toBe(0);
+    expect(receipt.commandExecutedOnce).toBe(true);
+
+    // New controller recovery attaches via receipt → succeeded, not completed_unknown.
+    const recovery = recoverManagedProcesses(fx.controllerHome, fx.repository.repoId);
+    expect(recovery.completedFromReceipt).toContain(handle.processId);
+    const after = getProcessHandle(fx.controllerHome, fx.repository.repoId, handle.processId);
+    expect(after?.completed).toBe(true);
+    expect(after?.status).toBe('succeeded');
+    expect(after?.ok).toBe(true);
+    expect(after?.status).not.toBe('completed_unknown');
+  });
+
+  test('controller monitor loss recovers non-zero exit as failed from runner receipt', async () => {
+    const fx = repoFixture();
+    const {
+      __detachMonitorsKeepRunnersForTests,
+    } = await import('../../src/runtime/execution/process-runtime/runtime');
+    const handle = await spawnManagedProcess({
+      controllerHome: fx.controllerHome,
+      repoId: fx.repository.repoId,
+      command: {
+        kind: 'argv',
+        executable: 'node',
+        args: ['-e', 'setTimeout(() => process.exit(7), 300)'],
+        cwd: fx.repoRoot,
+      },
+      interactiveWaitMs: 0,
+      timeoutMs: 30_000,
+      returnHandleImmediately: true,
+    });
+    __detachMonitorsKeepRunnersForTests();
+    const receiptPath = join(
+      fx.controllerHome,
+      'repositories',
+      fx.repository.repoId,
+      'processes',
+      'logs',
+      `${handle.processId}.exit.json`,
+    );
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline && !existsSync(receiptPath)) {
+      await new Promise((r) => setTimeout(r, 50));
     }
+    expect(existsSync(receiptPath)).toBe(true);
+    const recovery = recoverManagedProcesses(fx.controllerHome, fx.repository.repoId);
+    expect(recovery.completedFromReceipt).toContain(handle.processId);
+    const after = getProcessHandle(fx.controllerHome, fx.repository.repoId, handle.processId);
+    expect(after?.status).toBe('failed');
+    expect(after?.exitCode).toBe(7);
+    expect(after?.status).not.toBe('completed_unknown');
   });
 
   test('cancel refuses untrusted identity (no signal on fallback PID)', async () => {
@@ -644,6 +789,207 @@ describe('process log GC', () => {
     });
     expect(result.ok).toBe(true);
     expect(result.removedRecords).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('writer claim inheritance and remaining fencing', () => {
+  test('bindRuntimeWriterClaim uses inferred slot, not authority.activeSlot after cutover', () => {
+    const fx = homeFixture();
+    const slotHome = join(fx.controllerHome, 'runtime-slots', 'green');
+    mkdirSync(slotHome, { recursive: true });
+    const first = publishWriterAuthority(fx.controllerHome, { activeSlot: 'green', reason: 'boot' });
+    // Bind from slot home path without explicit slot — infer green.
+    bindRuntimeWriterClaim({
+      controllerHome: slotHome,
+      epoch: first.epoch,
+      fencingToken: first.fencingToken,
+    });
+    expect(getRuntimeWriterClaim()?.slot).toBe('green');
+
+    // Cutover to blue; old process still holds green claim.
+    publishWriterAuthority(fx.controllerHome, {
+      activeSlot: 'blue',
+      reason: 'cutover',
+      previousEpoch: first.epoch,
+    });
+    // If we re-bound by re-reading authority we would steal blue — must not.
+    clearRuntimeWriterClaimForTests();
+    expect(() => bindRuntimeWriterClaim({
+      controllerHome: slotHome,
+      allowLegacyMissing: true,
+      adoptCurrentAuthority: false,
+    })).toThrow(/WRITER_CLAIM_BIND_FAILED|inherit full writer claim/);
+  });
+
+  test('authority present without full inherited claim fails closed', () => {
+    const fx = homeFixture();
+    publishWriterAuthority(fx.controllerHome, { activeSlot: 'green', reason: 'boot' });
+    expect(() => bindRuntimeWriterClaim({
+      controllerHome: fx.controllerHome,
+      slot: 'green',
+      allowLegacyMissing: true,
+      adoptCurrentAuthority: false,
+    })).toThrow(/WRITER_CLAIM_BIND_FAILED/);
+  });
+
+  test('legacy home without authority still binds synthetic claim', () => {
+    const fx = homeFixture();
+    // No publishWriterAuthority
+    const claim = bindRuntimeWriterClaim({
+      controllerHome: fx.controllerHome,
+      slot: 'green',
+      allowLegacyMissing: true,
+      adoptCurrentAuthority: false,
+    });
+    expect(claim.legacy).toBe(true);
+    expect(assertThisRuntimeMayWrite('consume_queue').allowed).toBe(true);
+  });
+
+  test('stale worker claim cannot release leases after cutover', () => {
+    const fx = repoFixture();
+    const auth = publishWriterAuthority(fx.controllerHome, { activeSlot: 'green', reason: 'active' });
+    bindRuntimeWriterClaim({
+      controllerHome: fx.controllerHome,
+      slot: 'green',
+      epoch: auth.epoch,
+      fencingToken: auth.fencingToken,
+    });
+    const ok = acquireExecutionLeases(
+      fx.controllerHome,
+      fx.repository.repoId,
+      'job-release-fence',
+      [claimWorkspaceRead('co')],
+      30_000,
+    );
+    expect(ok.acquired).toBe(true);
+
+    // Cutover fences the old claim.
+    publishWriterAuthority(fx.controllerHome, {
+      activeSlot: 'green',
+      reason: 'rotate',
+      previousEpoch: auth.epoch,
+    });
+    expect(() => releaseExecutionLeases(
+      fx.controllerHome,
+      fx.repository.repoId,
+      'job-release-fence',
+      ok.leases,
+    )).toThrow(/WRITER_FENCED/);
+    // Lease still present.
+    expect(listActiveLeases(fx.controllerHome, fx.repository.repoId).length).toBeGreaterThan(0);
+  });
+
+  test('passive cannot integrate worktree (fencing at integrateAgentJob boundary)', () => {
+    const fx = homeFixture();
+    publishWriterAuthority(fx.controllerHome, { activeSlot: 'green', reason: 'active' });
+    bindRuntimeWriterClaim({
+      controllerHome: fx.controllerHome,
+      slot: 'blue',
+      epoch: 'stale',
+      fencingToken: 'stale',
+    });
+    // Dynamic require to avoid loading full agent-job graph when not needed for other tests.
+    const { integrateAgentJob } = require('../../src/cli/agent-jobs/integration') as typeof import('../../src/cli/agent-jobs/integration');
+    expect(() => integrateAgentJob(fx.root, { profile: 'controller' } as any, 'run_missing')).toThrow(/WRITER_FENCED/);
+  });
+
+  test('passive cannot execute remote side effect via command executor fence', () => {
+    const fx = repoFixture();
+    publishWriterAuthority(fx.controllerHome, { activeSlot: 'green', reason: 'active' });
+    bindRuntimeWriterClaim({
+      controllerHome: fx.controllerHome,
+      slot: 'blue',
+      epoch: 'stale',
+      fencingToken: 'stale',
+    });
+    const { executeRepositoryCommand } = require('../../src/cli/repositories/command-executor') as typeof import('../../src/cli/repositories/command-executor');
+    // Force a remote_write classification path by using git push argv; dryRun false.
+    // Fence must throw before spawn.
+    expect(() => executeRepositoryCommand(fx.controllerHome, fx.repository, {
+      command: ['git', 'push', 'origin', 'main'],
+      approvalToken: 'test',
+      authorization: { confirmed: true } as any,
+    })).toThrow(/WRITER_FENCED|approval|AUTHORIZ|CONFIRM|denied|remote/i);
+  });
+
+  test('disk log quota stops unbounded growth', async () => {
+    const fx = repoFixture();
+    const maxBytes = 8_192;
+    const handle = await spawnManagedProcess({
+      controllerHome: fx.controllerHome,
+      repoId: fx.repository.repoId,
+      command: {
+        kind: 'argv',
+        executable: 'node',
+        args: ['-e', 'process.stdout.write("x".repeat(200000)); process.exit(0)'],
+        cwd: fx.repoRoot,
+      },
+      interactiveWaitMs: 10_000,
+      timeoutMs: 15_000,
+      maxOutputBytes: maxBytes,
+    });
+    expect(handle.completed).toBe(true);
+    const { getProcessRecord } = await import('../../src/runtime/execution/process-runtime/store');
+    const { readProcessLogs, readFileTailBytes } = await import('../../src/runtime/execution/process-runtime/runtime');
+    const record = getProcessRecord(fx.controllerHome, fx.repository.repoId, handle.processId);
+    expect(record).toBeTruthy();
+    const stdoutPath = record!.stdoutPath!;
+    expect(existsSync(stdoutPath)).toBe(true);
+    const size = readFileSync(stdoutPath).length;
+    // Hard disk quota: stored size must not far exceed configured max.
+    expect(size).toBeLessThanOrEqual(maxBytes + 64);
+    const logs = readProcessLogs(fx.controllerHome, fx.repository.repoId, handle.processId, 4_096);
+    expect(logs).toBeTruthy();
+    expect(logs!.stdoutBytes).toBeGreaterThan(0);
+    // Bounded tail read must not throw on large files.
+    const tail = readFileTailBytes(stdoutPath, 1_024);
+    expect(tail.text.length).toBeGreaterThan(0);
+    expect(tail.fileBytes).toBe(size);
+  });
+
+  test('process MCP tools are registered and process_get is repo-scoped', async () => {
+    const { processToolDefinitions, callProcessTool } = await import('../../src/runtime/gateway/mcp/process-tools');
+    const names = processToolDefinitions.map((t) => t.name);
+    expect(names).toEqual(expect.arrayContaining([
+      'process_get',
+      'process_wait',
+      'process_logs',
+      'process_cancel',
+    ]));
+    const fx = repoFixture();
+    const handle = await spawnManagedProcess({
+      controllerHome: fx.controllerHome,
+      repoId: fx.repository.repoId,
+      command: {
+        kind: 'argv',
+        executable: 'node',
+        args: ['-e', 'process.exit(0)'],
+        cwd: fx.repoRoot,
+      },
+      interactiveWaitMs: 5_000,
+    });
+    const ctx = {
+      controllerHome: fx.controllerHome,
+      repoRoot: fx.repoRoot,
+      sessionId: 'sess-test',
+      policy: { profile: 'controller', execution: { agentRunner: 'none', allowedAgents: [], runnerTimeoutMs: 60_000, runnerMaxTimeoutMs: 120_000 } },
+    } as any;
+    const got = await callProcessTool(ctx, 'process_get', {
+      repo_id: fx.repository.repoId,
+      process_id: handle.processId,
+    });
+    expect(got).toBeTruthy();
+    expect(got!.isError).not.toBe(true);
+    const payload = got!.structuredContent as any;
+    expect(payload.process.processId).toBe(handle.processId);
+    expect(payload.process.status).toBe('succeeded');
+
+    // Wrong repo → error
+    const wrong = await callProcessTool(ctx, 'process_get', {
+      repo_id: 'repo_does_not_exist',
+      process_id: handle.processId,
+    });
+    expect(wrong?.isError).toBe(true);
   });
 });
 

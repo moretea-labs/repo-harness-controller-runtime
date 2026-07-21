@@ -36,6 +36,22 @@ export type ActivationTxStatus =
   | 'incomplete'
   | 'missing';
 
+/**
+ * Full previous runtime snapshot for true rollback (not slot-only swap).
+ * Compatible with older authorities that only store previousSlot/previousEpoch.
+ */
+export interface PreviousRuntimeSnapshot {
+  activeSlot: RuntimeSlotId;
+  generation?: string;
+  releaseRevision?: string;
+  releasePath?: string;
+  daemonPort?: number;
+  gatewayPort?: number;
+  writerEpoch?: string;
+  fencingToken?: string;
+  transactionId?: string;
+}
+
 export interface ActivationAuthorityRecord {
   schemaVersion: 1;
   status: 'committed';
@@ -50,6 +66,8 @@ export interface ActivationAuthorityRecord {
   reason?: string;
   previousEpoch?: string;
   previousSlot?: RuntimeSlotId;
+  /** Full previous runtime snapshot for authentic rollback. */
+  previousRuntime?: PreviousRuntimeSnapshot;
   rollbackUntil?: string;
   committedAt: string;
   transactionId: string;
@@ -207,7 +225,13 @@ export function commitActivationTransaction(
     reason?: string;
     previousEpoch?: string;
     previousSlot?: RuntimeSlotId;
+    previousRuntime?: PreviousRuntimeSnapshot;
     rollbackUntil?: string;
+    /**
+     * Bootstrap / activation authority holder may commit without holding the
+     * runtime claim that is about to be replaced.
+     */
+    bootstrapMutation?: boolean;
     /** Test hook: stop after prepare journal is written. */
     crashAfterPrepare?: boolean;
     /** Test hook: stop after authority commit, before projections. */
@@ -216,6 +240,19 @@ export function commitActivationTransaction(
 ): ActivationAuthorityRecord {
   const home = root(controllerHome);
   mkdirSync(join(home, 'bootstrap'), { recursive: true });
+
+  // Activation/cutover/rollback is itself the bootstrap authority mutation.
+  // Default bootstrapMutation=true so Bootstrap does not need the claim it is replacing.
+  // Callers that want to require an active runtime claim must pass bootstrapMutation: false.
+  if (input.bootstrapMutation === false) {
+    try {
+      const { assertThisRuntimeMayWriteOrThrow } = require('../../cli/controller/stable-state/runtime-writer-context') as typeof import('../../cli/controller/stable-state/runtime-writer-context');
+      assertThisRuntimeMayWriteOrThrow('release_mutation', home);
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith('WRITER_FENCED:')) throw error;
+      /* unbound legacy */
+    }
+  }
 
   const existing = readActivationAuthority(home);
   if (input.previousEpoch) {
@@ -231,6 +268,23 @@ export function commitActivationTransaction(
   const transactionId = `atx-${Date.now()}-${randomUUID().slice(0, 8)}`;
   const writerEpoch = `wa-${Date.now()}-${randomUUID().slice(0, 8)}`;
   const fencingToken = randomUUID();
+
+  // Capture full previous runtime snapshot for authentic rollback.
+  const previousRuntime: PreviousRuntimeSnapshot | undefined = input.previousRuntime
+    ?? (existing
+      ? {
+          activeSlot: existing.activeSlot,
+          generation: existing.generation,
+          releaseRevision: existing.releaseRevision,
+          releasePath: existing.releasePath,
+          daemonPort: existing.daemonPort,
+          gatewayPort: existing.gatewayPort,
+          writerEpoch: existing.writerEpoch,
+          fencingToken: existing.fencingToken,
+          transactionId: existing.transactionId,
+        }
+      : undefined);
+
   const intended: ActivationPrepareJournal['intended'] = {
     transactionId,
     activeSlot: input.activeSlot,
@@ -244,6 +298,7 @@ export function commitActivationTransaction(
     reason: input.reason,
     previousEpoch: input.previousEpoch ?? existing?.writerEpoch,
     previousSlot: input.previousSlot ?? existing?.activeSlot,
+    previousRuntime,
     rollbackUntil: input.rollbackUntil,
   };
 
@@ -282,8 +337,11 @@ export function commitActivationTransaction(
 }
 
 /**
- * After crash: if authority is committed, rebuild projections; clear stale prepare.
- * Never reports incomplete as succeeded.
+ * After crash recovery rules:
+ * - prepare.transactionId === authority.transactionId → authority committed; rebuild projections; clear matching prepare.
+ * - prepare.transactionId !== authority.transactionId → keep prepare; report incomplete / prepared_pending_resolution.
+ * - prepare only → do not invent authority.
+ * Never silently delete a mismatched prepare based on time alone.
  */
 export function recoverActivationTransaction(controllerHome: string): ActivationTransactionResult {
   const home = root(controllerHome);
@@ -291,10 +349,26 @@ export function recoverActivationTransaction(controllerHome: string): Activation
   const authority = readActivationAuthority(home);
   const prepare = readActivationPrepare(home);
 
-  if (authority) {
-    // Authority committed — ensure projections match, clear prepare if same tx or stale.
+  if (authority && prepare) {
+    if (prepare.transactionId === authority.transactionId) {
+      // Matching prepare: commit already landed; rebuild projections and clear prepare.
+      writeCompatibilityProjections(home, authority);
+      safeUnlink(activationPreparePath(home));
+      return { ok: true, status: 'committed', authority, recovered: true };
+    }
+    // Mismatched prepare belongs to another in-flight transaction — preserve it.
     writeCompatibilityProjections(home, authority);
-    if (prepare) safeUnlink(activationPreparePath(home));
+    return {
+      ok: false,
+      status: 'incomplete',
+      authority,
+      recovered: false,
+      error: `prepared_pending_resolution: prepare ${prepare.transactionId} does not match committed ${authority.transactionId}`,
+    };
+  }
+
+  if (authority) {
+    writeCompatibilityProjections(home, authority);
     return { ok: true, status: 'committed', authority, recovered: true };
   }
 
@@ -336,7 +410,9 @@ export function recoverActivationTransaction(controllerHome: string): Activation
 }
 
 /**
- * Rollback activation: swap to previous slot with a new epoch in one transaction.
+ * Rollback activation: restore the full previousRuntime snapshot (slot, generation,
+ * release path/revision, ports) with a NEW writer epoch / fencing token.
+ * The pre-rollback runtime is saved as the next previousRuntime for limited re-rollback.
  */
 export function rollbackActivationTransaction(
   controllerHome: string,
@@ -344,6 +420,8 @@ export function rollbackActivationTransaction(
     generation?: string;
     reason?: string;
     crashMidway?: boolean;
+    /** Explicit bootstrap context — rollback is an authority mutation. */
+    bootstrapMutation?: boolean;
   } = {},
 ): ActivationAuthorityRecord {
   const current = readActivationAuthority(controllerHome)
@@ -351,25 +429,70 @@ export function rollbackActivationTransaction(
   if (!current) {
     throw new Error('ACTIVATION_ROLLBACK_FAILED: no committed authority to roll back');
   }
-  const previous = current.previousSlot ?? (current.activeSlot === 'blue' ? 'green' : 'blue');
+
+  const snapshot = current.previousRuntime;
+  const previousSlot = snapshot?.activeSlot
+    ?? current.previousSlot
+    ?? (current.activeSlot === 'blue' ? 'green' : 'blue');
+
+  // Prefer full snapshot metadata; fall back carefully without inventing mixed slot/release.
+  const targetGeneration = snapshot?.generation ?? input.generation;
+  const targetReleaseRevision = snapshot?.releaseRevision;
+  const targetReleasePath = snapshot?.releasePath;
+  const targetDaemonPort = snapshot?.daemonPort;
+  const targetGatewayPort = snapshot?.gatewayPort;
+
+  if (targetReleasePath) {
+    // release path must still be under a controlled releases root when present.
+    const normalized = targetReleasePath.replace(/\\/g, '/');
+    if (!normalized.includes('/releases/') && !normalized.includes('/release/')) {
+      throw new Error(
+        `ACTIVATION_ROLLBACK_FAILED: previous release path is not under a controlled releases root: ${targetReleasePath}`,
+      );
+    }
+  }
+
+  // Save current as previousRuntime so a later rollback can re-enter this state.
+  const rollbackPrevious: PreviousRuntimeSnapshot = {
+    activeSlot: current.activeSlot,
+    generation: current.generation,
+    releaseRevision: current.releaseRevision,
+    releasePath: current.releasePath,
+    daemonPort: current.daemonPort,
+    gatewayPort: current.gatewayPort,
+    writerEpoch: current.writerEpoch,
+    fencingToken: current.fencingToken,
+    transactionId: current.transactionId,
+  };
+
   if (input.crashMidway) {
-    // Prepare only then crash — incomplete.
     return commitActivationTransaction(controllerHome, {
-      activeSlot: previous,
+      activeSlot: previousSlot,
       previousSlot: current.activeSlot,
-      generation: input.generation ?? current.generation,
+      generation: targetGeneration,
+      releaseRevision: targetReleaseRevision,
+      releasePath: targetReleasePath,
+      daemonPort: targetDaemonPort,
+      gatewayPort: targetGatewayPort,
       reason: input.reason ?? 'rollback',
       previousEpoch: current.writerEpoch,
+      previousRuntime: rollbackPrevious,
+      bootstrapMutation: input.bootstrapMutation ?? true,
       crashAfterPrepare: true,
     });
   }
+
   return commitActivationTransaction(controllerHome, {
-    activeSlot: previous,
+    activeSlot: previousSlot,
     previousSlot: current.activeSlot,
-    generation: input.generation ?? current.generation,
-    releaseRevision: current.releaseRevision,
-    releasePath: current.releasePath,
+    generation: targetGeneration,
+    releaseRevision: targetReleaseRevision,
+    releasePath: targetReleasePath,
+    daemonPort: targetDaemonPort,
+    gatewayPort: targetGatewayPort,
     reason: input.reason ?? 'rollback',
     previousEpoch: current.writerEpoch,
+    previousRuntime: rollbackPrevious,
+    bootstrapMutation: input.bootstrapMutation ?? true,
   });
 }

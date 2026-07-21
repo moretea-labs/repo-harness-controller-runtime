@@ -499,6 +499,18 @@ export function integrateAgentJob(
   changedPaths: string[];
   changeOutcome: IntegrationChangeOutcome;
 } {
+  // Active-writer fencing before any integration mutation (workspace, git index,
+  // task/run state, worktree, branch). Preview/diff paths do not call this.
+  try {
+    const { assertThisRuntimeMayWriteOrThrow } = require('../controller/stable-state/runtime-writer-context') as typeof import('../controller/stable-state/runtime-writer-context');
+    const controllerHome = process.env.REPO_HARNESS_CONTROLLER_HOME
+      ?? process.env.CONTROLLER_HOME
+      ?? undefined;
+    assertThisRuntimeMayWriteOrThrow('integrate_worktree', controllerHome);
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('WRITER_FENCED:')) throw error;
+    /* unbound legacy single-runtime */
+  }
   let run: AgentJobMeta = getAgentJob(repoRoot, runId);
   const autoFinalizing = run.status === "running" &&
     run.autoIntegrate === true &&

@@ -67,6 +67,12 @@ export const STABLE_CONTROLLER_TOOL_NAMES = [
   'list_checks',
   'run_check',
   'run_workflow_check',
+
+  // Managed Process Runtime lifecycle (attach / poll / cancel — never re-exec).
+  'process_get',
+  'process_wait',
+  'process_logs',
+  'process_cancel',
   'repository_git_status',
   'repository_git_diff',
   'repository_git_create_branch',

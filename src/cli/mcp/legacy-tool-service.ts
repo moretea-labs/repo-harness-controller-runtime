@@ -3627,7 +3627,7 @@ export async function callMcpTool(
                     durableSideEffects: facade.durableSideEffects,
                     next: facade.process.completed
                       ? "Check finished on Process Runtime without LocalBridgeJob / ExecutionJob / Worker."
-                      : `Managed process ${facade.process.processId} still running; poll process_get / process_wait.`,
+                      : `Managed process ${facade.process.processId} still running; poll process_get / process_wait / process_logs.`,
                   });
                 }
               }

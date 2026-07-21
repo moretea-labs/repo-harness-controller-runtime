@@ -119,13 +119,24 @@ export function controllerDaemonMaxLifetimeMs(controllerHome: string, configured
 
 export function startControllerDaemon(controllerHome: string): void {
   // Capture writer identity once for this daemon process (slot path → stable root authority).
+  // Daemon is the active-runtime owner and may adopt current authority at startup.
+  // Workers must NOT re-adopt; they inherit the daemon's captured claim via spawn args.
   try {
     const { bindRuntimeWriterClaim } = require('../../cli/controller/stable-state/runtime-writer-context') as typeof import('../../cli/controller/stable-state/runtime-writer-context');
     const ownershipEarly = childOwnershipMetadata();
+    const inheritedEpoch = process.env.REPO_HARNESS_WRITER_EPOCH?.trim() || undefined;
+    const inheritedToken = process.env.REPO_HARNESS_WRITER_FENCING_TOKEN?.trim() || undefined;
+    const inheritedSlot = (process.env.REPO_HARNESS_WRITER_SLOT?.trim() as 'blue' | 'green' | undefined)
+      ?? ownershipEarly.slot;
+    const inheritedGeneration = process.env.REPO_HARNESS_WRITER_GENERATION?.trim() || undefined;
     bindRuntimeWriterClaim({
       controllerHome,
-      slot: ownershipEarly.slot,
+      slot: inheritedSlot,
+      generation: inheritedGeneration,
+      epoch: inheritedEpoch,
+      fencingToken: inheritedToken,
       allowLegacyMissing: true,
+      adoptCurrentAuthority: !(inheritedEpoch && inheritedToken),
     });
   } catch (error) {
     console.error('[repo-harness daemon] writer claim bind failed:', error instanceof Error ? error.message : error);

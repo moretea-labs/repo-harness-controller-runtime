@@ -143,19 +143,28 @@ export function isPassiveRuntime(
 export const PASSIVE_FORBIDDEN_ACTIONS = [
   'consume_queue',
   'renew_lease',
+  'release_lease',
   'write_process_terminal',
   'write_workflow_terminal',
   'remote_side_effect',
   'cleanup',
   'update_active_projection',
   'scheduler_write',
+  'integrate_worktree',
+  'release_mutation',
+  'bootstrap_mutation',
 ] as const;
 
 export type PassiveForbiddenAction = (typeof PASSIVE_FORBIDDEN_ACTIONS)[number];
 
 export function assertActiveWriterForAction(
   controllerHome: string,
-  claim: { slot: RuntimeSlotId; epoch?: string; fencingToken?: string },
+  claim: {
+    slot: RuntimeSlotId;
+    epoch?: string;
+    fencingToken?: string;
+    allowLegacyMissing?: boolean;
+  },
   action: PassiveForbiddenAction,
 ): WriterFenceCheck {
   const check = assertWriterAuthority(controllerHome, claim);

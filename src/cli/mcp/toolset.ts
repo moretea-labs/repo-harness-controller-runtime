@@ -10,6 +10,7 @@ import {
 import { repositoryToolDefinitions } from './repository-tools';
 import { runtimeToolDefinitions } from '../../runtime/gateway/mcp/runtime-tools';
 import { executionToolDefinitions } from '../../runtime/gateway/mcp/execution-tools';
+import { processToolDefinitions } from '../../runtime/gateway/mcp/process-tools';
 import { DEFAULT_CONTROLLER_TOOL_NAMES, PREFERRED_FACADE_TOOL_NAMES, STABLE_CONTROLLER_TOOL_NAMES } from './toolset-names';
 export { BOOTSTRAP_CONTROLLER_TOOL_NAMES, DEFAULT_CONTROLLER_TOOL_NAMES, PREFERRED_FACADE_TOOL_NAMES, STABLE_CONTROLLER_TOOL_NAMES } from './toolset-names';
 import type { McpToolset } from './types';
@@ -140,6 +141,7 @@ function buildStaticControllerExposureSnapshot(
 ): StaticControllerExposureSnapshot {
   const rawDefinitions = runtimeToolDefinitions.concat(
     executionToolDefinitions,
+    processToolDefinitions,
     accessToolDefinitions,
     repositoryToolDefinitions,
     buildMultiRepositoryToolDefinitions(ctx),
@@ -190,7 +192,7 @@ export function clearControllerExposureCacheForTest(): void {
 
 export function allControllerToolDefinitions(ctx: MultiRepositoryMcpToolContext): McpToolDefinition[] {
   return uniqueDefinitions(
-    runtimeToolDefinitions.concat(executionToolDefinitions, accessToolDefinitions, repositoryToolDefinitions, buildMultiRepositoryToolDefinitions(ctx)),
+    runtimeToolDefinitions.concat(executionToolDefinitions, processToolDefinitions, accessToolDefinitions, repositoryToolDefinitions, buildMultiRepositoryToolDefinitions(ctx)),
   ).definitions;
 }
 

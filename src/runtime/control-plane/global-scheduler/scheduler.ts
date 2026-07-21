@@ -368,6 +368,28 @@ export class GlobalScheduler {
     })();
     if (!command) return false;
     const bun = Boolean(process.versions.bun);
+    // Pass the daemon's captured writer claim so the worker never re-adopts
+    // the current active authority after cutover (fencing bypass).
+    let writerClaim: {
+      slot?: string;
+      generation?: string;
+      epoch?: string;
+      fencingToken?: string;
+    } = {};
+    try {
+      const { getRuntimeWriterClaim } = require('../../../cli/controller/stable-state/runtime-writer-context') as typeof import('../../../cli/controller/stable-state/runtime-writer-context');
+      const claim = getRuntimeWriterClaim();
+      if (claim) {
+        writerClaim = {
+          slot: claim.slot,
+          generation: claim.generation,
+          epoch: claim.epoch,
+          fencingToken: claim.fencingToken,
+        };
+      }
+    } catch {
+      /* unbound legacy */
+    }
     const workerArgs = [
       '--controller-home', this.controllerHome,
       '--repo-id', repoId,
@@ -375,6 +397,10 @@ export class GlobalScheduler {
       '--controller-pid', String(this.controllerPid),
     ];
     if (this.controllerStartedAt) workerArgs.push('--controller-started-at', this.controllerStartedAt);
+    if (writerClaim.slot) workerArgs.push('--writer-slot', writerClaim.slot);
+    if (writerClaim.generation) workerArgs.push('--writer-generation', writerClaim.generation);
+    if (writerClaim.epoch) workerArgs.push('--writer-epoch', writerClaim.epoch);
+    if (writerClaim.fencingToken) workerArgs.push('--writer-fencing-token', writerClaim.fencingToken);
     const args = bun
       ? [command.entry, ...workerArgs]
       : ['--loader', command.loader, command.entry, ...workerArgs];
@@ -384,6 +410,10 @@ export class GlobalScheduler {
       REPO_HARNESS_CONTROLLER_HOME: this.controllerHome,
       ...(this.runtimeSourceRoot ? { REPO_HARNESS_CONTROLLER_RUNTIME_SOURCE_ROOT: this.runtimeSourceRoot } : {}),
       ...(this.ownerEpoch ? { REPO_HARNESS_SUPERVISOR_EPOCH: this.ownerEpoch } : {}),
+      ...(writerClaim.slot ? { REPO_HARNESS_WRITER_SLOT: writerClaim.slot } : {}),
+      ...(writerClaim.generation ? { REPO_HARNESS_WRITER_GENERATION: writerClaim.generation } : {}),
+      ...(writerClaim.epoch ? { REPO_HARNESS_WRITER_EPOCH: writerClaim.epoch } : {}),
+      ...(writerClaim.fencingToken ? { REPO_HARNESS_WRITER_FENCING_TOKEN: writerClaim.fencingToken } : {}),
     };
     const stderrPath = join(executionJobRoot(this.controllerHome, repoId), 'worker-stderr', `${jobId}-attempt-${current.attempt}.log`);
     mkdirSync(dirname(stderrPath), { recursive: true });

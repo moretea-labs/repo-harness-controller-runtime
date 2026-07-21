@@ -25,12 +25,34 @@ function option(name: string): string | undefined {
 }
 
 const controllerHome = ensureControllerHome(option('--controller-home'));
-// Capture writer identity once — never re-read authority as "mine" on each write.
+// Bind ONLY the writer claim inherited from the parent daemon/scheduler.
+// Never re-read current authority and treat it as "mine" (cutover fencing bypass).
 try {
   const { bindRuntimeWriterClaim } = require('../../../cli/controller/stable-state/runtime-writer-context') as typeof import('../../../cli/controller/stable-state/runtime-writer-context');
-  bindRuntimeWriterClaim({ controllerHome, allowLegacyMissing: true });
+  const slotOpt = option('--writer-slot');
+  const slot = slotOpt === 'blue' || slotOpt === 'green'
+    ? slotOpt
+    : (process.env.REPO_HARNESS_WRITER_SLOT === 'blue' || process.env.REPO_HARNESS_WRITER_SLOT === 'green'
+      ? process.env.REPO_HARNESS_WRITER_SLOT
+      : undefined);
+  const epoch = option('--writer-epoch') ?? process.env.REPO_HARNESS_WRITER_EPOCH?.trim();
+  const fencingToken = option('--writer-fencing-token') ?? process.env.REPO_HARNESS_WRITER_FENCING_TOKEN?.trim();
+  const generation = option('--writer-generation') ?? process.env.REPO_HARNESS_WRITER_GENERATION?.trim();
+  bindRuntimeWriterClaim({
+    controllerHome,
+    slot,
+    generation,
+    epoch,
+    fencingToken,
+    // Workers must inherit a full claim when stable authority exists.
+    // Only allow synthetic legacy bind when there is no authority file at all.
+    allowLegacyMissing: true,
+    adoptCurrentAuthority: false,
+  });
 } catch (error) {
   console.error('[repo-harness worker] writer claim bind failed:', error instanceof Error ? error.message : error);
+  // Fail closed: do not run production mutations without a bound claim when authority may exist.
+  process.exit(78);
 }
 
 const repoIdOption = option('--repo-id');

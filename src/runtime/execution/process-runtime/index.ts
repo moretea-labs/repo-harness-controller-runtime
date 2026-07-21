@@ -5,3 +5,4 @@ export * from './runtime';
 export * from './check-facade';
 export * from './command-facade';
 export * from './gc';
+export type { ProcessCommandDescriptor, ProcessRunnerExitReceipt } from './process-runner-entry';
