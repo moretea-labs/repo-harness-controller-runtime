@@ -23,6 +23,10 @@ import {
   routeExecution,
   type ExecutionDecision,
 } from '../../execution/thin-harness';
+import {
+  checkRequiresDurableWorkflow,
+  runCheckViaProcessRuntime,
+} from '../../execution/process-runtime';
 
 const DIRECT_REPOSITORY_TOOLS = new Set(['repository_list', 'repository_get', 'repository_workbench', 'repository_command_preview']);
 
@@ -46,6 +50,8 @@ const THIN_ROUTED_TOOLS = new Set([
   'search_repository',
   'read_file_range',
   'read_repository_file',
+  // run_check uses Process Runtime unless multi-phase/release requires Durable.
+  'run_check',
 ]);
 
 /** Blocking native host tools must never execute on the public MCP event loop. */
@@ -183,6 +189,37 @@ export function classifyGatewayExecutionPath(
   if (isSelfManagedDurableTool(name)) {
     return { path: 'direct', reasons: ['self_managed_durable_boundary'] };
   }
+  // run_check: Process Runtime for ordinary checks; Durable only for release/multi-phase.
+  if (name === 'run_check') {
+    const checkId = String(args.check_id ?? args.checkId ?? '').trim();
+    if (args.apply_mode === 'async' || args.mode === 'durable' || args.force_durable === true) {
+      return { path: 'durable', reasons: ['caller_requested_durable_check'] };
+    }
+    if (checkId && checkRequiresDurableWorkflow(checkId)) {
+      return { path: 'durable', reasons: ['multi_phase_or_release_check'] };
+    }
+    // Route as "fast" so shouldCreateDurableJob returns false; actual execution
+    // uses Process Runtime (direct or managed handle) in routeDurableMcpCall / legacy handler.
+    return {
+      path: 'fast',
+      reasons: ['run_check_process_runtime'],
+      decision: {
+        mode: 'fast',
+        reasons: ['run_check_process_runtime'],
+        risk: 'workspace_write',
+        estimatedClass: 'short',
+        requiresIsolation: false,
+        requiresRecovery: false,
+        effects: {
+          readsWorkspace: true,
+          mutatesWorkspace: true,
+          mutatesGitRefs: false,
+          remoteWrite: false,
+        },
+      },
+    };
+  }
+
   if (THIN_ROUTED_TOOLS.has(name) || name === 'repository_command_execute') {
     const decision = routeExecution({
       operation: name,
@@ -417,6 +454,91 @@ export async function routeDurableMcpCall(
       suggestedOperation: classification.decision.suggestedOperation,
     });
   }
+
+  // run_check Process Runtime facade — execute here so legacy LocalBridgeJob path is skipped.
+  if (name === 'run_check' && classification.path === 'fast') {
+    const restoringDisabledRepository = false;
+    void restoringDisabledRepository;
+    const repository = resolveRepositorySelection({
+      repoId: typeof args.repo_id === 'string' ? args.repo_id : undefined,
+      checkoutId: typeof args.checkout_id === 'string' ? args.checkout_id : undefined,
+      explicitPath: ctx.explicitRepository?.canonicalRoot,
+      controllerHome: ctx.controllerHome,
+      allowSoleRepository: true,
+    });
+    if (!repository) {
+      return result({
+        accepted: false,
+        mode: 'reject',
+        path: 'reject',
+        message: 'run_check requires a resolvable repository',
+      });
+    }
+    const checkId = String(args.check_id ?? '').trim();
+    if (!checkId) {
+      return result({
+        accepted: false,
+        mode: 'reject',
+        path: 'reject',
+        message: 'run_check requires check_id',
+      });
+    }
+    const facade = await runCheckViaProcessRuntime({
+      controllerHome: ctx.controllerHome,
+      repoId: repository.repoId,
+      checkoutId: repository.activeCheckoutId,
+      repoRoot: repository.canonicalRoot,
+      checkId,
+      timeoutMs: typeof args.timeout_ms === 'number' ? args.timeout_ms : undefined,
+      interactiveWaitMs: typeof args.interactive_wait_ms === 'number' ? args.interactive_wait_ms : undefined,
+      requestId: typeof args.request_id === 'string' ? args.request_id : undefined,
+      forceDurable: args.force_durable === true,
+    });
+    if (facade.mode === 'durable') {
+      // Multi-phase/release should already be classified durable. Remaining durable
+      // reasons (missing check, explicit force) must not silently create empty jobs
+      // without a clear signal — return structured escalation instead of LocalBridge.
+      return result({
+        accepted: false,
+        mode: 'durable',
+        path: 'durable',
+        routing: {
+          path: 'durable',
+          reasons: [facade.durable?.reason ?? 'check_requires_durable'],
+        },
+        checkId: facade.checkId,
+        message: facade.durable?.reason ?? 'check requires durable workflow',
+        suggestedOperation: facade.durable?.suggestedOperation,
+        durableSideEffects: facade.durableSideEffects,
+      });
+    }
+    const handle = facade.process;
+    return result({
+      accepted: true,
+      mode: facade.mode,
+      path: facade.mode === 'direct' ? 'process_direct' : 'process_managed',
+      routing: {
+        path: facade.mode,
+        reasons: classification.reasons,
+      },
+      checkId: facade.checkId,
+      repoId: repository.repoId,
+      checkoutId: repository.activeCheckoutId,
+      processId: handle?.processId,
+      status: handle?.status,
+      completed: handle?.completed === true,
+      ok: handle?.ok,
+      exitCode: handle?.exitCode,
+      timedOut: handle?.timedOut,
+      stdout: handle?.stdout,
+      stderr: handle?.stderr,
+      durableSideEffects: facade.durableSideEffects,
+      next: handle?.completed
+        ? 'Check finished on Process Runtime without ExecutionJob / LocalBridgeJob / Worker.'
+        : `Check still running as managed process ${handle?.processId}. Use process_get / process_wait; do not re-run the same check.`,
+    });
+  }
+
   if (!shouldCreateDurableJob(ctx, name, args, opts)) {
     // Fast/direct: leave execution to repository facade / runtime tool handlers.
     // Returning undefined lets the MCP server call the direct tool path without

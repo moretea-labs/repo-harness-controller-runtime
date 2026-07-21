@@ -3580,11 +3580,68 @@ export async function callMcpTool(
             "TOOL_DISABLED",
             "run_check requires the controller profile",
           );
+        // Prefer Unified Process Runtime for ordinary checks. Only multi-phase /
+        // release checks (or explicit force_durable) fall back to LocalBridgeJob.
+        const checkId = String(args.check_id ?? "").trim();
+        const forceDurable = args.force_durable === true
+          || args.apply_mode === "async"
+          || args.mode === "durable";
+        if (!forceDurable && checkId) {
+          try {
+            const { checkRequiresDurableWorkflow, runCheckViaProcessRuntime } = await import(
+              "../../runtime/execution/process-runtime"
+            );
+            const { resolveRepoPreferredControllerHome } = await import("../repositories/controller-home");
+            const { resolveRepositorySelection } = await import("../repositories/registry");
+            if (!checkRequiresDurableWorkflow(checkId)) {
+              const controllerHome = resolveRepoPreferredControllerHome(ctx.repoRoot);
+              const repository = resolveRepositorySelection({
+                explicitPath: ctx.repoRoot,
+                controllerHome,
+                allowSoleRepository: true,
+              });
+              if (repository) {
+                const facade = await runCheckViaProcessRuntime({
+                  controllerHome,
+                  repoId: repository.repoId,
+                  checkoutId: repository.activeCheckoutId,
+                  repoRoot: repository.canonicalRoot,
+                  checkId,
+                  timeoutMs: typeof args.timeout_ms === "number" ? args.timeout_ms : undefined,
+                  requestId: typeof args.request_id === "string" ? args.request_id.trim() || undefined : undefined,
+                });
+                if (facade.mode !== "durable" && facade.process) {
+                  audit(ctx, name, "ok", args);
+                  return textResult({
+                    mode: facade.mode,
+                    path: facade.mode === "direct" ? "process_direct" : "process_managed",
+                    checkId: facade.checkId,
+                    processId: facade.process.processId,
+                    status: facade.process.status,
+                    completed: facade.process.completed === true,
+                    ok: facade.process.ok,
+                    exitCode: facade.process.exitCode,
+                    timedOut: facade.process.timedOut,
+                    stdout: facade.process.stdout,
+                    stderr: facade.process.stderr,
+                    durableSideEffects: facade.durableSideEffects,
+                    next: facade.process.completed
+                      ? "Check finished on Process Runtime without LocalBridgeJob / ExecutionJob / Worker."
+                      : `Managed process ${facade.process.processId} still running; poll process_get / process_wait.`,
+                  });
+                }
+              }
+            }
+          } catch (error) {
+            // Fall through to legacy LocalBridge path if Process Runtime is unavailable.
+            void error;
+          }
+        }
         const job = submitLocalBridgeJob(ctx.repoRoot, {
           action: "run-check",
           requestedBy: "mcp:run_check",
           payload: {
-            checkId: String(args.check_id ?? ""),
+            checkId,
             timeoutMs: typeof args.timeout_ms === "number" ? args.timeout_ms : undefined,
             requestId: typeof args.request_id === "string" ? args.request_id.trim() || undefined : undefined,
           },

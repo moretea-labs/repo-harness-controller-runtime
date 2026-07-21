@@ -1,4 +1,11 @@
 import type { ResourceClaimSpec } from '../../execution/jobs/types';
+import {
+  claimsForCheck,
+  claimsForRepositoryCommand,
+  claimHeavyCheck,
+  claimWorkspaceRead,
+  claimBuildCacheWrite,
+} from '../../execution/process-runtime/resource-claims';
 
 const READ_ONLY_TOOLS = new Set([
   'controller_capabilities',
@@ -113,7 +120,16 @@ export function claimsForMcpOperation(name: string, args: Record<string, unknown
     { resourceKey: `git-refs:${repoId}`, mode: 'exclusive' },
   ];
   if (REPO_STATE_TOOLS.has(name)) return [{ resourceKey: 'repo-state', mode: 'write' }];
-  if (CHECK_TOOLS.has(name)) return [{ resourceKey: `heavy-check:${repoId}`, mode: 'exclusive' }];
+  // run_check: only true heavy/release checks take exclusive heavy-check lock.
+  // Ordinary typecheck / lint / package scripts use fine-grained claims.
+  if (name === 'run_check') {
+    const checkId = String(args.check_id ?? args.checkId ?? '').trim();
+    if (!checkId) return [claimWorkspaceRead(checkoutId), claimBuildCacheWrite(repoId)];
+    return claimsForCheck(checkId, undefined, repoId, checkoutId);
+  }
+  // verify_edit_session may run multiple checks — keep exclusive to avoid parallel mutate+verify races.
+  if (name === 'verify_edit_session') return [claimHeavyCheck(repoId)];
+  if (CHECK_TOOLS.has(name)) return claimsForCheck(String(args.check_id ?? name), undefined, repoId, checkoutId);
   if (INTEGRATION_TOOLS.has(name)) return [
     { resourceKey: `integration:${repoId}`, mode: 'exclusive' },
     { resourceKey: `workspace:${checkoutId ?? 'active'}`, mode: 'write' },
@@ -128,12 +144,30 @@ export function claimsForMcpOperation(name: string, args: Record<string, unknown
     const dispatchKey = isolatedWorktreeKey(args) || requestId || name;
     return [{ resourceKey: `agent-dispatch:${repoId}:${dispatchKey}`, mode: 'write' }];
   }
+  if (name === 'repository_command_execute' && args.command !== undefined) {
+    return claimsForRepositoryCommand(
+      args.command as string | string[],
+      repoId,
+      checkoutId,
+      typeof args.default_branch === 'string' ? args.default_branch : undefined,
+    );
+  }
   if (WORKSPACE_WRITE_TOOLS.has(name)) {
     const paths = operationPaths(args);
-    if (paths.length > 0) return paths.map((path) => ({ resourceKey: `path:${path}`, mode: 'write' }));
+    if (paths.length > 0) {
+      return paths.map((path) => ({
+        resourceKey: `path:${checkoutId ?? 'active'}:${path.replace(/^\.\//, '')}`,
+        mode: 'write' as const,
+      }));
+    }
     return [{ resourceKey: `workspace:${checkoutId ?? 'active'}`, mode: 'write' }];
   }
   const paths = operationPaths(args);
-  if (paths.length > 0) return paths.map((path) => ({ resourceKey: `path:${path}`, mode: 'write' }));
+  if (paths.length > 0) {
+    return paths.map((path) => ({
+      resourceKey: `path:${checkoutId ?? 'active'}:${path.replace(/^\.\//, '')}`,
+      mode: 'write' as const,
+    }));
+  }
   return [];
 }

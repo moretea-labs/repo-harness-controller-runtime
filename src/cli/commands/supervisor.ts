@@ -37,12 +37,81 @@ function launchSupervisor(repo: string, home: string): { pid?: number; service?:
   return { pid: launchStableSupervisor({ repoRoot: repo, controllerHome: home, logPath: supervisorLogPath(home) }).pid, service: service as unknown as Record<string, unknown> };
 }
 
-function activationStatePath(home: string): string {
+export type SupervisorActivationPhase =
+  | 'scheduled'
+  | 'waiting_for_handoff'
+  | 'stopping_legacy'
+  | 'registering_service'
+  | 'succeeded'
+  | 'failed';
+
+export interface SupervisorActivationState {
+  schemaVersion: 1;
+  activationId: string;
+  phase: SupervisorActivationPhase;
+  repoRoot: string;
+  updatedAt: string;
+  pid?: number;
+  startedAt?: string;
+  completedAt?: string;
+  expectedReleaseRevision?: string;
+  expectedReleasePath?: string;
+  releaseRevision?: string;
+  releasePath?: string;
+  error?: string;
+  recovery?: unknown;
+  [key: string]: unknown;
+}
+
+export function serviceActivationStatePath(home: string): string {
   return join(supervisorRoot(home), 'activation.json');
 }
 
+export function readServiceActivationState(home: string): SupervisorActivationState | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(serviceActivationStatePath(home), 'utf8')) as SupervisorActivationState;
+    return parsed?.schemaVersion === 1 && typeof parsed.activationId === 'string' && typeof parsed.phase === 'string'
+      ? parsed
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function writeActivationState(home: string, value: Record<string, unknown>): void {
-  writeJsonAtomic(activationStatePath(home), { schemaVersion: 1, ...value, updatedAt: new Date().toISOString() });
+  const existing = readServiceActivationState(home);
+  writeJsonAtomic(serviceActivationStatePath(home), {
+    ...(existing ?? {}),
+    schemaVersion: 1,
+    ...value,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+export async function waitForServiceActivation(input: {
+  home: string;
+  activationId: string;
+  expectedReleaseRevision?: string;
+  timeoutMs?: number;
+  intervalMs?: number;
+}): Promise<SupervisorActivationState> {
+  const deadline = Date.now() + Math.max(1_000, input.timeoutMs ?? 120_000);
+  while (Date.now() < deadline) {
+    const state = readServiceActivationState(input.home);
+    if (state?.activationId === input.activationId) {
+      if (state.phase === 'failed') {
+        throw new Error(`SUPERVISOR_ACTIVATION_FAILED: ${state.error ?? 'unknown activation failure'}`);
+      }
+      if (state.phase === 'succeeded') {
+        if (input.expectedReleaseRevision && state.releaseRevision !== input.expectedReleaseRevision) {
+          throw new Error(`SUPERVISOR_ACTIVATION_RELEASE_MISMATCH: expected=${input.expectedReleaseRevision} actual=${state.releaseRevision ?? 'missing'}`);
+        }
+        return state;
+      }
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, Math.max(100, input.intervalMs ?? 500)));
+  }
+  throw new Error(`SUPERVISOR_ACTIVATION_TIMEOUT: ${input.activationId}`);
 }
 
 export function supervisorActivationMatchesRelease(control: unknown, expectedReleaseRevision: string): boolean {
@@ -65,8 +134,9 @@ export function scheduleServiceActivation(
   repo: string,
   home: string,
   handoffDelayMs = 750,
-): { activationId: string; pid: number; statePath: string; logPath: string } {
+): { activationId: string; pid: number; statePath: string; logPath: string; expectedReleaseRevision?: string; expectedReleasePath?: string } {
   const activationId = `sup-activate-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const expectedRelease = readCurrentSupervisorRelease(home);
   const currentRelease = readCurrentRelease(home);
   const installedCli = currentRelease ? join(currentRelease, 'repo-harness.js') : undefined;
   const cliEntry = installedCli && existsSync(installedCli)
@@ -97,8 +167,23 @@ export function scheduleServiceActivation(
     closeSync(logFd);
   }
   if (!child.pid) throw new Error('SUPERVISOR_ACTIVATION_SPAWN_FAILED');
-  writeActivationState(home, { activationId, phase: 'scheduled', pid: child.pid, repoRoot: repo, startedAt: new Date().toISOString() });
-  return { activationId, pid: child.pid, statePath: activationStatePath(home), logPath };
+  writeActivationState(home, {
+    activationId,
+    phase: 'scheduled',
+    pid: child.pid,
+    repoRoot: repo,
+    startedAt: new Date().toISOString(),
+    ...(expectedRelease?.releaseRevision ? { expectedReleaseRevision: expectedRelease.releaseRevision } : {}),
+    ...(expectedRelease?.releasePath ? { expectedReleasePath: expectedRelease.releasePath } : {}),
+  });
+  return {
+    activationId,
+    pid: child.pid,
+    statePath: serviceActivationStatePath(home),
+    logPath,
+    ...(expectedRelease?.releaseRevision ? { expectedReleaseRevision: expectedRelease.releaseRevision } : {}),
+    ...(expectedRelease?.releasePath ? { expectedReleasePath: expectedRelease.releasePath } : {}),
+  };
 }
 
 async function activateInstalledService(
@@ -147,7 +232,12 @@ async function activateInstalledService(
     if (!supervisorActivationMatchesRelease(control, expectedReleaseRevision)) {
       throw new Error(`SUPERVISOR_ACTIVATION_VERIFY_TIMEOUT: expected releaseRevision=${expectedReleaseRevision}`);
     }
-    update('succeeded', { completedAt: new Date().toISOString(), service });
+    update('succeeded', {
+      completedAt: new Date().toISOString(),
+      service,
+      releaseRevision: expectedRelease.releaseRevision,
+      releasePath: expectedRelease.releasePath,
+    });
     return { ok: true, activationId, stopped, service, control };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

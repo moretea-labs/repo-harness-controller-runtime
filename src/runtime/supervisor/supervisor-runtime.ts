@@ -492,11 +492,20 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
         });
       }
       const identity = readSlotIdentity(this.options.controllerHome, this.state.activeSlot);
-      if (identity && (identity.generation !== reconciled.generation || identity.sourceCommit !== daemonRuntime?.source.commit)) {
+      const daemonReleasePath = daemon?.releasePath;
+      const daemonReleaseRevision = daemon?.releaseRevision;
+      if (identity && (
+        identity.generation !== reconciled.generation
+        || identity.sourceCommit !== daemonRuntime?.source.commit
+        || identity.releasePath !== daemonReleasePath
+        || identity.releaseRevision !== daemonReleaseRevision
+      )) {
         writeSlotIdentity(this.options.controllerHome, {
           ...identity,
           generation: reconciled.generation,
           ...(daemonRuntime?.source.commit ? { sourceCommit: daemonRuntime.source.commit } : {}),
+          releasePath: daemonReleasePath,
+          releaseRevision: daemonReleaseRevision,
         });
       }
     }

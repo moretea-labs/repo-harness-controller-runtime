@@ -190,15 +190,35 @@ function isReadOnlySegment(segment: string): boolean {
   return READ_ONLY_PROGRAMS.has(program);
 }
 
+/** Package scripts that are local validation (not install/publish/mutate deps). */
+const SAFE_PACKAGE_SCRIPT = /^(?:test|check|lint|typecheck|format:check|tsc)(?::|$)/i;
+
+function isSafePackageRunner(program: string, words: string[]): boolean {
+  if (!['bun', 'npm', 'pnpm', 'yarn', 'node'].includes(program)) return false;
+  // bun test <path>, npm test, etc.
+  if (words[1]?.toLowerCase() === 'test') return true;
+  // bun run check:type / npm run lint / pnpm run typecheck
+  if (words[1]?.toLowerCase() === 'run' && words[2] && SAFE_PACKAGE_SCRIPT.test(words[2])) return true;
+  // bunx tsc --noEmit / npx eslint
+  if ((program === 'bun' && words[1]?.toLowerCase() === 'x') || program === 'node') {
+    const tool = words[program === 'node' ? 1 : 2]?.toLowerCase();
+    if (tool === 'tsc' || tool === 'eslint' || tool === 'biome') return true;
+  }
+  return false;
+}
+
 function isReplaySafeValidationWords(words: string[]): boolean {
   const program = words[0]?.split(/[\\/]/).at(-1)?.toLowerCase();
   const subcommand = words[1]?.toLowerCase();
   if (!program) return false;
+  if (isSafePackageRunner(program, words)) return true;
   if (program === 'bun') return subcommand === 'test';
   if (program === 'node') return words.slice(1).some((word) => word === '--test' || word.startsWith('--test='));
   if (program === 'go') return subcommand === 'test';
   if (program === 'cargo') return subcommand === 'test' || subcommand === 'check';
   if (program === 'swift') return subcommand === 'test';
+  if (program === 'tsc') return true;
+  if (program === 'eslint' || program === 'biome') return true;
   if (program === 'pytest' || program === 'py.test') return true;
   if ((program === 'python' || program === 'python3') && subcommand === '-m') return words[2]?.toLowerCase() === 'pytest';
   if (program === 'mvn' || program === 'mvnw') return words.slice(1).some((word) => word === 'test' || word === 'verify');
@@ -211,6 +231,77 @@ function isReplaySafeValidationWords(words: string[]): boolean {
 
 function isReplaySafeValidationSegment(segment: string): boolean {
   return isReplaySafeValidationWords(firstWords(segment));
+}
+
+/**
+ * Dangerous shell constructs that must never ride the Process Runtime / Fast Path
+ * even when individual segments look like tests or readonly tools.
+ */
+export function shellCommandHasUnsafeConstructs(command: string): { unsafe: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+  const normalized = command.trim();
+  // Background jobs
+  if (/(?:^|[^&])&(?:[^&]|$)/.test(normalized.replace(/&&/g, ' '))) {
+    reasons.push('background execution (&) is not allowed on the direct process path');
+  }
+  // Dynamic substitution / eval
+  if (/(?:^|[\s;|&])eval(?:\s|$)/i.test(normalized)) reasons.push('eval is not allowed');
+  if (/\$\([^)]*\)/.test(normalized) || /`[^`]+`/.test(normalized)) {
+    reasons.push('command substitution is not allowed');
+  }
+  if (/\$\{[^}]+\}/.test(normalized) && !/\$\{\w+\}/.test(normalized.replace(/\$\{\w+\}/g, ''))) {
+    // keep simple ${VAR} allowed later; complex nested expansions flagged below
+  }
+  // Download-and-execute
+  if (/\b(?:curl|wget)\b[\s\S]*\|\s*(?:sh|bash|zsh|fish)\b/i.test(normalized)) {
+    reasons.push('download-and-execute pipelines are not allowed');
+  }
+  if (/\b(?:curl|wget)\b[\s\S]*\b(?:-o|--output)\b[\s\S]*&&\s*(?:sh|bash|\.\/)/i.test(normalized)) {
+    reasons.push('download then execute is not allowed');
+  }
+  // Path escape hints
+  if (/(?:^|[\s"'])\.\.\/(?:\.\.\/)*/.test(normalized)) {
+    reasons.push('parent-directory path traversal requires durable review');
+  }
+  return { unsafe: reasons.length > 0, reasons };
+}
+
+/**
+ * Safe fixed shell combinations: every segment is readonly or a known local
+ * validation command, joined only by && or ; (not pipes that mix side effects).
+ * Example: `bun test tests/a.test.ts && bun run check:type`
+ */
+export function isSafeFixedShellCombination(command: string): boolean {
+  const normalized = command.trim();
+  if (!normalized) return false;
+  if (shellCommandHasUnsafeConstructs(normalized).unsafe) return false;
+  // Reject bare pipes that feed dynamic interpreters
+  if (/\|\s*(?:sh|bash|zsh|python|node|perl|ruby)\b/i.test(normalized)) return false;
+  const segments = shellSegments(normalized);
+  if (segments.length === 0) return false;
+  return segments.every((segment) => isReadOnlySegment(segment) || isReplaySafeValidationSegment(segment));
+}
+
+/**
+ * When a shell string is a safe fixed combination, classify at the highest risk
+ * among segments (readonly if all readonly, else workspace_write for validation).
+ */
+export function classifySafeShellCombination(command: string): RepositoryCommandClassification | undefined {
+  if (!isSafeFixedShellCombination(command)) return undefined;
+  const segments = shellSegments(command);
+  const allReadonly = segments.every(isReadOnlySegment);
+  if (allReadonly) {
+    return {
+      risk: 'readonly',
+      confirmation: 'none',
+      reasons: ['safe fixed shell combination of repository-local read operations'],
+    };
+  }
+  return {
+    risk: 'workspace_write',
+    confirmation: 'none',
+    reasons: ['safe fixed shell combination of local validation commands'],
+  };
 }
 
 function escapeRegex(value: string): string {
@@ -332,6 +423,22 @@ function classifyShellCommand(
 ): RepositoryCommandClassification {
   const normalized = command.trim();
   const reasons: string[] = [];
+
+  // Reject unsafe constructs early (background, eval, download|sh, substitution).
+  const unsafe = shellCommandHasUnsafeConstructs(normalized);
+  if (unsafe.unsafe) {
+    return {
+      risk: 'destructive',
+      confirmation: 'strong_confirmation',
+      reasons: unsafe.reasons,
+    };
+  }
+
+  // Allow safe fixed combinations (e.g. bun test path && bun run check:type)
+  // without forcing Durable merely because the command is a shell string with &&.
+  const safeCombo = classifySafeShellCombination(normalized);
+  if (safeCombo) return safeCombo;
+
   const forcePush = /\bgit\s+push\b[^\n]*(?:--force(?:-with-lease)?\b|-f(?:\s|$)|\+[^\s:]+:[^\s]+)/i.test(normalized);
   const hardReset = /\bgit\s+reset\b[^\n]*--hard\b/i.test(normalized);
   const cleanAll = /\bgit\s+clean\b[^\n]*(?:-[a-z]*x|--force)/i.test(normalized);
@@ -365,10 +472,28 @@ function classifyShellCommand(
   for (const [pattern, reason] of remoteWritePatterns) if (pattern.test(normalized)) reasons.push(reason);
   if (reasons.length > 0) return { risk: 'remote_write', confirmation: 'authorization', reasons };
 
+  // Safe fixed validation combinations are already handled above. Remaining shell
+  // package runners that are validation-only (test/check/lint/typecheck) are
+  // workspace_write with no confirmation — they may write caches/snapshots but
+  // do not require Durable solely because they use `bun run` / `npm run`.
+  const segmentsRaw = shellSegments(normalized);
+  if (segmentsRaw.length > 0 && segmentsRaw.every((segment) => isReadOnlySegment(segment) || isReplaySafeValidationSegment(segment))) {
+    const allReadonly = segmentsRaw.every(isReadOnlySegment);
+    return {
+      risk: allReadonly ? 'readonly' : 'workspace_write',
+      confirmation: allReadonly ? 'none' : 'none',
+      reasons: allReadonly
+        ? ['all command segments are recognized as repository-local read operations']
+        : ['shell segments are recognized local validation commands'],
+    };
+  }
+
   const workspaceWritePatterns: Array<[RegExp, string]> = [
     [/\bgit\s+(?:add|commit|pull|fetch|merge|rebase|checkout|switch|cherry-pick|revert|stash|mv|rm|restore|apply|am|bisect)(?:\s|$)/i, 'changes the checkout, local refs, index, or working tree'],
     [/(?:^|[;&|]\s*)(?:touch|mkdir|cp|mv|install|tee|truncate|patch)(?:\s|$)/i, 'writes repository files'],
-    [/(?:^|[;&|]\s*)(?:npm|bun|pnpm|yarn)\s+(?:install|add|remove|update|run)(?:\s|$)/i, 'may modify dependencies, generated files, or the working tree'],
+    // install/add/remove/update mutate deps; bare `run` of unknown scripts stays conservative below.
+    [/(?:^|[;&|]\s*)(?:npm|bun|pnpm|yarn)\s+(?:install|add|remove|update)(?:\s|$)/i, 'may modify dependencies, generated files, or the working tree'],
+    [/(?:^|[;&|]\s*)(?:npm|bun|pnpm|yarn)\s+run\s+(?!test|check|lint|typecheck|format:check|tsc)[a-z0-9:_-]+/i, 'may modify dependencies, generated files, or the working tree'],
   ];
   for (const [pattern, reason] of workspaceWritePatterns) if (pattern.test(normalized)) reasons.push(reason);
   if (hasRepositoryOutputRedirection(normalized)) reasons.push('redirects output into a repository file');

@@ -1,4 +1,8 @@
-import { classifyRepositoryCommand } from '../../../cli/repositories/command-classifier';
+import {
+  classifyRepositoryCommand,
+  isSafeFixedShellCombination,
+  shellCommandHasUnsafeConstructs,
+} from '../../../cli/repositories/command-classifier';
 import { normalizeRepositoryCommand } from '../../../cli/repositories/command-normalization';
 import {
   FAST_BATCH_MAX_STEPS,
@@ -363,7 +367,27 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
       const classification = classifyRepositoryCommand(input.command, input.defaultBranch);
       const canonical = normalizeRepositoryCommand(input.command);
       commandEffectsValue = commandEffects(input.command, input.defaultBranch);
-      if (canonical.kind !== 'argv' && (operation === 'run_focused_check' || operation === 'run_short_command')) {
+      const shellText = canonical.kind === 'shell'
+        ? (canonical.shellCommand ?? '')
+        : typeof input.command === 'string'
+          ? input.command
+          : '';
+      const unsafeShell = shellText ? shellCommandHasUnsafeConstructs(shellText) : { unsafe: false, reasons: [] as string[] };
+      if (unsafeShell.unsafe) {
+        return decisionBase({
+          mode: 'reject',
+          reasons: ['unsafe_shell_construct', ...unsafeShell.reasons],
+          risk: 'destructive',
+          estimatedClass: 'unknown',
+          requiresIsolation: true,
+          requiresRecovery: false,
+          rejectCode: 'UNSAFE_SHELL',
+          suggestedOperation: 'repository_command_preview',
+          effects: commandEffectsValue,
+        }, operation);
+      }
+      const safeShellCombo = canonical.kind === 'shell' && isSafeFixedShellCombination(canonical.shellCommand ?? '');
+      if (canonical.kind !== 'argv' && !safeShellCombo && (operation === 'run_focused_check' || operation === 'run_short_command')) {
         reasons.push('shell_command_not_allowed_on_fast_path');
       }
       if (classification.risk === 'remote_write') reasons.push('command_classified_remote_write');
@@ -381,15 +405,15 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
         }, operation);
       }
       const focused = isFocusedCheckCommand(input.command);
-      if (operation === 'run_focused_check' && !focused) {
+      if (operation === 'run_focused_check' && !focused && !safeShellCombo) {
         reasons.push('not_a_strict_focused_check');
       }
-      if (classification.risk === 'workspace_write' && !focused) {
+      if (classification.risk === 'workspace_write' && !focused && !safeShellCombo) {
         if (operation === 'repository_command_execute' || operation === 'run_short_command' || operation === 'run_focused_check') {
           reasons.push('mutating_or_unfocused_command');
         }
       }
-      if (classification.risk !== 'readonly' && !focused && !FAST_OPERATIONS.has(operation)) {
+      if (classification.risk !== 'readonly' && !focused && !safeShellCombo && !FAST_OPERATIONS.has(operation)) {
         reasons.push('untrusted_or_unclassified_command');
       }
     } else if (operation === 'repository_command_execute' || operation === 'run_focused_check') {
@@ -537,7 +561,9 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
     const focused = isFocusedCheckCommand(input.command);
     const canonical = normalizeRepositoryCommand(input.command);
     const effects = commandEffects(input.command, input.defaultBranch);
-    if (canonical.kind !== 'argv') {
+    const safeShellCombo = canonical.kind === 'shell'
+      && isSafeFixedShellCombination(canonical.shellCommand ?? '');
+    if (canonical.kind !== 'argv' && !safeShellCombo) {
       return decisionBase({
         mode: 'durable',
         reasons: ['shell_command_requires_durable'],
@@ -549,13 +575,19 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
         effects,
       }, operation);
     }
-    if (classification.risk === 'readonly' || focused) {
+    if (classification.risk === 'readonly' || focused || safeShellCombo) {
       return decisionBase({
         mode: 'fast',
-        reasons: focused ? ['strict_focused_check_command'] : ['readonly_allowlisted_command'],
+        reasons: safeShellCombo
+          ? ['safe_fixed_shell_combination']
+          : focused
+            ? ['strict_focused_check_command']
+            : ['readonly_allowlisted_command'],
         risk: riskFromClassification(classification.risk === 'readonly' && focused && effects.mutatesWorkspace
           ? 'workspace_write'
-          : classification.risk),
+          : classification.risk === 'readonly'
+            ? 'readonly'
+            : classification.risk),
         estimatedClass: 'short',
         requiresIsolation: false,
         requiresRecovery: false,

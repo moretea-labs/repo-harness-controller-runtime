@@ -70,6 +70,10 @@ export function ensureRepositoryControllerLayout(controllerHome: string, repoId:
     'work-handles',
     'results',
     'audit',
+    'processes',
+    'leases',
+    'workflows',
+    'projections',
   ]) {
     mkdirSync(join(root, child), { recursive: true });
   }

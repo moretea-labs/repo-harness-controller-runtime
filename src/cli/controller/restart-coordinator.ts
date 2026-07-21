@@ -16,8 +16,9 @@ import { runProcess } from "../../effects/process-runner";
 import { readControllerDaemonStatus } from "../../runtime/control-plane/daemon-client";
 import { isProcessAlive } from "../../runtime/shared/process-tree";
 import { readSupervisorOperation } from "../../runtime/supervisor/operation-store";
-import { scheduleStableSupervisorOperation } from "../../runtime/supervisor/bridge";
+import { readStableSupervisorState, scheduleStableSupervisorOperation } from "../../runtime/supervisor/bridge";
 import { supervisorLogPath } from "../../runtime/supervisor/paths";
+import { evaluateRuntimeReleaseCoherence } from "../../runtime/supervisor/release-coherence";
 import { loadMcpServiceRuntimeState } from "../mcp/auth";
 import { resolveMcpRepoRoot } from "../mcp/repo";
 import { resolveRepoPreferredControllerHome } from "../repositories/controller-home";
@@ -31,6 +32,7 @@ import {
   type ControllerServiceOptions,
   type ControllerServiceStatus,
 } from "./lifecycle";
+import { readActiveSlotAuthority, readSlotIdentity } from "./runtime-slots";
 
 export type ControllerRestartPhase =
   | "scheduled"
@@ -51,6 +53,11 @@ export interface ControllerRestartVerification {
   runtimeSourceCurrent: boolean;
   runtimeGenerationPresent: boolean;
   runtimeGenerationChanged: boolean;
+  releaseCoherent: boolean;
+  generationCoherent: boolean;
+  slotCoherent: boolean;
+  legacyReleaseMetadata: boolean;
+  coherenceFailures: string[];
   connectorHealthy: boolean;
   publicConfigured: boolean;
   publicHealth: boolean;
@@ -546,6 +553,13 @@ export async function verifyControllerRestart(
   const runtimeGenerationChanged = !state.previousGeneration || (
     Boolean(status.runtimeGeneration) && status.runtimeGeneration !== state.previousGeneration
   );
+  const authority = readActiveSlotAuthority(status.controllerHome);
+  const slotIdentity = readSlotIdentity(status.controllerHome, authority.activeSlot);
+  const coherence = evaluateRuntimeReleaseCoherence({
+    supervisorState: readStableSupervisorState(status.controllerHome),
+    authority,
+    slotIdentity: slotIdentity ?? undefined,
+  });
   const connectorHealthy = status.readiness.connector && status.mcpRuntime?.tunnel?.connectorNeedsReconnect !== true;
   const publicEndpoint = status.mcpRuntime?.tunnel?.publicEndpoint;
   const publicConfigured = Boolean(publicEndpoint);
@@ -567,6 +581,10 @@ export async function verifyControllerRestart(
   if (!runtimeSourceCurrent) failures.push(`runtime source requires restart: ${status.restartReasons.join("; ")}`);
   if (!runtimeGenerationPresent) failures.push("runtime generation is missing");
   if (!runtimeGenerationChanged) failures.push("runtime generation did not change after restart");
+  if (!coherence.releaseCoherent) failures.push("active runtime release metadata is incoherent");
+  if (!coherence.generationCoherent) failures.push("active runtime generation metadata is incoherent");
+  if (!coherence.slotCoherent) failures.push("active runtime slot metadata is incoherent");
+  failures.push(...coherence.failures.map((failure) => `runtime coherence: ${failure}`));
   if (!connectorHealthy) failures.push("connector is unhealthy or requires reconnect");
   if (!publicHealth) failures.push("configured public health endpoint is unavailable");
   if (!oauthDiscovery) failures.push("OAuth protected-resource discovery is invalid");
@@ -580,6 +598,11 @@ export async function verifyControllerRestart(
     runtimeSourceCurrent,
     runtimeGenerationPresent,
     runtimeGenerationChanged,
+    releaseCoherent: coherence.releaseCoherent,
+    generationCoherent: coherence.generationCoherent,
+    slotCoherent: coherence.slotCoherent,
+    legacyReleaseMetadata: coherence.legacyReleaseMetadata,
+    coherenceFailures: coherence.failures,
     connectorHealthy,
     publicConfigured,
     publicHealth,

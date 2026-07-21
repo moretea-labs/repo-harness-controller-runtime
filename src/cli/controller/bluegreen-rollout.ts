@@ -14,6 +14,7 @@ import {
   ensureSlotHome,
   markCutoverAuthority,
   markRollbackAuthority,
+  isRollbackWindowOpen,
   oppositeSlot,
   readActiveSlotAuthority,
   readSlotIdentity,
@@ -37,7 +38,8 @@ import { resolveControllerRuntimeSourceRoot } from '../../runtime/control-plane/
 import { sendSupervisorCommand } from '../../runtime/supervisor/control-server';
 import { readStableSupervisorState } from '../../runtime/supervisor/bridge';
 import type { SupervisorOperation, SupervisorOperationKind } from '../../runtime/supervisor/types';
-import { scheduleServiceActivation } from '../commands/supervisor';
+import { scheduleServiceActivation, waitForServiceActivation } from '../commands/supervisor';
+import { restartRequestNeedsDetachedCoordinator } from './restart-coordinator';
 
 export interface BlueGreenRolloutOptions {
   repo?: string;
@@ -236,9 +238,55 @@ async function stableSupervisorRollout(
   }
 
   const authority = readActiveSlotAuthority(rootHome);
+  let activationState: unknown;
+  if (!('skipped' in activation)) {
+    if (restartRequestNeedsDetachedCoordinator(repoRoot, rootHome)) {
+      return partialResult({
+        phase: 'activation_pending',
+        summary: `Candidate cutover and release publication succeeded on ${authority.activeSlot}; detached Supervisor activation is still pending`,
+        keyOutput: [
+          `operation=${operation.operationId}`,
+          `active=${authority.activeSlot}`,
+          `generation=${authority.generation ?? 'unknown'}`,
+          `release=${publication.releaseRevision}`,
+          `activation=${activation.activationId}`,
+          `state=${activation.statePath}`,
+        ].join('\n'),
+        nextAction: 'reconnect to the stable domain and inspect activation state; do not repeat rollout while this activation is pending',
+        details: { authority, operation, publication, activation },
+      });
+    }
+    try {
+      activationState = await waitForServiceActivation({
+        home: rootHome,
+        activationId: activation.activationId,
+        expectedReleaseRevision: publication.releaseRevision,
+        timeoutMs: operationTimeoutMs(opts),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.startsWith('SUPERVISOR_ACTIVATION_TIMEOUT')) {
+        return partialResult({
+          phase: 'activation_pending',
+          summary: `Candidate cutover and release publication succeeded on ${authority.activeSlot}; activation has not reached a terminal state`,
+          keyOutput: `${message}\nstate=${activation.statePath}`,
+          nextAction: 'inspect activation state before retrying or rolling back',
+          details: { authority, operation, publication, activation },
+        });
+      }
+      return compositeFailed({
+        phase: 'activation',
+        summary: 'Candidate cutover succeeded, but Stable Supervisor activation failed or restored the previous release',
+        failedCheck: 'supervisor_activation',
+        keyOutput: message,
+        nextAction: 'inspect activation recovery evidence and current release pointers before retrying',
+        details: { authority, operation, publication, activation },
+      });
+    }
+  }
   return compositeSucceeded({
     phase: 'cutover',
-    summary: `Rollout complete under one Stable Supervisor: active slot is ${authority.activeSlot}`,
+    summary: `Rollout and Stable Supervisor activation complete: active slot is ${authority.activeSlot}`,
     keyOutput: [
       `operation=${operation.operationId}`,
       `active=${authority.activeSlot}`,
@@ -246,8 +294,8 @@ async function stableSupervisorRollout(
       `release=${publication.releaseRevision}`,
       `activation=${'skipped' in activation ? 'skipped' : activation.activationId}`,
     ].join('\n'),
-    nextAction: 'retry the stable domain while detached Supervisor activation completes',
-    details: { authority, operation, publication, activation },
+    nextAction: 'use controller status to confirm the active immutable release and runtime generation',
+    details: { authority, operation, publication, activation, activationState },
   });
 }
 
@@ -257,6 +305,8 @@ async function stableSupervisorRollback(
   opts: BlueGreenRolloutOptions,
 ): Promise<CompositeToolResult> {
   const supervisorState = readStableSupervisorState(rootHome);
+  const rollbackAuthority = readActiveSlotAuthority(rootHome);
+  const rollbackMode = supervisorState?.standby && isRollbackWindowOpen(rollbackAuthority) ? 'hot' : 'cold';
   const rollbackReleasePath = supervisorState?.standby?.controllerDaemon.releasePath
     ?? readPreviousRelease(rootHome);
   let operation: SupervisorOperation;
@@ -325,17 +375,64 @@ async function stableSupervisorRollback(
   }
 
   const authority = readActiveSlotAuthority(rootHome);
+  let activationState: unknown;
+  if (!('skipped' in activation)) {
+    if (restartRequestNeedsDetachedCoordinator(repoRoot, rootHome)) {
+      return partialResult({
+        phase: 'activation_pending',
+        summary: `${rollbackMode === 'hot' ? 'Hot' : 'Cold'} slot rollback and release publication succeeded; detached Supervisor activation is still pending`,
+        keyOutput: [
+          `operation=${operation.operationId}`,
+          `active=${authority.activeSlot}`,
+          `release=${publication.releaseRevision}`,
+          `rollbackMode=${rollbackMode}`,
+          `activation=${activation.activationId}`,
+          `state=${activation.statePath}`,
+        ].join('\n'),
+        nextAction: 'reconnect to the stable domain and inspect activation state; do not repeat rollback while activation is pending',
+        details: { authority, operation, publication, activation, rollbackMode },
+      });
+    }
+    try {
+      activationState = await waitForServiceActivation({
+        home: rootHome,
+        activationId: activation.activationId,
+        expectedReleaseRevision: publication.releaseRevision,
+        timeoutMs: operationTimeoutMs(opts),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.startsWith('SUPERVISOR_ACTIVATION_TIMEOUT')) {
+        return partialResult({
+          phase: 'activation_pending',
+          summary: `${rollbackMode === 'hot' ? 'Hot' : 'Cold'} rollback publication succeeded; activation has not reached a terminal state`,
+          keyOutput: `${message}\nstate=${activation.statePath}`,
+          nextAction: 'inspect activation state before retrying rollback',
+          details: { authority, operation, publication, activation, rollbackMode },
+        });
+      }
+      return compositeFailed({
+        phase: 'rollback-activation',
+        summary: `${rollbackMode === 'hot' ? 'Hot' : 'Cold'} rollback cutover succeeded, but Stable Supervisor activation failed`,
+        failedCheck: 'supervisor_activation',
+        keyOutput: message,
+        nextAction: 'inspect activation recovery and release pointers before retrying rollback',
+        details: { authority, operation, publication, activation, rollbackMode },
+      });
+    }
+  }
   return compositeSucceeded({
     phase: 'rollback',
-    summary: `Rollback complete under one Stable Supervisor: active slot is ${authority.activeSlot}`,
+    summary: `${rollbackMode === 'hot' ? 'Hot' : 'Cold'} rollback and Stable Supervisor activation complete: active slot is ${authority.activeSlot}`,
     keyOutput: [
       `operation=${operation.operationId}`,
       `active=${authority.activeSlot}`,
       `release=${publication.releaseRevision}`,
+      `rollbackMode=${rollbackMode}`,
       `activation=${'skipped' in activation ? 'skipped' : activation.activationId}`,
     ].join('\n'),
-    nextAction: 'retry the stable domain while detached Supervisor activation completes',
-    details: { authority, operation, publication, activation },
+    nextAction: 'use controller status to confirm the restored immutable release and runtime generation',
+    details: { authority, operation, publication, activation, activationState, rollbackMode },
   });
 }
 

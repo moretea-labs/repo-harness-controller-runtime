@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { bootstrapLaunchAgentWithRetry } from '../../src/cli/controller/launch-agents';
-import { supervisorActivationMatchesRelease } from '../../src/cli/commands/supervisor';
+import { serviceActivationStatePath, supervisorActivationMatchesRelease, waitForServiceActivation } from '../../src/cli/commands/supervisor';
 import { installSupervisorRelease, publishSupervisorRelease, renderLaunchdSupervisorPlist, renderSystemdSupervisorUnit, stageSupervisorRelease, supervisorServiceLabel, supervisorSystemdUnitName } from '../../src/runtime/supervisor/installer';
 import { createStableIngressRouter } from '../../src/runtime/supervisor/ingress-router';
 import { createStableIngressProcess } from '../../src/runtime/supervisor/ingress-process';
@@ -18,6 +18,7 @@ import { writeActiveSlotAuthority } from '../../src/cli/controller/runtime-slots
 import { readCurrentRelease, readCurrentSupervisorRelease, supervisorReleasesRoot } from '../../src/runtime/supervisor/paths';
 import { createSupervisorControlServer } from '../../src/runtime/supervisor/control-server';
 import type { SupervisorManagedProcess, SupervisorState } from '../../src/runtime/supervisor/types';
+import { evaluateRuntimeReleaseCoherence } from '../../src/runtime/supervisor/release-coherence';
 
 const servers: Server[] = [];
 
@@ -433,6 +434,100 @@ describe('Stable Supervisor production hardening', () => {
         gatewayHost: { releaseRevision: 'new-revision' },
       },
     }, 'new-revision')).toBe(true);
+  });
+
+  test('release coherence requires exact path, revision, generation, and active slot agreement', () => {
+    const releasePath = '/tmp/releases/revision-a';
+    const daemon = { ...managedProcess('green', 501, 'generation-a'), releasePath, releaseRevision: 'revision-a' };
+    const gateway = { ...managedProcess('green', 502, 'generation-a'), releasePath, releaseRevision: 'revision-a' };
+    const state = {
+      schemaVersion: 1,
+      supervisor: {
+        pid: 500,
+        instanceId: 'supervisor-500',
+        processStartTime: 'start-500',
+        executableFingerprint: 'fingerprint-500',
+        controllerHome: '/tmp/controller-home',
+        ownerEpoch: 1,
+        epoch: 1,
+        startedAt: '2026-07-21T00:00:00.000Z',
+        releasePath,
+        releaseRevision: 'revision-a',
+      },
+      desiredState: 'running',
+      observedState: 'healthy',
+      activeSlot: 'green',
+      activeGeneration: 'generation-a',
+      controllerDaemon: daemon,
+      gatewayHost: gateway,
+      ingress: { state: 'running', activeUpstreamSlot: 'green' },
+      restartBudget: {},
+      updatedAt: '2026-07-21T00:00:00.000Z',
+    } as SupervisorState;
+    const authority = { schemaVersion: 1, activeSlot: 'green', generation: 'generation-a', reason: 'test', updatedAt: '2026-07-21T00:00:00.000Z' } as any;
+    const identity = {
+      schemaVersion: 1,
+      slot: 'green',
+      role: 'active',
+      controllerHome: '/tmp/controller-home',
+      slotHome: '/tmp/controller-home/runtime-slots/green',
+      mcpPort: 8795,
+      localControllerPort: 8776,
+      generation: 'generation-a',
+      releasePath,
+      releaseRevision: 'revision-a',
+      startedAt: '2026-07-21T00:00:00.000Z',
+      updatedAt: '2026-07-21T00:00:00.000Z',
+      logDir: '/tmp/logs',
+    } as any;
+
+    const coherent = evaluateRuntimeReleaseCoherence({ supervisorState: state, authority, slotIdentity: identity });
+    expect(coherent.ok).toBe(true);
+    expect(coherent.releaseCoherent).toBe(true);
+    expect(coherent.generationCoherent).toBe(true);
+
+    const mismatched = evaluateRuntimeReleaseCoherence({
+      supervisorState: state,
+      authority,
+      slotIdentity: { ...identity, releasePath: '/tmp/releases/revision-b' },
+    });
+    expect(mismatched.ok).toBe(false);
+    expect(mismatched.releasePathCoherent).toBe(false);
+    expect(mismatched.failures.join('; ')).toContain('release path mismatch');
+  });
+
+  test('activation state waits for the matching terminal release instead of treating scheduling as success', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'repo-harness-activation-state-'));
+    try {
+      const statePath = serviceActivationStatePath(home);
+      mkdirSync(join(home, 'supervisor'), { recursive: true });
+      writeFileSync(statePath, `${JSON.stringify({
+        schemaVersion: 1,
+        activationId: 'activation-a',
+        phase: 'succeeded',
+        repoRoot: '/tmp/repo',
+        releaseRevision: 'revision-a',
+        releasePath: '/tmp/releases/revision-a',
+        updatedAt: '2026-07-21T00:00:00.000Z',
+      })}\n`);
+      const state = await waitForServiceActivation({
+        home,
+        activationId: 'activation-a',
+        expectedReleaseRevision: 'revision-a',
+        timeoutMs: 1_000,
+        intervalMs: 10,
+      });
+      expect(state.phase).toBe('succeeded');
+      await expect(waitForServiceActivation({
+        home,
+        activationId: 'activation-a',
+        expectedReleaseRevision: 'revision-b',
+        timeoutMs: 1_000,
+        intervalMs: 10,
+      })).rejects.toThrow('SUPERVISOR_ACTIVATION_RELEASE_MISMATCH');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   test('launchd bootstrap retries bounded macOS error 5', async () => {
