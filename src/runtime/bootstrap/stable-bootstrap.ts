@@ -136,8 +136,10 @@ export function writeActiveRuntimePointer(
 }
 
 /**
- * Atomically switch active runtime pointer + writer authority.
+ * Atomically switch active runtime pointer + writer authority via activation transaction.
  * Old runtime loses write permission even if still alive.
+ * Compatibility projections (active-runtime, writer-authority, active-slot) are updated
+ * only after the authority record commits.
  */
 export function atomicActivateRuntime(
   controllerHome: string,
@@ -150,26 +152,51 @@ export function atomicActivateRuntime(
     gatewayPort?: number;
     reason?: string;
     previousEpoch?: string;
+    previousSlot?: RuntimeSlotId;
+    rollbackUntil?: string;
   },
 ): { pointer: ActiveRuntimePointer; authority: WriterAuthority } {
-  const authority = publishWriterAuthority(controllerHome, {
+  const {
+    commitActivationTransaction,
+    recoverActivationTransaction,
+  } = require('./activation-transaction') as typeof import('./activation-transaction');
+  // Recover any partial previous transaction first.
+  recoverActivationTransaction(controllerHome);
+  const record = commitActivationTransaction(controllerHome, {
     activeSlot: input.activeSlot,
     generation: input.generation,
     releaseRevision: input.releaseRevision,
     releasePath: input.releasePath,
-    reason: input.reason ?? 'atomic-activate',
-    previousEpoch: input.previousEpoch,
-  });
-  const pointer = writeActiveRuntimePointer(controllerHome, {
-    activeSlot: input.activeSlot,
-    generation: input.generation,
-    releaseRevision: input.releaseRevision,
-    releasePath: input.releasePath,
-    writerEpoch: authority.epoch,
-    fencingToken: authority.fencingToken,
     daemonPort: input.daemonPort,
     gatewayPort: input.gatewayPort,
+    reason: input.reason ?? 'atomic-activate',
+    previousEpoch: input.previousEpoch,
+    previousSlot: input.previousSlot,
+    rollbackUntil: input.rollbackUntil,
   });
+  const authority: WriterAuthority = {
+    schemaVersion: 1,
+    epoch: record.writerEpoch,
+    activeSlot: record.activeSlot,
+    fencingToken: record.fencingToken,
+    generation: record.generation,
+    releaseRevision: record.releaseRevision,
+    releasePath: record.releasePath,
+    updatedAt: record.committedAt,
+    reason: record.reason,
+  };
+  const pointer: ActiveRuntimePointer = {
+    schemaVersion: 1,
+    activeSlot: record.activeSlot,
+    generation: record.generation,
+    releaseRevision: record.releaseRevision,
+    releasePath: record.releasePath,
+    writerEpoch: record.writerEpoch,
+    fencingToken: record.fencingToken,
+    daemonPort: record.daemonPort,
+    gatewayPort: record.gatewayPort,
+    updatedAt: record.committedAt,
+  };
   return { pointer, authority };
 }
 
@@ -226,14 +253,39 @@ export function ensureControlSocketReady(
     // unreachable
   }
 
-  // Stale socket: owner dead or missing identity — safe to remove.
+  // Stale socket: owner dead or missing identity — only remove Unix sockets / FIFOs.
+  // Never delete ordinary files or symlinks that happen to sit at the socket path.
   try {
     const stat = statSync(path);
-    // Only unlink socket-like files; refuse to remove regular unexpected files blindly.
-    if (stat.isSocket() || stat.isFIFO() || !stat.isDirectory()) {
+    const isLink = (() => {
+      try {
+        return require('fs').lstatSync(path).isSymbolicLink();
+      } catch {
+        return false;
+      }
+    })();
+    if (isLink) {
+      throw new Error(
+        `CONTROL_SOCKET_REFUSES_SYMLINK: ${path} is a symlink; refusing to unlink (owner stale but path unsafe)`,
+      );
+    }
+    if (stat.isSocket() || stat.isFIFO()) {
       unlinkSync(path);
+    } else if (stat.isFile()) {
+      throw new Error(
+        `CONTROL_SOCKET_REFUSES_REGULAR_FILE: ${path} is a regular file; refusing to unlink`,
+      );
+    } else if (stat.isDirectory()) {
+      throw new Error(
+        `CONTROL_SOCKET_REFUSES_DIRECTORY: ${path} is a directory; refusing to unlink`,
+      );
+    } else {
+      throw new Error(
+        `CONTROL_SOCKET_UNKNOWN_NODE: ${path} is not a socket; refusing to unlink`,
+      );
     }
   } catch (error) {
+    if (error instanceof Error && error.message.startsWith('CONTROL_SOCKET_')) throw error;
     throw new Error(`CONTROL_SOCKET_CLEANUP_FAILED: ${error instanceof Error ? error.message : String(error)}`);
   }
   atomicWrite(ownerPath, {
