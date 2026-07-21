@@ -122,7 +122,7 @@ export const repositoryToolDefinitions: McpToolDefinition[] = [
     },
     payload: {
       type: 'object',
-      description: 'Operation-specific bounded arguments. Batch write operations should include request_id. For batch_execute: { steps:[{id?, kind, input}], stop_on_error?, allowed_paths?, timeout_ms?, request_id?, purpose? }. For assess_work_mode: { description, known_paths?, expected_files?, requires_parallelism?, independent_task_count? }.',
+      description: 'Operation-specific bounded arguments. Batch write operations should include request_id. For batch_execute: { steps:[{id?, kind, input}], stop_on_error?, allowed_paths?, timeout_ms?, request_id?, purpose? }. For assess_work_mode: { description, known_paths?, expected_files?, requires_parallelism?, independent_task_count?, agent_requested? }. Agent routing is opt-in only.',
       additionalProperties: true,
     },
   }),
@@ -375,7 +375,8 @@ export async function callRepositoryTool(
             independentTaskCount: typeof payload.independent_task_count === 'number' ? payload.independent_task_count : undefined,
             requiresRemoteWrite: payload.requires_remote_write === true || payload.remote_write === true,
             requiresRecovery: payload.requires_recovery === true,
-            requiresWorkerIsolation: payload.requires_worker === true || payload.requires_worker_isolation === true,
+            agentRequested: payload.agent_requested === true || payload.requires_worker === true,
+            requiresWorkerIsolation: payload.requires_worker_isolation === true,
             risk: typeof payload.risk === 'string' ? payload.risk as 'low' | 'medium' | 'high' | 'destructive' : undefined,
           });
           return result({

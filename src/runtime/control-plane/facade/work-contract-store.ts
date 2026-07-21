@@ -116,7 +116,7 @@ function defaultDriver(mode: WorkContract['mode']): WorkContract['driver'] {
   if (mode === 'handoff_only') {
     return { preferred: 'handoff_only', allowWorker: false, allowDirectEdit: false };
   }
-  return { preferred: 'isolated_worktree', allowWorker: true, allowDirectEdit: false };
+  return { preferred: 'direct_edit', allowWorker: false, allowDirectEdit: true };
 }
 
 export function createWorkContract(options: WorkContractStoreOptions, input: CreateWorkContractInput): WorkContract {

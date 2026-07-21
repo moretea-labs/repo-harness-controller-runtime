@@ -252,7 +252,7 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
     requires_parallelism: { type: 'boolean' },
     needs_dependencies: { type: 'boolean' },
     requires_recovery: { type: 'boolean' },
-    requires_worker: { type: 'boolean' },
+    requires_worker: { type: 'boolean', description: 'Opt-in only. Set true only when the user explicitly requests Codex/Claude or another agent worker; never infer it from task complexity.' },
     requires_external_effect: { type: 'boolean' },
     requires_approval: { type: 'boolean' },
     requires_user_approval: { type: 'boolean' },
@@ -269,7 +269,7 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
     forbidden_paths: { type: 'array', items: { type: 'string' } },
     constraints: { type: 'object' },
     repair_operation: { type: 'string', enum: ['diagnose', 'repair', 'verify', 'handoff'] },
-    target: { type: 'string', enum: ['codex', 'grok', 'claude'], description: 'Small-brain delegate target for operation=delegate.' },
+    target: { type: 'string', enum: ['codex', 'grok', 'claude'], description: 'Explicit small-brain delegate target for operation=delegate. Delegation is never the default execution path.' },
     available: { type: 'boolean', description: 'Whether the delegate target is currently available.' },
     codex_available: { type: 'boolean' },
     simulate_check: { type: 'boolean', description: 'Test hook: skip real check execution and use infrastructure_failed/check_failed flags.' },
@@ -1058,7 +1058,8 @@ function controllerContextAssessment(args: Record<string, unknown>) {
     independentTaskCount: typeof args.independent_task_count === 'number' ? args.independent_task_count : undefined,
     requiresRemoteWrite: args.requires_remote_write === true || args.remote_write === true,
     requiresRecovery: args.requires_recovery === true,
-    requiresWorkerIsolation: args.requires_worker === true || args.requires_worker_isolation === true,
+    agentRequested: args.agent_requested === true || args.requires_worker === true,
+    requiresWorkerIsolation: args.requires_worker_isolation === true,
     risk: typeof args.risk === 'string' ? args.risk as TaskRisk : undefined,
   });
 }

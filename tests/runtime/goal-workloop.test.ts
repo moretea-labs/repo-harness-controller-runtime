@@ -86,7 +86,33 @@ describe('goal workloop engine', () => {
     expect(contracts[0]!.checks).toContain('package:check:type');
     expect(contracts[0]!.evidenceRefs.length).toBeGreaterThan(0);
     expect(contracts[0]!.worktreePolicy.required).toBe(false);
-    expect(contracts[0]!.driver.preferred).toBe('direct_edit');
+    expect(contracts[0]!.driver).toEqual({
+      preferred: 'direct_edit',
+      allowWorker: false,
+      allowDirectEdit: true,
+    });
+  });
+
+  test('agent workers are opt-in and enabled only by an explicit worker request', () => {
+    const { ctx } = fixture();
+    const result = routeWorkStart(ctx, {
+      objective: 'Use Codex to implement the requested refactor',
+      acceptanceCriteria: ['targeted tests pass'],
+      modeInput: {
+        scopeClear: true,
+        expectedFiles: 6,
+        expectedChangedLines: 300,
+        requiresWorker: true,
+      },
+    });
+
+    expect(result.status).toBe('ok');
+    const [contract] = listWorkContracts({ ...ctx.workStore, status: 'all' });
+    expect(contract?.driver).toEqual({
+      preferred: 'codex_worker',
+      allowWorker: true,
+      allowDirectEdit: false,
+    });
   });
 
   test('high-risk missing-authorization tasks create handoff_only without WorkContract', () => {

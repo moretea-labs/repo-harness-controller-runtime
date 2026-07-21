@@ -411,9 +411,9 @@ export function startGoalWorkloop(
     forbiddenPaths: input.forbiddenPaths ?? [],
     checks: normalized.validCheckIds,
     driver: {
-      preferred: input.modeInput.requiresWorker ? 'codex_worker' : needsWorktree ? 'isolated_worktree' : 'direct_edit',
-      allowWorker: true,
-      allowDirectEdit: !needsWorktree,
+      preferred: input.modeInput.requiresWorker === true ? 'codex_worker' : needsWorktree ? 'isolated_worktree' : 'direct_edit',
+      allowWorker: input.modeInput.requiresWorker === true,
+      allowDirectEdit: input.modeInput.requiresWorker !== true && !needsWorktree,
     },
     worktreePolicy: {
       required: needsWorktree,

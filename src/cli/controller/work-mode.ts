@@ -21,6 +21,8 @@ export interface WorkModeAssessmentInput {
   /** True when interruption recovery / worker isolation is required. */
   requiresRecovery?: boolean;
   requiresWorkerIsolation?: boolean;
+  /** True only when the user explicitly asks to use an Agent executor. */
+  agentRequested?: boolean;
 }
 
 export interface WorkModeAssessment {
@@ -42,7 +44,7 @@ const PROTECTED_PATH = /(^|\/)(\.github|\.git|package-lock\.json|bun\.lock|pnpm-
  * Defaults:
  * - small bounded multi-file edits stay direct_edit / Fast Path
  * - multi-file alone never upgrades to Issue/Task/Campaign
- * - Campaign is opt-in for multiple independent long-running deliverables
+ * - Agent, Issue/Task dispatch, and Campaign execution are opt-in only
  */
 export function assessWorkMode(input: WorkModeAssessmentInput): WorkModeAssessment {
   const description = input.description.trim();
@@ -52,7 +54,17 @@ export function assessWorkMode(input: WorkModeAssessmentInput): WorkModeAssessme
   const expectedChangedLines = Math.max(0, Math.trunc(input.expectedChangedLines ?? 0));
   const independentTaskCount = Math.max(0, Math.trunc(input.independentTaskCount ?? 0));
   const risk = input.risk ?? 'low';
+  const agentRequested = input.agentRequested === true;
   const reasons: string[] = [];
+  const directDurableTools = [
+    'controller_context_pack',
+    'repository_workbench(operation=batch_execute)',
+    'begin_edit_session',
+    'apply_patch',
+    'get_edit_session_diff',
+    'verify_edit_session',
+    'finalize_edit_session',
+  ];
 
   const protectedPathTouched = paths.some((path) => PROTECTED_PATH.test(path));
   const campaignEligible =
@@ -60,10 +72,11 @@ export function assessWorkMode(input: WorkModeAssessmentInput): WorkModeAssessme
     || (input.requiresParallelism === true && independentTaskCount >= 2)
     || independentTaskCount >= 3;
 
-  if (campaignEligible) {
+  if (campaignEligible && agentRequested) {
     if (input.requiresIndependentDeliverables) reasons.push('Multiple independent long-running deliverables were requested.');
     if (input.requiresParallelism) reasons.push('The work needs truly independent parallel delivery lanes.');
     if (independentTaskCount >= 2) reasons.push(`About ${independentTaskCount} independent tasks exceed one Issue/Task slice.`);
+    reasons.push('The user explicitly requested Agent execution.');
     return {
       recommendedMode: 'campaign',
       executionPath: 'campaign',
@@ -72,6 +85,20 @@ export function assessWorkMode(input: WorkModeAssessmentInput): WorkModeAssessme
       nextTools: ['create_campaign', 'add_campaign_task', 'reconcile_campaign', 'get_campaign_review_packet'],
       issueRequired: false,
       campaignRequired: true,
+    };
+  }
+
+  if (campaignEligible) {
+    reasons.push('The work has multiple independent delivery lanes, but no Agent execution was explicitly requested.');
+    reasons.push('Keep ChatGPT in direct control and execute the lanes sequentially or through bounded repository batches.');
+    return {
+      recommendedMode: 'direct_edit',
+      executionPath: 'durable',
+      confidence: 'high',
+      reasons,
+      nextTools: directDurableTools,
+      issueRequired: false,
+      campaignRequired: false,
     };
   }
 
@@ -89,16 +116,29 @@ export function assessWorkMode(input: WorkModeAssessmentInput): WorkModeAssessme
     (input.requiresParallelism === true && independentTaskCount < 2);
 
   if (durableComplex) {
-    if (input.requiresParallelism) reasons.push('Parallel work is requested but not enough independent deliverables for a Campaign; use Issue/Task.');
+    if (input.requiresParallelism) reasons.push('Parallel work is requested but does not require automatic Agent dispatch.');
     if (input.requiresLongRunningChecks) reasons.push('The work has long-running verification or environment dependencies.');
-    if (input.needsDependencies) reasons.push('The work needs a durable dependency graph.');
+    if (input.needsDependencies) reasons.push('The work needs durable dependency tracking.');
     if (input.requiresRemoteWrite) reasons.push('Remote write, publish, or deploy requires Durable execution.');
     if (input.requiresRecovery) reasons.push('Cross-session recovery requires Durable Work.');
-    if (input.requiresWorkerIsolation) reasons.push('Worker isolation / worktree isolation requires Durable Work.');
+    if (input.requiresWorkerIsolation) reasons.push('Worktree isolation requires Durable Work, but does not itself authorize an Agent.');
     if (risk === 'high') reasons.push('The declared risk is high.');
     if (risk === 'destructive') reasons.push('The request contains destructive or irreversible operations.');
     if (expectedFiles > 12 || expectedChangedLines > 2000) reasons.push('The estimated change is too broad for one bounded edit session.');
     if (protectedPathTouched) reasons.push('The request touches a protected or release-sensitive path.');
+    if (!agentRequested) {
+      reasons.push('No Agent was explicitly requested; keep execution under direct ChatGPT control.');
+      return {
+        recommendedMode: 'direct_edit',
+        executionPath: 'durable',
+        confidence: 'high',
+        reasons,
+        nextTools: directDurableTools,
+        issueRequired: false,
+        campaignRequired: false,
+      };
+    }
+    reasons.push('The user explicitly requested Agent execution.');
     return {
       recommendedMode: 'issue_task',
       executionPath: 'durable',
@@ -117,7 +157,7 @@ export function assessWorkMode(input: WorkModeAssessmentInput): WorkModeAssessme
     expectedChangedLines <= 1000 &&
     paths.length <= 12;
 
-  if (direct) {
+  if (direct && !agentRequested) {
     if (discoveryRequired) {
       reasons.push('The exact edit locations can be discovered with repository search before opening a bounded edit session.');
       reasons.push('Investigation alone does not require an Agent when the expected change remains bounded.');
@@ -148,14 +188,27 @@ export function assessWorkMode(input: WorkModeAssessmentInput): WorkModeAssessme
     };
   }
 
-  reasons.push('The request is larger than one preferred direct-edit session but does not need a durable Issue graph or Campaign.');
-  reasons.push('Use one scoped Agent session only after repository search shows that bounded direct patches are not safe or practical.');
+  if (agentRequested) {
+    reasons.push('The user explicitly requested a scoped Agent executor.');
+    return {
+      recommendedMode: 'quick_agent',
+      executionPath: 'durable',
+      confidence: 'high',
+      reasons,
+      nextTools: ['search_repository', 'submit_local_job(action=quick-agent-session)', 'get_task_run', 'get_task_diff'],
+      issueRequired: false,
+      campaignRequired: false,
+    };
+  }
+
+  reasons.push('The request is larger than one preferred direct-edit session.');
+  reasons.push('No Agent was explicitly requested; use durable direct execution instead of quick-agent delegation.');
   return {
-    recommendedMode: 'quick_agent',
+    recommendedMode: 'direct_edit',
     executionPath: 'durable',
-    confidence: 'medium',
+    confidence: 'high',
     reasons,
-    nextTools: ['search_repository', 'submit_local_job(action=quick-agent-session)', 'get_task_run', 'get_task_diff'],
+    nextTools: directDurableTools,
     issueRequired: false,
     campaignRequired: false,
   };

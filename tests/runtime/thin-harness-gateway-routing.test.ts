@@ -181,15 +181,94 @@ describe('Gateway Thin Harness routing before ExecutionJob', () => {
     expect(assessment.issueRequired).toBe(false);
     expect(assessment.campaignRequired).toBe(false);
 
-    const campaign = assessWorkMode({
+    const directCampaign = assessWorkMode({
       description: 'Ship three independent product workstreams in parallel',
       requiresIndependentDeliverables: true,
       independentTaskCount: 3,
       requiresParallelism: true,
     });
+    expect(directCampaign.recommendedMode).toBe('direct_edit');
+    expect(directCampaign.executionPath).toBe('durable');
+    expect(directCampaign.campaignRequired).toBe(false);
+
+    const campaign = assessWorkMode({
+      description: 'Use Agents to ship three independent product workstreams in parallel',
+      requiresIndependentDeliverables: true,
+      independentTaskCount: 3,
+      requiresParallelism: true,
+      agentRequested: true,
+    });
     expect(campaign.recommendedMode).toBe('campaign');
     expect(campaign.executionPath).toBe('campaign');
     expect(campaign.campaignRequired).toBe(true);
+  });
+
+  test('never recommends quick_agent or Issue dispatch without explicit Agent opt-in', () => {
+    const medium = assessWorkMode({
+      description: 'Implement a broad but bounded refactor directly',
+      expectedFiles: 10,
+      expectedChangedLines: 1_500,
+    });
+    expect(medium.recommendedMode).toBe('direct_edit');
+    expect(medium.executionPath).toBe('durable');
+    expect(medium.issueRequired).toBe(false);
+
+    const explicitQuickAgent = assessWorkMode({
+      description: 'Use Codex for a broad but bounded refactor',
+      expectedFiles: 10,
+      expectedChangedLines: 1_500,
+      agentRequested: true,
+    });
+    expect(explicitQuickAgent.recommendedMode).toBe('quick_agent');
+
+    const broad = assessWorkMode({
+      description: 'Implement a large cross-cutting change directly',
+      expectedFiles: 20,
+      expectedChangedLines: 3_000,
+    });
+    expect(broad.recommendedMode).toBe('direct_edit');
+    expect(broad.executionPath).toBe('durable');
+    expect(broad.issueRequired).toBe(false);
+    expect(broad.nextTools).not.toContain('dispatch_task');
+
+    const explicitIssueAgent = assessWorkMode({
+      description: 'Use Codex for a large cross-cutting change',
+      expectedFiles: 20,
+      expectedChangedLines: 3_000,
+      agentRequested: true,
+    });
+    expect(explicitIssueAgent.recommendedMode).toBe('issue_task');
+    expect(explicitIssueAgent.issueRequired).toBe(true);
+  });
+
+  test('workbench assess_work_mode keeps Agent routing opt-in', async () => {
+    const fx = fixture();
+    roots.push(fx.root);
+
+    const directResponse = await callRepositoryTool(fx.controllerHome, 'repository_workbench', {
+      repo_id: fx.repository.repoId,
+      operation: 'assess_work_mode',
+      payload: {
+        description: 'Implement a broad refactor directly',
+        expected_files: 10,
+        expected_changed_lines: 1_500,
+      },
+    });
+    expect(directResponse?.isError).not.toBe(true);
+    expect((directResponse?.structuredContent as { assessment: { recommendedMode: string } }).assessment.recommendedMode).toBe('direct_edit');
+
+    const agentResponse = await callRepositoryTool(fx.controllerHome, 'repository_workbench', {
+      repo_id: fx.repository.repoId,
+      operation: 'assess_work_mode',
+      payload: {
+        description: 'Use Codex for a broad refactor',
+        expected_files: 10,
+        expected_changed_lines: 1_500,
+        agent_requested: true,
+      },
+    });
+    expect(agentResponse?.isError).not.toBe(true);
+    expect((agentResponse?.structuredContent as { assessment: { recommendedMode: string } }).assessment.recommendedMode).toBe('quick_agent');
   });
 
   test('workbench batch_execute runs multi-step Fast Path with one parent receipt', async () => {

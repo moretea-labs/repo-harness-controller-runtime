@@ -329,6 +329,7 @@ export interface ExecutionModeSelectionInput {
   requiresParallelism?: boolean;
   needsDependencies?: boolean;
   requiresRecovery?: boolean;
+  /** True only when the user explicitly requested an agent/worker executor. Complexity alone must not enable workers. */
   requiresWorker?: boolean;
   requiresExternalEffect?: boolean;
   requiresApproval?: boolean;
