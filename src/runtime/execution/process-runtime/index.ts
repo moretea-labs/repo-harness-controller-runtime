@@ -3,3 +3,5 @@ export * from './store';
 export * from './resource-claims';
 export * from './runtime';
 export * from './check-facade';
+export * from './command-facade';
+export * from './gc';

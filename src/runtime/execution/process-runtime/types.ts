@@ -7,11 +7,13 @@
 export type ProcessRuntimeStatus =
   | 'starting'
   | 'running'
+  | 'running_recovered'
   | 'succeeded'
   | 'failed'
   | 'timed_out'
   | 'cancelled'
   | 'orphaned'
+  | 'completed_unknown'
   | 'unknown';
 
 export type ProcessRouteMode = 'direct' | 'managed' | 'durable';
@@ -78,6 +80,12 @@ export interface ManagedProcessRecord {
     correlationId?: string;
   };
   error?: { code: string; message: string };
+  /** Sidecar exit receipt path written by wrapper (survives controller restart). */
+  exitReceiptPath?: string;
+  /** True when PID identity used fallback without startTime — signals forbidden. */
+  identityUntrusted?: boolean;
+  /** Log truncated due to quota. */
+  logTruncated?: boolean;
 }
 
 export interface SpawnManagedProcessInput {

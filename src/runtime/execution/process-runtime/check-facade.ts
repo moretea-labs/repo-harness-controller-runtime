@@ -110,7 +110,10 @@ export async function runCheckViaProcessRuntime(
     };
   }
 
-  const interactiveWaitMs = input.interactiveWaitMs ?? DEFAULT_INTERACTIVE_WAIT_MS;
+  // Checks often outlive a short interactive window; default to a brief wait so
+  // MCP stays responsive and returns a Managed handle for the same OS process.
+  // Keep well under 2s so controller MCP tests and ChatGPT tool UX stay snappy.
+  const interactiveWaitMs = input.interactiveWaitMs ?? Math.min(800, DEFAULT_INTERACTIVE_WAIT_MS);
   const timeoutMs = Math.min(
     check.timeoutMs,
     typeof input.timeoutMs === 'number' && Number.isFinite(input.timeoutMs)

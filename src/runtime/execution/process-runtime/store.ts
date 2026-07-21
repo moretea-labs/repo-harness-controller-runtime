@@ -17,7 +17,7 @@ import { dirname, join } from 'path';
 import { ensureRepositoryControllerLayout, repositoryControllerRoot } from '../../../cli/repositories/controller-home';
 import type { ManagedProcessRecord, ProcessRuntimeStatus } from './types';
 
-const ACTIVE_STATUSES = new Set<ProcessRuntimeStatus>(['starting', 'running']);
+const ACTIVE_STATUSES = new Set<ProcessRuntimeStatus>(['starting', 'running', 'running_recovered']);
 
 function processesRoot(controllerHome: string, repoId: string): string {
   const root = ensureRepositoryControllerLayout(controllerHome, repoId);
