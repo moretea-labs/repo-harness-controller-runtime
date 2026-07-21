@@ -58,6 +58,26 @@ function projectionNeedsRebuild(controllerHome: string, repoId: string): boolean
  * recorded and cannot prevent healthy repositories from becoming ready.
  */
 export function reconcileControllerStartup(controllerHome: string): ControllerStartupRecoveryResult {
+  // Recover activation authority projections before durable reconciliation.
+  try {
+    const { recoverActivationTransaction } = require('../bootstrap/activation-transaction') as typeof import('../bootstrap/activation-transaction');
+    recoverActivationTransaction(controllerHome);
+  } catch {
+    /* non-fatal for pure unit fixtures without bootstrap layout */
+  }
+  // Recover process leases / terminal receipts for every repository.
+  try {
+    const { recoverManagedProcesses } = require('../execution/process-runtime/runtime') as typeof import('../execution/process-runtime/runtime');
+    for (const repository of listRepositories(controllerHome).filter((repo) => repo.enabled && !repo.removedAt)) {
+      try {
+        recoverManagedProcesses(controllerHome, repository.repoId);
+      } catch {
+        /* per-repo best-effort */
+      }
+    }
+  } catch {
+    /* process runtime optional in early fixtures */
+  }
   const repositories = listRepositories(controllerHome).filter((repo) => repo.enabled && !repo.removedAt);
   const recovered: ControllerRecoveryRepositoryResult[] = [];
   const errors: ControllerRecoveryError[] = [];

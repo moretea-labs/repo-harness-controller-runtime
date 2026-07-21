@@ -44,7 +44,9 @@ import {
   PROCESS_LOG_TAIL_BYTES,
   type ManagedProcessRecord,
   type ProcessHandle,
+  type ProcessLeaseRef,
   type ProcessLogSlice,
+  type ProcessResourceClaim,
   type SpawnManagedProcessInput,
   type WaitProcessOptions,
 } from './types';
@@ -52,6 +54,7 @@ import type {
   ProcessCommandDescriptor,
   ProcessRunnerExitReceipt,
 } from './process-runner-entry';
+import type { ResourceClaimSpec } from '../jobs/types';
 
 interface LiveMonitor {
   processId: string;
@@ -231,11 +234,59 @@ function statusFromReceipt(receipt: ProcessExitReceipt): ManagedProcessRecord['s
   return code === 0 ? 'succeeded' : 'failed';
 }
 
+function processOwnerJobId(processId: string): string {
+  return `process:${processId}`;
+}
+
+function toResourceClaimSpecs(claims: ProcessResourceClaim[]): ResourceClaimSpec[] {
+  return claims.map((claim) => ({
+    resourceKey: claim.resourceKey,
+    mode: claim.mode,
+  }));
+}
+
+/**
+ * Release process leases exactly once. Safe under recovery/cancel/terminal races.
+ * Passive / fenced runtimes must not release (lease store fences).
+ */
+export function releaseProcessLeasesOnce(
+  controllerHome: string,
+  repoId: string,
+  processId: string,
+): ManagedProcessRecord | undefined {
+  const record = getProcessRecord(controllerHome, repoId, processId);
+  if (!record) return undefined;
+  if (record.leasesReleased === true) return record;
+  const refs = record.leaseRefs ?? [];
+  if (refs.length === 0) {
+    return updateProcessRecord(controllerHome, repoId, processId, { leasesReleased: true }, { allowTerminal: true });
+  }
+  try {
+    const { releaseExecutionLeases } = require('../../resources/leases/store') as typeof import('../../resources/leases/store');
+    releaseExecutionLeases(
+      controllerHome,
+      repoId,
+      processOwnerJobId(processId),
+      refs.map((ref) => ({ leaseId: ref.leaseId, fencingToken: ref.fencingToken })),
+      { visibility: 'ephemeral', notifyScheduler: false, invalidateProjection: false, emitRuntimeEvent: false },
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    // Fenced passive runtime: leave leases for the active writer / recovery.
+    if (message.startsWith('WRITER_FENCED:')) return record;
+    // Unexpected: still mark attempted only if we own nothing left.
+  }
+  return updateProcessRecord(controllerHome, repoId, processId, { leasesReleased: true }, { allowTerminal: true })
+    ?? getProcessRecord(controllerHome, repoId, processId);
+}
+
 /**
  * Central terminal completion path used by finalizeMonitor, getProcessHandle,
  * waitForProcess, recoverManagedProcesses, and cancelProcess.
  * Durable terminal record writes require active writer fencing.
  * Receipt itself is independent evidence and is never blocked by fencing.
+ * Leases are released exactly once after a successful terminal write (or when
+ * already terminal and leases remain held).
  */
 export function completeProcessFromEvidence(
   controllerHome: string,
@@ -305,7 +356,14 @@ export function completeProcessFromEvidence(
         : {}),
     },
   );
-  return completion.record ?? getProcessRecord(controllerHome, repoId, processId);
+
+  // Always attempt exactly-once lease release after terminal evidence, including
+  // already-terminal races (second caller still needs to clear leases once).
+  const afterTerminal = completion.record ?? getProcessRecord(controllerHome, repoId, processId);
+  if (afterTerminal && (completion.ok || completion.reason === 'already_terminal' || afterTerminal.terminalWritten === true)) {
+    return releaseProcessLeasesOnce(controllerHome, repoId, processId) ?? afterTerminal;
+  }
+  return afterTerminal;
 }
 
 async function killTree(child: ChildProcess): Promise<void> {
@@ -328,15 +386,23 @@ async function killTree(child: ChildProcess): Promise<void> {
 }
 
 function runnerEntryPath(): string {
-  // Resolve relative to this module so tests and installed releases both work.
+  const configured = process.env.REPO_HARNESS_PROCESS_RUNNER_ENTRY?.trim();
+  if (configured && existsSync(configured)) return configured;
   try {
     const here = typeof __dirname !== 'undefined'
       ? __dirname
       : dirname(fileURLToPath(import.meta.url));
-    return join(here, 'process-runner-entry.ts');
+    const installed = join(here, 'process-runner.js');
+    if (existsSync(installed)) return installed;
+    const sourceSibling = join(here, 'process-runner-entry.ts');
+    if (existsSync(sourceSibling)) return sourceSibling;
   } catch {
-    return join(process.cwd(), 'src/runtime/execution/process-runtime/process-runner-entry.ts');
+    /* continue to source-root fallback */
   }
+  const sourceRoot = process.env.REPO_HARNESS_CONTROLLER_RUNTIME_SOURCE_ROOT?.trim() || process.cwd();
+  const sourceEntry = join(sourceRoot, 'src/runtime/execution/process-runtime/process-runner-entry.ts');
+  if (existsSync(sourceEntry)) return sourceEntry;
+  throw new Error('PROCESS_RUNNER_ENTRY_NOT_FOUND: immutable release is missing process-runner.js');
 }
 
 function commandFingerprint(command: ManagedProcessRecord['command']): string {
@@ -554,8 +620,9 @@ function attachRunnerMonitor(
       );
       return;
     }
-    // Runner exited without receipt — unknown / failed.
-    finalizeMonitor(monitor, 'failed', 1, false, false, 'process runner exited without receipt');
+    // Runner exited without receipt. The actual command may have succeeded or
+    // failed, so do not fabricate a deterministic failure.
+    finalizeMonitor(monitor, 'completed_unknown', 1, false, false, 'process runner exited without receipt; outcome unknown');
   });
 
   liveMonitors.set(record.processId, monitor);
@@ -621,6 +688,11 @@ function spawnProcessRunner(descriptor: ProcessCommandDescriptor, descriptorPath
  * Spawn once via independent Process Runner.
  * If the process finishes within interactiveWaitMs, return a completed Direct handle.
  * Otherwise return a Managed handle for the same process (no re-exec).
+ *
+ * Ordering:
+ *   classify claims → acquire execution leases → spawn Runner
+ * Terminal:
+ *   receipt / cancel / timeout / failure → release leases exactly once
  */
 export async function spawnManagedProcess(input: SpawnManagedProcessInput): Promise<ProcessHandle> {
   const interactiveWaitMs = Math.max(
@@ -641,6 +713,7 @@ export async function spawnManagedProcess(input: SpawnManagedProcessInput): Prom
   const stderrPath = join(logDir, `${processId}.stderr.log`);
   const exitReceiptPath = receiptPathFor(input.controllerHome, input.repoId, processId);
   const descriptorPath = descriptorPathFor(input.controllerHome, input.repoId, processId);
+  const resourceClaims = input.resourceClaims ?? [];
 
   const record: ManagedProcessRecord = {
     schemaVersion: 1,
@@ -651,7 +724,7 @@ export async function spawnManagedProcess(input: SpawnManagedProcessInput): Prom
     status: 'starting',
     route: input.returnHandleImmediately || interactiveWaitMs === 0 ? 'managed' : 'direct',
     command: input.command,
-    resourceClaims: input.resourceClaims ?? [],
+    resourceClaims,
     interactiveWaitMs,
     timeoutMs,
     maxOutputBytes,
@@ -696,6 +769,57 @@ export async function spawnManagedProcess(input: SpawnManagedProcessInput): Prom
       });
       return recordToHandle(completed!, { completed: true });
     }
+    // Corrupt receipt present: do not re-exec; surface completed_unknown.
+    const completed = completeProcessFromEvidence(input.controllerHome, input.repoId, processId, fenceToken, {
+      status: 'completed_unknown',
+      exitCode: 1,
+      exitReceiptPath,
+      errorMessage: 'exit receipt exists but is corrupt; refusing re-exec',
+    });
+    return recordToHandle(completed!, { completed: true });
+  }
+
+  // Acquire real execution leases BEFORE spawning the runner. Fail closed on conflict.
+  let leaseRefs: ProcessLeaseRef[] = [];
+  if (resourceClaims.length > 0) {
+    const { acquireExecutionLeases } = require('../../resources/leases/store') as typeof import('../../resources/leases/store');
+    const acquisition = acquireExecutionLeases(
+      input.controllerHome,
+      input.repoId,
+      processOwnerJobId(processId),
+      toResourceClaimSpecs(resourceClaims),
+      {
+        ttlMs: Math.max(30_000, timeoutMs + 30_000),
+        visibility: 'ephemeral',
+        notifyScheduler: false,
+        invalidateProjection: false,
+        emitRuntimeEvent: false,
+      },
+    );
+    if (!acquisition.acquired) {
+      const blockers = acquisition.blockers
+        .map((b) => `${b.resourceKey}@${b.ownerJobId}`)
+        .join(', ');
+      completeProcessFromEvidence(input.controllerHome, input.repoId, processId, fenceToken, {
+        status: 'failed',
+        exitCode: 1,
+        errorMessage: `PROCESS_LEASE_CONFLICT: ${blockers || 'resource busy'}`,
+        exitReceiptPath,
+      });
+      const failed = getProcessRecord(input.controllerHome, input.repoId, processId)!;
+      return recordToHandle(failed, {
+        completed: true,
+        stdout: '',
+        stderr: failed.error?.message ?? `PROCESS_LEASE_CONFLICT: ${blockers}`,
+      });
+    }
+    leaseRefs = acquisition.leases.map((lease) => ({
+      leaseId: lease.leaseId,
+      resourceKey: lease.resourceKey,
+      fencingToken: lease.fencingToken,
+      expiresAt: lease.expiresAt,
+    }));
+    updateProcessRecord(input.controllerHome, input.repoId, processId, { leaseRefs });
   }
 
   const descriptor: ProcessCommandDescriptor = {
@@ -713,13 +837,42 @@ export async function spawnManagedProcess(input: SpawnManagedProcessInput): Prom
     startedAt,
   };
 
-  const runner = spawnProcessRunner(descriptor, descriptorPath);
+  let runner: ChildProcess;
+  try {
+    runner = spawnProcessRunner(descriptor, descriptorPath);
+  } catch (error) {
+    // Spawn failed — release any leases acquired above.
+    releaseProcessLeasesOnce(input.controllerHome, input.repoId, processId);
+    const message = error instanceof Error ? error.message : String(error);
+    completeProcessFromEvidence(input.controllerHome, input.repoId, processId, fenceToken, {
+      status: 'failed',
+      exitCode: 1,
+      errorMessage: message,
+      exitReceiptPath,
+    });
+    const failed = getProcessRecord(input.controllerHome, input.repoId, processId)!;
+    return recordToHandle(failed, { completed: true, stdout: '', stderr: message });
+  }
+
   // Unref so controller event loop can exit independently of long-lived runners
   // only after we have identity — keep ref while monitoring.
   try {
     runner.unref?.();
   } catch {
     /* ignore */
+  }
+
+  // Immediate spawn failure (no PID) → release leases.
+  if (!runner.pid) {
+    releaseProcessLeasesOnce(input.controllerHome, input.repoId, processId);
+    completeProcessFromEvidence(input.controllerHome, input.repoId, processId, fenceToken, {
+      status: 'failed',
+      exitCode: 1,
+      errorMessage: 'process runner failed to spawn (no pid)',
+      exitReceiptPath,
+    });
+    const failed = getProcessRecord(input.controllerHome, input.repoId, processId)!;
+    return recordToHandle(failed, { completed: true, stdout: '', stderr: 'process runner failed to spawn' });
   }
 
   const captured = captureIdentity(runner.pid);
@@ -731,10 +884,11 @@ export async function spawnManagedProcess(input: SpawnManagedProcessInput): Prom
     logPath: stdoutPath,
     stdoutPath,
     stderrPath,
+    leaseRefs,
   });
 
   const monitor = attachRunnerMonitor(
-    { ...record, status: 'running', identity: captured.identity },
+    { ...record, status: 'running', identity: captured.identity, leaseRefs },
     runner,
     {
       timeoutMs,
@@ -902,6 +1056,27 @@ export async function cancelProcess(
   if (!record) throw new Error(`PROCESS_NOT_FOUND: ${processId}`);
   if (record.terminalWritten) return recordToHandle(record, { completed: true });
 
+  // Process control is itself a writer mutation. Fence BEFORE sending any
+  // signal so a passive/stale runtime cannot kill the active runtime's work.
+  try {
+    const { assertThisRuntimeMayWriteOrThrow } = require('../../../cli/controller/stable-state/runtime-writer-context') as typeof import('../../../cli/controller/stable-state/runtime-writer-context');
+    assertThisRuntimeMayWriteOrThrow('cancel_process', controllerHome);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    // Always rethrow fencing denials. Legacy unbound is only allowed when no authority file exists.
+    if (message.startsWith('WRITER_FENCED:')) throw error;
+    if (message.includes('WRITER_CLAIM_UNBOUND') || message.includes('writer_claim_unbound')) {
+      const { readWriterAuthority } = require('../../../cli/controller/stable-state/writer-authority') as typeof import('../../../cli/controller/stable-state/writer-authority');
+      const { resolveStableControllerHome } = require('../../../cli/controller/stable-state/stable-home') as typeof import('../../../cli/controller/stable-state/stable-home');
+      if (readWriterAuthority(resolveStableControllerHome(controllerHome))) {
+        throw new Error(`WRITER_FENCED:cancel_process:writer_claim_unbound_while_authority_present`);
+      }
+      // no authority → single-runtime legacy allow
+    } else {
+      throw error;
+    }
+  }
+
   const monitor = liveMonitors.get(processId);
   if (monitor) {
     await killTree(monitor.child);
@@ -986,15 +1161,17 @@ export function readProcessLogs(
 /**
  * Re-discover running processes after Controller restart.
  * Does not re-spawn; only re-validates identity and applies runner receipts.
+ * Releases leases for terminal processes (exactly once) when this runtime may write.
  */
 export function recoverManagedProcesses(
   controllerHome: string,
   repoId: string,
-): { recovered: string[]; orphaned: string[]; completedUnknown: string[]; completedFromReceipt: string[] } {
+): { recovered: string[]; orphaned: string[]; completedUnknown: string[]; completedFromReceipt: string[]; leasesReleased: string[] } {
   const recovered: string[] = [];
   const orphaned: string[] = [];
   const completedUnknown: string[] = [];
   const completedFromReceipt: string[] = [];
+  const leasesReleased: string[] = [];
   for (const processId of listActiveProcessIds(controllerHome, repoId)) {
     if (liveMonitors.has(processId)) {
       recovered.push(processId);
@@ -1002,11 +1179,19 @@ export function recoverManagedProcesses(
     }
     const record = getProcessRecord(controllerHome, repoId, processId);
     if (!record) continue;
-    if (record.terminalWritten) continue;
+    if (record.terminalWritten) {
+      // Cleanup leftover leases after crash between terminal write and release.
+      if (record.leasesReleased !== true && (record.leaseRefs?.length ?? 0) > 0) {
+        const after = releaseProcessLeasesOnce(controllerHome, repoId, processId);
+        if (after?.leasesReleased) leasesReleased.push(processId);
+      }
+      continue;
+    }
 
     const fromReceipt = applyReceiptIfPresent(controllerHome, repoId, processId, record);
     if (fromReceipt) {
       completedFromReceipt.push(processId);
+      if (fromReceipt.leasesReleased) leasesReleased.push(processId);
       continue;
     }
 
@@ -1015,6 +1200,21 @@ export function recoverManagedProcesses(
         status: 'running_recovered',
         route: 'managed',
       }, { allowTerminal: false });
+      // Renew leases for recovered running processes when possible.
+      if ((record.leaseRefs?.length ?? 0) > 0) {
+        try {
+          const { renewExecutionLeases } = require('../../resources/leases/store') as typeof import('../../resources/leases/store');
+          renewExecutionLeases(
+            controllerHome,
+            repoId,
+            processOwnerJobId(processId),
+            Math.max(30_000, record.timeoutMs),
+            record.leaseRefs!.map((ref) => ({ leaseId: ref.leaseId, fencingToken: ref.fencingToken })),
+          );
+        } catch {
+          /* fenced or missing — leave for active writer */
+        }
+      }
       recovered.push(processId);
       continue;
     }
@@ -1028,14 +1228,14 @@ export function recoverManagedProcesses(
       continue;
     }
 
-    // PID gone, no receipt → completed_unknown.
+    // PID gone, no receipt → completed_unknown (releases leases).
     completeProcessFromEvidence(controllerHome, repoId, processId, record.terminalFenceToken, {
       status: 'completed_unknown',
       errorMessage: 'process no longer running and no exit receipt after controller restart',
     });
     completedUnknown.push(processId);
   }
-  return { recovered, orphaned, completedUnknown, completedFromReceipt };
+  return { recovered, orphaned, completedUnknown, completedFromReceipt, leasesReleased };
 }
 
 export function listLiveMonitorIds(): string[] {

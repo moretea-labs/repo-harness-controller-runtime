@@ -153,6 +153,8 @@ export const PASSIVE_FORBIDDEN_ACTIONS = [
   'integrate_worktree',
   'release_mutation',
   'bootstrap_mutation',
+  /** Cancel is a process-control mutation; fence before any signal. */
+  'cancel_process',
 ] as const;
 
 export type PassiveForbiddenAction = (typeof PASSIVE_FORBIDDEN_ACTIONS)[number];

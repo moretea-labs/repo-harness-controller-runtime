@@ -699,8 +699,15 @@ describe("MCP controller profile", () => {
       expect(coreNames).toEqual(expect.arrayContaining(["rh_status", "rh_inbox", "rh_context", "rh_work", "repository_list"]));
       expect(coreNames).toContain("create_campaign");
       expect(coreNames.length).toBeGreaterThanOrEqual(100);
-      // Keep the public Controller surface within the declared 128-tool schema budget.
-      expect(coreNames.length).toBe(128);
+      // Keep the public Controller surface within the declared 132-tool schema budget
+      // (128 baseline + process_get/wait/logs/cancel).
+      expect(coreNames.length).toBe(132);
+      expect(coreNames).toEqual(expect.arrayContaining([
+        'process_get',
+        'process_wait',
+        'process_logs',
+        'process_cancel',
+      ]));
       const advancedNames = exposedControllerToolDefinitions(advanced).map((tool) => tool.name);
       const fullNames = exposedControllerToolDefinitions(full).map((tool) => tool.name);
       expect(advancedNames).toEqual(coreNames);

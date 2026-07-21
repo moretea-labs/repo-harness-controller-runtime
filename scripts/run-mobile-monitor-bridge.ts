@@ -23,7 +23,7 @@ const runtimeDir = resolve(process.env.REPO_HARNESS_MONITOR_RUNTIME?.trim()
   || resolve(repoRoot, '.repo-harness/mobile-monitor-runtime'));
 const host = process.env.REPO_HARNESS_MONITOR_HOST?.trim() || '0.0.0.0';
 const port = Number(process.env.REPO_HARNESS_MONITOR_PORT?.trim() || '8766');
-const defaultRepoId = process.env.REPO_HARNESS_MONITOR_REPO_ID?.trim() || 'repo_123b7cf58b6b17b5cbe46a56';
+const defaultRepoId = process.env.REPO_HARNESS_MONITOR_REPO_ID?.trim() || '';
 const credentialPath = resolve(runtimeDir, 'device.json');
 
 mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });

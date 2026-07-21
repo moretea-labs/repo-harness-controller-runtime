@@ -5,6 +5,7 @@ import { accessToolDefinitions } from '../src/cli/mcp/access-tools';
 import { repositoryToolDefinitions } from '../src/cli/mcp/repository-tools';
 import { runtimeToolDefinitions } from '../src/runtime/gateway/mcp/runtime-tools';
 import { executionToolDefinitions } from '../src/runtime/gateway/mcp/execution-tools';
+import { processToolDefinitions } from '../src/runtime/gateway/mcp/process-tools';
 import {
   ADVANCED_CONTROLLER_TOOL_NAMES,
   DEFAULT_CONTROLLER_TOOL_NAMES,
@@ -13,8 +14,9 @@ import {
 } from '../src/cli/mcp/toolset';
 
 // Versioned v8 stable surface. Update deliberately when the exported contract changes.
-const EXPECTED_STABLE_TOOL_COUNT = 128;
-const MAX_STABLE_TOOL_COUNT = 128;
+// 128 baseline + process_get/process_wait/process_logs/process_cancel (Managed Process Runtime).
+const EXPECTED_STABLE_TOOL_COUNT = 132;
+const MAX_STABLE_TOOL_COUNT = 132;
 
 const policy = runtimePolicy(process.cwd(), {
   profile: 'controller',
@@ -25,6 +27,7 @@ const policy = runtimePolicy(process.cwd(), {
 const sourceGroups = {
   runtime: runtimeToolDefinitions.map((tool) => tool.name),
   execution: executionToolDefinitions.map((tool) => tool.name),
+  process: processToolDefinitions.map((tool) => tool.name),
   access: accessToolDefinitions.map((tool) => tool.name),
   repository: repositoryToolDefinitions.map((tool) => tool.name),
   legacyCompatibility: buildMcpToolDefinitions(policy).map((tool) => tool.name),

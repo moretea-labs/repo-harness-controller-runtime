@@ -36,6 +36,10 @@ export interface RuntimeStorageBinding {
 export interface RepositoryRuntimeStorageReport {
   repoId: string;
   controllerRoot: string;
+  /** True when controllerRoot is under stable root repositories/, not a slot home. */
+  usesStableRoot: boolean;
+  /** Stable controller home (parent of repositories/). */
+  stableControllerHome?: string;
   readyForExecution: boolean;
   bindings: RuntimeStorageBinding[];
   warnings: string[];
@@ -387,11 +391,21 @@ export function ensureRepositoryRuntimeStorage(
     .filter((binding) => binding.status === 'legacy-active' || binding.status === 'conflict')
     .map((binding) => `${binding.name}: ${binding.message ?? binding.status}`);
 
+  const { resolveStableControllerHome } = require('../controller/stable-state/stable-home') as typeof import('../controller/stable-state/stable-home');
+  const stableHome = resolveStableControllerHome(controllerHome ?? '');
+  const normalizedRoot = resolve(controllerRoot).replace(/\\/g, '/');
+  const usesStableRoot = !/\/runtime-slots\/(blue|green)\//.test(normalizedRoot)
+    && normalizedRoot.includes('/repositories/');
+
   return {
     repoId: repository.repoId,
     controllerRoot,
-    readyForExecution: warnings.length === 0,
+    usesStableRoot,
+    stableControllerHome: stableHome,
+    readyForExecution: warnings.length === 0 && usesStableRoot,
     bindings,
-    warnings,
+    warnings: usesStableRoot
+      ? warnings
+      : [...warnings, `RUNTIME_STORAGE_NOT_STABLE: ${controllerRoot}`],
   };
 }

@@ -345,17 +345,36 @@ export function bootstrapStatus(controllerHome: string): {
   layout: StableLayoutPaths;
   pointer?: ActiveRuntimePointer;
   authority?: WriterAuthority;
+  /** Single source of truth when present (writer-authority / active-runtime are projections). */
+  activationAuthority?: import('./activation-transaction').ActivationAuthorityRecord;
+  activationStatus?: import('./activation-transaction').ActivationTxStatus;
+  activationError?: string;
   controlSocketPath: string;
   controlSocketExists: boolean;
   socketActivation: ReturnType<typeof detectSocketActivation>;
+  /** Durable repository state always under stable root. */
+  stableRepositoryRoot: string;
 } {
   const layout = ensureStableLayout(controllerHome);
+  const {
+    recoverActivationTransaction,
+    readActivationAuthority,
+    inspectActivationTransaction,
+  } = require('./activation-transaction') as typeof import('./activation-transaction');
+  // Ensure activation authority exists when only projections remain.
+  recoverActivationTransaction(controllerHome);
+  const activationInspect = inspectActivationTransaction(controllerHome);
+  const activation = readActivationAuthority(controllerHome) ?? activationInspect.authority;
   return {
     layout,
     pointer: readActiveRuntimePointer(controllerHome),
     authority: readWriterAuthority(controllerHome),
+    activationAuthority: activation,
+    activationStatus: activationInspect.status,
+    activationError: activationInspect.error,
     controlSocketPath: controlSocketPath(controllerHome),
     controlSocketExists: existsSync(controlSocketPath(controllerHome)),
     socketActivation: detectSocketActivation(),
+    stableRepositoryRoot: layout.repositories,
   };
 }

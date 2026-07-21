@@ -30,6 +30,14 @@ export interface ProcessResourceClaim {
   mode: 'read' | 'write' | 'exclusive';
 }
 
+/** Durable lease ownership held by a managed process (not only recorded claims). */
+export interface ProcessLeaseRef {
+  leaseId: string;
+  resourceKey: string;
+  fencingToken: number;
+  expiresAt?: string;
+}
+
 export interface ProcessCommandSpec {
   kind: 'argv' | 'shell';
   executable?: string;
@@ -50,6 +58,10 @@ export interface ManagedProcessRecord {
   command: ProcessCommandSpec;
   identity?: ProcessIdentityRecord;
   resourceClaims: ProcessResourceClaim[];
+  /** Real execution leases acquired before spawn; released exactly once on terminal. */
+  leaseRefs?: ProcessLeaseRef[];
+  /** True after leases were released (prevents double-release on recovery/cancel). */
+  leasesReleased?: boolean;
   interactiveWaitMs: number;
   timeoutMs: number;
   maxOutputBytes: number;

@@ -24,8 +24,17 @@ import {
   readActiveRuntimePointer,
   STABLE_PUBLIC_PORTS,
 } from '../../src/runtime/bootstrap/stable-bootstrap';
+import {
+  recoverActivationTransaction,
+  readActivationAuthority,
+  commitActivationTransaction,
+} from '../../src/runtime/bootstrap/activation-transaction';
 import { markCutoverAuthority, markRollbackAuthority } from '../../src/cli/controller/runtime-slots';
 import { evaluateRuntimeReleaseCoherence } from '../../src/runtime/supervisor/release-coherence';
+import {
+  bindRuntimeWriterClaim,
+  clearRuntimeWriterClaimForTests,
+} from '../../src/cli/controller/stable-state/runtime-writer-context';
 
 const roots: string[] = [];
 
@@ -196,6 +205,65 @@ describe('stable bootstrap control socket and ports', () => {
     const status = bootstrapStatus(fx.controllerHome);
     expect(status.layout.bootstrap).toContain('bootstrap');
     expect(status.socketActivation.platform === 'none' || status.socketActivation.activated).toBeTruthy();
+  });
+});
+
+describe('activation authority generation coherence', () => {
+  afterEach(() => {
+    clearRuntimeWriterClaimForTests();
+  });
+
+  test('recoverActivationTransaction synthesizes authority from projections', () => {
+    const fx = homeFixture();
+    publishWriterAuthority(fx.controllerHome, {
+      activeSlot: 'green',
+      generation: 'gen-recover-1',
+      releaseRevision: 'rev-r1',
+      reason: 'projection-only',
+    });
+    // active-runtime projection only (no activation-authority yet)
+    writeFileSync(join(fx.controllerHome, 'bootstrap', 'active-runtime.json'), `${JSON.stringify({
+      schemaVersion: 1,
+      activeSlot: 'green',
+      generation: 'gen-recover-1',
+      writerEpoch: readWriterAuthority(fx.controllerHome)!.epoch,
+      fencingToken: readWriterAuthority(fx.controllerHome)!.fencingToken,
+      updatedAt: new Date().toISOString(),
+    }, null, 2)}\n`);
+    expect(existsSync(join(fx.controllerHome, 'bootstrap', 'activation-authority.json'))).toBe(false);
+    const recovered = recoverActivationTransaction(fx.controllerHome);
+    expect(recovered.ok).toBe(true);
+    expect(recovered.authority?.generation).toBe('gen-recover-1');
+    expect(readActivationAuthority(fx.controllerHome)?.generation).toBe('gen-recover-1');
+  });
+
+  test('bootstrapStatus reports activation authority and stable repository root', () => {
+    const fx = homeFixture();
+    commitActivationTransaction(fx.controllerHome, {
+      activeSlot: 'green',
+      generation: 'gen-status',
+      releaseRevision: 'rev-status',
+      reason: 'status-test',
+      bootstrapMutation: true,
+    });
+    const status = bootstrapStatus(fx.controllerHome);
+    expect(status.activationAuthority?.generation).toBe('gen-status');
+    expect(status.activationStatus).toBe('committed');
+    expect(status.stableRepositoryRoot).toContain('repositories');
+    expect(status.authority?.generation).toBe('gen-status');
+  });
+
+  test('daemon-style writer bind fails closed when authority present without full claim', () => {
+    const fx = homeFixture();
+    publishWriterAuthority(fx.controllerHome, { activeSlot: 'green', generation: 'g1', reason: 'bind-fail' });
+    clearRuntimeWriterClaimForTests();
+    expect(() => bindRuntimeWriterClaim({
+      controllerHome: fx.controllerHome,
+      slot: 'green',
+      // missing epoch + fencingToken, not allowed to adopt
+      adoptCurrentAuthority: false,
+      allowLegacyMissing: true,
+    })).toThrow(/WRITER_CLAIM_BIND_FAILED/);
   });
 });
 

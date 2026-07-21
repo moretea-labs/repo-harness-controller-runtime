@@ -148,9 +148,12 @@ export function stageSupervisorRelease(input: { controllerHome: string; repoRoot
   buildEntry(sourceRoot, 'src/cli/index.ts', join(releasePath, 'repo-harness.js'));
   buildEntry(sourceRoot, 'src/runtime/control-plane/daemon-entry.ts', join(releasePath, 'daemon.js'));
   buildEntry(sourceRoot, 'src/runtime/execution/workers/worker-entry.ts', join(releasePath, 'worker.js'));
+  buildEntry(sourceRoot, 'src/runtime/execution/process-runtime/process-runner-entry.ts', join(releasePath, 'process-runner.js'));
   buildEntry(sourceRoot, 'src/runtime/plugins/browser-handoff-host.ts', join(releasePath, 'browser-handoff-host.js'));
-  writeFileSync(join(releasePath, 'manifest.json'), `${JSON.stringify({ schemaVersion: 1, releaseRevision: revision, sourceRoot, builtAt: new Date().toISOString(), entrypoint: 'supervisor.js', runtimeEntrypoint: 'repo-harness.js', daemonEntrypoint: 'daemon.js', workerEntrypoint: 'worker.js', browserHandoffHostEntrypoint: 'browser-handoff-host.js', capabilities: ['staged_rollout_release', 'browser_handoff_host'] }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-  try { chmodSync(join(releasePath, 'supervisor.js'), 0o700); } catch { /* best effort */ }
+  writeFileSync(join(releasePath, 'manifest.json'), `${JSON.stringify({ schemaVersion: 1, releaseRevision: revision, sourceRoot, builtAt: new Date().toISOString(), entrypoint: 'supervisor.js', runtimeEntrypoint: 'repo-harness.js', daemonEntrypoint: 'daemon.js', workerEntrypoint: 'worker.js', processRunnerEntrypoint: 'process-runner.js', browserHandoffHostEntrypoint: 'browser-handoff-host.js', capabilities: ['staged_rollout_release', 'browser_handoff_host', 'independent_process_runner'] }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  for (const executable of ['supervisor.js', 'repo-harness.js', 'daemon.js', 'worker.js', 'process-runner.js', 'browser-handoff-host.js']) {
+    try { chmodSync(join(releasePath, executable), 0o700); } catch { /* best effort */ }
+  }
   return { controllerHome, sourceRoot, releaseRevision: revision, releasePath };
 }
 

@@ -10,6 +10,7 @@ import { GlobalScheduler } from './global-scheduler/scheduler';
 import {
   collectRuntimeSourceIdentity,
   CONTROLLER_RUNTIME_SOURCE_ROOT_ENV,
+  readRuntimeGeneration,
   resolveControllerRuntimeSourceRoot,
   rotateRuntimeGeneration,
   type RuntimeGenerationRecord,
@@ -139,7 +140,11 @@ export function startControllerDaemon(controllerHome: string): void {
       adoptCurrentAuthority: !(inheritedEpoch && inheritedToken),
     });
   } catch (error) {
-    console.error('[repo-harness daemon] writer claim bind failed:', error instanceof Error ? error.message : error);
+    // Fail closed: authority exists (or bind rules failed) but we cannot bind a
+    // complete claim → refuse readiness rather than start as an unbound writer.
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[repo-harness daemon] writer claim bind failed:', message);
+    process.exit(78);
   }
   const statePath = join(controllerHome, 'daemon', 'state.json');
   const pidPath = join(controllerHome, 'daemon', 'controller.pid');
@@ -224,10 +229,66 @@ export function publishReadyAfterStartupRecovery(
       + `Set ${CONTROLLER_RUNTIME_SOURCE_ROOT_ENV} to the controller package/source checkout.`,
     );
   }
-  const generation = rotateRuntimeGeneration(
-    controllerHome,
-    collectRuntimeSourceIdentity(resolvedSource.root),
-  );
+  // Recover / materialize activation authority before generation decisions.
+  try {
+    const { recoverActivationTransaction, readActivationAuthority } = require('../bootstrap/activation-transaction') as typeof import('../bootstrap/activation-transaction');
+    const recovery = recoverActivationTransaction(controllerHome);
+    if (recovery.status === 'incomplete' || recovery.status === 'prepared') {
+      throw new Error(
+        `ACTIVATION_INCOMPLETE: ${recovery.error ?? recovery.status}; refusing ready until authority is committed`,
+      );
+    }
+    // Generation must stay coherent with activation authority. Ordinary restart
+    // must NOT mint a new generation while continuing to use the old writer epoch.
+    const authority = readActivationAuthority(controllerHome);
+    const inheritedGeneration = process.env.REPO_HARNESS_WRITER_GENERATION?.trim()
+      || authority?.generation;
+    if (inheritedGeneration) {
+      const existing = readRuntimeGeneration(controllerHome);
+      const source = collectRuntimeSourceIdentity(resolvedSource.root);
+      if (existing && existing.generation === inheritedGeneration) {
+        // reuse
+      } else {
+        // Persist the authority generation without inventing a new one.
+        const { writeJsonAtomic } = require('../shared/json-files') as typeof import('../shared/json-files');
+        const { ensureControllerHome } = require('../../cli/repositories/controller-home') as typeof import('../../cli/repositories/controller-home');
+        const path = join(ensureControllerHome(controllerHome), 'system', 'runtime-generation.json');
+        writeJsonAtomic(path, {
+          schemaVersion: 1,
+          generation: inheritedGeneration,
+          revision: Math.max(0, existing?.revision ?? 0) + 1,
+          controllerHome: ensureControllerHome(controllerHome),
+          source,
+          createdAt: existing?.createdAt ?? new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+      }
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.startsWith('ACTIVATION_INCOMPLETE:')) throw error;
+    // Legacy homes without activation still rotate.
+  }
+  let generation = readRuntimeGeneration(controllerHome);
+  if (!generation) {
+    generation = rotateRuntimeGeneration(
+      controllerHome,
+      collectRuntimeSourceIdentity(resolvedSource.root),
+    );
+  }
+  // Fail closed when authority generation and daemon generation diverge.
+  try {
+    const { readActivationAuthority } = require('../bootstrap/activation-transaction') as typeof import('../bootstrap/activation-transaction');
+    const authority = readActivationAuthority(controllerHome);
+    if (authority?.generation && generation.generation !== authority.generation) {
+      throw new Error(
+        `GENERATION_AUTHORITY_MISMATCH: daemon generation ${generation.generation} != authority generation ${authority.generation}; refusing ready`,
+      );
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.startsWith('GENERATION_AUTHORITY_MISMATCH:')) throw error;
+  }
   // The controller is observably starting while recovery is synchronous. A
   // gateway must never see ready before durable truth has been reconciled.
   writeJsonAtomic(statePath, {

@@ -41,3 +41,7 @@ tests/runtime/browser-plugin.test.ts
 tests/runtime/capability-recovery.test.ts
 tests/runtime/low-interception-tooling.test.ts
 tests/runtime/target-architecture.test.ts
+# Supervisor service unit tests use synthetic homeDir placeholders for PATH assembly.
+tests/runtime/stable-supervisor-hardening.test.ts
+# Local monitor bridge defaults may reference a development repository id.
+scripts/run-mobile-monitor-bridge.ts

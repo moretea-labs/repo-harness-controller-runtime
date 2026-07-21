@@ -204,16 +204,76 @@ async function killTree(child: ChildProcess): Promise<void> {
   }
 }
 
+/**
+ * Atomic "started" claim for exactly-once execution.
+ * Two runners with the same descriptor must not both spawn the command:
+ * the first to create `<exitReceiptPath>.started.json` wins; the second exits.
+ */
+export function startedClaimPath(exitReceiptPath: string): string {
+  return `${exitReceiptPath}.started.json`;
+}
+
+export function claimRunnerStarted(exitReceiptPath: string, processId: string): {
+  claimed: boolean;
+  path: string;
+  reason?: string;
+} {
+  const path = startedClaimPath(exitReceiptPath);
+  mkdirSync(dirname(path), { recursive: true });
+  // O_EXCL-style create: write exclusive tmp then rename only if dest missing is racy;
+  // use openSync with 'wx' for true atomic create on POSIX.
+  try {
+    const fd = openSync(path, 'wx');
+    try {
+      writeFileSync(fd, `${JSON.stringify({
+        schemaVersion: 1,
+        processId,
+        runnerPid: process.pid,
+        claimedAt: new Date().toISOString(),
+      }, null, 2)}\n`);
+    } finally {
+      closeSync(fd);
+    }
+    return { claimed: true, path };
+  } catch (error) {
+    const code = error && typeof error === 'object' && 'code' in error
+      ? String((error as { code?: string }).code)
+      : '';
+    if (code === 'EEXIST' || existsSync(path)) {
+      return { claimed: false, path, reason: 'started_claim_held' };
+    }
+    throw error;
+  }
+}
+
 export async function runProcessRunnerFromDescriptor(
   descriptor: ProcessCommandDescriptor,
 ): Promise<ProcessRunnerExitReceipt> {
   if (existsSync(descriptor.exitReceiptPath)) {
-    // Idempotent: never re-exec if receipt already exists.
+    // Idempotent: once any terminal receipt exists, never re-execute. A corrupt
+    // receipt is an outcome-recovery problem, not permission to run again.
     try {
       return JSON.parse(readFileSync(descriptor.exitReceiptPath, 'utf8')) as ProcessRunnerExitReceipt;
     } catch {
-      /* fall through and re-capture */
+      throw new Error(`PROCESS_RUNNER_RECEIPT_CORRUPT: ${descriptor.exitReceiptPath}`);
     }
+  }
+
+  // Atomic started claim before spawn — second runner for same descriptor must not re-exec.
+  const claim = claimRunnerStarted(descriptor.exitReceiptPath, descriptor.processId);
+  if (!claim.claimed) {
+    // Another runner already started (or completed and left claim). Prefer reading
+    // receipt if it appeared; otherwise report completed_unknown without re-exec.
+    if (existsSync(descriptor.exitReceiptPath)) {
+      try {
+        return JSON.parse(readFileSync(descriptor.exitReceiptPath, 'utf8')) as ProcessRunnerExitReceipt;
+      } catch {
+        throw new Error(`PROCESS_RUNNER_RECEIPT_CORRUPT: ${descriptor.exitReceiptPath}`);
+      }
+    }
+    throw new Error(
+      `PROCESS_RUNNER_ALREADY_STARTED: ${descriptor.processId} claim held at ${claim.path}`,
+    );
   }
 
   const stdout = new BoundedLogWriter(descriptor.stdoutPath, descriptor.maxStdoutBytes);
@@ -304,12 +364,31 @@ async function main(): Promise<void> {
   } catch {
     /* keep runner cwd */
   }
-  const receipt = await runProcessRunnerFromDescriptor(descriptor);
-  process.exit(receipt.exitCode === 0 && !receipt.timedOut && !receipt.cancelled ? 0 : 1);
+  try {
+    const receipt = await runProcessRunnerFromDescriptor(descriptor);
+    process.exit(receipt.exitCode === 0 && !receipt.timedOut && !receipt.cancelled ? 0 : 1);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    // Duplicate start is not a re-exec failure of the command — exit with a
+    // distinct code so the controller can treat it as completed_unknown.
+    if (message.startsWith('PROCESS_RUNNER_ALREADY_STARTED:')) {
+      console.error('[process-runner]', message);
+      process.exit(75);
+    }
+    if (message.startsWith('PROCESS_RUNNER_RECEIPT_CORRUPT:')) {
+      console.error('[process-runner]', message);
+      process.exit(74);
+    }
+    throw error;
+  }
 }
 
 const isDirectRun = typeof process.argv[1] === 'string'
-  && (process.argv[1].includes('process-runner-entry') || process.env.REPO_HARNESS_PROCESS_RUNNER === '1');
+  && (
+    process.argv[1].includes('process-runner-entry')
+    || process.argv[1].includes('process-runner.js')
+    || process.env.REPO_HARNESS_PROCESS_RUNNER === '1'
+  );
 
 if (isDirectRun) {
   void main().catch((error) => {
