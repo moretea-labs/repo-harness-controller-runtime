@@ -38,6 +38,8 @@ dist/RepoSentinel-0.1.0-debug.apk
 
 也可以直接把 APK 复制到手机后安装。此 APK 使用 Android 调试签名，仅适合个人测试。
 
+HyperOS 若返回 `INSTALL_FAILED_USER_RESTRICTED`，需要在开发者选项中启用“USB 安装”，或从 Downloads 打开 APK 并在系统安装器中手动确认。
+
 ## 首次使用
 
 1. 打开 Repo Sentinel，允许通知。

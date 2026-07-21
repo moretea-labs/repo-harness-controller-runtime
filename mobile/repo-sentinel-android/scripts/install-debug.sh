@@ -13,7 +13,7 @@ if [[ "$DEVICE_COUNT" -ne 1 ]]; then
   "$ADB" devices -l >&2
   exit 2
 fi
-"$ADB" install -r -g "$APK"
+"$ADB" install -r "$APK"
 "$ADB" shell am force-stop com.moretea.reposentinel
 "$ADB" shell am start -W -n com.moretea.reposentinel/.MainActivity
 printf 'Repo Sentinel 已安装并启动。\n'
