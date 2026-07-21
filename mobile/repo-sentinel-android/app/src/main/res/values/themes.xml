@@ -2,9 +2,12 @@
     <style name="Theme.RepoSentinel" parent="android:style/Theme.Material.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="android:windowLightStatusBar">false</item>
-        <item name="android:statusBarColor">@color/sentinel_bg</item>
-        <item name="android:navigationBarColor">@color/sentinel_bg</item>
-        <item name="android:windowBackground">@color/sentinel_bg</item>
-        <item name="android:colorAccent">@color/sentinel_green</item>
+        <item name="android:statusBarColor">#000000</item>
+        <item name="android:navigationBarColor">#000000</item>
+        <item name="android:windowBackground">#000000</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowDisablePreview">true</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:colorAccent">#46DA8B</item>
     </style>
 </resources>

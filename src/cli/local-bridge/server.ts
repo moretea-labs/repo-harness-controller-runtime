@@ -160,6 +160,7 @@ import {
   revokeMobileIntentDevice,
   verifyMobileIntentRequest,
 } from "./mobile-intents";
+import { buildMobileMonitorSnapshot } from "./mobile-monitor";
 import { controllerExposureSnapshot } from "../mcp/toolset";
 import { submitAssistantIntent, runAssistantRoutineNow } from "../../runtime/assistant/intent";
 import { updateAssistantRoutineLifecycle } from "../../runtime/assistant/schedule-binding";
@@ -1000,6 +1001,58 @@ export async function startLocalBridgeServer(
     });
   });
 
+
+  app.post("/mobile/v1/monitor/snapshot", (request, response) => {
+    try {
+      const verified = verifyMobileIntentRequest(repoRoot, request);
+      if (!mobileIntentHasScope(verified.principal.scopes, "monitor:read")) {
+        throw new Error("MOBILE_INTENT_SCOPE_DENIED: monitor:read is required");
+      }
+      const selected = registerRepository({ path: repoRoot, controllerHome });
+      response.setHeader("Cache-Control", "no-store");
+      response.json({
+        ...buildMobileMonitorSnapshot({
+          controllerHome,
+          repoId: selected.repoId,
+          repoRoot: selected.canonicalRoot,
+          repositoryName: selected.displayName,
+        }),
+        device: verified.principal.device,
+        signatureVerified: verified.signatureVerified,
+      });
+    } catch (error) {
+      const message = errorMessage(error);
+      const status = message.includes("RATE_LIMITED") ? 429
+        : message.includes("SCOPE_DENIED") ? 403
+          : message.includes("TOKEN") || message.includes("SIGNATURE") || message.includes("REPLAY") || message.includes("TIMESTAMP") || message.includes("NONCE") || message.includes("DEVICE") ? 401
+            : 400;
+      response.status(status).json({ error: message });
+    }
+  });
+
+  app.get("/mobile/v1/monitor/events", (request, response) => {
+    try {
+      const verified = verifyMobileIntentRequest(repoRoot, request);
+      if (!mobileIntentHasScope(verified.principal.scopes, "monitor:read")) {
+        throw new Error("MOBILE_INTENT_SCOPE_DENIED: monitor:read is required");
+      }
+      response.status(200);
+      response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+      response.setHeader("Cache-Control", "no-cache, no-transform");
+      response.setHeader("Connection", "keep-alive");
+      response.flushHeaders();
+      streamClients.set(response, { repoRoot, signature: controllerStateSignature(repoRoot) });
+      sendStreamEvent(response, "ready");
+      request.on("close", () => streamClients.delete(response));
+    } catch (error) {
+      const message = errorMessage(error);
+      const status = message.includes("RATE_LIMITED") ? 429
+        : message.includes("SCOPE_DENIED") ? 403
+          : message.includes("TOKEN") || message.includes("SIGNATURE") || message.includes("REPLAY") || message.includes("TIMESTAMP") || message.includes("NONCE") || message.includes("DEVICE") ? 401
+            : 400;
+      response.status(status).json({ error: message });
+    }
+  });
 
   app.post("/mobile/intent", (request, response) => {
     try {

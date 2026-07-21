@@ -4,6 +4,7 @@ import { dirname, join } from "path";
 import type { Request } from "express";
 
 export type MobileIntentScope =
+  | "monitor:read"
   | "plugins:read"
   | "jobs:read"
   | "plugin:*:*"
