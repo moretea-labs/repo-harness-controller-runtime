@@ -246,13 +246,23 @@ export function publishReadyAfterStartupRecovery(
     if (inheritedGeneration) {
       const existing = readRuntimeGeneration(controllerHome);
       const source = collectRuntimeSourceIdentity(resolvedSource.root);
+      const { writeJsonAtomic } = require('../shared/json-files') as typeof import('../shared/json-files');
+      const { ensureControllerHome } = require('../../cli/repositories/controller-home') as typeof import('../../cli/repositories/controller-home');
+      const path = join(ensureControllerHome(controllerHome), 'system', 'runtime-generation.json');
       if (existing && existing.generation === inheritedGeneration) {
-        // reuse
+        // Reuse the generation but refresh the source identity when the
+        // release commit changed (e.g. after a supervisor-managed restart
+        // into a new immutable release built from a newer main commit).
+        if (source && existing.source?.commit !== source.commit) {
+          writeJsonAtomic(path, {
+            ...existing,
+            source,
+            revision: Math.max(0, existing.revision ?? 0) + 1,
+            updatedAt: new Date().toISOString(),
+          });
+        }
       } else {
         // Persist the authority generation without inventing a new one.
-        const { writeJsonAtomic } = require('../shared/json-files') as typeof import('../shared/json-files');
-        const { ensureControllerHome } = require('../../cli/repositories/controller-home') as typeof import('../../cli/repositories/controller-home');
-        const path = join(ensureControllerHome(controllerHome), 'system', 'runtime-generation.json');
         writeJsonAtomic(path, {
           schemaVersion: 1,
           generation: inheritedGeneration,
