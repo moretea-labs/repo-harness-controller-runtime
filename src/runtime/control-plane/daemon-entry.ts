@@ -118,6 +118,18 @@ export function controllerDaemonMaxLifetimeMs(controllerHome: string, configured
 }
 
 export function startControllerDaemon(controllerHome: string): void {
+  // Capture writer identity once for this daemon process (slot path → stable root authority).
+  try {
+    const { bindRuntimeWriterClaim } = require('../../cli/controller/stable-state/runtime-writer-context') as typeof import('../../cli/controller/stable-state/runtime-writer-context');
+    const ownershipEarly = childOwnershipMetadata();
+    bindRuntimeWriterClaim({
+      controllerHome,
+      slot: ownershipEarly.slot,
+      allowLegacyMissing: true,
+    });
+  } catch (error) {
+    console.error('[repo-harness daemon] writer claim bind failed:', error instanceof Error ? error.message : error);
+  }
   const statePath = join(controllerHome, 'daemon', 'state.json');
   const pidPath = join(controllerHome, 'daemon', 'controller.pid');
   const abort = new AbortController();

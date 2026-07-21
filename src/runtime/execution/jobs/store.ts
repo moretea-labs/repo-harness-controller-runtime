@@ -482,6 +482,16 @@ export function transitionExecutionJob(
   patch: Partial<ExecutionJob> = {},
   eventData?: Record<string, unknown>,
 ): ExecutionJob {
+  // Terminal states require active writer fencing.
+  const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'timed_out', 'orphaned']);
+  if (TERMINAL.has(status)) {
+    try {
+      const { assertThisRuntimeMayWriteOrThrow } = require('../../../cli/controller/stable-state/runtime-writer-context') as typeof import('../../../cli/controller/stable-state/runtime-writer-context');
+      assertThisRuntimeMayWriteOrThrow('write_workflow_terminal', controllerHome);
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith('WRITER_FENCED:')) throw error;
+    }
+  }
   return updateExecutionJob(controllerHome, repoId, jobId, (current) => {
     if (!transitionAllowed(current.status, status)) {
       if (TERMINAL_JOB_STATUSES.has(current.status)) throw new Error(`JOB_ALREADY_TERMINAL: ${jobId} is ${current.status}`);

@@ -16,6 +16,16 @@ function dirtyPath(controllerHome: string, repoId: string): string {
 }
 
 export function markRepositoryProjectionDirty(controllerHome: string, repoId: string, reason: string): void {
+  try {
+    const { assertThisRuntimeMayWrite } = require('../../cli/controller/stable-state/runtime-writer-context') as typeof import('../../cli/controller/stable-state/runtime-writer-context');
+    const fence = assertThisRuntimeMayWrite('update_active_projection', controllerHome);
+    if (!fence.allowed) {
+      // Passive candidates must not mutate projections.
+      return;
+    }
+  } catch {
+    /* unbound / legacy */
+  }
   writeJsonAtomic(dirtyPath(controllerHome, repoId), {
     schemaVersion: 1,
     repoId,

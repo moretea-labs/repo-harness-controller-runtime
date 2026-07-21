@@ -25,6 +25,14 @@ function option(name: string): string | undefined {
 }
 
 const controllerHome = ensureControllerHome(option('--controller-home'));
+// Capture writer identity once — never re-read authority as "mine" on each write.
+try {
+  const { bindRuntimeWriterClaim } = require('../../../cli/controller/stable-state/runtime-writer-context') as typeof import('../../../cli/controller/stable-state/runtime-writer-context');
+  bindRuntimeWriterClaim({ controllerHome, allowLegacyMissing: true });
+} catch (error) {
+  console.error('[repo-harness worker] writer claim bind failed:', error instanceof Error ? error.message : error);
+}
+
 const repoIdOption = option('--repo-id');
 const jobIdOption = option('--job-id');
 const controllerPid = Number(option('--controller-pid') ?? 0) || undefined;

@@ -333,6 +333,14 @@ export class GlobalScheduler {
   }
 
   private spawnWorker(repoId: string, jobId: string): boolean {
+    // Passive / fenced runtimes must not consume the queue or dispatch workers.
+    try {
+      const { assertThisRuntimeMayWrite } = require('../../../cli/controller/stable-state/runtime-writer-context') as typeof import('../../../cli/controller/stable-state/runtime-writer-context');
+      const fence = assertThisRuntimeMayWrite('consume_queue', this.controllerHome);
+      if (!fence.allowed) return false;
+    } catch {
+      /* unbound legacy */
+    }
     const tracked = this.children.get(jobId);
     if (tracked?.pid && this.pidAlive(tracked.pid)) return false;
     const current = getExecutionJob(this.controllerHome, repoId, jobId);

@@ -318,6 +318,37 @@ function archiveLegacyRun(path: string, repoRoot: string): void {
 }
 
 export function applyRuntimeCleanup(repoRoot: string, options: RuntimeCleanupOptions = {}): RuntimeCleanupApplyResult {
+  // Passive / fenced runtimes must not run cleanup.
+  try {
+    const controllerHome = process.env.REPO_HARNESS_CONTROLLER_HOME?.trim();
+    if (controllerHome) {
+      const { assertThisRuntimeMayWrite } = require('../../cli/controller/stable-state/runtime-writer-context') as typeof import('../../cli/controller/stable-state/runtime-writer-context');
+      const fence = assertThisRuntimeMayWrite('cleanup', controllerHome);
+      if (!fence.allowed) {
+        const generatedAt = now();
+        return {
+          schemaVersion: 1,
+          generatedAt,
+          repoRoot: resolve(repoRoot),
+          mode: 'apply',
+          candidates: [],
+          applied: [],
+          truncated: { candidates: false },
+          summary: {
+            total: 0, safe: 0, unsafe: 0, tempDirs: 0, localJobs: 0, legacyRuns: 0, attentionMarkers: 0,
+          },
+          warnings: [`writer_fenced:${fence.reason ?? 'denied'}`],
+          cycle: {
+            scanned: 0, eligible: 0, attempted: 0, removed: 0, retained: 0, skipped: 0, failed: 0,
+            truncated: false, budgetExhausted: false, skippedByReason: { writer_fenced: 1 }, failedByType: {},
+            startedAt: generatedAt, finishedAt: generatedAt, durationMs: 0,
+          },
+        } as RuntimeCleanupApplyResult;
+      }
+    }
+  } catch {
+    /* legacy / shape mismatch — proceed */
+  }
   const normalized = normalizeOptions(options);
   if (!normalized.confirmCleanup) throw new Error('RUNTIME_CLEANUP_CONFIRMATION_REQUIRED: confirmCleanup=true is required.');
   const preview = previewRuntimeCleanup(repoRoot, normalized);

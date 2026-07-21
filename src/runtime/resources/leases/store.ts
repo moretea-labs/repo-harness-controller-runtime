@@ -96,6 +96,26 @@ export function acquireExecutionLeases(
   claims: ResourceClaimSpec[],
   ttlMsOrOptions: number | LeaseAcquisitionOptions = 30_000,
 ): LeaseAcquisitionResult {
+  // Writer fencing: passive / fenced runtimes must not acquire leases.
+  try {
+    const { assertThisRuntimeMayWrite } = require('../../../cli/controller/stable-state/runtime-writer-context') as typeof import('../../../cli/controller/stable-state/runtime-writer-context');
+    const fence = assertThisRuntimeMayWrite('renew_lease', controllerHome);
+    if (!fence.allowed) {
+      return {
+        acquired: false,
+        leases: [],
+        blockers: [{
+          resourceKey: 'writer-authority',
+          ownerJobId: 'writer-fence',
+          leaseId: fence.reason ?? 'writer_fenced',
+          mode: 'exclusive',
+        }],
+      };
+    }
+  } catch {
+    /* unbound claim + missing authority → legacy single-runtime allow */
+  }
+
   const options: LeaseAcquisitionOptions = typeof ttlMsOrOptions === 'number'
     ? { ttlMs: ttlMsOrOptions }
     : ttlMsOrOptions;
@@ -173,6 +193,13 @@ export function renewExecutionLeases(
   ttlMs = 30_000,
   expected?: ExpectedLeaseRef[],
 ): ExecutionLease[] {
+  try {
+    const { assertThisRuntimeMayWriteOrThrow } = require('../../../cli/controller/stable-state/runtime-writer-context') as typeof import('../../../cli/controller/stable-state/runtime-writer-context');
+    assertThisRuntimeMayWriteOrThrow('renew_lease', controllerHome);
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('WRITER_FENCED:')) throw error;
+    /* unbound legacy */
+  }
   return withControllerLock(controllerHome, { scope: 'repository', repoId }, `lease-renew:${ownerJobId}`, () => {
     const expectedTokens = expectedLeaseMap(expected);
     const timestamp = new Date().toISOString();
