@@ -368,6 +368,45 @@ describe('repository command execution lifecycle', () => {
     expect(orphaned.finishedAt).toBeTruthy();
   });
 
+  test('semantic dedupe terminalizes a stale running repository-command and creates a fresh Local Job', () => {
+    const controllerHome = tempRoot('repo-harness-cmd-stale-dedupe-home-');
+    const repoRoot = tempRoot('repo-harness-cmd-stale-dedupe-repo-');
+    const repository = seedRepo(controllerHome, repoRoot);
+    const payload = {
+      controllerHome,
+      repoId: repository.repoId,
+      checkoutId: repository.activeCheckoutId,
+      command: "printf 'fresh\\n'",
+      timeoutMs: 60_000,
+    };
+
+    const stale = submitLocalBridgeJob(repoRoot, {
+      action: 'repository-command',
+      requestedBy: 'test',
+      payload,
+    });
+    const jobPath = join(repoRoot, '.ai/harness/local-jobs', stale.jobId, 'job.json');
+    const fixture = JSON.parse(readFileSync(jobPath, 'utf-8'));
+    fixture.status = 'running';
+    fixture.startedAt = new Date(Date.now() - 10_000).toISOString();
+    fixture.updatedAt = fixture.startedAt;
+    fixture.ownerPid = 999_999_011;
+    fixture.workerPid = 999_999_012;
+    fixture.deadlineAt = new Date(Date.now() + 60_000).toISOString();
+    fixture.heartbeatAt = new Date(Date.now() - 5_000).toISOString();
+    writeFileSync(jobPath, `${JSON.stringify(fixture, null, 2)}\n`);
+
+    const fresh = submitLocalBridgeJob(repoRoot, {
+      action: 'repository-command',
+      requestedBy: 'test',
+      payload,
+    });
+
+    expect(fresh.jobId).not.toBe(stale.jobId);
+    expect(fresh.status).toBe('approved');
+    expect(getLocalBridgeJob(repoRoot, stale.jobId).status).toBe('orphaned');
+  });
+
   test('persisted deadline terminalizes a running repository-command Local Job', () => {
     const controllerHome = tempRoot('repo-harness-cmd-deadline-home-');
     const repoRoot = tempRoot('repo-harness-cmd-deadline-repo-');

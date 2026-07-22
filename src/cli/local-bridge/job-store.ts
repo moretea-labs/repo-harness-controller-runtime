@@ -516,7 +516,7 @@ function findExistingRepositoryCommandJob(
       (entry.payload as RepositoryCommandPayload).requestId === requestId,
     );
   }
-  return jobs.find((entry) =>
+  const candidate = jobs.find((entry) =>
     entry.action === "repository-command" &&
     ["approved", "running"].includes(entry.status) &&
     (entry.payload as RepositoryCommandPayload).repoId === payload.repoId &&
@@ -525,6 +525,9 @@ function findExistingRepositoryCommandJob(
     (entry.payload as RepositoryCommandPayload).cwd === payload.cwd &&
     (entry.payload as RepositoryCommandPayload).approvalToken === payload.approvalToken,
   );
+  if (!candidate) return undefined;
+  const refreshed = refreshLocalBridgeJob(repoRoot, candidate);
+  return ["approved", "running"].includes(refreshed.status) ? refreshed : undefined;
 }
 
 export function submitLocalBridgeJob(
