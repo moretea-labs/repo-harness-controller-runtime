@@ -515,7 +515,7 @@ export function integrateAgentJob(
   const autoFinalizing = run.status === "running" &&
     run.autoIntegrate === true &&
     run.executionMode === "worktree" &&
-    run.progress?.phase === "finalizing";
+    (run.progress?.phase === "finalizing" || run.closureState === "ready_to_integrate");
   const userResolvableIntegration = run.status === "waiting_for_user" &&
     run.autoIntegrate === true &&
     run.executionMode === "worktree" &&

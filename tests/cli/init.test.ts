@@ -23,6 +23,7 @@ import { configuredBrainRoot } from "../../src/cli/commands/brain-root";
 const ROOT = join(import.meta.dir, "..", "..");
 const CLI = join(ROOT, "src/cli/index.ts");
 const CODEGRAPH_INIT_TIMEOUT_MS = 30000;
+const BASE_TEST_PATH = process.env.PATH ?? "";
 
 function makeExecutable(path: string, body: string): void {
   writeFileSync(path, body);
@@ -258,7 +259,7 @@ describe("init command", () => {
         env: {
           ...process.env,
           HOME: home,
-          PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+          PATH: `${fakeBin}:${BASE_TEST_PATH}`,
         },
       });
 
