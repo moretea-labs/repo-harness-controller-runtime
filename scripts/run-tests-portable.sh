@@ -5,7 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 if command -v bun >/dev/null 2>&1; then
-  exec bun test --isolate "$@"
+  test_parallelism="${REPO_HARNESS_TEST_PARALLELISM:-4}"
+  exec bun test --parallel="$test_parallelism" "$@"
 fi
 
 cat >&2 <<'MSG'
