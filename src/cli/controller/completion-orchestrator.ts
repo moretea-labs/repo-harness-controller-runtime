@@ -5,13 +5,14 @@ import { join } from 'path';
 import { getAgentJob, markAgentJobClosure, markAgentJobReviewedCompletion, recordAgentJobIntegrationEvidence } from '../agent-jobs/job-manager';
 import type { AgentJobMeta } from '../agent-jobs/types';
 import { cleanupIntegratedWorktree, cleanupNoChangeWorktree, integrateAgentJob, IntegrationReviewRequiredError, taskRunDiff } from '../agent-jobs/integration';
-import { finalizeEditSession, getEditSession, verifyEditSession } from '../editing/edit-session';
+import { finalizeEditSession, getEditSession, revalidateEditSessionOwnership, rollbackEditSession, verifyEditSession } from '../editing/edit-session';
 import { getMcpPolicy } from '../mcp/policy';
 import { resolveRepoPreferredControllerHome } from '../repositories/controller-home';
 import { withControllerLock } from '../repositories/locks';
 import { listActiveLeases } from '../../runtime/resources/leases/store';
 import { acceptVerifiedTask, getIssue, projectIssueEffectiveView, recordTaskVerification, updateTask } from './issue-store';
-import { completionEvidenceComplete, taskExecutionPolicy } from './execution-policy';
+import { cleanupEvidenceResourceBlockers, completionEvidenceComplete, taskExecutionPolicy } from './execution-policy';
+import { currentCompletionTarget, resolveCompletionTargetBranch } from './completion-target';
 import { runControllerCheck } from './check-runner';
 import type { CleanupEvidence, ControllerIssue, ControllerTask, IntegrationEvidence, TaskCommandEvidence, TaskVerification } from './types';
 import type { CompletionMaintenanceWarning, CompletionReceipt, CompletionReceiptSource, CompletionResourceBlocker } from './types';
@@ -104,10 +105,13 @@ function safeCommitChangedPaths(repoRoot: string, input: { issueId: string; task
   if (!add.ok) return { error: add.stderr || 'failed to stage changed paths' };
   const commit = gitText(repoRoot, [
     'commit',
+    '--only',
     '-m',
     `Complete ${input.issueId}/${input.taskId}`,
     '-m',
     `${input.sourceLabel}: ${input.sourceId}`,
+    '--',
+    ...paths,
   ]);
   if (!commit.ok) {
     gitText(repoRoot, ['reset', '--', ...paths]);
@@ -117,6 +121,28 @@ function safeCommitChangedPaths(repoRoot: string, input: { issueId: string; task
   }
   const rev = gitText(repoRoot, ['rev-parse', 'HEAD']);
   return rev.ok ? { commitSha: rev.stdout.trim() } : { error: rev.stderr || 'commit created but HEAD could not be resolved' };
+}
+
+function latestDirectEditOperations(session: ReturnType<typeof getEditSession>) {
+  const latest = new Map<string, (typeof session.operations)[number]>();
+  for (const operation of session.operations) latest.set(operation.path, operation);
+  return latest;
+}
+
+function directEditRevisionMismatches(repoRoot: string, revision: string, session: ReturnType<typeof getEditSession>): string[] {
+  const mismatches: string[] = [];
+  for (const operation of latestDirectEditOperations(session).values()) {
+    const object = `${revision}:${operation.path}`;
+    if (operation.type === 'delete') {
+      if (gitText(repoRoot, ['cat-file', '-e', object]).ok) mismatches.push(operation.path);
+      continue;
+    }
+    const content = gitText(repoRoot, ['show', object]);
+    if (!content.ok || !operation.afterSha256 || createHash('sha256').update(content.stdout).digest('hex') !== operation.afterSha256) {
+      mismatches.push(operation.path);
+    }
+  }
+  return mismatches;
 }
 
 function nowIso(): string {
@@ -291,7 +317,11 @@ function finishEditSessionUnlocked(repoRoot: string, options: FinishEditSessionO
   const issue = getIssue(repoRoot, initialSession.issueId);
   const task = taskForRun(issue, initialSession.taskId);
   if (task.status === 'done') {
-    if (!completionEvidenceComplete(task.verification)) {
+    if (!completionEvidenceComplete(task.verification, {
+      issueId: issue.id,
+      taskId: task.id,
+      targetBranch: resolveCompletionTargetBranch(repoRoot),
+    })) {
       return editResult(repoRoot, {
         action: 'blocked',
         sessionId: initialSession.sessionId,
@@ -328,18 +358,71 @@ function finishEditSessionUnlocked(repoRoot: string, options: FinishEditSessionO
   }
 
   if (decision === 'discard') {
+    let discardSession = revalidateEditSessionOwnership(repoRoot, initialSession.sessionId, {
+      reviewer,
+      note: options.note ?? `Validated direct edit before discard for ${issue.id}/${task.id}.`,
+    });
+    const discardPaths = directEditChangedPaths(discardSession);
+    if (discardSession.status === 'superseded') {
+      const updated = updateTask(repoRoot, issue.id, task.id, {
+        status: 'integration_blocked',
+        note: `Cannot discard superseded direct edit ${discardSession.sessionId}; newer changes are preserved.`,
+      });
+      return editResult(repoRoot, {
+        action: 'blocked', sessionId: discardSession.sessionId, issueId: issue.id, taskId: task.id, decision,
+        taskStatus: taskForRun(updated, task.id).status, changedPaths: discardPaths,
+        reason: 'Direct Edit was superseded and cannot be safely rolled back.',
+      });
+    }
+    if (discardPaths.length > 0) {
+      const stagedOwned = gitText(repoRoot, ['diff', '--cached', '--name-only', '--', ...discardPaths]);
+      if (!stagedOwned.ok || stagedOwned.stdout.trim()) {
+        return editResult(repoRoot, {
+          action: 'blocked', sessionId: discardSession.sessionId, issueId: issue.id, taskId: task.id, decision,
+          taskStatus: task.status, changedPaths: discardPaths,
+          reason: stagedOwned.ok
+            ? `Direct Edit discard requires owned paths to be unstaged first: ${stagedOwned.stdout.trim().split('\n').join(', ')}`
+            : stagedOwned.stderr || 'Unable to inspect staged Direct Edit paths before discard.',
+        });
+      }
+    }
+    if (discardSession.status === 'finalized') {
+      const dirtyPaths = new Set(workspaceChangesForPaths(repoRoot, discardPaths));
+      const cleanOwnedPaths = discardPaths.filter((path) => !dirtyPaths.has(path));
+      if (cleanOwnedPaths.length > 0) {
+        return editResult(repoRoot, {
+          action: 'blocked', sessionId: discardSession.sessionId, issueId: issue.id, taskId: task.id, decision,
+          taskStatus: task.status, changedPaths: discardPaths,
+          reason: `Finalized Direct Edit has clean or integrated owned paths and requires an explicit revert: ${cleanOwnedPaths.join(', ')}`,
+        });
+      }
+      discardSession = rollbackEditSession(repoRoot, discardSession.sessionId, { allowFinalized: true });
+    } else if (discardSession.status !== 'rolled_back') {
+      discardSession = rollbackEditSession(repoRoot, discardSession.sessionId);
+    }
+    const retained = ownedWorkspaceChanges(repoRoot, discardPaths, discardSession.allowedPaths);
+    if (discardSession.status !== 'rolled_back' || retained.length > 0) {
+      return editResult(repoRoot, {
+        action: 'blocked', sessionId: discardSession.sessionId, issueId: issue.id, taskId: task.id, decision,
+        taskStatus: task.status, changedPaths: discardPaths,
+        reason: retained.length > 0
+          ? `Direct Edit discard retained owned changes: ${retained.join(', ')}`
+          : `Direct Edit discard did not close the session (current: ${discardSession.status}).`,
+      });
+    }
     const updated = updateTask(repoRoot, issue.id, task.id, {
       status: 'cancelled',
-      note: options.note ?? `Discarded direct edit ${initialSession.sessionId}.`,
+      note: options.note ?? `Discarded and rolled back direct edit ${initialSession.sessionId}.`,
     });
     return editResult(repoRoot, {
       action: 'discarded',
-      sessionId: initialSession.sessionId,
+      sessionId: discardSession.sessionId,
       issueId: issue.id,
       taskId: task.id,
       decision,
       taskStatus: taskForRun(updated, task.id).status,
-      reason: 'Direct edit was discarded.',
+      changedPaths: discardPaths,
+      reason: 'Direct edit was rolled back and discarded.',
     });
   }
 
@@ -356,8 +439,20 @@ function finishEditSessionUnlocked(repoRoot: string, options: FinishEditSessionO
     });
   }
 
+  const completionTarget = currentCompletionTarget(repoRoot);
+  if (!completionTarget.onTargetBranch) {
+    return editResult(repoRoot, {
+      action: 'blocked', sessionId: initialSession.sessionId, issueId: issue.id, taskId: task.id, decision,
+      taskStatus: task.status,
+      reason: `Direct Edit completion must run on integration target ${completionTarget.expectedBranch}; current branch is ${completionTarget.branch}.`,
+    });
+  }
+
   const checkIds = directEditCheckIds(task, initialSession, options.checkIds);
-  let session = initialSession;
+  let session = revalidateEditSessionOwnership(repoRoot, initialSession.sessionId, {
+    reviewer,
+    note: options.note ?? `Revalidated direct edit ownership before Task completion for ${issue.id}/${task.id}.`,
+  });
   let standaloneCheckResults: TaskVerification['checkResults'] = [];
   if (!['finalized', 'superseded', 'rolled_back'].includes(session.status)) {
     const emptyOpenSession = session.status === 'open' && session.operations.length === 0;
@@ -544,8 +639,24 @@ function finishEditSessionUnlocked(repoRoot: string, options: FinishEditSessionO
     }
   }
 
-  const after = currentTarget(repoRoot);
+  const after = currentCompletionTarget(repoRoot);
+  if (!after.onTargetBranch) {
+    return editResult(repoRoot, {
+      action: 'blocked', sessionId: session.sessionId, issueId: issue.id, taskId: task.id, decision,
+      taskStatus: task.status, changedPaths, commitSha,
+      reason: `Integration target changed during completion; expected ${after.expectedBranch}, current ${after.branch}.`,
+    });
+  }
   const targetRevision = commitSha ?? after.revision;
+  const revisionMismatches = directEditRevisionMismatches(repoRoot, targetRevision, session);
+  if (revisionMismatches.length > 0) {
+    const reason = `Target revision ${targetRevision} does not contain finalized Direct Edit content for: ${revisionMismatches.join(', ')}`;
+    updateTask(repoRoot, issue.id, task.id, { status: 'integration_blocked', note: reason });
+    return editResult(repoRoot, {
+      action: 'blocked', sessionId: session.sessionId, issueId: issue.id, taskId: task.id, decision,
+      taskStatus: 'integration_blocked', changedPaths, commitSha, reason,
+    });
+  }
   const integrationEvidence = {
     kind: commitSha ? 'commit' as const : 'no_change' as const,
     targetBranch: after.branch,
@@ -745,16 +856,7 @@ function blocker(code: CompletionResourceBlocker['code'], message: string, resou
 }
 
 function cleanupBlockersForEvidence(cleanup: CleanupEvidence): CompletionResourceBlocker[] {
-  const at = cleanup.recordedAt;
-  const warningsOnly = (cleanup.maintenanceWarnings?.length ?? 0) > 0 && (cleanup.resourceBlockers?.length ?? 0) === 0;
-  const blockers: CompletionResourceBlocker[] = [...(cleanup.resourceBlockers ?? [])];
-  if (!cleanup.worktreeRemovedOrNotCreated && !warningsOnly) blockers.push(blocker('unknown_resource_ownership', 'Worktree removal or absence was not proven.', 'worktree', undefined, at));
-  if (!cleanup.branchDeletedOrRetained && !warningsOnly) blockers.push(blocker('unknown_resource_ownership', 'Temporary branch deletion or retention was not proven.', 'branch', undefined, at));
-  if (!cleanup.leasesReleased) blockers.push(blocker('lease_active', 'Task-owned leases are still active.', 'lease', undefined, at));
-  if (!cleanup.editSessionClosedOrNotCreated) blockers.push(blocker('edit_session_open', 'Task-owned edit session is not closed.', 'edit_session', undefined, at));
-  if (!cleanup.noActiveProcess) blockers.push(blocker('active_write_process', 'Task-owned execution process may still be active.', 'process', undefined, at));
-  if (!cleanup.noDirtyDiff) blockers.push(blocker('dirty_owned_paths', 'Task-owned paths still have uncommitted changes.', 'workspace', undefined, at));
-  return blockers;
+  return cleanupEvidenceResourceBlockers(cleanup, { includeRunTerminal: false });
 }
 
 function buildCompletionReceipt(input: {
@@ -862,7 +964,11 @@ function finishTaskRunUnlocked(repoRoot: string, options: FinishTaskRunOptions):
   const issue = getIssue(repoRoot, run.issueId);
   const task = taskForRun(issue, run.taskId);
   if (task.status === 'done') {
-    if (!completionEvidenceComplete(task.verification)) {
+    if (!completionEvidenceComplete(task.verification, {
+      issueId: issue.id,
+      taskId: task.id,
+      targetBranch: resolveCompletionTargetBranch(repoRoot),
+    })) {
       return result(repoRoot, {
         action: 'blocked', runId: run.runId, issueId: issue.id, taskId: task.id, decision,
         taskStatus: task.status, reason: 'Task is declared done without a complete delivery receipt; run lifecycle migration before accepting it.',
@@ -947,7 +1053,15 @@ function finishTaskRunUnlocked(repoRoot: string, options: FinishTaskRunOptions):
   let commitError: string | undefined;
   let reusedHead = false;
 
-  const target = currentTarget(repoRoot);
+  const completionTarget = currentCompletionTarget(repoRoot);
+  if (!completionTarget.onTargetBranch) {
+    return result(repoRoot, {
+      action: 'blocked', runId: run.runId, issueId: issue.id, taskId: task.id, decision,
+      taskStatus: task.status,
+      reason: `Run completion must execute on integration target ${completionTarget.expectedBranch}; current branch is ${completionTarget.branch}.`,
+    });
+  }
+  const target = { branch: completionTarget.branch, revision: completionTarget.revision };
 
   if (run.provider === 'local' && run.executionMode === 'workspace' && !changedPaths) {
     changedPaths = scopedWorkspaceChanges(repoRoot, task.allowedPaths);
@@ -1198,7 +1312,16 @@ function finishTaskRunUnlocked(repoRoot: string, options: FinishTaskRunOptions):
         });
       }
     }
-    const afterIntegration = currentTarget(repoRoot);
+    const afterIntegration = currentCompletionTarget(repoRoot);
+    if (!afterIntegration.onTargetBranch) {
+      const reason = `Integration target changed during Run completion; expected ${afterIntegration.expectedBranch}, current ${afterIntegration.branch}.`;
+      markAgentJobClosure(repoRoot, run.runId, { state: 'integration_blocked', preservationReason: 'target_branch_drift', details: reason });
+      updateTask(repoRoot, issue.id, task.id, { status: 'integration_blocked', note: reason });
+      return result(repoRoot, {
+        action: 'blocked', runId: run.runId, issueId: issue.id, taskId: task.id, decision,
+        taskStatus: 'integration_blocked', integrated: true, cleaned: false, changedPaths, changeOutcome, reason, commitSha,
+      });
+    }
     const noTargetChanges = (changedPaths ?? []).length === 0;
     const integrationEvidence: IntegrationEvidence = {
       runId: run.runId,
@@ -1360,8 +1483,8 @@ function finishTaskRunUnlocked(repoRoot: string, options: FinishTaskRunOptions):
 }
 
 export function finishTaskRun(repoRoot: string, options: FinishTaskRunOptions): FinishTaskRunResult {
-  const target = currentTarget(repoRoot);
-  const resource = `integration-${createHash('sha256').update(`${repoRoot}\0${target.branch}`).digest('hex').slice(0, 24)}`;
+  const targetBranch = resolveCompletionTargetBranch(repoRoot);
+  const resource = `integration-${createHash('sha256').update(`${repoRoot}\0${targetBranch}`).digest('hex').slice(0, 24)}`;
   return withControllerLock(
     resolveRepoPreferredControllerHome(repoRoot),
     { scope: 'global', resource },
@@ -1372,8 +1495,8 @@ export function finishTaskRun(repoRoot: string, options: FinishTaskRunOptions): 
 }
 
 export function finishEditSession(repoRoot: string, options: FinishEditSessionOptions): FinishEditSessionResult {
-  const target = currentTarget(repoRoot);
-  const resource = `integration-${createHash('sha256').update(`${repoRoot}\0${target.branch}`).digest('hex').slice(0, 24)}`;
+  const targetBranch = resolveCompletionTargetBranch(repoRoot);
+  const resource = `integration-${createHash('sha256').update(`${repoRoot}\0${targetBranch}`).digest('hex').slice(0, 24)}`;
   return withControllerLock(
     resolveRepoPreferredControllerHome(repoRoot),
     { scope: 'global', resource },

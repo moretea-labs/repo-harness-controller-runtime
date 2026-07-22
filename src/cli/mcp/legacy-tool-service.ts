@@ -3602,6 +3602,15 @@ export async function callMcpTool(
         // Prefer Unified Process Runtime for ordinary checks. Only multi-phase /
         // release checks (or explicit force_durable) fall back to LocalBridgeJob.
         const checkId = String(args.check_id ?? "").trim();
+        // Self-hosting controller-v8 nests Local Jobs and must not be scheduled
+        // through outer Heavy Check / durable exclusive claims (deadlock risk).
+        if (/(?:^|:)(?:check:controller-v8|package:check:controller-v8|controller-v8)(?:$|:)/i.test(checkId)) {
+          audit(ctx, name, "blocked", args);
+          return errorResult(
+            "SELF_HOSTING_CHECK_UNSUPPORTED_VIA_RUN_CHECK",
+            `Check ${checkId} is a self-hosting suite. Run it directly with \`bun run check:controller-v8\` or \`bash scripts/verify-controller-v8.sh\` instead of run_check/Local Job. Nested durable scheduling would wait forever on heavy-check.`,
+          );
+        }
         const forceDurable = args.force_durable === true
           || args.apply_mode === "async"
           || args.mode === "durable";

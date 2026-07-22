@@ -2342,8 +2342,11 @@ process.exit(2);
       join(tmpdir(), "repo-harness-controller-git-"),
     );
     const binRoot = mkdtempSync(join(tmpdir(), "repo-harness-controller-bin-"));
+    const controllerHome = mkdtempSync(join(tmpdir(), "repo-harness-controller-home-"));
     const originalPath = process.env.PATH;
+    const originalControllerHome = process.env.REPO_HARNESS_CONTROLLER_HOME;
     try {
+      process.env.REPO_HARNESS_CONTROLLER_HOME = controllerHome;
       mkdirSync(join(repoRoot, "src"), { recursive: true });
       mkdirSync(join(repoRoot, "tasks"), { recursive: true });
       mkdirSync(join(repoRoot, ".ai/harness"), { recursive: true });
@@ -2492,8 +2495,11 @@ process.exit(2);
       expect(persistedRun.cleanupEvidence.noDirtyDiff).toBe(true);
     } finally {
       process.env.PATH = originalPath;
+      if (originalControllerHome === undefined) delete process.env.REPO_HARNESS_CONTROLLER_HOME;
+      else process.env.REPO_HARNESS_CONTROLLER_HOME = originalControllerHome;
       rmSync(repoRoot, { recursive: true, force: true });
       rmSync(binRoot, { recursive: true, force: true });
+      rmSync(controllerHome, { recursive: true, force: true });
     }
   }, 15_000);
 

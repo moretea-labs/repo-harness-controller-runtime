@@ -5,6 +5,7 @@ import { inspectCompletionBacklog, type CompletionBacklogItem } from './completi
 import { getIssue, listIssues, updateIssue, updateTask } from './issue-store';
 import { completionEvidenceComplete, taskExecutionPolicy, verificationEvidencePassed } from './execution-policy';
 import type { CompletionReceipt, ControllerIssue, ControllerTask } from './types';
+import { resolveCompletionTargetBranch } from './completion-target';
 
 export type StuckStateKind =
   | 'finishable_run'
@@ -241,7 +242,11 @@ function extraFindings(repoRoot: string, issue: ControllerIssue, task: Controlle
     });
   }
   if (task.status === 'done') {
-    if (!completionEvidenceComplete(task.verification)) {
+    if (!completionEvidenceComplete(task.verification, {
+      issueId: issue.id,
+      taskId: task.id,
+      targetBranch: resolveCompletionTargetBranch(repoRoot),
+    })) {
       const safeReceipt = historicalCompletionReceipt(repoRoot, issue, task);
       let run;
       for (const runId of [...task.runIds].reverse()) {

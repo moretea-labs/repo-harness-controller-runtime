@@ -54,16 +54,25 @@ export interface RunCheckFacadeResult {
   };
 }
 
-const DURABLE_CHECK_ID = /(?:^|:)(?:release|migration|integrate|controller-v8|public-export|deploy)(?:$|:)/i;
+const DURABLE_CHECK_ID = /(?:^|:)(?:release|migration|integrate|public-export|deploy)(?:$|:)/i;
+/** Self-hosting suites that spawn Local Jobs / nested checks and must not hold exclusive heavy-check. */
+const SELF_HOSTING_CHECK_ID = /(?:^|:)(?:check:controller-v8|package:check:controller-v8|controller-v8)(?:$|:)/i;
 
 /**
  * True when a check must stay on Durable Workflow (multi-phase / release).
  * Ordinary typecheck / lint / package test / focused validation stay on Process Runtime.
+ * Self-hosting controller-v8 is NOT durable via run_check — it deadlocks on nested heavy-check.
  */
 export function checkRequiresDurableWorkflow(checkId: string, check?: ControllerCheck): boolean {
+  if (isSelfHostingNestedCheck(checkId)) return false;
   if (DURABLE_CHECK_ID.test(checkId)) return true;
   if (check && /release|rollback|blue.?green|migrate/i.test(check.description)) return true;
   return false;
+}
+
+/** Self-hosting checks that create nested Local Jobs / ExecutionJobs while running. */
+export function isSelfHostingNestedCheck(checkId: string): boolean {
+  return SELF_HOSTING_CHECK_ID.test(checkId.trim());
 }
 
 function resolveCheck(repoRoot: string, checkId: string): ControllerCheck | undefined {

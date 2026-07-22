@@ -615,7 +615,8 @@ printf '%s\n' '{"type":"turn.completed"}'
 
   test("classifies full repository gates as heavy while leaving focused checks concurrent", () => {
     expect(controllerCheckConcurrencyClass("package:test")).toBe("heavy");
-    expect(controllerCheckConcurrencyClass("package:check:controller-v8")).toBe("heavy");
+    // Self-hosting controller-v8 nests Local Jobs; exclusive heavy-check would deadlock.
+    expect(controllerCheckConcurrencyClass("package:check:controller-v8")).toBe("light");
     expect(controllerCheckConcurrencyClass("package:check:release-surface")).toBe("heavy");
     expect(controllerCheckConcurrencyClass("focused")).toBe("light");
     expect(controllerCheckConcurrencyClass("package:check:type")).toBe("light");

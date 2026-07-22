@@ -29,11 +29,49 @@ function requestId(job: LocalBridgeJob): string {
 }
 
 function claims(job: LocalBridgeJob, repoId: string, checkoutId: string): ResourceClaimSpec[] {
-  if (job.action === 'run-check' || job.action === 'verify-edit-session') return [{ resourceKey: `heavy-check:${repoId}`, mode: 'exclusive' }];
-  if (job.action === 'repository-command') return [
-    { resourceKey: `workspace:${checkoutId}`, mode: 'write' },
-    { resourceKey: `git-refs:${repoId}`, mode: 'exclusive' },
-  ];
+  if (job.action === 'run-check') {
+    const checkId = typeof (job.payload as { checkId?: unknown }).checkId === 'string'
+      ? String((job.payload as { checkId: string }).checkId)
+      : '';
+    // Self-hosting controller-v8 and light checks must not take exclusive heavy-check
+    // (nested Local Jobs would stay dispatched waiting for the outer lock).
+    if (/(?:^|:)(?:check:controller-v8|package:check:controller-v8|controller-v8)(?:$|:)/i.test(checkId)) {
+      return [
+        { resourceKey: `workspace:${checkoutId}`, mode: 'read' },
+        { resourceKey: `build-cache:${repoId}`, mode: 'write' },
+      ];
+    }
+    const heavy = /(?:^|:)(?:test(?::coverage)?|check:(?:ci|public-export|release(?:-[a-z0-9-]+)?))$/.test(checkId)
+      || /release|migration|integrate/i.test(checkId);
+    if (heavy) return [{ resourceKey: `heavy-check:${repoId}`, mode: 'exclusive' }];
+    return [
+      { resourceKey: `workspace:${checkoutId}`, mode: 'read' },
+      { resourceKey: `build-cache:${repoId}`, mode: 'write' },
+    ];
+  }
+  if (job.action === 'verify-edit-session') {
+    // Verification is not a full CI package; avoid exclusive heavy-check.
+    return [
+      { resourceKey: `workspace:${checkoutId}`, mode: 'read' },
+      { resourceKey: `build-cache:${repoId}`, mode: 'write' },
+    ];
+  }
+  if (job.action === 'repository-command') {
+    const command = (job.payload as { command?: string | string[] }).command;
+    // Readonly repository commands must not claim exclusive git-refs.
+    if (command !== undefined) {
+      try {
+        const { claimsForRepositoryCommand } = require('../process-runtime/resource-claims') as typeof import('../process-runtime/resource-claims');
+        return claimsForRepositoryCommand(command, repoId, checkoutId);
+      } catch {
+        // Fall through to conservative write claims when classifier is unavailable.
+      }
+    }
+    return [
+      { resourceKey: `workspace:${checkoutId}`, mode: 'write' },
+      { resourceKey: `git-refs:${repoId}`, mode: 'exclusive' },
+    ];
+  }
   // Parent only creates/accepts the Agent Run; workspace write ownership belongs to the child Run.
   if (job.action === 'launch-task' || job.action === 'quick-agent-session') {
     return [{ resourceKey: `agent-dispatch:${repoId}:${job.jobId}`, mode: 'write' }];

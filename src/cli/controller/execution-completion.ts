@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import type { AgentJobMeta } from '../agent-jobs/types';
 import { runControllerCheck } from './check-runner';
-import { completionEvidenceComplete, taskExecutionPolicy } from './execution-policy';
+import { cleanupEvidenceResourceBlockers, completionEvidenceComplete, taskExecutionPolicy } from './execution-policy';
 import { acceptVerifiedTask, getIssue, recordTaskVerification, updateTask } from './issue-store';
 import type { CompletionReceipt, CompletionReceiptSource, TaskCommandEvidence, TaskVerification } from './types';
 
@@ -30,7 +30,7 @@ function completionReceiptForRun(run: AgentJobMeta): CompletionReceipt | undefin
   const integration = run.integrationEvidence;
   const cleanup = run.cleanupEvidence;
   if (!integration || !cleanup) return undefined;
-  const blockers = cleanup.resourceBlockers ?? [];
+  const blockers = cleanupEvidenceResourceBlockers(cleanup);
   const warnings = cleanup.maintenanceWarnings ?? [];
   const recordedAt = new Date().toISOString();
   return {
@@ -142,7 +142,12 @@ export function continueTaskAfterSuccessfulRun(
     return { continued: true, status, checkCount: checkResults.length };
   }
   if (status === 'verified' && policy.autoCompleteAfterSuccessfulRun && !policy.requiresHumanAcceptance) {
-    const closureComplete = run.closureState === 'completed' && completionEvidenceComplete(verification);
+    const closureComplete = run.closureState === 'completed' && completionEvidenceComplete(verification, {
+      issueId: run.issueId,
+      taskId: run.taskId,
+      runId: run.runId,
+      targetBranch: run.integrationEvidence?.targetBranch,
+    });
     if (!closureComplete) {
       return {
         continued: true,

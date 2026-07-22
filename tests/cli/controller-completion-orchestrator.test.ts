@@ -4,14 +4,15 @@ import { createHash } from 'crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
-import { createIssue, getIssue, projectBoard, recordTaskVerification, updateTask } from '../../src/cli/controller/issue-store';
+import { acceptVerifiedTask, createIssue, getIssue, projectBoard, recordTaskVerification, updateTask } from '../../src/cli/controller/issue-store';
 import { finishEditSession, finishTaskRun } from '../../src/cli/controller/completion-orchestrator';
 import { applyCompletionDecision, completionDecisionQueues, finishCompletionBacklog, inspectCompletionBacklog } from '../../src/cli/controller/completion-backlog';
 import { prepareCodexContinuation } from '../../src/cli/controller/codex-continuation';
 import { applyStuckStateMigration, inspectStuckControllerStates } from '../../src/cli/controller/stuck-state-migration';
 import { getAgentJob, markAgentJobReviewedCompletion } from '../../src/cli/agent-jobs/job-manager';
 import type { AgentJobMeta } from '../../src/cli/agent-jobs/types';
-import { applyEditOperations, beginEditSession } from '../../src/cli/editing/edit-session';
+import { applyEditOperations, beginEditSession, finalizeEditSession, getEditSession } from '../../src/cli/editing/edit-session';
+import { cleanupEvidenceResourceBlockers } from '../../src/cli/controller/execution-policy';
 import { getMcpPolicy } from '../../src/cli/mcp/policy';
 
 function withRepo<T>(fn: (repoRoot: string) => T): T {
@@ -381,6 +382,166 @@ describe('completion orchestrator', () => {
     expect(destructiveAutomatic.action).toBe('needs_decision');
     expect(getIssue(repoRoot, issue.id).tasks[1]?.status).not.toBe('done');
   }));
+
+  test('revalidates finalized Direct Edit ownership before committing', () => withRepo((repoRoot) => {
+    const issue = createIssue(repoRoot, {
+      title: 'Finalized ownership',
+      tasks: [{ title: 'Patch source', objective: 'Do not claim later edits.', allowedPaths: ['src/**'], risk: 'medium' }],
+      allowDuplicate: true,
+    });
+    const session = beginEditSession(repoRoot, { purpose: 'Finalized ownership', issueId: issue.id, taskId: 'T1', allowedPaths: ['src/**'] });
+    const path = join(repoRoot, 'src/example.ts');
+    const initial = readFileSync(path, 'utf-8');
+    applyEditOperations(repoRoot, getMcpPolicy('controller', { repoRoot }), session.sessionId, [{
+      type: 'replace', path: 'src/example.ts', expectedSha256: sha(initial),
+      replacements: [{ oldText: 'value = 1', newText: 'value = 8' }],
+    }]);
+    finalizeEditSession(repoRoot, session.sessionId, { reviewer: 'test' });
+    writeFileSync(path, 'export const value = 9;\n');
+
+    const result = finishEditSession(repoRoot, { sessionId: session.sessionId, reviewer: 'test' });
+
+    expect(result.action).toBe('blocked');
+    expect(result.taskStatus).toBe('integration_blocked');
+    expect(getEditSession(repoRoot, session.sessionId).status).toBe('superseded');
+    expect(execFileSync('git', ['log', '-1', '--pretty=%s'], { cwd: repoRoot, encoding: 'utf-8' }).trim()).toBe('Initial commit');
+  }));
+
+  test('rolls back owned changes before reporting a Direct Edit discarded', () => withRepo((repoRoot) => {
+    const issue = createIssue(repoRoot, {
+      title: 'Discard direct edit',
+      tasks: [{ title: 'Patch source', objective: 'Discard safely.', allowedPaths: ['src/**'], risk: 'medium' }],
+      allowDuplicate: true,
+    });
+    const session = beginEditSession(repoRoot, { purpose: 'Discard direct edit', issueId: issue.id, taskId: 'T1', allowedPaths: ['src/**'] });
+    const path = join(repoRoot, 'src/example.ts');
+    const initial = readFileSync(path, 'utf-8');
+    applyEditOperations(repoRoot, getMcpPolicy('controller', { repoRoot }), session.sessionId, [{
+      type: 'replace', path: 'src/example.ts', expectedSha256: sha(initial),
+      replacements: [{ oldText: 'value = 1', newText: 'value = 10' }],
+    }]);
+
+    const result = finishEditSession(repoRoot, { sessionId: session.sessionId, decision: 'discard', reviewer: 'test' });
+
+    expect(result.action).toBe('discarded');
+    expect(result.taskStatus).toBe('cancelled');
+    expect(getEditSession(repoRoot, session.sessionId).status).toBe('rolled_back');
+    expect(readFileSync(path, 'utf-8')).toBe(initial);
+    expect(execFileSync('git', ['status', '--porcelain', '--', 'src/example.ts'], { cwd: repoRoot, encoding: 'utf-8' }).trim()).toBe('');
+  }));
+
+  test('blocks discard before rollback when an owned path is staged', () => withRepo((repoRoot) => {
+    const issue = createIssue(repoRoot, {
+      title: 'Staged discard',
+      tasks: [{ title: 'Patch source', objective: 'Preserve recoverability while staged.', allowedPaths: ['src/**'], risk: 'medium' }],
+      allowDuplicate: true,
+    });
+    const session = beginEditSession(repoRoot, { purpose: 'Staged discard', issueId: issue.id, taskId: 'T1', allowedPaths: ['src/**'] });
+    const path = join(repoRoot, 'src/example.ts');
+    const initial = readFileSync(path, 'utf-8');
+    applyEditOperations(repoRoot, getMcpPolicy('controller', { repoRoot }), session.sessionId, [{
+      type: 'replace', path: 'src/example.ts', expectedSha256: sha(initial),
+      replacements: [{ oldText: 'value = 1', newText: 'value = 13' }],
+    }]);
+    execFileSync('git', ['add', 'src/example.ts'], { cwd: repoRoot });
+
+    const result = finishEditSession(repoRoot, { sessionId: session.sessionId, decision: 'discard', reviewer: 'test' });
+
+    expect(result.action).toBe('blocked');
+    expect(result.reason).toContain('unstaged first');
+    expect(getEditSession(repoRoot, session.sessionId).status).toBe('dirty');
+    expect(readFileSync(path, 'utf-8')).toContain('value = 13');
+  }));
+
+  test('does not discard finalized Direct Edit content already committed', () => withRepo((repoRoot) => {
+    const issue = createIssue(repoRoot, {
+      title: 'Committed direct edit discard',
+      tasks: [{ title: 'Patch source', objective: 'Require an explicit revert after commit.', allowedPaths: ['src/**'], risk: 'medium' }],
+      allowDuplicate: true,
+    });
+    const session = beginEditSession(repoRoot, { purpose: 'Committed direct edit', issueId: issue.id, taskId: 'T1', allowedPaths: ['src/**'] });
+    const path = join(repoRoot, 'src/example.ts');
+    const initial = readFileSync(path, 'utf-8');
+    applyEditOperations(repoRoot, getMcpPolicy('controller', { repoRoot }), session.sessionId, [{
+      type: 'replace', path: 'src/example.ts', expectedSha256: sha(initial),
+      replacements: [{ oldText: 'value = 1', newText: 'value = 11' }],
+    }]);
+    finalizeEditSession(repoRoot, session.sessionId, { reviewer: 'test' });
+    execFileSync('git', ['add', 'src/example.ts'], { cwd: repoRoot });
+    execFileSync('git', ['commit', '-qm', 'Commit finalized direct edit'], { cwd: repoRoot });
+
+    const result = finishEditSession(repoRoot, { sessionId: session.sessionId, decision: 'discard', reviewer: 'test' });
+
+    expect(result.action).toBe('blocked');
+    expect(result.reason).toContain('explicit revert');
+    expect(getIssue(repoRoot, issue.id).tasks[0]?.status).not.toBe('cancelled');
+    expect(getEditSession(repoRoot, session.sessionId).status).toBe('finalized');
+  }));
+
+  test('blocks completion from a non-integration branch', () => withRepo((repoRoot) => {
+    const issue = createIssue(repoRoot, {
+      title: 'Branch-bound completion',
+      tasks: [{ title: 'Patch source', objective: 'Complete only on main.', allowedPaths: ['src/**'], risk: 'medium' }],
+      allowDuplicate: true,
+    });
+    execFileSync('git', ['checkout', '-qb', 'feature/not-integrated'], { cwd: repoRoot });
+    const session = beginEditSession(repoRoot, { purpose: 'Feature branch edit', issueId: issue.id, taskId: 'T1', allowedPaths: ['src/**'] });
+    const path = join(repoRoot, 'src/example.ts');
+    const initial = readFileSync(path, 'utf-8');
+    applyEditOperations(repoRoot, getMcpPolicy('controller', { repoRoot }), session.sessionId, [{
+      type: 'replace', path: 'src/example.ts', expectedSha256: sha(initial),
+      replacements: [{ oldText: 'value = 1', newText: 'value = 12' }],
+    }]);
+
+    const result = finishEditSession(repoRoot, { sessionId: session.sessionId, reviewer: 'test' });
+
+    expect(result.action).toBe('blocked');
+    expect(result.reason).toContain('integration target main');
+    expect(getIssue(repoRoot, issue.id).tasks[0]?.status).not.toBe('done');
+  }));
+
+  test('rejects a completion receipt copied from another Task', () => withRepo((repoRoot) => {
+    const issue = createIssue(repoRoot, {
+      title: 'Receipt identity binding',
+      tasks: [
+        { title: 'Source task', objective: 'Own the receipt.', allowedPaths: ['src/**'], risk: 'medium' },
+        { title: 'Other task', objective: 'Reject a copied receipt.', allowedPaths: ['src/**'], risk: 'medium' },
+      ],
+      allowDuplicate: true,
+    });
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf-8' }).trim();
+    updateTask(repoRoot, issue.id, 'T2', {
+      status: 'verified',
+      verification: {
+        reviewer: 'test', checkResults: [], commandEvidence: [], acceptanceResults: [], verifiedAt: new Date().toISOString(),
+        completionReceipt: {
+          schemaVersion: 1, receiptId: 'REC-copied', source: 'direct_edit', issueId: issue.id, taskId: 'T1', editSessionId: 'EDIT-source',
+          targetBranch: 'main', targetRevision: head, changedPaths: ['src/example.ts'],
+          delivery: { kind: 'commit', status: 'integrated', strategy: 'already_integrated', reachable: true, recordedAt: new Date().toISOString() },
+          cleanup: { status: 'complete', warnings: [], blockers: [], recordedAt: new Date().toISOString() },
+          verifiedAt: new Date().toISOString(), recordedAt: new Date().toISOString(),
+        },
+      },
+    });
+
+    expect(() => acceptVerifiedTask(repoRoot, issue.id, 'T2')).toThrow('bound to this Task');
+    expect(getIssue(repoRoot, issue.id).tasks[1]?.status).toBe('verified');
+  }));
+
+  test('derives blockers from legacy cleanup booleans', () => {
+    const blockers = cleanupEvidenceResourceBlockers({
+      runId: 'RUN-legacy', worktreeRemovedOrNotCreated: false, branchDeletedOrRetained: false,
+      leasesReleased: false, runTerminal: false, editSessionClosedOrNotCreated: false,
+      noActiveProcess: false, noDirtyDiff: false, recordedAt: new Date().toISOString(),
+    });
+    const codes = new Set(blockers.map((entry) => entry.code));
+    expect(codes).toContain('unknown_resource_ownership');
+    expect(codes).toContain('lease_active');
+    expect(codes).toContain('run_not_terminal');
+    expect(codes).toContain('edit_session_open');
+    expect(codes).toContain('active_write_process');
+    expect(codes).toContain('dirty_owned_paths');
+  });
 });
 
 

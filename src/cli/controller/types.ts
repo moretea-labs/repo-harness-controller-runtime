@@ -87,6 +87,7 @@ export interface CompletionResourceBlocker {
     | 'dirty_owned_paths'
     | 'edit_session_open'
     | 'lease_active'
+    | 'run_not_terminal'
     | 'target_revision_unreachable';
   message: string;
   resourceKind?: 'worktree' | 'branch' | 'edit_session' | 'lease' | 'process' | 'workspace';

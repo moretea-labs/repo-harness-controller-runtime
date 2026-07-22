@@ -91,8 +91,14 @@ export function boundExecutionResult(
   result: Record<string, unknown>,
   kind: ExecutionArtifactRecord['kind'] = 'job-result',
 ): { result: Record<string, unknown>; artifact?: ExecutionArtifactRecord } {
-  const configured = typeof job.payload.maxOutputBytes === 'number' ? job.payload.maxOutputBytes : 512 * 1024;
-  const maxBytes = Math.max(16 * 1024, Math.min(configured, 2 * 1024 * 1024));
+  // Default success budget stays compact (~16KB). Callers still fetch full
+  // content via get_artifact when externalized.
+  const DEFAULT_INLINE_SUCCESS = 16 * 1024;
+  const DEFAULT_INLINE_ERROR = 32 * 1024;
+  const configured = typeof job.payload.maxOutputBytes === 'number' ? job.payload.maxOutputBytes : DEFAULT_INLINE_SUCCESS;
+  const maxBytes = kind === 'job-error'
+    ? Math.max(DEFAULT_INLINE_ERROR, Math.min(configured, 512 * 1024))
+    : Math.max(DEFAULT_INLINE_SUCCESS, Math.min(configured, 512 * 1024));
   const serialized = JSON.stringify(result);
   const bytes = Buffer.byteLength(serialized);
 
@@ -103,30 +109,46 @@ export function boundExecutionResult(
       result: {
         externalized: true,
         byteLength: bytes,
+        referenceType: 'artifact',
         artifactId: artifact.artifactId,
         artifactKind: artifact.kind,
+        // Keep a short human message, never the full JSON dump.
+        message: typeof result.message === 'string'
+          ? String(result.message).slice(0, 800)
+          : (typeof result.error === 'string' ? String(result.error).slice(0, 800) : 'Job failed; full details externalized.'),
         detailPointer: {
           tool: 'get_artifact',
           repoId: job.repoId,
           artifactId: artifact.artifactId,
           maxBytes,
         },
-        next: `Call get_artifact with repo_id=${job.repoId} and artifact_id=${artifact.artifactId}.`,
+        next: `Call get_artifact with repo_id=${job.repoId} and artifact_id=${artifact.artifactId} (ART-..., not EVD-...).`,
       },
     };
   }
 
-  if (bytes <= maxBytes) return { result };
+  if (bytes <= maxBytes) {
+    // Prefer inlining compact stdout/stderr when present.
+    return { result };
+  }
   const artifact = writeExecutionArtifact(controllerHome, job, kind, result);
   return {
     artifact,
     result: {
       truncated: true,
+      externalized: true,
       byteLength: bytes,
+      referenceType: 'artifact',
       artifactId: artifact.artifactId,
       artifactKind: artifact.kind,
-      preview: serialized.slice(0, Math.min(16 * 1024, serialized.length)),
-      next: `Call get_artifact with repo_id=${job.repoId} and artifact_id=${artifact.artifactId}.`,
+      preview: serialized.slice(0, Math.min(2 * 1024, serialized.length)),
+      detailPointer: {
+        tool: 'get_artifact',
+        repoId: job.repoId,
+        artifactId: artifact.artifactId,
+        maxBytes,
+      },
+      next: `Call get_artifact with repo_id=${job.repoId} and artifact_id=${artifact.artifactId} (ART-..., not EVD-...).`,
     },
   };
 }

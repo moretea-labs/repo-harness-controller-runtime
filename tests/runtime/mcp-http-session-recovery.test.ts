@@ -76,6 +76,17 @@ describe('MCP HTTP session recovery', () => {
         code: 'MCP_REQUEST_FAILED',
         message: 'temporary failure',
         recoverable: true,
+        retryable: false,
+        sessionPreserved: true,
+        action: 'retry',
+      },
+    });
+    expect(mcpRequestError(new Error('HTTP 502 bad gateway'))).toMatchObject({
+      status: 503,
+      body: {
+        error: 'request_failed',
+        code: 'MCP_TRANSIENT_FAILURE',
+        retryable: true,
         sessionPreserved: true,
         action: 'retry',
       },

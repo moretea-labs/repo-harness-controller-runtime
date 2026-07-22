@@ -9,6 +9,12 @@ import { withControllerLockAsync } from '../repositories/locks';
 import { registerRepository, repositorySummary, resolveRepositorySelection } from '../repositories/registry';
 import { ensureRepositoryRuntimeStorage, type RepositoryRuntimeStorageReport } from '../repositories/runtime-storage';
 import type { RepositoryRecord } from '../repositories/types';
+import {
+  compactErrorMessage,
+  compactRepositoryRef,
+  compactRuntimeStorageRef,
+  RESPONSE_BUDGET,
+} from '../../runtime/shared/response-budget';
 
 export interface McpServerOptions {
   repo?: string;
@@ -156,13 +162,41 @@ export function buildMultiRepositoryToolDefinitions(
 }
 
 function errorResult(error: unknown): ToolResult {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = compactErrorMessage(error);
   const code = message.includes(':') ? message.slice(0, message.indexOf(':')) : 'TOOL_FAILED';
-  const value = { error: { code, message } };
+  const value = {
+    error: {
+      code,
+      message,
+      retryable: /(?:^|_)(?:502|503|429|ECONNRESET|ETIMEDOUT|EAI_AGAIN)|server_busy|session_capacity|gateway.*unavailable|transient/i.test(message),
+    },
+  };
   return {
-    content: [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+    content: [{ type: 'text', text: JSON.stringify(value) }],
     structuredContent: value,
     isError: true,
+  };
+}
+
+function compactEnvelopePayload(
+  repository: RepositoryRecord,
+  runtimeStorage: RepositoryRuntimeStorageReport,
+): { repoId: string; repository: Record<string, unknown>; runtimeStorage: Record<string, unknown> } {
+  const summary = repositorySummary(repository);
+  return {
+    repoId: repository.repoId,
+    repository: compactRepositoryRef({
+      repoId: summary.repoId,
+      checkoutId: summary.checkoutId,
+      displayName: summary.displayName,
+      defaultBranch: summary.defaultBranch,
+    }),
+    runtimeStorage: compactRuntimeStorageRef({
+      readyForExecution: runtimeStorage.readyForExecution,
+      usesStableRoot: runtimeStorage.usesStableRoot,
+      warningCount: runtimeStorage.warnings.length,
+      warnings: runtimeStorage.warnings,
+    }),
   };
 }
 
@@ -171,25 +205,46 @@ function withRepositoryEnvelope(
   repository: RepositoryRecord,
   runtimeStorage: RepositoryRuntimeStorageReport,
 ): ToolResult {
-  const summary = repositorySummary(repository);
+  const envelope = compactEnvelopePayload(repository, runtimeStorage);
   if (result.structuredContent && typeof result.structuredContent === 'object' && !Array.isArray(result.structuredContent)) {
-    const structuredContent = {
-      ...(result.structuredContent as Record<string, unknown>),
-      repoId: repository.repoId,
-      repository: summary,
-      runtimeStorage,
+    const existing = result.structuredContent as Record<string, unknown>;
+    // Avoid re-nesting full repository/runtimeStorage when the tool already
+    // returned a compact or authoritative payload for those keys.
+    const structuredContent: Record<string, unknown> = {
+      ...existing,
+      repoId: typeof existing.repoId === 'string' ? existing.repoId : envelope.repoId,
+      repository: existing.repository && typeof existing.repository === 'object'
+        ? existing.repository
+        : envelope.repository,
+      runtimeStorage: existing.runtimeStorage && typeof existing.runtimeStorage === 'object'
+        ? existing.runtimeStorage
+        : envelope.runtimeStorage,
     };
+    // Prefer compact JSON without pretty-print bloat for default responses.
+    let text = JSON.stringify(structuredContent);
+    if (Buffer.byteLength(text, 'utf8') > RESPONSE_BUDGET.successBytes && result.isError !== true) {
+      // Keep structuredContent authoritative; only shrink the text channel when oversized.
+      text = JSON.stringify({
+        repoId: structuredContent.repoId,
+        summary: typeof structuredContent.summary === 'string' ? structuredContent.summary : undefined,
+        status: structuredContent.status ?? structuredContent.phase,
+        jobId: structuredContent.jobId,
+        next: structuredContent.next,
+        truncatedTextChannel: true,
+        message: 'Text channel truncated to response budget; use structuredContent or detail APIs.',
+      });
+    }
     return {
       ...result,
       structuredContent,
-      content: [{ type: 'text', text: JSON.stringify(structuredContent, null, 2) }],
+      content: [{ type: 'text', text }],
     };
   }
   return {
     ...result,
     content: [
       ...result.content,
-      { type: 'text', text: JSON.stringify({ repoId: repository.repoId, repository: summary, runtimeStorage }, null, 2) },
+      { type: 'text', text: JSON.stringify(envelope) },
     ],
   };
 }

@@ -170,7 +170,11 @@ export function claimsForCheck(
   repoId: string,
   checkoutId?: string,
 ): ResourceClaimSpec[] {
-  const heavy = /(?:^|:)(?:test(?::coverage)?|check:(?:ci|controller-v8|public-export|release(?:-[a-z0-9-]+)?))$/.test(checkId)
+  // Self-hosting controller-v8 spawns nested jobs; exclusive heavy-check would deadlock.
+  if (/(?:^|:)(?:check:controller-v8|package:check:controller-v8|controller-v8)(?:$|:)/i.test(checkId)) {
+    return [claimWorkspaceRead(checkoutId), claimBuildCacheWrite(repoId)];
+  }
+  const heavy = /(?:^|:)(?:test(?::coverage)?|check:(?:ci|public-export|release(?:-[a-z0-9-]+)?))$/.test(checkId)
     || /release|migration|integrate/i.test(checkId);
   if (heavy) {
     return [claimHeavyCheck(repoId)];

@@ -7,6 +7,13 @@ import {
   isAgentDelegationOperation,
 } from '../execution/jobs/child-reference';
 import type { SafeJobResultSummary } from './types';
+import {
+  artifactRef,
+  boundText,
+  compactErrorMessage,
+  evidenceRef,
+  RESPONSE_BUDGET,
+} from '../shared/response-budget';
 
 type SafeErrorClass = NonNullable<SafeJobResultSummary['safeError']>['class'];
 type SafeArtifactRef = NonNullable<SafeJobResultSummary['artifactRefs']>[number];
@@ -24,7 +31,7 @@ function scrubPathText(text: string, replacements: string[] = []): string {
 }
 
 function sanitizeMessage(message: string, replacements: string[] = []): string {
-  return redactMcpText(scrubPathText(message, replacements)).text.slice(0, 800);
+  return compactErrorMessage(redactMcpText(scrubPathText(message, replacements)).text, RESPONSE_BUDGET.errorMessageChars);
 }
 
 function classifyError(message: string): SafeErrorClass {
@@ -190,17 +197,50 @@ function enrichDelegatedDigest(
 
 export function summarizeExecutionJobForMcp(job: ExecutionJob, repoRoot?: string): Record<string, unknown> {
   const payloadArguments = job.payload.arguments && typeof job.payload.arguments === 'object'
-    ? Object.keys(job.payload.arguments as Record<string, unknown>).slice(0, 20)
+    ? Object.keys(job.payload.arguments as Record<string, unknown>).slice(0, 12)
     : undefined;
   const replacements = repoRoot ? [repoRoot] : [];
-  const resultPreview = job.result !== undefined ? jsonPreview(job.result, 320, replacements) : undefined;
-  const artifactRefs = collectArtifactRefs(job.result, job.error?.details);
-  const evidenceIds = job.evidenceIds.slice(-20);
+  const resultPreview = job.result !== undefined ? jsonPreview(job.result, 240, replacements) : undefined;
+  const artifactRefsRaw = collectArtifactRefs(job.result, job.error?.details);
+  const artifactRefs = artifactRefsRaw.map((entry) => artifactRef({
+    artifactId: entry.artifactId,
+    artifactKind: entry.artifactKind,
+    byteLength: entry.byteLength,
+    repoId: job.repoId,
+    jobId: job.jobId,
+  }));
+  const evidenceIds = job.evidenceIds.slice(-8);
+  const evidenceRefs = evidenceIds.map((evidenceId) => evidenceRef({
+    evidenceId,
+    repoId: job.repoId,
+    jobId: job.jobId,
+  }));
   const errorDetailsAvailable = job.error?.details !== undefined;
   const rawDigest = enrichDelegatedDigest(job, buildJobOperationDigest(job), repoRoot);
-  const digest = JSON.parse(
-    redactMcpText(scrubPathText(JSON.stringify(rawDigest), replacements)).text,
-  ) as ReturnType<typeof buildJobOperationDigest>;
+  // Compact digest: drop nested suggested actions duplication; top-level keeps them once.
+  const digest = {
+    schemaVersion: rawDigest.schemaVersion,
+    phase: rawDigest.phase,
+    statusLabel: rawDigest.statusLabel,
+    summary: boundText(sanitizeMessage(rawDigest.summary, replacements), 500),
+    terminal: rawDigest.terminal,
+    resultAccepted: rawDigest.resultAccepted,
+    operation: rawDigest.operation,
+    workId: rawDigest.workId,
+    jobId: rawDigest.jobId,
+    requestId: rawDigest.requestId,
+    errorClass: rawDigest.errorClass,
+    errorMessage: rawDigest.errorMessage
+      ? sanitizeMessage(rawDigest.errorMessage, replacements)
+      : undefined,
+    rawAvailable: false,
+    ...(rawDigest.childReference ? { childReference: rawDigest.childReference } : {}),
+    ...(rawDigest.childRunStatus ? { childRunStatus: rawDigest.childRunStatus } : {}),
+    ...(rawDigest.childLocalJobStatus ? { childLocalJobStatus: rawDigest.childLocalJobStatus } : {}),
+    ...(rawDigest.delegationAccepted ? { delegationAccepted: true } : {}),
+  };
+  const errorMessage = digest.errorMessage
+    ?? (job.error?.message ? sanitizeMessage(job.error.message, replacements) : undefined);
   return {
     jobId: job.jobId,
     repoId: job.repoId,
@@ -212,9 +252,10 @@ export function summarizeExecutionJobForMcp(job: ExecutionJob, repoRoot?: string
     summary: digest.summary,
     terminal: digest.terminal,
     errorClass: digest.errorClass,
-    errorMessage: digest.errorMessage ?? (job.error?.message ? sanitizeMessage(job.error.message, replacements) : undefined),
-    changedFiles: digest.changedFiles,
-    suggestedNextActions: digest.suggestedNextActions,
+    errorMessage,
+    changedFiles: (rawDigest.changedFiles ?? []).slice(0, 20),
+    // Single authoritative suggested-actions list (not nested inside digest).
+    suggestedNextActions: (rawDigest.suggestedNextActions ?? []).slice(0, 6),
     childReference: digest.childReference,
     childRunStatus: digest.childRunStatus,
     childLocalJobStatus: digest.childLocalJobStatus,
@@ -222,63 +263,58 @@ export function summarizeExecutionJobForMcp(job: ExecutionJob, repoRoot?: string
     digest,
     priority: job.priority,
     requestId: job.requestId,
-    semanticKey: job.semanticKey,
     payload: {
       operation: job.payload.operation,
       target: job.payload.target,
-      profile: job.payload.profile,
       timeoutMs: job.payload.timeoutMs,
-      maxOutputBytes: job.payload.maxOutputBytes,
       argumentKeys: payloadArguments,
       summaryOnly: true,
     },
-    origin: job.origin,
-    resourceClaims: job.resourceClaims.map((claim) => ({
-      resourceKey: redactMcpText(scrubPathText(claim.resourceKey, replacements)).text,
-      mode: claim.mode,
-    })),
+    resourceClaimCount: job.resourceClaims.length,
     dependencyCount: job.dependencies.length,
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
-    queuedAt: job.queuedAt,
     startedAt: job.startedAt,
     finishedAt: job.finishedAt,
-    heartbeatAt: job.heartbeatAt,
-    deadlineAt: job.deadlineAt,
-    workerPid: job.workerPid,
     attempt: job.attempt,
     maxAttempts: job.maxAttempts,
     evidenceCount: job.evidenceIds.length,
     evidenceIds,
+    evidenceRefs,
     evidenceIdsTruncated: job.evidenceIds.length > evidenceIds.length,
     ...(artifactRefs.length ? { artifactRefs } : {}),
     detailPointers: {
       includeEvents: `Call get_job with job_id=${job.jobId} and include_events=true for bounded event previews.`,
-      ...(artifactRefs.length ? { artifacts: artifactRefs } : {}),
+      ...(artifactRefs.length
+        ? {
+          artifacts: artifactRefs,
+          note: 'Use artifactId (ART-...) with get_artifact. evidenceId (EVD-...) is audit metadata, not artifact content.',
+        }
+        : {}),
       evidenceIds,
       rawJobStateReturned: false,
     },
-    outcome: job.outcome ? {
-      infrastructureError: job.outcome.infrastructureError ? {
+    outcome: job.outcome?.infrastructureError ? {
+      infrastructureError: {
         code: job.outcome.infrastructureError.code,
         message: sanitizeMessage(job.outcome.infrastructureError.message, replacements),
-      } : undefined,
+      },
     } : undefined,
     result: resultPreview
       ? {
         preview: resultPreview.preview,
         truncated: resultPreview.truncated,
         byteLength: resultPreview.byteLength,
-        next: artifactRefs.length ? 'Call get_artifact with a listed artifactId for bounded content.' : 'Result is returned only as a bounded preview in job summaries.',
+        next: artifactRefs.length
+          ? 'Call get_artifact with a listed artifactId (ART-...) for bounded content.'
+          : 'Result is returned only as a bounded preview in job summaries.',
       }
       : undefined,
-    error: job.error || digest.errorMessage
+    error: job.error || errorMessage
       ? {
         code: job.error?.code || digest.errorClass || 'UNKNOWN_FAILURE',
-        message: job.error?.message
-          ? sanitizeMessage(job.error.message, replacements)
-          : (digest.errorMessage || '任务失败，但未提供详细错误信息。'),
-        class: digest.errorClass || classifyError(job.error?.message || digest.errorMessage || ''),
+        message: errorMessage || '任务失败，但未提供详细错误信息。',
+        class: digest.errorClass || classifyError(job.error?.message || errorMessage || ''),
         retryable: job.error?.retryable ?? false,
         detailsAvailable: errorDetailsAvailable,
         detailsSuppressed: errorDetailsAvailable && artifactRefs.length === 0,

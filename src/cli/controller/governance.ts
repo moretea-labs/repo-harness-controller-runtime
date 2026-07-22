@@ -12,6 +12,7 @@ import {
 import { clearCurrentIssue, loadControllerProjectState, saveControllerProjectState } from "./project-state";
 import type { ControllerIssue, ControllerTask } from "./types";
 import { completionEvidenceComplete, taskExecutionPolicy } from "./execution-policy";
+import { resolveCompletionTargetBranch } from "./completion-target";
 import { readIssueRunEvidence } from "./run-evidence";
 import { resolveEffectiveTaskState, resolveIssueTaskStates, resolveTaskDependencies, type EffectiveTaskState } from "./task-status-resolver";
 import { tryAppendControllerWorklogEvent } from "./worklog";
@@ -183,9 +184,13 @@ function hasGovernanceRetryBlocker(task: ControllerTask): boolean {
   return task.notes.some((note) => note.includes(GOVERNANCE_RETRY_BLOCKER_NOTE));
 }
 
-function shouldAutoAcceptVerifiedTask(task: ControllerTask): boolean {
+function shouldAutoAcceptVerifiedTask(repoRoot: string, issue: ControllerIssue, task: ControllerTask): boolean {
   if (task.status !== "verified" || !task.verification) return false;
-  if (!completionEvidenceComplete(task.verification)) return false;
+  if (!completionEvidenceComplete(task.verification, {
+    issueId: issue.id,
+    taskId: task.id,
+    targetBranch: resolveCompletionTargetBranch(repoRoot),
+  })) return false;
   const policy = taskExecutionPolicy(task);
   return policy.autoCompleteAfterSuccessfulRun && !policy.requiresHumanAcceptance;
 }
@@ -498,7 +503,7 @@ export function reconcileProjectGovernance(repoRoot: string): ReconcileResult {
         });
         changes.push({ issueId: issue.id, taskId: task.id, action: "block_after_run", summary: `Blocked ${task.id} after ${latestRunStatus} Run; explicit retry required.` });
       }
-      if (shouldAutoAcceptVerifiedTask(task)) {
+      if (shouldAutoAcceptVerifiedTask(repoRoot, issue, task)) {
         acceptVerifiedTask(repoRoot, issue.id, task.id, "Accepted during governance reconciliation because policy auto-completes verified work for this Task.");
         changes.push({ issueId: issue.id, taskId: task.id, action: "auto_accept_verified_task", summary: `Closed ${task.id} because existing verification already satisfies the current auto-complete policy.` });
       }

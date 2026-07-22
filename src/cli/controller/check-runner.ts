@@ -416,7 +416,12 @@ const activeAsyncCheckSubscriptions = new Map<string, ActiveAsyncCheck>();
 const heavyCheckQueues = new Map<string, Promise<void>>();
 
 export function controllerCheckConcurrencyClass(id: string): 'heavy' | 'light' {
-  return /(?:^|:)(?:test(?::coverage)?|check:(?:ci|controller-v8|public-export|release(?:-[a-z0-9-]+)?))$/.test(id)
+  // controller-v8 is self-hosting and nests Local Jobs; serialize only via process-local
+  // queue when needed, never exclusive heavy-check at the durable claim layer.
+  if (/(?:^|:)(?:check:controller-v8|package:check:controller-v8|controller-v8)(?:$|:)/i.test(id)) {
+    return 'light';
+  }
+  return /(?:^|:)(?:test(?::coverage)?|check:(?:ci|public-export|release(?:-[a-z0-9-]+)?))$/.test(id)
     ? 'heavy'
     : 'light';
 }

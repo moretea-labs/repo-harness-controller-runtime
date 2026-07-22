@@ -948,7 +948,8 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
 ];
 
 function result(value: Record<string, unknown>, isError = false): CallToolResult {
-  return { content: [{ type: 'text', text: JSON.stringify(value, null, 2) }], structuredContent: value, ...(isError ? { isError: true } : {}) };
+  // Compact text channel by default (no pretty-print bloat).
+  return { content: [{ type: 'text', text: JSON.stringify(value) }], structuredContent: value, ...(isError ? { isError: true } : {}) };
 }
 
 function repositoryRootForRepoId(controllerHome: string, repoId: string): string | undefined {
@@ -2776,22 +2777,22 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         }
         const full = args.detail_level === 'full';
         const repoRoot = repositoryRootForRepoId(ctx.controllerHome, job.repoId);
-        const digest = buildJobOperationDigest(job, {
-          waited: args.wait === true || typeof args.wait_ms === 'number',
-          stillRunning: timedOut,
-        });
+        // summarizeExecutionJob already embeds a compact digest + single suggestedNextActions list.
+        const jobSummary = summarizeExecutionJob(job, repoRoot);
         return result({
           detailLevel: 'summary',
           requestedDetailLevel: full ? 'full' : 'summary',
-          job: summarizeExecutionJob(job, repoRoot),
-          digest,
-          summary: digest.summary,
-          phase: digest.phase,
-          statusLabel: digest.statusLabel,
-          errorClass: digest.errorClass,
-          errorMessage: digest.errorMessage,
-          changedFiles: digest.changedFiles,
-          suggestedNextActions: digest.suggestedNextActions,
+          job: jobSummary,
+          summary: jobSummary.summary,
+          phase: jobSummary.phase,
+          statusLabel: jobSummary.statusLabel,
+          errorClass: jobSummary.errorClass,
+          errorMessage: jobSummary.errorMessage,
+          changedFiles: jobSummary.changedFiles,
+          suggestedNextActions: jobSummary.suggestedNextActions,
+          artifactRefs: jobSummary.artifactRefs,
+          evidenceIds: jobSummary.evidenceIds,
+          evidenceRefs: jobSummary.evidenceRefs,
           waited: args.wait === true || typeof args.wait_ms === 'number',
           timedOut,
           waitedMs,
@@ -2799,11 +2800,11 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             ? { events: summarizeJobEvents(ctx.controllerHome, job.repoId, job.jobId) }
             : {}),
           next: full
-            ? 'Raw job state is intentionally not returned through MCP. Use the bounded job summary, events, and get_artifact evidence instead.'
-            : digest.terminal
-              ? digest.summary
+            ? 'Raw job state is intentionally not returned through MCP. Use the bounded job summary, events, and get_artifact with artifactId (ART-...), not evidenceId (EVD-...).'
+            : jobSummary.terminal
+              ? String(jobSummary.summary ?? '')
               : 'Job is still active. Poll get_job without waiting, or use work_wait only when blocking is explicitly required.',
-        }, digest.phase === 'failed' || digest.phase === 'timed_out');
+        }, jobSummary.phase === 'failed' || jobSummary.phase === 'timed_out');
       }
       case 'repository_change_verify': {
         const repository = selected(ctx, args);
@@ -2870,13 +2871,47 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         const artifactId = String(args.artifact_id ?? '').trim();
         const artifactRepoId = String(args.repo_id ?? '').trim();
         if (artifactId.startsWith('EVD-')) {
+          const evidence = readExecutionEvidence(ctx.controllerHome, artifactRepoId, artifactId);
           return result({
-            evidence: readExecutionEvidence(ctx.controllerHome, artifactRepoId, artifactId),
-            referenceType: 'execution-evidence',
-            readableThrough: 'get_artifact',
+            referenceType: 'evidence',
+            evidenceId: evidence.evidenceId,
+            repoId: evidence.repoId,
+            jobId: evidence.jobId,
+            outcome: evidence.outcome,
+            operation: evidence.operation,
+            revision: evidence.revision,
+            executedAt: evidence.executedAt,
+            note: 'This is an evidenceId (EVD-...), not an artifactId (ART-...). Evidence holds audit metadata; command output lives under artifactRefs/artifactId.',
+            next: `For output content, call get_job with job_id=${evidence.jobId} and use artifactRefs.artifactId, then get_artifact with that ART-... id.`,
           });
         }
-        return result(readExecutionArtifact(ctx.controllerHome, artifactRepoId, artifactId, typeof args.max_bytes === 'number' ? args.max_bytes : undefined) as unknown as Record<string, unknown>);
+        if (!artifactId.startsWith('ART-') && artifactId) {
+          return result({
+            error: {
+              code: 'ARTIFACT_ID_EXPECTED',
+              message: `Expected artifactId starting with ART- (got ${artifactId.slice(0, 40)}). evidenceId (EVD-...) is audit metadata; use get_job artifactRefs for content.`,
+            },
+            referenceType: 'unknown',
+            next: 'Call get_job, read artifactRefs[].artifactId (ART-...), then get_artifact with that id and repo_id.',
+          }, true);
+        }
+        const maxBytes = typeof args.max_bytes === 'number' ? args.max_bytes : 64 * 1024;
+        const loaded = readExecutionArtifact(ctx.controllerHome, artifactRepoId, artifactId, maxBytes);
+        // Do not re-attach controller/repository/runtime envelopes here; multi-repo layer already compact.
+        return result({
+          referenceType: 'artifact',
+          artifactId: loaded.artifact.artifactId,
+          artifactKind: loaded.artifact.kind,
+          repoId: loaded.artifact.repoId,
+          jobId: loaded.artifact.jobId,
+          byteLength: loaded.artifact.byteLength,
+          mediaType: loaded.artifact.mediaType,
+          truncated: loaded.truncated,
+          content: loaded.content,
+          next: loaded.truncated
+            ? `Artifact truncated at ${maxBytes} bytes. Re-call get_artifact with a larger max_bytes (up to 512KB) or page via result refs.`
+            : 'Artifact content loaded.',
+        });
       }
       case 'list_jobs': {
         const repository = selected(ctx, args);

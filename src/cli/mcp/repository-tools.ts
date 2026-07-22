@@ -41,6 +41,12 @@ import {
 } from '../../runtime/execution/thin-harness';
 import { assessWorkMode } from '../controller/work-mode';
 import type { CallToolResult, McpToolDefinition } from './tools';
+import {
+  compactCommandOutput,
+  compactErrorMessage,
+  compactRoutingSummary,
+  RESPONSE_BUDGET,
+} from '../../runtime/shared/response-budget';
 
 export type RepositoryToolResult = CallToolResult;
 
@@ -253,17 +259,63 @@ export const repositoryToolDefinitions: McpToolDefinition[] = [
 export const repositoryToolNames = repositoryToolDefinitions.map((tool) => tool.name);
 
 function result(value: Record<string, unknown>): RepositoryToolResult {
+  // Compact text channel by default; structuredContent remains the machine view.
   return {
-    content: [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+    content: [{ type: 'text', text: JSON.stringify(value) }],
     structuredContent: value,
   };
 }
 
 function failure(error: unknown): RepositoryToolResult {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = compactErrorMessage(error);
   const code = message.includes(':') ? message.slice(0, message.indexOf(':')) : 'REPOSITORY_TOOL_FAILED';
   const details = typeof error === 'object' && error !== null && 'details' in error ? (error as { details?: unknown }).details : undefined;
-  return { ...result({ error: { code, message, ...(details ? { details } : {}) } }), isError: true };
+  const compactDetails = details !== undefined && Buffer.byteLength(JSON.stringify(details) ?? '', 'utf8') > RESPONSE_BUDGET.previewBytes
+    ? { omitted: true, message: 'Error details exceeded budget; inspect job/artifact/result refs.' }
+    : details;
+  return { ...result({ error: { code, message, ...(compactDetails !== undefined ? { details: compactDetails } : {}) } }), isError: true };
+}
+
+function compactProcessCommandPayload(input: {
+  accepted?: boolean;
+  mode: string;
+  path: string;
+  route?: string;
+  reasons: string[];
+  decision?: unknown;
+  repoId: string;
+  checkoutId?: string;
+  processId?: string;
+  process?: unknown;
+  ok?: boolean;
+  exitCode?: number | null;
+  stdout?: string;
+  stderr?: string;
+  durableSideEffects?: Record<string, number>;
+  next: string;
+  includeFullProcess?: boolean;
+}): Record<string, unknown> {
+  const output = compactCommandOutput(input.stdout, input.stderr, { ok: input.ok === true });
+  return {
+    accepted: input.accepted ?? true,
+    mode: input.mode,
+    path: input.path,
+    route: input.route ?? input.path,
+    routing: compactRoutingSummary({ path: input.path, mode: input.mode, reasons: input.reasons }),
+    repoId: input.repoId,
+    ...(input.checkoutId ? { checkoutId: input.checkoutId } : {}),
+    ...(input.processId ? { processId: input.processId } : {}),
+    ok: input.ok,
+    exitCode: input.exitCode,
+    ...output,
+    durableSideEffects: input.durableSideEffects ?? {
+      executionJobCount: 0,
+      localJobCount: 0,
+      workerSpawnCount: 0,
+      projectionUpdateCount: 0,
+    },
+    next: input.next,
+  };
 }
 
 function settledLocalJobStatus(status: string): boolean {
@@ -615,7 +667,9 @@ export async function callRepositoryTool(
               defaultBranch: repository.defaultBranch,
               timeoutMs,
             });
-            if (routeClass.route === 'process_direct' || routeClass.route === 'process_managed') {
+            // Only short readonly commands skip Local Job. Workspace mutations and
+            // managed long builds keep the durable settlement surface (jobId/localJob).
+            if (routeClass.route === 'process_direct') {
               const processResult = await executeRepositoryCommandViaProcessRuntime({
                 controllerHome,
                 repository,
@@ -625,31 +679,24 @@ export async function callRepositoryTool(
                 maxOutputBytes,
                 requestId: typeof args.request_id === 'string' ? args.request_id : undefined,
               });
-              if (processResult.route === 'process_direct' || processResult.route === 'process_managed') {
+              if (processResult.route === 'process_direct') {
                 const handle = processResult.process;
-                return result({
+                return result(compactProcessCommandPayload({
                   accepted: true,
                   mode: processResult.route,
                   path: processResult.route,
                   route: processResult.route,
-                  routing: {
-                    path: processResult.route,
-                    reasons: [processResult.reason ?? routeClass.reason, ...routingDecision.reasons],
-                    decision: routingDecision,
-                  },
+                  reasons: [processResult.reason ?? routeClass.reason, ...routingDecision.reasons],
                   repoId: repository.repoId,
                   checkoutId: repository.activeCheckoutId,
                   processId: handle?.processId,
-                  process: handle,
                   ok: processResult.ok,
                   exitCode: processResult.exitCode,
                   stdout: processResult.stdout,
                   stderr: processResult.stderr,
                   durableSideEffects: processResult.durableSideEffects,
-                  next: processResult.route === 'process_managed'
-                    ? 'Use process status/wait/logs/cancel tools with processId; command was not re-spawned.'
-                    : 'Process Runtime Direct completed without Local Job / ExecutionJob / Worker.',
-                });
+                  next: 'Process Runtime Direct completed without Local Job / ExecutionJob / Worker.',
+                }));
               }
             }
           } catch (error) {
@@ -695,38 +742,38 @@ export async function callRepositoryTool(
               latency: { totalMs: fast.latency.totalMs },
             });
           }
-          return fast.ok
-            ? result({
-              accepted: true,
-              mode: 'fast',
-              path: 'fast',
-              routing: {
-                path: 'fast',
-                reasons: fast.decision.reasons,
-                decision: fast.decision,
-              },
-              repoId: repository.repoId,
-              checkoutId: repository.activeCheckoutId,
-              receipt: fast.receipt,
-              execution: fast.result,
-              durableSideEffects: fast.durableSideEffects,
-              latency: args.include_latency_breakdown === true ? fast.latency : { totalMs: fast.latency.totalMs },
-              next: 'Fast Path completed without Local Job / ExecutionJob / Worker.',
-            })
-            : { ...result({
-              mode: 'fast',
-              path: 'fast',
-              routing: {
-                path: 'fast',
-                reasons: fast.decision.reasons,
-                decision: fast.decision,
-              },
-              repoId: repository.repoId,
-              checkoutId: repository.activeCheckoutId,
-              receipt: fast.receipt,
-              execution: fast.result,
-              latency: args.include_latency_breakdown === true ? fast.latency : { totalMs: fast.latency.totalMs },
-            }), isError: true };
+          const fastExecution = fast.result && typeof fast.result === 'object'
+            ? fast.result as Record<string, unknown>
+            : {};
+          const fastOutput = compactCommandOutput(
+            typeof fastExecution.stdout === 'string' ? fastExecution.stdout : undefined,
+            typeof fastExecution.stderr === 'string' ? fastExecution.stderr : undefined,
+            { ok: fast.ok },
+          );
+          const fastPayload = {
+            accepted: fast.ok,
+            mode: 'fast',
+            path: 'fast',
+            routing: compactRoutingSummary({ path: 'fast', mode: 'fast', reasons: fast.decision.reasons }),
+            repoId: repository.repoId,
+            checkoutId: repository.activeCheckoutId,
+            receiptId: (() => {
+              const receipt = fast.receipt as unknown as Record<string, unknown> | undefined;
+              return typeof receipt?.receiptId === 'string'
+                ? receipt.receiptId
+                : typeof receipt?.id === 'string'
+                  ? receipt.id
+                  : undefined;
+            })(),
+            ok: fast.ok,
+            exitCode: typeof fastExecution.exitCode === 'number' ? fastExecution.exitCode : undefined,
+            status: typeof fastExecution.status === 'string' ? fastExecution.status : undefined,
+            ...fastOutput,
+            durableSideEffects: fast.durableSideEffects,
+            latency: args.include_latency_breakdown === true ? fast.latency : { totalMs: fast.latency.totalMs },
+            next: 'Fast Path completed without Local Job / ExecutionJob / Worker.',
+          };
+          return fast.ok ? result(fastPayload) : { ...result(fastPayload), isError: true };
         }
         // Durable Worker already owns this request: execute the repository command
         // directly instead of submitting another Local Bridge projection that could
@@ -742,40 +789,36 @@ export async function callRepositoryTool(
             maxOutputBytes,
           });
           const ok = execution.ok === true && execution.status === 'executed';
-          return ok
-            ? result({
-              accepted: true,
+          const execRecord = execution as unknown as Record<string, unknown>;
+          const inlinePayload = {
+            accepted: ok,
+            mode: 'durable',
+            path: 'durable_worker_inline',
+            routing: compactRoutingSummary({
+              path: 'durable',
               mode: 'durable',
-              path: 'durable_worker_inline',
-              routing: {
-                path: 'durable',
-                reasons: ['durable_worker_inline_no_nested_job', ...routingDecision.reasons],
-                decision: routingDecision,
-              },
-              repoId: repository.repoId,
-              checkoutId: repository.activeCheckoutId,
-              execution,
-              durableSideEffects: {
-                executionJobCount: 0,
-                localJobCount: 0,
-                workerSpawnCount: 0,
-                projectionUpdateCount: 0,
-                schedulerWakeCount: 0,
-              },
-              next: 'Durable Worker executed the repository command inline without a nested ExecutionJob.',
-            })
-            : { ...result({
-              mode: 'durable',
-              path: 'durable_worker_inline',
-              routing: {
-                path: 'durable',
-                reasons: ['durable_worker_inline_no_nested_job', ...routingDecision.reasons],
-                decision: routingDecision,
-              },
-              repoId: repository.repoId,
-              checkoutId: repository.activeCheckoutId,
-              execution,
-            }), isError: true };
+              reasons: ['durable_worker_inline_no_nested_job', ...routingDecision.reasons],
+            }),
+            repoId: repository.repoId,
+            checkoutId: repository.activeCheckoutId,
+            ok,
+            status: typeof execRecord.status === 'string' ? execRecord.status : undefined,
+            exitCode: typeof execRecord.exitCode === 'number' ? execRecord.exitCode : undefined,
+            ...compactCommandOutput(
+              typeof execRecord.stdout === 'string' ? execRecord.stdout : undefined,
+              typeof execRecord.stderr === 'string' ? execRecord.stderr : undefined,
+              { ok },
+            ),
+            durableSideEffects: {
+              executionJobCount: 0,
+              localJobCount: 0,
+              workerSpawnCount: 0,
+              projectionUpdateCount: 0,
+              schedulerWakeCount: 0,
+            },
+            next: 'Durable Worker executed the repository command inline without a nested ExecutionJob.',
+          };
+          return ok ? result(inlinePayload) : { ...result(inlinePayload), isError: true };
         }
         const preview = previewRepositoryCommandExecution(repository, {
           command: args.command as string | string[],
@@ -809,21 +852,42 @@ export async function callRepositoryTool(
           ? executeLocalBridgeJob(repository.canonicalRoot, job.jobId)
           : job;
         const handoff = await waitForRepositoryCommandHandoff(repository.canonicalRoot, accepted.jobId, maxOutputBytes);
+        const handoffOutput = compactCommandOutput(handoff.stdout, handoff.stderr, {
+          ok: handoff.status === 'succeeded',
+          maxInlineBytes: typeof maxOutputBytes === 'number' ? Math.min(maxOutputBytes, RESPONSE_BUDGET.inlineOutputBytes) : undefined,
+        });
+        // Compact localJob keeps legacy fields without nesting full job/repo state.
+        const localJob = {
+          jobId: handoff.jobId ?? accepted.jobId,
+          status: handoff.status,
+          stdout: handoffOutput.stdout,
+          stderr: handoffOutput.stderr,
+          stdoutBytes: handoffOutput.stdoutBytes,
+          stderrBytes: handoffOutput.stderrBytes,
+          stdoutTruncated: handoffOutput.stdoutTruncated,
+          stderrTruncated: handoffOutput.stderrTruncated,
+          stdoutPath: handoff.stdoutPath,
+          stderrPath: handoff.stderrPath,
+          outputStatus: handoff.outputStatus,
+          nextLocalCommand: handoff.nextLocalCommand,
+        };
         return result({
           accepted: true,
           mode: 'durable',
           path: 'durable',
-          routing: {
+          routing: compactRoutingSummary({
             path: 'durable',
+            mode: 'durable',
             reasons: routingDecision.reasons.length > 0 ? routingDecision.reasons : ['policy_requires_durable'],
-            decision: routingDecision,
-          },
+          }),
           repoId: repository.repoId,
           checkoutId: repository.activeCheckoutId,
           jobId: accepted.jobId,
           status: handoff.status,
-          localJob: handoff,
-          next: handoff.nextLocalCommand ?? `Inspect Job ${accepted.jobId} with get_local_job.`,
+          ...handoffOutput,
+          localJob,
+          outputStatus: handoff.outputStatus,
+          next: handoff.nextLocalCommand ?? `Inspect Job ${accepted.jobId} with get_local_job or get_job.`,
         });
       }
       case 'repository_batch_execute': {

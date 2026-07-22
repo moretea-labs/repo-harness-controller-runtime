@@ -26,6 +26,7 @@ import {
 } from './task-status-resolver';
 import { tryAppendControllerWorklogEvent } from './worklog';
 import { completionEvidenceComplete, executionScopesConflict, taskExecutionPolicy, verificationEvidencePassed } from './execution-policy';
+import { resolveCompletionTargetBranch } from './completion-target';
 import { listControllerChecks } from './check-runner';
 import { normalizeCheckIds } from '../../runtime/control-plane/facade/check-normalization';
 
@@ -908,8 +909,13 @@ export function acceptVerifiedTask(repoRoot: string, issueIdValue: string, taskI
   if (task.status === 'done') return issue;
   if (task.status !== 'verified' || !task.verification) throw new Error(`task must have passed required verification before acceptance (current: ${task.status})`);
   const verification = task.verification;
-  if (!completionEvidenceComplete(verification)) {
-    throw new Error('task completion requires a complete delivery receipt or compatible legacy Run evidence');
+  if (!completionEvidenceComplete(verification, {
+    issueId: issue.id,
+    taskId: task.id,
+    runId: verification.runId,
+    targetBranch: resolveCompletionTargetBranch(repoRoot),
+  })) {
+    throw new Error('task completion requires a complete delivery receipt bound to this Task and integration target, or compatible legacy Run evidence');
   }
   const integration = verification.completionReceipt
     ? {

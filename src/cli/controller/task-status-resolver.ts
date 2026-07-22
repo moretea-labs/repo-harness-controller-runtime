@@ -144,9 +144,9 @@ export function resolveIssueLifecycleStatus(issue: ControllerIssue): IssueLifecy
   return "active";
 }
 
-function resolveVerificationStatus(task: ControllerTask): VerificationStatus {
+function resolveVerificationStatus(issue: ControllerIssue, task: ControllerTask): VerificationStatus {
   if (task.status === "changes_requested") return "changes_requested";
-  if (task.verification && task.status === "done" && !completionEvidenceComplete(task.verification)) return "pending";
+  if (task.verification && task.status === "done" && !completionEvidenceComplete(task.verification, { issueId: issue.id, taskId: task.id })) return "pending";
   if (task.verification && ["verified", "done"].includes(task.status)) return "passed";
   if (["review", "integrated", "verifying", "verified"].includes(task.status)) return "pending";
   return "not_started";
@@ -167,7 +167,7 @@ function baseState(
     activeRunStatus: evidence.currentActiveRun?.status,
     activeRunIds: evidence.activeRuns.map((run) => run.runId),
     historicalRunOutcomes: evidence.historicalOutcomes,
-    verificationStatus: resolveVerificationStatus(task),
+    verificationStatus: resolveVerificationStatus(issue, task),
     replacementTaskIds: [...(task.supersededBy ?? [])],
     multipleActiveRuns: evidence.multipleActiveRuns,
   };
@@ -235,7 +235,7 @@ export function resolveEffectiveTaskState(input: {
   }
 
   // Explicit Task terminal state always wins over Run evidence.
-  if (task.status === "done" && completionEvidenceComplete(task.verification)) return finalizeState(base, "done", "declared_done", true, false);
+  if (task.status === "done" && completionEvidenceComplete(task.verification, { issueId: issue.id, taskId: task.id })) return finalizeState(base, "done", "declared_done", true, false);
   if (task.status === "done") {
     // When verification names a Run, only that Run can classify its missing
     // closure evidence. A later unrelated Run must not rewrite the historical

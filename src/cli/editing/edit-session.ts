@@ -402,6 +402,41 @@ function assertCurrentHashes(repoRoot: string, session: EditSession): void {
   if (path) throw new Error(`edited file changed outside the session after revision ${latestOperations(session).get(path)?.revision ?? session.currentRevision}: ${path}`);
 }
 
+function markEditSessionSuperseded(repoRoot: string, session: EditSession, paths: string[], input: {
+  reviewer?: string;
+  note?: string;
+} = {}): EditSession {
+  session.status = 'superseded';
+  session.reviewer = input.reviewer?.trim() || session.reviewer || 'chatgpt-controller';
+  session.reviewNote = input.note?.trim() || session.reviewNote || 'Closed because newer workspace changes superseded this edit session.';
+  session.supersededAt = now();
+  session.supersededPaths = paths;
+  session.updatedAt = session.supersededAt;
+  writeSession(repoRoot, session);
+  tryAppendControllerWorklogEvent(repoRoot, {
+    category: 'edit',
+    action: 'edit_session_superseded',
+    summary: `${session.purpose}: superseded by newer changes in ${paths.length} file(s)`,
+    actor: session.reviewer,
+    issueId: session.issueId,
+    taskId: session.taskId,
+    editSessionId: session.sessionId,
+    details: { files: paths, note: session.reviewNote },
+  });
+  return session;
+}
+
+export function revalidateEditSessionOwnership(repoRoot: string, sessionId: string, input: {
+  reviewer?: string;
+  note?: string;
+} = {}): EditSession {
+  const session = getEditSession(repoRoot, sessionId);
+  if (['superseded', 'rolled_back'].includes(session.status)) return session;
+  const emptyOpenSession = session.status === 'open' && session.operations.length === 0;
+  const mismatches = emptyOpenSession ? [] : currentHashMismatches(repoRoot, session);
+  return mismatches.length > 0 ? markEditSessionSuperseded(repoRoot, session, mismatches, input) : session;
+}
+
 interface PatchItem {
   relativePath: string;
   before: string;
@@ -1086,9 +1121,10 @@ function restoreOperation(repoRoot: string, operation: EditSessionOperationRecor
 export function rollbackEditSession(repoRoot: string, sessionId: string, input: {
   toRevision?: number;
   savepoint?: string;
+  allowFinalized?: boolean;
 } = {}): EditSession {
   const session = getEditSession(repoRoot, sessionId);
-  if (session.status === 'open' && session.operations.length === 0) {
+  if ((session.status === 'open' || (session.status === 'finalized' && input.allowFinalized)) && session.operations.length === 0) {
     const at = now();
     session.status = 'rolled_back';
     session.rolledBackAt = at;
@@ -1105,7 +1141,7 @@ export function rollbackEditSession(repoRoot: string, sessionId: string, input: 
     });
     return session;
   }
-  if (['finalized', 'rolled_back', 'open'].includes(session.status)) {
+  if (['rolled_back', 'open'].includes(session.status) || (session.status === 'finalized' && !input.allowFinalized)) {
     throw new Error(`edit session cannot be rolled back from ${session.status}`);
   }
   assertCurrentHashes(repoRoot, session);
@@ -1157,27 +1193,8 @@ export function finalizeEditSession(repoRoot: string, sessionId: string, input: 
   if (!emptyOpenSession && !['dirty', 'checked', 'check_failed'].includes(session.status)) {
     throw new Error(`edit session cannot be finalized from ${session.status}`);
   }
-  const supersededPaths = emptyOpenSession ? [] : currentHashMismatches(repoRoot, session);
-  if (supersededPaths.length > 0) {
-    session.status = 'superseded';
-    session.reviewer = input.reviewer?.trim() || session.reviewer || 'chatgpt-controller';
-    session.reviewNote = input.note?.trim() || session.reviewNote || 'Closed because newer workspace changes superseded this edit session.';
-    session.supersededAt = now();
-    session.supersededPaths = supersededPaths;
-    session.updatedAt = session.supersededAt;
-    writeSession(repoRoot, session);
-    tryAppendControllerWorklogEvent(repoRoot, {
-      category: 'edit',
-      action: 'edit_session_superseded',
-      summary: `${session.purpose}: superseded by newer changes in ${supersededPaths.length} file(s)`,
-      actor: session.reviewer,
-      issueId: session.issueId,
-      taskId: session.taskId,
-      editSessionId: session.sessionId,
-      details: { files: supersededPaths, note: session.reviewNote },
-    });
-    return session;
-  }
+  const revalidated = revalidateEditSessionOwnership(repoRoot, session.sessionId, input);
+  if (revalidated.status === 'superseded') return revalidated;
   if (!emptyOpenSession && session.requestedChecks.length > 0) {
     const allRequestedPassed = session.requestedChecks.every((checkId) => session.checkResults.some((result) => result.checkId === checkId && result.ok));
     if (!allRequestedPassed) throw new Error('configured checks must pass before finalization');

@@ -4,6 +4,7 @@ import { getIssue, listIssues, projectIssueEffectiveView, updateTask } from './i
 import { completionEvidenceComplete, taskExecutionPolicy } from './execution-policy';
 import type { ControllerIssue, ControllerTask, TaskStatus } from './types';
 import { finishTaskRun, type FinishTaskRunResult } from './completion-orchestrator';
+import { resolveCompletionTargetBranch } from './completion-target';
 
 export type CompletionBacklogAction =
   | 'auto_finish'
@@ -123,7 +124,11 @@ function classifyTask(repoRoot: string, issue: ControllerIssue, task: Controller
   };
 
   if (task.status === 'done') {
-    if (!completionEvidenceComplete(task.verification)) {
+    if (!completionEvidenceComplete(task.verification, {
+      issueId: issue.id,
+      taskId: task.id,
+      targetBranch: resolveCompletionTargetBranch(repoRoot),
+    })) {
       return {
         ...base,
         action: 'system_blocked',

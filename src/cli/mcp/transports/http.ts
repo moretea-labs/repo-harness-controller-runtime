@@ -132,13 +132,20 @@ export function sendMcpSessionLookupError(res: Response, sessionId: string | und
 }
 
 export function mcpRequestError(error: unknown) {
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  // Never dump multi-megabyte JSON into transport error bodies.
+  const message = rawMessage.length > 800
+    ? `${rawMessage.slice(0, 797)}...`
+    : rawMessage;
+  const retryable = /(?:\b502\b|\b503\b|\b429\b|ECONNRESET|ETIMEDOUT|EAI_AGAIN|server_busy|session_capacity|gateway)/i.test(rawMessage);
   return {
-    status: 500 as const,
+    status: (retryable ? 503 : 500) as 500 | 503,
     body: {
       error: 'request_failed' as const,
-      code: 'MCP_REQUEST_FAILED' as const,
-      message: error instanceof Error ? error.message : String(error),
+      code: (retryable ? 'MCP_TRANSIENT_FAILURE' : 'MCP_REQUEST_FAILED') as 'MCP_TRANSIENT_FAILURE' | 'MCP_REQUEST_FAILED',
+      message,
       recoverable: true as const,
+      retryable,
       sessionPreserved: true as const,
       action: 'retry' as const,
     },

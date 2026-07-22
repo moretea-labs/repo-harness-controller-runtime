@@ -401,11 +401,21 @@ describe("repository MCP command tools", () => {
       }));
 
       expect(executed.accepted).toBe(true);
-      expect(executed.status).toBe("succeeded");
-      expect(executed.localJob.stdout).toContain("alpha");
-      expect(executed.localJob.stderr ?? "").toBe("");
-      expect(executed.localJob.stdoutPath).toBe(`.ai/harness/local-jobs/${executed.jobId}/stdout.log`);
-      expect(executed.localJob.nextLocalCommand).toContain(executed.jobId);
+      // Short readonly commands complete on Process Runtime Direct (no Durable Job).
+      // Durable handoff remains for mutations / forced durable paths.
+      if (executed.path === "process_direct" || executed.mode === "process_direct") {
+        expect(executed.ok).toBe(true);
+        expect(String(executed.stdout ?? "")).toContain("alpha");
+        expect(executed.jobId).toBeUndefined();
+        expect(executed.durableSideEffects?.executionJobCount ?? 0).toBe(0);
+        expect(Buffer.byteLength(JSON.stringify(executed), "utf8")).toBeLessThan(16 * 1024);
+      } else {
+        expect(executed.status).toBe("succeeded");
+        expect(executed.localJob.stdout).toContain("alpha");
+        expect(executed.localJob.stderr ?? "").toBe("");
+        expect(executed.localJob.stdoutPath).toBe(`.ai/harness/local-jobs/${executed.jobId}/stdout.log`);
+        expect(executed.localJob.nextLocalCommand).toContain(executed.jobId);
+      }
     } finally {
       await cleanupWorkspace([workspace, controllerHome, repoRoot]);
       rmSync(workspace, { recursive: true, force: true });

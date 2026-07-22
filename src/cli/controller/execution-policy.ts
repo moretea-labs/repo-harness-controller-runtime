@@ -1,4 +1,4 @@
-import type { CleanupEvidence, CompletionReceipt, ControllerTask, IntegrationEvidence, TaskAcceptanceOutcome, TaskAcceptanceResult, TaskRisk, TaskVerification } from './types';
+import type { CleanupEvidence, CompletionReceipt, CompletionResourceBlocker, ControllerTask, IntegrationEvidence, TaskAcceptanceOutcome, TaskAcceptanceResult, TaskRisk, TaskVerification } from './types';
 
 export type TaskExecutionClass =
   | 'read_only'
@@ -25,7 +25,24 @@ export interface TaskExecutionPolicy {
   destructiveSignals: string[];
 }
 
-export function completionReceiptComplete(receipt: CompletionReceipt | undefined): receipt is CompletionReceipt {
+export interface CompletionReceiptExpectation {
+  issueId?: string;
+  taskId?: string;
+  runId?: string;
+  editSessionId?: string;
+  targetBranch?: string;
+}
+
+function receiptSourceIdentityComplete(receipt: CompletionReceipt): boolean {
+  if (receipt.source === 'direct_edit') return Boolean(receipt.editSessionId?.trim()) && !receipt.runId;
+  if (receipt.source === 'isolated_agent_run' || receipt.source === 'workspace_run') return Boolean(receipt.runId?.trim());
+  return true;
+}
+
+export function completionReceiptComplete(
+  receipt: CompletionReceipt | undefined,
+  expected: CompletionReceiptExpectation = {},
+): receipt is CompletionReceipt {
   return Boolean(receipt
     && receipt.schemaVersion === 1
     && receipt.receiptId.trim()
@@ -33,16 +50,58 @@ export function completionReceiptComplete(receipt: CompletionReceipt | undefined
     && receipt.taskId.trim()
     && receipt.targetBranch.trim()
     && receipt.targetRevision.trim()
+    && receiptSourceIdentityComplete(receipt)
+    && (!expected.issueId || receipt.issueId === expected.issueId)
+    && (!expected.taskId || receipt.taskId === expected.taskId)
+    && (!expected.runId || receipt.runId === expected.runId)
+    && (!expected.editSessionId || receipt.editSessionId === expected.editSessionId)
+    && (!expected.targetBranch || receipt.targetBranch === expected.targetBranch)
     && receipt.delivery.status === 'integrated'
     && receipt.delivery.reachable
     && receipt.cleanup.status !== 'blocked'
+    && Array.isArray(receipt.cleanup.blockers)
     && receipt.cleanup.blockers.length === 0);
+}
+
+function cleanupBlocker(
+  code: CompletionResourceBlocker['code'],
+  message: string,
+  resourceKind: CompletionResourceBlocker['resourceKind'],
+  recordedAt: string,
+): CompletionResourceBlocker {
+  return { code, message, resourceKind, recordedAt };
+}
+
+export function cleanupEvidenceResourceBlockers(
+  cleanup: CleanupEvidence,
+  options: { includeRunTerminal?: boolean } = {},
+): CompletionResourceBlocker[] {
+  const recordedAt = cleanup.recordedAt || new Date().toISOString();
+  const blockers = [...(cleanup.resourceBlockers ?? [])];
+  const warningOnlyRetention = (cleanup.maintenanceWarnings?.length ?? 0) > 0 && blockers.length === 0;
+  const add = (entry: CompletionResourceBlocker): void => {
+    if (!blockers.some((candidate) => candidate.code === entry.code && candidate.resourceKind === entry.resourceKind)) blockers.push(entry);
+  };
+  if (!cleanup.worktreeRemovedOrNotCreated && !warningOnlyRetention) {
+    add(cleanupBlocker('unknown_resource_ownership', 'Worktree removal or absence was not proven.', 'worktree', recordedAt));
+  }
+  if (!cleanup.branchDeletedOrRetained && !warningOnlyRetention) {
+    add(cleanupBlocker('unknown_resource_ownership', 'Temporary branch deletion or retention was not proven.', 'branch', recordedAt));
+  }
+  if (!cleanup.leasesReleased) add(cleanupBlocker('lease_active', 'Task-owned leases are still active.', 'lease', recordedAt));
+  if (!cleanup.editSessionClosedOrNotCreated) add(cleanupBlocker('edit_session_open', 'Task-owned edit session is not closed.', 'edit_session', recordedAt));
+  if (!cleanup.noActiveProcess) add(cleanupBlocker('active_write_process', 'Task-owned execution process may still be active.', 'process', recordedAt));
+  if (!cleanup.noDirtyDiff) add(cleanupBlocker('dirty_owned_paths', 'Task-owned paths still have uncommitted changes.', 'workspace', recordedAt));
+  if (options.includeRunTerminal !== false && !cleanup.runTerminal) {
+    add(cleanupBlocker('run_not_terminal', 'Task-owned Run has not reached a terminal state.', 'process', recordedAt));
+  }
+  return blockers;
 }
 
 function cleanupEvidenceHasOnlyMaintenanceWarnings(cleanup: CleanupEvidence): boolean {
   return Boolean(
     (cleanup.maintenanceWarnings?.length ?? 0) > 0
-    && (cleanup.resourceBlockers?.length ?? 0) === 0
+    && cleanupEvidenceResourceBlockers(cleanup).length === 0
     && cleanup.leasesReleased
     && cleanup.runTerminal
     && cleanup.editSessionClosedOrNotCreated
@@ -53,21 +112,25 @@ function cleanupEvidenceHasOnlyMaintenanceWarnings(cleanup: CleanupEvidence): bo
 
 export function completionEvidenceComplete(
   verification: TaskVerification | undefined,
+  expected: CompletionReceiptExpectation = {},
 ): verification is TaskVerification & {
   integrationEvidence?: IntegrationEvidence;
   cleanupEvidence?: CleanupEvidence;
   completionReceipt?: CompletionReceipt;
 } {
-  if (completionReceiptComplete(verification?.completionReceipt)) return true;
+  const expectedReceipt = { ...expected, runId: expected.runId ?? verification?.runId };
+  if (completionReceiptComplete(verification?.completionReceipt, expectedReceipt)) return true;
   const runId = verification?.runId;
   const integration = verification?.integrationEvidence;
   const cleanup = verification?.cleanupEvidence;
   return Boolean(runId
+    && (!expected.runId || runId === expected.runId)
     && integration?.runId === runId
     && cleanup?.runId === runId
     && integration.reachable
     && integration.targetBranch.trim()
     && integration.targetRevision.trim()
+    && (!expected.targetBranch || integration.targetBranch === expected.targetBranch)
     && (cleanup.worktreeRemovedOrNotCreated || cleanupEvidenceHasOnlyMaintenanceWarnings(cleanup))
     && (cleanup.branchDeletedOrRetained || cleanupEvidenceHasOnlyMaintenanceWarnings(cleanup))
     && cleanup.leasesReleased

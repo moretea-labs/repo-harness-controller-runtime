@@ -254,7 +254,14 @@ function extractChangedFiles(job: ExecutionJob): string[] {
 function readableErrorMessage(job: ExecutionJob): string | undefined {
   const code = job.error?.code?.trim();
   const message = job.error?.message?.trim();
-  if (message) return bound(message);
+  // Never embed a full JSON response dump into errorMessage.
+  if (message) {
+    const trimmed = message.trim();
+    if ((trimmed.startsWith('{') || trimmed.startsWith('[')) && trimmed.length > 240) {
+      return bound(`${code || 'STRUCTURED_ERROR'}: see artifactRefs / get_artifact (message ${trimmed.length} chars suppressed)`);
+    }
+    return bound(message);
+  }
   if (code) return bound(code);
   if (job.outcome?.infrastructureError?.message) return bound(job.outcome.infrastructureError.message);
   if (job.status === 'failed') return '任务失败，但未提供详细错误信息。请查看证据或运行诊断。';
