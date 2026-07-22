@@ -342,7 +342,7 @@ describe("init command", () => {
         env: {
           ...process.env,
           HOME: home,
-          PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+          PATH: `${fakeBin}:${BASE_TEST_PATH}`,
         },
       });
 
@@ -535,7 +535,7 @@ describe("init command", () => {
         env: {
           ...process.env,
           HOME: home,
-          PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+          PATH: `${fakeBin}:${BASE_TEST_PATH}`,
           AGENTIC_DEV_CODEGRAPH_ALLOW_REPO_LOCAL: "0",
         },
       });
@@ -582,7 +582,7 @@ describe("init command", () => {
         env: {
           ...process.env,
           HOME: home,
-          PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+          PATH: `${fakeBin}:${BASE_TEST_PATH}`,
         },
       });
 
@@ -745,7 +745,7 @@ describe("init command", () => {
         env: {
           ...process.env,
           HOME: home,
-          PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+          PATH: `${fakeBin}:${BASE_TEST_PATH}`,
           AGENTIC_DEV_CODEGRAPH_ALLOW_REPO_LOCAL: "0",
         },
       });
