@@ -6,6 +6,7 @@ import { spawnSync } from "child_process";
 
 const ROOT = join(import.meta.dir, "..", "..");
 const SCRIPT = join(ROOT, "scripts/ensure-codegraph.sh");
+const BASE_TEST_PATH = process.env.PATH ?? "";
 
 function writeExecutable(filePath: string, content: string) {
   writeFileSync(filePath, content);
@@ -97,7 +98,7 @@ describe("ensure-codegraph", () => {
         env: {
           ...process.env,
           HOME: envRoot.home,
-          PATH: `${envRoot.fakeBin}:${process.env.PATH ?? ""}`,
+          PATH: `${envRoot.fakeBin}:${BASE_TEST_PATH}`,
           AGENTIC_DEV_CODEGRAPH_ALLOW_REPO_LOCAL: "0",
         },
       });
