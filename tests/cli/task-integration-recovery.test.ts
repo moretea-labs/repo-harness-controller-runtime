@@ -1,13 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 import { execFileSync } from 'child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { getAgentJob, markAgentJobIntegrated } from '../../src/cli/agent-jobs/job-manager';
 import { cleanupIntegratedWorktree } from '../../src/cli/agent-jobs/integration';
 import type { AgentJobMeta } from '../../src/cli/agent-jobs/types';
 import { finishTaskRun } from '../../src/cli/controller/completion-orchestrator';
-import { createIssue, updateTask } from '../../src/cli/controller/issue-store';
+import { createIssue, getIssue, updateTask } from '../../src/cli/controller/issue-store';
 
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf-8' });
@@ -147,6 +147,9 @@ describe('task integration recovery', () => {
     expect(meta.integrationEvidence?.reachable).toBe(true);
     expect(meta.cleanupEvidence?.editSessionClosedOrNotCreated).toBe(true);
     expect(meta.cleanupEvidence?.worktreeRemovedOrNotCreated).toBe(true);
+    const completedTask = getIssue(repoRoot, prepared.issueId).tasks[0]!;
+    expect(completedTask.verification?.completionReceipt?.source).toBe('isolated_agent_run');
+    expect(completedTask.verification?.completionReceipt?.targetRevision).toBe(result.commitSha);
 
     const repeated = finishTaskRun(repoRoot, { runId, commit: true });
     expect(repeated.action).toBe('already_done');
@@ -168,6 +171,58 @@ describe('task integration recovery', () => {
     expect(result.commitSha).toBe(committedBeforeEvidence);
     expect(git(repoRoot, ['rev-parse', 'HEAD']).trim()).toBe(committedBeforeEvidence);
     expect(getAgentJob(repoRoot, runId).integrationEvidence?.targetRevision).toBe(committedBeforeEvidence);
+  }));
+
+  test('marks delivered work done with a maintenance warning when verified worktree removal fails', () => withRepo((repoRoot, registerCleanupPath) => {
+    const issue = createIssue(repoRoot, {
+      title: 'Cleanup warning delivery',
+      tasks: [{
+        title: 'Deliver despite cleanup failure',
+        objective: 'Complete after integration even if resource cleanup needs maintenance.',
+        allowedPaths: ['src/**'],
+        risk: 'medium',
+      }],
+      allowDuplicate: true,
+    });
+    const runId = 'RUN-cleanup-warning';
+    updateTask(repoRoot, issue.id, 'T1', { status: 'review', runId });
+    const branch = `controller/${runId.toLowerCase()}`;
+    const baseRevision = git(repoRoot, ['rev-parse', 'HEAD']).trim();
+    const parent = mkdtempSync(join(tmpdir(), 'repo-harness-cleanup-parent-'));
+    const worktree = join(parent, 'wt');
+    registerCleanupPath(parent);
+    git(repoRoot, ['worktree', 'add', '-b', branch, worktree, 'HEAD']);
+    seedRun(repoRoot, {
+      runId,
+      issueId: issue.id,
+      taskId: 'T1',
+      repoRoot: realpathSync(repoRoot),
+      worktree: realpathSync(worktree),
+      branch,
+      baseRevision,
+      executionMode: 'worktree',
+      status: 'succeeded',
+    });
+    writeFileSync(join(worktree, 'src/example.ts'), 'export const value = 8;\n');
+    chmodSync(parent, 0o500);
+    try {
+      const result = finishTaskRun(repoRoot, { runId, commit: true });
+
+      expect(result.action).toBe('finished');
+      expect(result.taskStatus).toBe('done');
+      expect(result.maintenanceWarnings?.[0]?.code).toBe('worktree_cleanup_failed');
+      expect(existsSync(worktree)).toBe(true);
+      expect(branchExists(repoRoot, branch)).toBe(true);
+      const completedTask = getIssue(repoRoot, issue.id).tasks[0]!;
+      expect(completedTask.status).toBe('done');
+      expect(completedTask.verification?.completionReceipt?.source).toBe('isolated_agent_run');
+      expect(completedTask.verification?.completionReceipt?.cleanup.status).toBe('maintenance_warning');
+      const meta = getAgentJob(repoRoot, runId);
+      expect(meta.closureState).toBe('completed');
+      expect(meta.cleanupEvidence?.maintenanceWarnings?.[0]?.code).toBe('worktree_cleanup_failed');
+    } finally {
+      chmodSync(parent, 0o700);
+    }
   }));
 
   test('preserves an integrated worktree when it contains changes outside durable integration evidence', () => withRepo((repoRoot, registerCleanupPath) => {

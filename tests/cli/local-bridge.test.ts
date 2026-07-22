@@ -1063,7 +1063,7 @@ printf '%s\n' '{"type":"turn.completed"}'
       body: "{}",
     }).then((response) => response.json());
     expect(accepted.error).toBeTruthy();
-    expect(accepted.error).toContain("integration evidence");
+    expect(accepted.error).toContain("complete delivery receipt");
     expect(getIssue(root, issue.id).tasks[0]?.status).toBe("verified");
 
     const configured = await fetch(new URL("/api/github/plugin", handle.url), {

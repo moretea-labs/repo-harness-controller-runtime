@@ -1,8 +1,10 @@
 import { getAgentJob } from '../agent-jobs/job-manager';
+import { spawnSync } from 'child_process';
+import { createHash } from 'crypto';
 import { inspectCompletionBacklog, type CompletionBacklogItem } from './completion-backlog';
 import { getIssue, listIssues, updateIssue, updateTask } from './issue-store';
-import { completionEvidenceComplete } from './execution-policy';
-import type { ControllerIssue, ControllerTask } from './types';
+import { completionEvidenceComplete, taskExecutionPolicy, verificationEvidencePassed } from './execution-policy';
+import type { CompletionReceipt, ControllerIssue, ControllerTask } from './types';
 
 export type StuckStateKind =
   | 'finishable_run'
@@ -26,7 +28,7 @@ export interface StuckStateFinding {
   taskStatus: string;
   runId?: string;
   runStatus?: string;
-  safeAutomaticAction: 'finish' | 'reopen' | 'note_only' | 'none';
+  safeAutomaticAction: 'finish' | 'reconcile' | 'reopen' | 'note_only' | 'none';
   reason: string;
 }
 
@@ -151,6 +153,69 @@ function latestRunIsActive(repoRoot: string, task: ControllerTask): boolean {
   return false;
 }
 
+function gitText(repoRoot: string, args: string[]): string {
+  const result = spawnSync('git', args, { cwd: repoRoot, encoding: 'utf-8' });
+  if (result.status !== 0 || result.error) return '';
+  return typeof result.stdout === 'string' ? result.stdout.trim() : '';
+}
+
+function currentTarget(repoRoot: string): { branch: string; revision: string } | undefined {
+  const branch = gitText(repoRoot, ['branch', '--show-current']);
+  const revision = gitText(repoRoot, ['rev-parse', 'HEAD']);
+  return branch && revision ? { branch, revision } : undefined;
+}
+
+function reachable(repoRoot: string, revision: string, branch: string): boolean {
+  const result = spawnSync('git', ['merge-base', '--is-ancestor', revision, branch], { cwd: repoRoot, encoding: 'utf-8' });
+  return result.status === 0 && !result.error;
+}
+
+function historicalCompletionReceipt(repoRoot: string, issue: ControllerIssue, task: ControllerTask): CompletionReceipt | undefined {
+  if (!task.verification) return undefined;
+  const policy = taskExecutionPolicy(task);
+  const outcome = verificationEvidencePassed(task, task.verification, policy);
+  if (!outcome.ok) return undefined;
+  const target = currentTarget(repoRoot);
+  if (!target) return undefined;
+  const targetRevision = task.verification.integratedRevision
+    ?? task.verification.integrationEvidence?.targetRevision;
+  if (!targetRevision) return undefined;
+  const targetBranch = task.verification.integrationEvidence?.targetBranch ?? target.branch;
+  if (!reachable(repoRoot, targetRevision, targetBranch)) return undefined;
+  const recordedAt = new Date().toISOString();
+  return {
+    schemaVersion: 1,
+    receiptId: `REC-reconciled-${createHash('sha256').update(`${issue.id}\0${task.id}\0${targetRevision}`).digest('hex').slice(0, 16)}`,
+    source: task.verification.runId ? 'workspace_run' : 'remote_no_change_execution',
+    issueId: issue.id,
+    taskId: task.id,
+    runId: task.verification.runId,
+    editSessionId: task.verification.integrationEvidence?.editSessionId,
+    targetBranch,
+    targetRevision,
+    sourceRevision: task.verification.integrationEvidence?.sourceRevision ?? targetRevision,
+    baseRevision: task.verification.integrationEvidence?.baseRevision,
+    changedPaths: [],
+    delivery: {
+      kind: task.verification.integrationEvidence?.kind ?? 'commit',
+      status: 'integrated',
+      strategy: task.verification.integrationEvidence?.strategy === 'no_change' ? 'no_change'
+        : task.verification.integrationEvidence?.strategy === 'already_integrated' ? 'already_integrated'
+          : task.verification.runId ? 'already_integrated' : 'remote',
+      reachable: true,
+      recordedAt,
+    },
+    cleanup: {
+      status: 'complete',
+      warnings: [],
+      blockers: [],
+      recordedAt,
+    },
+    verifiedAt: task.verification.verifiedAt,
+    recordedAt,
+  };
+}
+
 function extraFindings(repoRoot: string, issue: ControllerIssue, task: ControllerTask): StuckStateFinding[] {
   const findings: StuckStateFinding[] = [];
   if (['ready_to_integrate', 'integration_blocked', 'cleanup_pending', 'cleanup_blocked'].includes(task.status)) {
@@ -177,6 +242,7 @@ function extraFindings(repoRoot: string, issue: ControllerIssue, task: Controlle
   }
   if (task.status === 'done') {
     if (!completionEvidenceComplete(task.verification)) {
+      const safeReceipt = historicalCompletionReceipt(repoRoot, issue, task);
       let run;
       for (const runId of [...task.runIds].reverse()) {
         try { run = getAgentJob(repoRoot, runId); break; }
@@ -200,8 +266,10 @@ function extraFindings(repoRoot: string, issue: ControllerIssue, task: Controlle
         taskStatus: task.status,
         runId: run?.runId,
         runStatus: run?.status,
-        safeAutomaticAction: 'reopen',
-        reason: `Task is declared done without complete integration and cleanup evidence${closure ? `; latest Run closure is ${closure}` : ''}.`,
+        safeAutomaticAction: safeReceipt ? 'reconcile' : 'reopen',
+        reason: safeReceipt
+          ? `Task is declared done with passing verification and reachable target revision ${safeReceipt.targetRevision}, but lacks a completion receipt.`
+          : `Task is declared done without complete integration and cleanup evidence${closure ? `; latest Run closure is ${closure}` : ''}.`,
       });
     }
   }
@@ -247,7 +315,7 @@ export function inspectStuckControllerStates(repoRoot: string, options: { limit?
   if (counts.manual_review_required) recommendations.push(`${counts.manual_review_required} high-risk Run(s) require explicit user decision in Local Bridge or finish-run --decision.`);
   if (counts.retry_required) recommendations.push(`${counts.retry_required} failed/cancelled Run(s) should be retried or marked changes_requested with a reason.`);
   const falseTerminal = counts.false_completed + counts.pending_integration + counts.integration_blocked + counts.cleanup_pending + counts.cleanup_blocked;
-  if (falseTerminal) recommendations.push(`${falseTerminal} Task(s) require explicit integration or cleanup resolution; use migrate-stuck-states --apply only for entries still declared done.`);
+  if (falseTerminal) recommendations.push(`${falseTerminal} Task(s) require completion receipt reconciliation or explicit integration/cleanup resolution; use migrate-stuck-states --apply only for entries still declared done.`);
   if (counts.review_without_run || counts.running_without_active_run) recommendations.push('Use controller migrate-stuck-states --apply to annotate stale review/running states before retrying them.');
   return { scannedAt: new Date().toISOString(), counts, findings: trimmed, recommendations };
 }
@@ -256,7 +324,7 @@ export function applyStuckStateMigration(repoRoot: string, options: ApplyStuckSt
   const report = inspectStuckControllerStates(repoRoot, { limit: options.limit ?? 100 });
   const dryRun = options.dryRun !== false;
   const reviewer = options.reviewer?.trim() || 'repo-harness-stuck-state-migration';
-  const selected = report.findings.filter((finding) => ['note_only', 'reopen'].includes(finding.safeAutomaticAction));
+  const selected = report.findings.filter((finding) => ['note_only', 'reconcile', 'reopen'].includes(finding.safeAutomaticAction));
   let applied = 0;
   let skipped = 0;
   const errors: Array<{ issueId: string; taskId: string; error: string }> = [];
@@ -265,7 +333,17 @@ export function applyStuckStateMigration(repoRoot: string, options: ApplyStuckSt
       try {
         getIssue(repoRoot, finding.issueId);
         const note = `${reviewer}: ${finding.kind} inspected. ${finding.reason}`;
-        if (finding.safeAutomaticAction === 'reopen') {
+        if (finding.safeAutomaticAction === 'reconcile') {
+          const currentIssue = getIssue(repoRoot, finding.issueId);
+          const task = currentIssue.tasks.find((entry) => entry.id === finding.taskId);
+          if (!task) throw new Error(`task not found: ${finding.issueId}/${finding.taskId}`);
+          const receipt = historicalCompletionReceipt(repoRoot, currentIssue, task);
+          if (!receipt || !task.verification) throw new Error('completion receipt reconciliation is no longer safe');
+          updateTask(repoRoot, finding.issueId, finding.taskId, {
+            verification: { ...task.verification, completionReceipt: receipt },
+            note: `${note} Reconciled completion receipt ${receipt.receiptId}.`,
+          });
+        } else if (finding.safeAutomaticAction === 'reopen') {
           const currentIssue = getIssue(repoRoot, finding.issueId);
           if (currentIssue.status === 'done') updateIssue(repoRoot, finding.issueId, { status: 'in_progress' });
           const status = finding.kind === 'cleanup_blocked' ? 'cleanup_blocked'

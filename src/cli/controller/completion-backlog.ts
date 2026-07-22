@@ -127,7 +127,7 @@ function classifyTask(repoRoot: string, issue: ControllerIssue, task: Controller
       return {
         ...base,
         action: 'system_blocked',
-        reason: 'Task is declared done without complete integration and cleanup evidence; run the stuck-state migration before any new execution.',
+        reason: 'Task is declared done without a complete delivery receipt; run the stuck-state migration before any new execution.',
         canAutoFinish: false,
         suggestedDecision: 'inspect',
       };

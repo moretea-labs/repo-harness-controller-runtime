@@ -697,7 +697,7 @@ Use \`get_task_run\`, \`get_task_run_events\`, and \`get_task_run_log\`; inspect
 
 ## Direct edit
 
-For a small fix, use \`begin_edit_session\`, \`apply_patch\`, \`get_git_diff\`, \`run_check\`, then \`finalize_edit_session\` or \`rollback_edit_session\`.
+For a small Task-bound fix, use \`begin_edit_session\`, \`apply_patch\`, \`get_git_diff\`, then \`finish_edit_session\`; use \`finalize_edit_session\` or \`rollback_edit_session\` only for session-level closeout.
 
 ## Legacy planning chain
 

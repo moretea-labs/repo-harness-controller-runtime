@@ -253,6 +253,18 @@ function summarizeVerification(verification?: TaskVerification) {
     })),
     acceptanceResultCount: verification.acceptanceResults.length,
     commandEvidenceCount: verification.commandEvidence?.length ?? 0,
+    completionReceipt: verification.completionReceipt
+      ? {
+          receiptId: verification.completionReceipt.receiptId,
+          source: verification.completionReceipt.source,
+          targetBranch: verification.completionReceipt.targetBranch,
+          targetRevision: verification.completionReceipt.targetRevision,
+          changedPathCount: verification.completionReceipt.changedPaths.length,
+          cleanupStatus: verification.completionReceipt.cleanup.status,
+          maintenanceWarningCount: verification.completionReceipt.cleanup.warnings.length,
+          blockerCount: verification.completionReceipt.cleanup.blockers.length,
+        }
+      : undefined,
     reviewer: verification.reviewer,
     verifiedAt: verification.verifiedAt,
     autoCompleted: verification.autoCompleted,
@@ -897,9 +909,15 @@ export function acceptVerifiedTask(repoRoot: string, issueIdValue: string, taskI
   if (task.status !== 'verified' || !task.verification) throw new Error(`task must have passed required verification before acceptance (current: ${task.status})`);
   const verification = task.verification;
   if (!completionEvidenceComplete(verification)) {
-    throw new Error('task completion requires matching integration evidence and cleanup evidence for one Run');
+    throw new Error('task completion requires a complete delivery receipt or compatible legacy Run evidence');
   }
-  const integration = verification.integrationEvidence;
+  const integration = verification.completionReceipt
+    ? {
+        targetBranch: verification.completionReceipt.targetBranch,
+        targetRevision: verification.completionReceipt.targetRevision,
+      }
+    : verification.integrationEvidence;
+  if (!integration) throw new Error('task completion is missing target revision evidence');
   const reachable = spawnSync(
     'git',
     ['merge-base', '--is-ancestor', integration.targetRevision, integration.targetBranch],
@@ -962,7 +980,7 @@ export function recordTaskVerification(
     status: verificationStatus,
     verification,
     note: successful
-      ? `Required verification evidence passed; integration and cleanup evidence remain required before completion.${invalidCheckNote}`
+      ? `Required verification evidence passed; a completion receipt remains required before completion.${invalidCheckNote}`
       : outcome.status === 'failed'
         ? `Verification evidence failed: ${outcome.reasons.join(' ')}${invalidCheckNote}`
         : `Verification evidence is incomplete: ${outcome.reasons.join(' ')}${invalidCheckNote}`,

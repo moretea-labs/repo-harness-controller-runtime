@@ -2129,6 +2129,11 @@ export function markAgentJobReviewedCompletion(
   const completedAt = new Date().toISOString();
   const integrationEvidence = options.integrationEvidence ?? meta.integrationEvidence;
   const cleanupEvidence = options.cleanupEvidence ?? meta.cleanupEvidence;
+  const cleanupHasMaintenanceWarnings = Boolean(
+    cleanupEvidence
+    && (cleanupEvidence.maintenanceWarnings?.length ?? 0) > 0
+    && (cleanupEvidence.resourceBlockers?.length ?? 0) === 0,
+  );
   const integrationMissing = [
     integrationEvidence?.runId === runId ? undefined : "runId",
     integrationEvidence?.reachable ? undefined : "reachable",
@@ -2136,12 +2141,13 @@ export function markAgentJobReviewedCompletion(
   ].filter((field): field is string => Boolean(field));
   const cleanupMissing = [
     cleanupEvidence?.runId === runId ? undefined : "runId",
-    cleanupEvidence?.worktreeRemovedOrNotCreated ? undefined : "worktreeRemovedOrNotCreated",
-    cleanupEvidence?.branchDeletedOrRetained ? undefined : "branchDeletedOrRetained",
+    cleanupEvidence?.worktreeRemovedOrNotCreated || cleanupHasMaintenanceWarnings ? undefined : "worktreeRemovedOrNotCreated",
+    cleanupEvidence?.branchDeletedOrRetained || cleanupHasMaintenanceWarnings ? undefined : "branchDeletedOrRetained",
     cleanupEvidence?.leasesReleased ? undefined : "leasesReleased",
     cleanupEvidence?.editSessionClosedOrNotCreated ? undefined : "editSessionClosedOrNotCreated",
     cleanupEvidence?.noActiveProcess ? undefined : "noActiveProcess",
     cleanupEvidence?.noDirtyDiff ? undefined : "noDirtyDiff",
+    (cleanupEvidence?.resourceBlockers?.length ?? 0) === 0 ? undefined : "resourceBlockers",
   ].filter((field): field is string => Boolean(field));
   const formatMissing = (label: string, fields: string[]): string => {
     const shown = fields.slice(0, 5);

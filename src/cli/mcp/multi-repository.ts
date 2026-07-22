@@ -45,6 +45,7 @@ const EXECUTION_STORAGE_TOOLS = new Set([
   'create_edit_savepoint',
   'rollback_edit_session',
   'finalize_edit_session',
+  'finish_edit_session',
   'verify_edit_session',
   'submit_local_bridge_job',
   'execute_local_bridge_job',

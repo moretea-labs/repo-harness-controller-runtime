@@ -329,6 +329,7 @@ describe("MCP controller profile", () => {
       expect(names).toContain("get_edit_session_diff");
       expect(names).toContain("verify_edit_session");
       expect(names).toContain("finalize_edit_session");
+      expect(names).toContain("finish_edit_session");
       expect(names).toContain("run_check");
       expect(names).toContain("publish_issue_to_github");
       expect(names).toContain("launch_issue");
@@ -371,6 +372,7 @@ describe("MCP controller profile", () => {
       expect(capabilities.value.capabilities.controllerContextAggregation).toBe(true);
       expect(capabilities.value.capabilities.persistedCheckReuse).toBe(true);
       expect(capabilities.value.expectedTools).toContain("verify_edit_session");
+      expect(capabilities.value.expectedTools).toContain("finish_edit_session");
       const source = await jsonTool(
         { ...ctx, policy: overridden },
         "read_repository_file",
@@ -699,9 +701,9 @@ describe("MCP controller profile", () => {
       expect(coreNames).toEqual(expect.arrayContaining(["rh_status", "rh_inbox", "rh_context", "rh_work", "repository_list"]));
       expect(coreNames).toContain("create_campaign");
       expect(coreNames.length).toBeGreaterThanOrEqual(100);
-      // Keep the public Controller surface within the declared 132-tool schema budget
-      // (128 baseline + process_get/wait/logs/cancel).
-      expect(coreNames.length).toBe(132);
+      // Keep the public Controller surface within the declared 133-tool schema budget
+      // (128 baseline + process_get/wait/logs/cancel + finish_edit_session).
+      expect(coreNames.length).toBe(133);
       expect(coreNames).toEqual(expect.arrayContaining([
         'process_get',
         'process_wait',
@@ -1128,7 +1130,7 @@ describe("MCP controller profile", () => {
         task_id: "T1",
       });
       expect(accepted.raw.isError).toBe(true);
-      expect(accepted.value.error.message).toContain("integration evidence");
+      expect(accepted.value.error.message).toContain("complete delivery receipt");
       const unchanged = await jsonTool(ctx, "get_issue", {
         issue_id: created.value.id,
       });

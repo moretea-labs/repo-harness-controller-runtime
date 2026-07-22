@@ -64,6 +64,7 @@ export function assessWorkMode(input: WorkModeAssessmentInput): WorkModeAssessme
     'get_edit_session_diff',
     'verify_edit_session',
     'finalize_edit_session',
+    'finish_edit_session',
   ];
 
   const protectedPathTouched = paths.some((path) => PROTECTED_PATH.test(path));
@@ -182,6 +183,7 @@ export function assessWorkMode(input: WorkModeAssessmentInput): WorkModeAssessme
         'get_edit_session_diff',
         'verify_edit_session',
         'finalize_edit_session',
+        'finish_edit_session',
       ],
       issueRequired: false,
       campaignRequired: false,

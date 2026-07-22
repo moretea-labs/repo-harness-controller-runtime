@@ -60,6 +60,7 @@ export const STABLE_CONTROLLER_TOOL_NAMES = [
   'verify_edit_session',
   'rollback_edit_session',
   'finalize_edit_session',
+  'finish_edit_session',
 
   // Commands, checks, and local Git lifecycle.
   'repository_command_preview',

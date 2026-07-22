@@ -1,4 +1,4 @@
-import type { CleanupEvidence, ControllerTask, IntegrationEvidence, TaskAcceptanceOutcome, TaskAcceptanceResult, TaskRisk, TaskVerification } from './types';
+import type { CleanupEvidence, CompletionReceipt, ControllerTask, IntegrationEvidence, TaskAcceptanceOutcome, TaskAcceptanceResult, TaskRisk, TaskVerification } from './types';
 
 export type TaskExecutionClass =
   | 'read_only'
@@ -25,13 +25,40 @@ export interface TaskExecutionPolicy {
   destructiveSignals: string[];
 }
 
+export function completionReceiptComplete(receipt: CompletionReceipt | undefined): receipt is CompletionReceipt {
+  return Boolean(receipt
+    && receipt.schemaVersion === 1
+    && receipt.receiptId.trim()
+    && receipt.issueId.trim()
+    && receipt.taskId.trim()
+    && receipt.targetBranch.trim()
+    && receipt.targetRevision.trim()
+    && receipt.delivery.status === 'integrated'
+    && receipt.delivery.reachable
+    && receipt.cleanup.status !== 'blocked'
+    && receipt.cleanup.blockers.length === 0);
+}
+
+function cleanupEvidenceHasOnlyMaintenanceWarnings(cleanup: CleanupEvidence): boolean {
+  return Boolean(
+    (cleanup.maintenanceWarnings?.length ?? 0) > 0
+    && (cleanup.resourceBlockers?.length ?? 0) === 0
+    && cleanup.leasesReleased
+    && cleanup.runTerminal
+    && cleanup.editSessionClosedOrNotCreated
+    && cleanup.noActiveProcess
+    && cleanup.noDirtyDiff,
+  );
+}
+
 export function completionEvidenceComplete(
   verification: TaskVerification | undefined,
 ): verification is TaskVerification & {
-  runId: string;
-  integrationEvidence: IntegrationEvidence;
-  cleanupEvidence: CleanupEvidence;
+  integrationEvidence?: IntegrationEvidence;
+  cleanupEvidence?: CleanupEvidence;
+  completionReceipt?: CompletionReceipt;
 } {
+  if (completionReceiptComplete(verification?.completionReceipt)) return true;
   const runId = verification?.runId;
   const integration = verification?.integrationEvidence;
   const cleanup = verification?.cleanupEvidence;
@@ -41,8 +68,8 @@ export function completionEvidenceComplete(
     && integration.reachable
     && integration.targetBranch.trim()
     && integration.targetRevision.trim()
-    && cleanup.worktreeRemovedOrNotCreated
-    && cleanup.branchDeletedOrRetained
+    && (cleanup.worktreeRemovedOrNotCreated || cleanupEvidenceHasOnlyMaintenanceWarnings(cleanup))
+    && (cleanup.branchDeletedOrRetained || cleanupEvidenceHasOnlyMaintenanceWarnings(cleanup))
     && cleanup.leasesReleased
     && cleanup.runTerminal
     && cleanup.editSessionClosedOrNotCreated

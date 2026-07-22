@@ -28,7 +28,7 @@ function now(): string { return new Date().toISOString(); }
 function operationJobType(operation: string): ExecutionJobType {
   operation = normalizeCampaignOperationName(operation);
   if (AGENT_OPERATIONS.has(operation)) return 'dispatch-task';
-  if (operation === 'run_check' || operation === 'verify_edit_session') return 'check';
+  if (operation === 'run_check' || operation === 'verify_edit_session' || operation === 'finish_edit_session') return 'check';
   if (operation === 'integrate_task_run') return 'integration';
   if (operation === 'repository_command_execute') return 'repository-command';
   return 'mcp-tool';

@@ -83,7 +83,7 @@ import { exportControllerWorklog, parseWorklogCategory } from "../controller/wor
 import { inspectProjectGovernance, reconcileProjectGovernance } from "../controller/governance";
 import { assessWorkMode } from "../controller/work-mode";
 import { taskExecutionPolicy, taskWriteScopesConflict } from "../controller/execution-policy";
-import { finishTaskRun } from "../controller/completion-orchestrator";
+import { finishEditSession, finishTaskRun } from "../controller/completion-orchestrator";
 import { buildControllerTaskLedgerProjection } from "../controller/task-ledger";
 import { buildControllerContextPack } from "../controller/context-pack";
 import { loadControllerProjectState, saveControllerProjectState } from "../controller/project-state";
@@ -2847,6 +2847,25 @@ export function buildMcpToolDefinitions(
         },
         annotations: write,
       },
+      {
+        name: "finish_edit_session",
+        description:
+          "Verify, finalize, selected-path commit, receipt, and complete the Task bound to one Direct Edit session.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            session_id: { type: "string" },
+            decision: { type: "string", enum: ["auto", "approve_and_finish", "request_changes", "discard"] },
+            reviewer: { type: "string" },
+            note: { type: "string" },
+            check_ids: { type: "array", items: { type: "string" } },
+            commit: { type: "boolean" },
+          },
+          required: ["session_id"],
+          additionalProperties: false,
+        },
+        annotations: write,
+      },
     );
   }
 
@@ -4961,6 +4980,29 @@ export async function callMcpTool(
           `.ai/harness/edit-sessions/${session.sessionId}`,
         );
         return textResult(session);
+      }
+      case "finish_edit_session": {
+        if (ctx.policy.profile !== "controller")
+          return errorResult(
+            "TOOL_DISABLED",
+            "finish_edit_session requires the controller profile",
+          );
+        const sessionId = String(args.session_id ?? "").trim();
+        if (!sessionId) return errorResult("SESSION_ID_REQUIRED", "finish_edit_session requires session_id");
+        const decision = typeof args.decision === "string" ? args.decision : "auto";
+        if (!["auto", "approve_and_finish", "request_changes", "discard"].includes(decision)) {
+          return errorResult("INVALID_DECISION", "decision must be auto, approve_and_finish, request_changes, or discard");
+        }
+        const finished = finishEditSession(ctx.repoRoot, {
+          sessionId,
+          decision: decision as "auto" | "approve_and_finish" | "request_changes" | "discard",
+          reviewer: typeof args.reviewer === "string" ? args.reviewer : undefined,
+          note: typeof args.note === "string" ? args.note : undefined,
+          checkIds: Array.isArray(args.check_ids) ? args.check_ids.map(String) : undefined,
+          commit: typeof args.commit === "boolean" ? args.commit : undefined,
+        });
+        audit(ctx, name, ["blocked", "needs_decision"].includes(finished.action) ? "failed" : "ok", args, `tasks/issues/${finished.issueId}`, finished.reason);
+        return textResult(finished);
       }
       case "list_workflow_files": {
         const files = workflowFileCandidates(ctx.repoRoot)

@@ -77,7 +77,7 @@ const REPO_STATE_TOOLS = new Set([
   'goal_handoff_packet_create', 'executor_dispatch', 'repair_continue',
 ]);
 const CHECK_TOOLS = new Set(['run_check', 'verify_edit_session']);
-const INTEGRATION_TOOLS = new Set(['integrate_task_run']);
+const INTEGRATION_TOOLS = new Set(['integrate_task_run', 'finish_edit_session']);
 const REMOTE_TOOLS = new Set(['publish_issue_to_github', 'refresh_github_issue', 'close_github_issue', 'configure_github_plugin']);
 const AGENT_TOOLS = new Set(['dispatch_task', 'launch_issue', 'dispatch_ready_tasks', 'retry_task_run', 'quick_agent_session']);
 const WORKSPACE_WRITE_TOOLS = new Set([
@@ -127,8 +127,14 @@ export function claimsForMcpOperation(name: string, args: Record<string, unknown
     if (!checkId) return [claimWorkspaceRead(checkoutId), claimBuildCacheWrite(repoId)];
     return claimsForCheck(checkId, undefined, repoId, checkoutId);
   }
-  // verify_edit_session may run multiple checks — keep exclusive to avoid parallel mutate+verify races.
+  // verify/finish edit may run multiple checks — keep exclusive to avoid parallel mutate+verify races.
   if (name === 'verify_edit_session') return [claimHeavyCheck(repoId)];
+  if (name === 'finish_edit_session') return [
+    claimHeavyCheck(repoId),
+    { resourceKey: `integration:${repoId}`, mode: 'exclusive' },
+    { resourceKey: `workspace:${checkoutId ?? 'active'}`, mode: 'write' },
+    { resourceKey: `git-refs:${repoId}`, mode: 'exclusive' },
+  ];
   if (CHECK_TOOLS.has(name)) return claimsForCheck(String(args.check_id ?? name), undefined, repoId, checkoutId);
   if (INTEGRATION_TOOLS.has(name)) return [
     { resourceKey: `integration:${repoId}`, mode: 'exclusive' },

@@ -4,6 +4,7 @@ const OPERATION_ALIASES = new Map<string, string>([
   ['retry_run', 'retry_task_run'],
   ['integrate_run', 'integrate_task_run'],
   ['verify_edit', 'verify_edit_session'],
+  ['finish_edit', 'finish_edit_session'],
   ['repository_command', 'repository_command_execute'],
   ['command_execute', 'repository_command_execute'],
   ['quick_agent_run', 'quick_agent_session'],

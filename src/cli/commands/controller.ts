@@ -5,7 +5,7 @@ import { getAgentJob, getAgentJobEvents, getAgentJobLog, listAgentJobs } from '.
 import { archiveIssue, getIssue, inspectIssueReadiness, projectBoard, restoreIssue } from '../controller/issue-store';
 import { taskWriteScopesConflict } from '../controller/execution-policy';
 import { getControllerTimeline, getProjectProgress } from '../controller/progress';
-import { finishTaskRun, type TaskReviewDecision } from '../controller/completion-orchestrator';
+import { finishEditSession, finishTaskRun, type TaskReviewDecision } from '../controller/completion-orchestrator';
 import { applyCompletionDecision, completionDecisionQueues, finishCompletionBacklog, inspectCompletionBacklog, type CompletionBacklogReport, type CompletionDecisionAction } from '../controller/completion-backlog';
 import { exportControllerWorklog, parseWorklogCategory } from '../controller/worklog';
 import { inspectProjectGovernance, reconcileProjectGovernance } from '../controller/governance';
@@ -252,6 +252,31 @@ export function buildControllerCommand(): Command {
     .option('--note <text>', 'Final note')
     .option('--json', 'Output JSON')
     .action((sessionId: string, opts: { repo?: string; reviewer?: string; note?: string; json?: boolean }) => output(finalizeEditSession(repoRoot(opts.repo), sessionId, { reviewer: opts.reviewer, note: opts.note }), opts.json === true));
+
+  command.command('finish-edit')
+    .description('Verify, finalize, commit, receipt, and complete one direct-edit Task session')
+    .argument('<session-id>', 'Edit session ID')
+    .option('--repo <path>', 'Repository root')
+    .option('--decision <decision>', 'auto, approve_and_finish, request_changes, or discard', 'auto')
+    .option('--reviewer <name>', 'Reviewer identity')
+    .option('--note <text>', 'Review note')
+    .option('--check <id...>', 'Additional named checks')
+    .option('--no-commit', 'Do not create the required selected-path Git commit after successful finish')
+    .option('--json', 'Output JSON')
+    .action((sessionId: string, opts: { repo?: string; decision?: string; reviewer?: string; note?: string; check?: string[]; commit?: boolean; json?: boolean }) => {
+      const decision = String(opts.decision ?? 'auto').replace(/-/g, '_') as TaskReviewDecision;
+      if (!['auto', 'approve_and_finish', 'request_changes', 'discard'].includes(decision)) {
+        throw new Error('decision must be auto, approve_and_finish, request_changes, or discard');
+      }
+      output(finishEditSession(repoRoot(opts.repo), {
+        sessionId,
+        decision,
+        reviewer: opts.reviewer,
+        note: opts.note,
+        checkIds: opts.check,
+        commit: opts.commit !== false,
+      }), opts.json === true);
+    });
 
   command.command('rollback-edit')
     .description('Rollback a non-finalized direct edit')

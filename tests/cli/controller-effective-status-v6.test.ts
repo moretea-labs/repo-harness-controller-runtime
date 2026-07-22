@@ -141,6 +141,46 @@ describe("Controller v6 effective Task state", () => {
     }
   });
 
+  test("done remains terminal with a Direct Edit completion receipt and no Run", () => {
+    const value = task("done", {
+      verification: {
+        reviewer: "test",
+        verifiedAt: "2026-06-21T00:00:00.000Z",
+        checkResults: [],
+        acceptanceResults: [],
+        completionReceipt: {
+          schemaVersion: 1,
+          receiptId: "REC-direct-edit-test",
+          source: "direct_edit",
+          issueId: "ISS-1",
+          taskId: "T1",
+          editSessionId: "EDIT-1",
+          targetBranch: "main",
+          targetRevision: "abc123",
+          changedPaths: ["src/example.ts"],
+          delivery: {
+            kind: "commit",
+            status: "integrated",
+            strategy: "edit_session_commit",
+            reachable: true,
+            recordedAt: "2026-06-21T00:00:00.000Z",
+          },
+          cleanup: {
+            status: "complete",
+            warnings: [],
+            blockers: [],
+            recordedAt: "2026-06-21T00:00:00.000Z",
+          },
+          recordedAt: "2026-06-21T00:00:00.000Z",
+          verifiedAt: "2026-06-21T00:00:00.000Z",
+        },
+      },
+    });
+    const state = resolveEffectiveTaskState({ issue: issue(value), task: value });
+    expect(state.effectiveStatus).toBe("done");
+    expect(state.terminal).toBe(true);
+  });
+
   test("legacy done without completion evidence is reopened as integration blocked", () => {
     const value = task("done");
     const state = resolveEffectiveTaskState({ issue: issue(value), task: value });

@@ -138,7 +138,7 @@ import { taskExecutionPolicy, taskWriteScopesConflict } from "../controller/exec
 import { scheduleControllerServiceRestart } from "../controller/restart-coordinator";
 import { continueTaskAfterSuccessfulRun } from "../controller/execution-completion";
 import { applyCompletionDecision, completionDecisionQueues, finishCompletionBacklog, inspectCompletionBacklog } from "../controller/completion-backlog";
-import { finishTaskRun } from "../controller/completion-orchestrator";
+import { finishEditSession, finishTaskRun } from "../controller/completion-orchestrator";
 import { prepareCodexContinuation } from "../controller/codex-continuation";
 import { applyStuckStateMigration, inspectStuckControllerStates } from "../controller/stuck-state-migration";
 import { getMcpPolicy } from "../mcp/policy";
@@ -2867,6 +2867,23 @@ export async function startLocalBridgeServer(
         reviewer: queryString(request.body?.reviewer) ?? "local-controller-human",
         note: queryString(request.body?.note),
       }));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error) });
+    }
+  });
+  app.post("/api/edit-sessions/:sessionId/finish", (request, response) => {
+    try {
+      const repoRoot = requestRepositoryRoot(request, options, controllerHome);
+      const result = finishEditSession(repoRoot, {
+        sessionId: request.params.sessionId,
+        decision: String(request.body?.decision ?? "auto").replace(/-/g, "_") as never,
+        reviewer: queryString(request.body?.reviewer) ?? "local-bridge-direct-edit",
+        note: queryString(request.body?.note),
+        checkIds: Array.isArray(request.body?.checkIds) ? request.body.checkIds.map(String) : undefined,
+        commit: request.body?.commit !== false,
+      });
+      localSnapshotCache.delete(repoRoot);
+      response.json(result);
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }

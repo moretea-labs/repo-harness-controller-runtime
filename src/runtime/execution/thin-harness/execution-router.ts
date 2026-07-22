@@ -71,6 +71,7 @@ const FAST_OPERATIONS = new Set<string>([
 const DURABLE_OPERATIONS = new Set<string>([
   'run_check',
   'verify_edit_session',
+  'finish_edit_session',
   'dispatch_task',
   'launch_issue',
   'quick_agent_session',

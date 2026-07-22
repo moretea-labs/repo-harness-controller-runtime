@@ -3,9 +3,9 @@ import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import type { AgentJobMeta } from '../agent-jobs/types';
 import { runControllerCheck } from './check-runner';
-import { taskExecutionPolicy } from './execution-policy';
+import { completionEvidenceComplete, taskExecutionPolicy } from './execution-policy';
 import { acceptVerifiedTask, getIssue, recordTaskVerification, updateTask } from './issue-store';
-import type { TaskCommandEvidence, TaskVerification } from './types';
+import type { CompletionReceipt, CompletionReceiptSource, TaskCommandEvidence, TaskVerification } from './types';
 
 export interface CompletionContinuationResult {
   continued: boolean;
@@ -19,6 +19,51 @@ function diffHash(repoRoot: string, run: AgentJobMeta): string | undefined {
   const absolute = join(repoRoot, run.diffArtifactPath);
   if (!existsSync(absolute)) return undefined;
   return createHash('sha256').update(readFileSync(absolute)).digest('hex');
+}
+
+function receiptSourceForRun(run: AgentJobMeta): CompletionReceiptSource {
+  if (run.provider !== 'local' || run.changeOutcome === 'no_change') return 'remote_no_change_execution';
+  return run.executionMode === 'worktree' ? 'isolated_agent_run' : 'workspace_run';
+}
+
+function completionReceiptForRun(run: AgentJobMeta): CompletionReceipt | undefined {
+  const integration = run.integrationEvidence;
+  const cleanup = run.cleanupEvidence;
+  if (!integration || !cleanup) return undefined;
+  const blockers = cleanup.resourceBlockers ?? [];
+  const warnings = cleanup.maintenanceWarnings ?? [];
+  const recordedAt = new Date().toISOString();
+  return {
+    schemaVersion: 1,
+    receiptId: `REC-${receiptSourceForRun(run)}-${createHash('sha256').update(`${run.runId}\0${integration.targetRevision}`).digest('hex').slice(0, 16)}`,
+    source: receiptSourceForRun(run),
+    issueId: run.issueId,
+    taskId: run.taskId,
+    runId: run.runId,
+    editSessionId: integration.editSessionId,
+    targetBranch: integration.targetBranch,
+    targetRevision: integration.targetRevision,
+    sourceRevision: integration.sourceRevision,
+    baseRevision: integration.baseRevision,
+    changedPaths: run.changedFiles ?? [],
+    delivery: {
+      kind: integration.kind,
+      status: integration.reachable ? 'integrated' : 'blocked',
+      strategy: integration.strategy === 'no_change' ? 'no_change'
+        : integration.strategy === 'already_integrated' ? 'already_integrated'
+          : run.provider !== 'local' ? 'remote' : 'edit_session_commit',
+      reachable: integration.reachable,
+      recordedAt: integration.recordedAt,
+    },
+    cleanup: {
+      status: blockers.length > 0 ? 'blocked' : warnings.length > 0 ? 'maintenance_warning' : 'complete',
+      warnings,
+      blockers,
+      recordedAt: cleanup.recordedAt,
+    },
+    verifiedAt: recordedAt,
+    recordedAt,
+  };
 }
 
 /**
@@ -82,6 +127,7 @@ export function continueTaskAfterSuccessfulRun(
     commandEvidence,
     acceptanceResults,
     verifiedAt: new Date().toISOString(),
+    completionReceipt: completionReceiptForRun(run),
     integrationEvidence: run.integrationEvidence,
     cleanupEvidence: run.cleanupEvidence,
   };
@@ -96,22 +142,12 @@ export function continueTaskAfterSuccessfulRun(
     return { continued: true, status, checkCount: checkResults.length };
   }
   if (status === 'verified' && policy.autoCompleteAfterSuccessfulRun && !policy.requiresHumanAcceptance) {
-    const closureComplete = run.closureState === 'completed'
-      && run.integrationEvidence?.runId === run.runId
-      && run.cleanupEvidence?.runId === run.runId
-      && Boolean(run.integrationEvidence.reachable)
-      && Boolean(run.cleanupEvidence.worktreeRemovedOrNotCreated
-        && run.cleanupEvidence.branchDeletedOrRetained
-        && run.cleanupEvidence.leasesReleased
-        && run.cleanupEvidence.runTerminal
-        && run.cleanupEvidence.editSessionClosedOrNotCreated
-        && run.cleanupEvidence.noActiveProcess
-        && run.cleanupEvidence.noDirtyDiff);
+    const closureComplete = run.closureState === 'completed' && completionEvidenceComplete(verification);
     if (!closureComplete) {
       return {
         continued: true,
         status,
-        reason: `Verification passed, but Run closure is ${run.closureState ?? 'none'}; integration and cleanup evidence are still required.`,
+        reason: `Verification passed, but Run closure is ${run.closureState ?? 'none'}; a completion receipt is still required.`,
         checkCount: checkResults.length,
       };
     }

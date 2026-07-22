@@ -110,7 +110,7 @@ const INTERACTIVE_SYNC_WRITE_TOOLS = new Set([
   'finish_task_run',
   'cancel_task_run',
 ]);
-const P0_TOOLS = new Set(['run_check', 'verify_edit_session', 'repository_command_execute']);
+const P0_TOOLS = new Set(['run_check', 'verify_edit_session', 'finish_edit_session', 'repository_command_execute']);
 const P2_TOOLS = new Set(['write_prd', 'write_sprint', 'write_plan', 'publish_issue_to_github']);
 
 function wantsAsyncExecution(args: Record<string, unknown>): boolean {
@@ -295,7 +295,7 @@ export function shouldCreateDurableJob(
 
 function jobType(name: string): ExecutionJobType {
   if (name === 'run_check') return 'check';
-  if (name === 'verify_edit_session') return 'verify-edit';
+  if (name === 'verify_edit_session' || name === 'finish_edit_session') return 'verify-edit';
   if (name === 'repository_command_execute' || name === 'repository_command_preview') return 'repository-command';
   if (name === 'integrate_task_run') return 'integration';
   if (['dispatch_task', 'launch_issue', 'dispatch_ready_tasks', 'retry_task_run'].includes(name)) return 'dispatch-task';
