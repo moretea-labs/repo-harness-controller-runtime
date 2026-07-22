@@ -293,28 +293,86 @@ function compactProcessCommandPayload(input: {
   stderr?: string;
   durableSideEffects?: Record<string, number>;
   next: string;
+  /** summary (default) omits nested process / routing dumps; detail restores diagnostics. */
+  detailLevel?: 'summary' | 'detail';
   includeFullProcess?: boolean;
 }): Record<string, unknown> {
   const output = compactCommandOutput(input.stdout, input.stderr, { ok: input.ok === true });
+  const detail = input.detailLevel === 'detail' || input.includeFullProcess === true;
+  const effects = input.durableSideEffects ?? {
+    executionJobCount: 0,
+    localJobCount: 0,
+    workerSpawnCount: 0,
+    projectionUpdateCount: 0,
+  };
+  const reason = input.reasons[0] ?? 'readonly_fast_path';
+
+  // Default success/failure: one authoritative stdout/stderr pair, no nested process dump.
+  if (!detail) {
+    const ok = input.ok === true;
+    const payload: Record<string, unknown> = {
+      ok,
+      accepted: ok,
+      mode: input.mode,
+      path: input.path,
+      route: input.route ?? input.path,
+      reason,
+      repoId: input.repoId,
+      ...(input.checkoutId ? { checkoutId: input.checkoutId } : {}),
+      ...(input.processId ? { processId: input.processId } : {}),
+      exitCode: input.exitCode ?? (ok ? 0 : 1),
+      stdout: output.stdout ?? '',
+      stderr: output.stderr ?? '',
+      ...(output.stdoutTruncated ? { stdoutTruncated: true, stdoutBytes: output.stdoutBytes } : {}),
+      ...(output.stderrTruncated ? { stderrTruncated: true, stderrBytes: output.stderrBytes } : {}),
+    };
+    if (!ok) {
+      payload.error = {
+        code: 'PROCESS_COMMAND_FAILED',
+        message: (output.stderr || 'process_direct command failed').slice(0, 800),
+        retryable: false,
+        exitCode: input.exitCode ?? 1,
+      };
+    }
+    // Zero side-effects are implicit for process_direct summary; only surface non-zero.
+    const nonZeroEffects = Object.fromEntries(
+      Object.entries(effects).filter(([, value]) => typeof value === 'number' && value > 0),
+    );
+    if (Object.keys(nonZeroEffects).length > 0) payload.durableSideEffects = nonZeroEffects;
+    return payload;
+  }
+
   return {
     accepted: input.accepted ?? true,
     mode: input.mode,
     path: input.path,
     route: input.route ?? input.path,
-    routing: compactRoutingSummary({ path: input.path, mode: input.mode, reasons: input.reasons }),
+    routing: {
+      ...compactRoutingSummary({ path: input.path, mode: input.mode, reasons: input.reasons }),
+      ...(input.decision ? { decision: input.decision } : {}),
+    },
+    reason,
     repoId: input.repoId,
     ...(input.checkoutId ? { checkoutId: input.checkoutId } : {}),
     ...(input.processId ? { processId: input.processId } : {}),
     ok: input.ok,
     exitCode: input.exitCode,
     ...output,
-    durableSideEffects: input.durableSideEffects ?? {
-      executionJobCount: 0,
-      localJobCount: 0,
-      workerSpawnCount: 0,
-      projectionUpdateCount: 0,
-    },
+    // Nested process only in detail mode; never duplicate stdout/stderr there.
+    ...(input.process && typeof input.process === 'object'
+      ? {
+        process: (() => {
+          const record = { ...(input.process as Record<string, unknown>) };
+          delete record.stdout;
+          delete record.stderr;
+          delete record.durableSideEffects;
+          return record;
+        })(),
+      }
+      : {}),
+    durableSideEffects: effects,
     next: input.next,
+    detailLevel: 'detail',
   };
 }
 
@@ -681,22 +739,31 @@ export async function callRepositoryTool(
               });
               if (processResult.route === 'process_direct') {
                 const handle = processResult.process;
-                return result(compactProcessCommandPayload({
-                  accepted: true,
+                const detailLevel = args.detail_level === 'detail' || args.detail === true
+                  ? 'detail'
+                  : 'summary';
+                const payload = compactProcessCommandPayload({
+                  accepted: processResult.ok === true,
                   mode: processResult.route,
                   path: processResult.route,
                   route: processResult.route,
                   reasons: [processResult.reason ?? routeClass.reason, ...routingDecision.reasons],
+                  decision: detailLevel === 'detail' ? routingDecision : undefined,
                   repoId: repository.repoId,
                   checkoutId: repository.activeCheckoutId,
                   processId: handle?.processId,
+                  process: detailLevel === 'detail' ? handle : undefined,
                   ok: processResult.ok,
                   exitCode: processResult.exitCode,
                   stdout: processResult.stdout,
                   stderr: processResult.stderr,
                   durableSideEffects: processResult.durableSideEffects,
                   next: 'Process Runtime Direct completed without Local Job / ExecutionJob / Worker.',
-                }));
+                  detailLevel,
+                });
+                return processResult.ok === true
+                  ? result(payload)
+                  : { ...result(payload), isError: true };
               }
             }
           } catch (error) {

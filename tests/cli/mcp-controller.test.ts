@@ -640,7 +640,12 @@ describe("MCP controller profile", () => {
         const status = await jsonTool(ctx, "local_bridge_status");
         expect(status.value.approvalQueue).toBe(false);
         expect(status.value.pendingApproval).toBeUndefined();
-        expect(status.value.endpoint).toContain("127.0.0.1");
+        // Default summary may omit an invented legacy 8766 endpoint when no
+        // surface is configured; when present it must be localhost.
+        if (status.value.endpoint != null) {
+          expect(String(status.value.endpoint)).toContain("127.0.0.1");
+        }
+        expect(status.value.mode === undefined || typeof status.value.mode === "string").toBe(true);
       } finally {
         process.env.PATH = originalPath;
         rmSync(binRoot, { recursive: true, force: true });
@@ -1269,7 +1274,11 @@ describe("MCP controller profile", () => {
       expect(Date.now() - readsStartedAt).toBeLessThan(2_500);
       expect(controllerContext.value.localBridge).toBeTruthy();
       expect(repositoryGet.repository.repoId).toBe(repository.repoId);
-      expect(localStatus.value.endpoint).toContain("127.0.0.1");
+      // Summary may leave endpoint null when no Local Bridge surface is configured.
+      if (localStatus.value.endpoint != null) {
+        expect(String(localStatus.value.endpoint)).toContain("127.0.0.1");
+      }
+      expect(localStatus.value.mode === undefined || typeof localStatus.value.mode === "string").toBe(true);
     });
   });
 

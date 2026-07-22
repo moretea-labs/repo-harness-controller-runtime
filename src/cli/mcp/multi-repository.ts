@@ -208,6 +208,24 @@ function withRepositoryEnvelope(
   const envelope = compactEnvelopePayload(repository, runtimeStorage);
   if (result.structuredContent && typeof result.structuredContent === 'object' && !Array.isArray(result.structuredContent)) {
     const existing = result.structuredContent as Record<string, unknown>;
+    const omitHeavyEnvelope = existing.omitEnvelope === true
+      || existing.mode === 'process_direct'
+      || existing.route === 'process_direct'
+      || (existing.detailLevel === 'summary' && existing.endpointConfigured !== undefined)
+      || existing.localBridgeSummary === true;
+    // Compact fast-path / status summaries: keep repoId only (no repository/runtimeStorage dump).
+    if (omitHeavyEnvelope) {
+      const { omitEnvelope: _omit, localBridgeSummary: _summary, ...rest } = existing;
+      const structuredContent: Record<string, unknown> = {
+        ...rest,
+        repoId: typeof rest.repoId === 'string' ? rest.repoId : envelope.repoId,
+      };
+      return {
+        ...result,
+        structuredContent,
+        content: [{ type: 'text', text: JSON.stringify(structuredContent) }],
+      };
+    }
     // Avoid re-nesting full repository/runtimeStorage when the tool already
     // returned a compact or authoritative payload for those keys.
     const structuredContent: Record<string, unknown> = {

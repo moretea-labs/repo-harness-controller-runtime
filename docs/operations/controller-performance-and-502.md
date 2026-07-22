@@ -55,6 +55,67 @@ Call `GET /ready` separately. A 503 from `/ready` with `/health` still returning
 
 The dashboard uses one shared state poller regardless of browser-tab count. Snapshot requests are reused for a short window, and historical Agent Jobs/Edit Sessions are limited before their JSON files are parsed. If the UI remains slow, inspect exceptionally large Issue files or unbounded event logs rather than deleting workflow state.
 
+## Compact Status and Fast-Path Responses
+
+Default MCP tool responses stay compact so clients avoid nested
+controller / repository / runtime dumps:
+
+| Surface | Default budget | Detail |
+| --- | --- | --- |
+| `repository_command_execute` `process_direct` success | &lt; 8 KB | one `stdout`/`stderr` pair; no nested `process` dump |
+| `process_direct` failure | &lt; 16 KB | error code, retryable, exitCode, bounded stderr, processId |
+| `local_bridge_status` summary | &lt; 16 KB | mode, endpoint, health, job counts; no runtimeStorage/bindings |
+| `get_job` summary | &lt; 16 KB | pass `detail_level=full` for full job |
+| Artifact ref | &lt; 4 KB | use `get_artifact` for body |
+| `rh_status` summary | &lt; 32 KB | pass `detail_level=detail` for expanded |
+
+Pass `detail_level=detail` (or `detail=true`) when full routing, process
+metadata, recentJobs, or owner evidence is required.
+
+### Local Bridge ports (8766 / 8776)
+
+Do not assume `8776` is always correct:
+
+- Root template default Local Controller port is **8766**.
+- Blue/green inactive slot offsets by **+10**, so a green inactive slot
+  often serves Local Controller on **8776**.
+- Authoritative endpoint comes from controller-home / slot-local
+  `mcp.local.json` and `runtime-state` (`localController.endpoint` /
+  `port`), not from hardcoding.
+
+Status model fields:
+
+- `mode`: `standalone` | `embedded` | `disabled` | `remote` | `unknown`
+- `processRunning`, `endpointConfigured`, `endpointReachable`
+- `expectedSurface`, `requiredForReadiness`
+
+Rules:
+
+- `mode=embedded` does not invent a legacy standalone `8766` probe target.
+- `mode=disabled` with `requiredForReadiness=false` does not emit
+  misleading `LOCAL_BRIDGE_ENDPOINT_UNAVAILABLE` as a readiness blocker.
+- Standalone required endpoints still fail closed when unreachable.
+- Historical `recentJobs` failures are operational stats, not current
+  active readiness blockers.
+
+### Completion target defaultBranch cache
+
+`resolveCompletionTargetBranch` caches registry `defaultBranch` using:
+
+1. **Registry mtime** — any change to `repositories.json` invalidates
+   immediately.
+2. **30 second TTL** — when mtime is unchanged, a change that is not
+   reflected in the registry file may take up to 30 seconds to become
+   visible.
+
+Documented operator expectation:
+
+> registry mtime 变化时立即失效；未检测到 mtime 变化时，defaultBranch 变更最多存在 30 秒可见延迟。
+
+Different repository roots never share a cache entry. When the registry
+is unavailable, Git discovery (`origin/HEAD`, `main`/`master`, current
+branch) is used.
+
 ## Safe Cleanup
 
 Safe source-distribution exclusions:

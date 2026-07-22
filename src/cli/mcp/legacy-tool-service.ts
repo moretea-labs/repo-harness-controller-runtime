@@ -152,6 +152,8 @@ import type {
 } from "../chatgpt-browser/types";
 import { hashMcpInput, tryWriteMcpAuditEntry } from "./audit";
 import { loadMcpRuntimeState } from "./auth";
+import { resolveLocalBridgeSurface, summarizeRecentJobs } from "../../runtime/shared/local-bridge-surface";
+import { resolveRepoPreferredControllerHome } from "../repositories/controller-home";
 import { normalizeMcpRelativePath, resolveMcpPath } from "./paths";
 import { currentGitBranch, isRepoHarnessAdopted } from "./repo";
 import { repositoryToolNames } from "./repository-tools";
@@ -1613,8 +1615,22 @@ export function buildMcpToolDefinitions(
       {
         name: "local_bridge_status",
         description:
-          "Return the localhost-only visual controller endpoint, execution state, and recent local bridge Jobs.",
-        inputSchema: EMPTY_SCHEMA,
+          "Return Local Bridge / Local Controller status. Default is a compact summary (mode, endpoint, health, job counts). Pass detail_level=detail for full recentJobs, reconciliation, and owner evidence.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            detail_level: {
+              type: "string",
+              enum: ["summary", "detail"],
+              description: "Defaults to summary. Use detail for full job lists and diagnostics.",
+            },
+            detail: {
+              type: "boolean",
+              description: "Legacy alias for detail_level=detail.",
+            },
+          },
+          additionalProperties: false,
+        },
         annotations: readOnly,
       },
       {
@@ -3195,18 +3211,63 @@ export async function callMcpTool(
             "TOOL_DISABLED",
             "local_bridge_status requires the controller profile",
           );
-        const runtime = loadMcpRuntimeState(ctx.repoRoot);
+        const detailLevel = args.detail_level === "detail" || args.detail === true
+          ? "detail"
+          : "summary";
+        const controllerHome = resolveRepoPreferredControllerHome(ctx.repoRoot);
+        const surface = resolveLocalBridgeSurface({
+          controllerHome,
+          repoRoot: ctx.repoRoot,
+          allowProcessScan: detailLevel === "detail",
+        });
+        const jobs = listLocalBridgeJobs(ctx.repoRoot, detailLevel === "detail" ? 12 : 20);
+        const { activeJobCount, recentJobSummary } = summarizeRecentJobs(jobs);
+        // Prefer authoritative surface; never invent a legacy 8766 endpoint.
+        const endpoint = surface.endpoint ?? null;
+        const running = surface.enabled
+          && (surface.processRunning === true
+            || (surface.endpointConfigured && surface.mode === "embedded"));
+        if (detailLevel === "summary") {
+          const payload = {
+            detailLevel: "summary",
+            repoId: ctx.repoId,
+            running,
+            ready: surface.enabled ? (surface.processRunning !== false) : true,
+            health: surface.enabled
+              ? (surface.processRunning === true || surface.mode === "embedded" ? "ready" : "warning")
+              : "disabled",
+            mode: surface.mode,
+            endpoint,
+            endpointConfigured: surface.endpointConfigured,
+            endpointReachable: null as boolean | null,
+            processRunning: surface.processRunning ?? null,
+            expectedSurface: surface.expectedSurface,
+            requiredForReadiness: surface.requiredForReadiness,
+            warnings: surface.error && surface.requiredForReadiness
+              ? [{ code: "LOCAL_BRIDGE_ERROR", message: surface.error.slice(0, 300) }]
+              : [],
+            activeJobCount,
+            recentJobSummary,
+            statusSource: surface.source,
+            nonBlocking: !surface.requiredForReadiness,
+            approvalQueue: false,
+          };
+          audit(ctx, name, "ok", args);
+          return textResult(payload);
+        }
         const reconciliation = reconcileLocalBridgeJobs(ctx.repoRoot);
-        const jobs = listLocalBridgeJobs(ctx.repoRoot, 12);
         const payload = {
-          endpoint:
-            runtime?.localController?.endpoint ?? "http://127.0.0.1:8766/",
-          running: runtime?.localController?.running ?? false,
-          error: runtime?.localController?.error,
-          counts: jobs.reduce<Record<string, number>>((counts, job) => {
-            counts[job.status] = (counts[job.status] ?? 0) + 1;
-            return counts;
-          }, {}),
+          detailLevel: "detail",
+          endpoint,
+          endpointConfigured: surface.endpointConfigured,
+          running,
+          error: surface.error,
+          mode: surface.mode,
+          requiredForReadiness: surface.requiredForReadiness,
+          statusSource: surface.source,
+          counts: recentJobSummary,
+          activeJobCount,
+          recentJobSummary,
           approvalQueue: false,
           reconciliation,
           recentJobs: jobs.map((job) => ({
@@ -3224,6 +3285,7 @@ export async function callMcpTool(
             deadlineAt: job.deadlineAt,
             error: job.error?.slice(0, 300),
           })),
+          nonBlocking: !surface.requiredForReadiness,
           fallback:
             "Open the localhost Local Controller to launch work or inspect execution when a ChatGPT write action is unavailable.",
         };
@@ -3353,8 +3415,13 @@ export async function callMcpTool(
             updatedAt: result.updatedAt,
           },
           localController:
-            loadMcpRuntimeState(ctx.repoRoot)?.localController?.endpoint ??
-            "http://127.0.0.1:8766/",
+            resolveLocalBridgeSurface({
+              controllerHome: resolveRepoPreferredControllerHome(ctx.repoRoot),
+              repoRoot: ctx.repoRoot,
+              allowProcessScan: false,
+            }).endpoint
+            ?? loadMcpRuntimeState(ctx.repoRoot)?.localController?.endpoint
+            ?? null,
           next: result.runId
             ? `Inspect Run ${result.runId}.`
             : "Inspect the Job result.",
@@ -3681,8 +3748,13 @@ export async function callMcpTool(
         return textResult({
           job: result,
           localController:
-            loadMcpRuntimeState(ctx.repoRoot)?.localController?.endpoint ??
-            "http://127.0.0.1:8766/",
+            resolveLocalBridgeSurface({
+              controllerHome: resolveRepoPreferredControllerHome(ctx.repoRoot),
+              repoRoot: ctx.repoRoot,
+              allowProcessScan: false,
+            }).endpoint
+            ?? loadMcpRuntimeState(ctx.repoRoot)?.localController?.endpoint
+            ?? null,
           next: `Inspect Job ${result.jobId} with get_local_job.`,
         });
       }

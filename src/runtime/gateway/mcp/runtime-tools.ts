@@ -81,6 +81,7 @@ import { loadMcpRuntimeState } from '../../../cli/mcp/auth';
 import { isExpectedLocalControllerHealth } from '../../../cli/mcp/keepalive';
 import { readActiveSlotAuthority } from '../../../cli/controller/runtime-slots';
 import { redactMcpText } from '../../../cli/mcp/redaction';
+import { resolveLocalBridgeSurface, summarizeRecentJobs } from '../../shared/local-bridge-surface';
 import { controllerPluginRepository, executeAssistantPluginReadDirect, getAssistantPluginManifest, isDirectPluginReadAction, listAssistantPluginManifests, submitAssistantPluginAction } from '../../plugins/store';
 import {
   listWebTargets,
@@ -2413,22 +2414,31 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
       }
       case 'local_bridge_status': {
         const repository = selected(ctx, args);
-        const runtime = loadMcpRuntimeState(repository.canonicalRoot);
-        const inferredLocalBridge = inferLocalControllerProcess(repository.canonicalRoot);
-        const mode = runtime?.localController?.mode ?? (inferredLocalBridge ? 'standalone' : 'unknown');
-        const capabilityEnabled = mode !== 'disabled';
-        const capabilityRequired = capabilityEnabled && Boolean(runtime?.localController || inferredLocalBridge);
-        const endpoint = runtime?.localController?.endpoint ?? inferredLocalBridge?.endpoint ?? 'http://127.0.0.1:8766/';
-        const liveHealth = await probeLocalControllerHealth(endpoint);
-        const endpointReachable = liveHealth !== null;
-        const expectedSurface = isExpectedLocalControllerHealth(liveHealth, {
+        const detailLevel = args.detail_level === 'detail' || args.detail === true ? 'detail' : 'summary';
+        const surface = resolveLocalBridgeSurface({
+          controllerHome: ctx.controllerHome,
           repoRoot: repository.canonicalRoot,
-          generation: runtime?.generation,
+          // Process scan is expensive; only for detail or missing runtime state.
+          allowProcessScan: detailLevel === 'detail',
         });
+        const runtime = loadMcpRuntimeState(repository.canonicalRoot);
+        const endpoint = surface.endpoint;
+        const shouldProbe = surface.enabled
+          && surface.endpointConfigured
+          && Boolean(endpoint)
+          && surface.mode !== 'disabled';
+        const liveHealth = shouldProbe ? await probeLocalControllerHealth(endpoint) : null;
+        const endpointReachable = liveHealth !== null;
+        const expectedSurface = shouldProbe
+          ? isExpectedLocalControllerHealth(liveHealth, {
+            repoRoot: repository.canonicalRoot,
+            generation: surface.generation ?? runtime?.generation,
+          })
+          : false;
         const expectedActiveSlot = readActiveSlotAuthority(ctx.controllerHome).activeSlot;
         const observedSlot = liveHealth?.slot === 'blue' || liveHealth?.slot === 'green' ? liveHealth.slot : undefined;
         const activeSlot = observedSlot ? observedSlot === expectedActiveSlot : undefined;
-        const processAlive = runtime?.localController?.running ?? inferredLocalBridge?.running;
+        const processAlive = surface.processRunning;
         const projectionSnapshot = readRepositoryProjectionSnapshot(ctx.controllerHome, repository.repoId);
         const daemon = readControllerDaemonStatus(ctx.controllerHome);
         const scheduler = readSchedulerHealthSnapshot(ctx.controllerHome);
@@ -2454,19 +2464,22 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           },
           projection: projectionObservation(projectionSnapshot),
           localBridge: {
-            enabled: capabilityEnabled,
-            requiredForReadiness: capabilityRequired,
-            mode,
+            enabled: surface.enabled,
+            requiredForReadiness: surface.requiredForReadiness,
+            mode: surface.mode,
             endpoint,
-            endpointReachable,
-            expectedSurface,
+            // When endpoint is not configured (disabled/unknown), treat as non-issue.
+            endpointReachable: shouldProbe ? endpointReachable : true,
+            expectedSurface: shouldProbe ? expectedSurface : true,
             activeSlot,
-            generationMatches: runtime?.generation
-              ? liveHealth?.generation === runtime.generation
-              : undefined,
+            generationMatches: surface.generation && liveHealth?.generation
+              ? liveHealth.generation === surface.generation
+              : (runtime?.generation && liveHealth?.generation
+                ? liveHealth.generation === runtime.generation
+                : undefined),
             processAlive,
-            runtimeStateFresh: runtime?.localController !== undefined,
-            error: runtime?.localController?.error,
+            runtimeStateFresh: surface.source === 'service-runtime' || surface.source === 'repo-runtime',
+            error: surface.error,
           },
           runtimeStorage: {
             readable: true,
@@ -2474,53 +2487,88 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             warnings: runtimeStorage.warnings,
           },
         });
-        const jobs = listLocalBridgeJobSnapshots(repository.canonicalRoot, 12);
-        const active = jobs.filter((job) => ['approved', 'running', 'dispatched'].includes(job.status)).length;
+        const jobs = listLocalBridgeJobSnapshots(repository.canonicalRoot, detailLevel === 'detail' ? 12 : 20);
+        const { activeJobCount, recentJobSummary } = summarizeRecentJobs(jobs);
+        const running = surface.enabled
+          && health.components.localBridge.ready
+          && (!shouldProbe || (endpointReachable && expectedSurface));
+        // Historical job counts are operational stats, not current readiness blockers.
+        const bridgeWarnings = health.components.localBridge.warnings
+          .filter((warning) => warning.code !== 'LOCAL_BRIDGE_ENDPOINT_UNAVAILABLE'
+            || surface.requiredForReadiness
+            || shouldProbe)
+          .map((warning) => ({ code: warning.code, message: warning.message }));
+
+        if (detailLevel === 'summary') {
+          return result({
+            localBridgeSummary: true,
+            omitEnvelope: true,
+            detailLevel: 'summary',
+            repoId: repository.repoId,
+            running,
+            ready: health.components.localBridge.ready,
+            health: health.components.localBridge.state,
+            mode: surface.mode,
+            endpoint: endpoint ?? null,
+            endpointConfigured: surface.endpointConfigured,
+            endpointReachable: shouldProbe ? endpointReachable : null,
+            processRunning: processAlive ?? null,
+            expectedSurface: surface.expectedSurface,
+            requiredForReadiness: surface.requiredForReadiness,
+            warnings: bridgeWarnings,
+            activeJobCount,
+            recentJobSummary,
+            statusSource: surface.source,
+            nonBlocking: !surface.requiredForReadiness,
+          });
+        }
+
         return result({
-          endpoint,
-          running: health.components.localBridge.ready && endpointReachable && expectedSurface,
+          detailLevel: 'detail',
+          endpoint: endpoint ?? null,
+          endpointConfigured: surface.endpointConfigured,
+          running,
           capability: {
-            enabled: capabilityEnabled,
-            requiredForReadiness: capabilityRequired,
-            mode,
+            enabled: surface.enabled,
+            requiredForReadiness: surface.requiredForReadiness,
+            mode: surface.mode,
             health: health.components.localBridge.state,
             ready: health.components.localBridge.ready,
-            endpointReachable,
-            expectedSurface,
+            endpointReachable: shouldProbe ? endpointReachable : null,
+            expectedSurface: shouldProbe ? expectedSurface : null,
             activeSlot,
-            generationMatches: runtime?.generation
-              ? liveHealth?.generation === runtime.generation
+            generationMatches: surface.generation && liveHealth?.generation
+              ? liveHealth.generation === surface.generation
               : undefined,
             observedAt: new Date().toISOString(),
             owner: {
-              kind: mode === 'embedded' ? 'mcp-keepalive' : mode === 'remote' ? 'external' : mode === 'standalone' ? 'controller-service' : 'unknown',
-              ...(runtime?.localController?.pid ?? inferredLocalBridge?.pid ? { pid: runtime?.localController?.pid ?? inferredLocalBridge?.pid } : {}),
-              ...(runtime?.generation ? { generation: runtime.generation } : {}),
+              kind: surface.ownerKind,
+              ...(surface.pid ? { pid: surface.pid } : {}),
+              ...(surface.generation ? { generation: surface.generation } : {}),
               ...(observedSlot ? { slot: observedSlot } : {}),
             },
             evidence: {
-              endpointReachable,
-              expectedSurface,
+              endpointReachable: shouldProbe ? endpointReachable : null,
+              expectedSurface: shouldProbe ? expectedSurface : null,
               ...(processAlive !== undefined ? { processAlive } : {}),
-              runtimeStateFresh: runtime?.localController !== undefined,
+              runtimeStateFresh: surface.source === 'service-runtime' || surface.source === 'repo-runtime',
               observedAt: new Date().toISOString(),
             },
           },
           health: {
             state: health.state,
             ready: health.ready,
+            // Do not elevate historical job failures into active blockers.
             activeBlockers: health.activeBlockers,
             warnings: health.warnings,
           },
-          error: runtime?.localController?.error,
-          inferredPid: inferredLocalBridge?.pid,
-          statusSource: endpointReachable ? 'endpoint' : runtime?.localController?.running ? 'runtime-state' : inferredLocalBridge ? 'process-scan' : 'runtime-state',
-          counts: jobs.reduce<Record<string, number>>((counts, job) => {
-            counts[job.status] = (counts[job.status] ?? 0) + 1;
-            return counts;
-          }, {}),
+          error: surface.error,
+          statusSource: surface.source,
+          counts: recentJobSummary,
+          activeJobCount,
+          recentJobSummary,
           approvalQueue: false,
-          reconciliation: { scanned: jobs.length, active, terminalized: 0, deferredToController: true },
+          reconciliation: { scanned: jobs.length, active: activeJobCount, terminalized: 0, deferredToController: true },
           recentJobs: jobs.map((job) => ({
             jobId: job.jobId,
             action: job.action,
@@ -2540,7 +2588,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           repoId: repository.repoId,
           repository: repositorySummary(repository),
           runtimeStorage,
-          nonBlocking: true,
+          nonBlocking: !surface.requiredForReadiness,
         });
       }
       case 'get_local_job': {

@@ -21,7 +21,15 @@ interface TargetBranchCacheEntry {
   expiresAt: number;
 }
 
-/** Short-lived cache: invalidated by registry mtime or 30s TTL. */
+/**
+ * Short-lived cache: invalidated by registry mtime or 30s TTL.
+ *
+ * Policy (do not rewrite without explicit design change):
+ * - registry mtime 变化时立即失效；
+ * - 未检测到 mtime 变化时，defaultBranch 变更最多存在 30 秒可见延迟。
+ * - Cache keys include controllerHome + canonical repo root (no cross-repo bleed).
+ * - Registry unavailable → Git fallback (origin/HEAD, main/master, current branch).
+ */
 const targetBranchCache = new Map<string, TargetBranchCacheEntry>();
 const TARGET_BRANCH_TTL_MS = 30_000;
 

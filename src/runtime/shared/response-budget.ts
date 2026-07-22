@@ -21,6 +21,16 @@ export const RESPONSE_BUDGET = {
   artifactDefaultBytes: 64 * 1024,
   /** Absolute upper bound for a single artifact read window. */
   artifactMaxBytes: 512 * 1024,
+  /** process_direct small readonly success (full MCP tool response). */
+  processDirectSuccessBytes: 8 * 1024,
+  /** process_direct small failure (bounded stderr + error). */
+  processDirectFailureBytes: 16 * 1024,
+  /** local_bridge_status / get_job default summary. */
+  statusSummaryBytes: 16 * 1024,
+  /** Compact artifact ref payload. */
+  artifactRefBytes: 4 * 1024,
+  /** rh_status summary envelope. */
+  rhStatusSummaryBytes: 32 * 1024,
 } as const;
 
 export function utf8ByteLength(value: string): number {
