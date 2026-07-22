@@ -35,6 +35,7 @@ import {
   repositoryIdentity,
 } from "../controller/runtime-config";
 import { normalizeRemoteUrl, stableCheckoutId, stableRemoteRepoId } from "../repositories/identity";
+import { resolveRepoPreferredControllerHome } from "../repositories/controller-home";
 import {
   ensureControllerEpoch,
   hasControllerOwnershipMetadata,
@@ -1495,7 +1496,17 @@ ${meta.supervisorInstructions}
   }
 
   const configPath = join(paths.dir, "worker-config.json");
-  const controllerEpoch = ensureControllerEpoch(repoRoot);
+  const controllerHome = resolveRepoPreferredControllerHome(repoRoot);
+  const daemonPidPath = join(controllerHome, "daemon", "controller.pid");
+  let stableControllerPid = process.pid;
+  try {
+    const candidate = Number(readFileSync(daemonPidPath, "utf-8").trim());
+    if (Number.isInteger(candidate) && candidate > 0 && isPidAlive(candidate)) stableControllerPid = candidate;
+  } catch (_error) {
+    // Standalone development mode has no durable Daemon owner; preserve the
+    // current-process fallback used by focused unit tests.
+  }
+  const controllerEpoch = ensureControllerEpoch(repoRoot, stableControllerPid);
   meta.controllerPid = controllerEpoch.pid;
   meta.controllerEpoch = controllerEpoch.epoch;
   meta.controllerEpochPath = relative(repoRoot, controllerEpoch.path).replace(/\\/g, "/");
@@ -1516,20 +1527,21 @@ ${meta.supervisorInstructions}
     controllerPid: meta.controllerPid,
     controllerEpoch: meta.controllerEpoch,
     controllerEpochPath: controllerEpoch.path,
-    parentPid: process.pid,
   };
   writeJson(configPath, workerConfig);
-  const workerEntry = fileURLToPath(
-    new URL("./job-worker.ts", import.meta.url),
-  );
+  const bundledWorkerEntry = join(dirname(process.argv[1] ?? ""), "agent-worker.js");
+  const workerEntry = existsSync(bundledWorkerEntry)
+    ? bundledWorkerEntry
+    : fileURLToPath(new URL("./job-worker.ts", import.meta.url));
   const outFd = openSync(join(paths.dir, "worker.log"), "a");
   const errFd = openSync(join(paths.dir, "worker-error.log"), "a");
   try {
     const child = spawn(process.execPath, [workerEntry, configPath], {
       cwd: repoRoot,
-      detached: false,
+      detached: true,
       stdio: ["ignore", outFd, errFd],
     });
+    child.unref();
     meta.workerPid = child.pid;
     meta.status = "running";
     meta.progress = {
