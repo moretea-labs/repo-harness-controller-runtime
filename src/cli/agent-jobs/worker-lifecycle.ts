@@ -72,7 +72,7 @@ export function shouldTolerateOwnedFinalizationInvalidation(
 export function matchesAgentWorkerCommand(command: string, expectedConfigPath: string): boolean {
   const escapedConfig = expectedConfigPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(
-    `(?:^|\\s)["']?(?!-)[^\\s"']*job-worker\\.(?:ts|js)["']?\\s+["']?${escapedConfig}["']?(?:\\s|$)`,
+    `(?:^|\\s)["']?(?!-)[^\\s"']*(?:job-worker\\.(?:ts|js)|agent-worker\\.js)["']?\\s+["']?${escapedConfig}["']?(?:\\s|$)`,
   ).test(command);
 }
 

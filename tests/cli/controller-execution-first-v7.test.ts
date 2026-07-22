@@ -771,6 +771,10 @@ describe("Controller v7 compatibility on the V8 execution bridge", () => {
       `/usr/bin/node /repo/src/cli/agent-jobs/job-worker.ts ${configPath}`,
       configPath,
     )).toBe(true);
+    expect(matchesAgentWorkerCommand(
+      `/usr/bin/node /repo/supervisor/releases/rev/agent-worker.js ${configPath}`,
+      configPath,
+    )).toBe(true);
     expect(matchesAgentWorkerCommand("/usr/bin/node unrelated-server.js", configPath)).toBe(false);
     expect(matchesAgentWorkerCommand(
       "/usr/bin/node /repo/src/cli/agent-jobs/job-worker.ts /repo/.ai/harness/jobs/RUN-2/worker-config.json",
@@ -778,6 +782,10 @@ describe("Controller v7 compatibility on the V8 execution bridge", () => {
     )).toBe(false);
     expect(matchesAgentWorkerCommand(
       `/usr/bin/node unrelated.js --log=job-worker.ts ${configPath}`,
+      configPath,
+    )).toBe(false);
+    expect(matchesAgentWorkerCommand(
+      `/usr/bin/node unrelated.js --log=agent-worker.js ${configPath}`,
       configPath,
     )).toBe(false);
   });
