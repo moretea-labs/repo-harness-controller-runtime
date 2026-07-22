@@ -1984,26 +1984,11 @@ export function dispatchAcceptedTaskJob(
   runId: string,
 ): void {
   try {
-    withRunLaunchLock(repoRoot, () => {
-      const meta = getAgentJob(repoRoot, runId);
-      if (!["starting", "queued"].includes(meta.status)) return;
-      if (meta.launchPid && isAlive(meta.launchPid)) return;
-      const paths = acceptancePaths(repoRoot, runId);
-      const launcherOutFd = openSync(join(paths.dir, "launcher.log"), "a");
-      const launcherErrFd = openSync(join(paths.dir, "launcher-error.log"), "a");
-      const launcher = spawn(process.execPath, [fileURLToPath(new URL("./job-manager.ts", import.meta.url)), "launch", repoRoot, runId], {
-        cwd: repoRoot,
-        detached: true,
-        stdio: ["ignore", launcherOutFd, launcherErrFd],
-        env: agentProcessEnv(),
-      });
-      closeSync(launcherOutFd);
-      closeSync(launcherErrFd);
-      launcher.unref();
-      const current = readJson<AgentJobMeta>(metaPath(repoRoot, runId));
-      current.launchPid = launcher.pid;
-      writeAgentMeta(repoRoot, metaPath(repoRoot, runId), current);
-    });
+    // Agent delegation already runs inside a durable/local Worker. Start the
+    // accepted Run there and let startAcceptedTaskJob spawn the isolated Agent
+    // worker. A second detached TypeScript launcher is both redundant and
+    // invalid inside immutable bundled Supervisor releases.
+    startAcceptedTaskJob(repoRoot, runId);
   } catch (error) {
     failAcceptedTaskJob(repoRoot, runId, error);
   }
