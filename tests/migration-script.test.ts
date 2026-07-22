@@ -251,11 +251,16 @@ describe("Migration script contract", () => {
         {
           cwd: ROOT,
           encoding: "utf-8",
-          env: { ...process.env, HOME: home, CODEX_HOME: codexHome },
+          env: {
+            ...process.env,
+            HOME: home,
+            CODEX_HOME: codexHome,
+            VOLTA_HOME: process.env.VOLTA_HOME ?? join(process.env.HOME ?? "", ".volta"),
+          },
         },
       );
 
-      expect(res.status).toBe(0);
+      expect(res.status, `signal=${res.signal ?? "none"}\nstdout=${res.stdout}\nstderr=${res.stderr}`).toBe(0);
       expect(res.stdout).toContain("Refreshed Codex handoff before workflow verify");
       expect(res.stdout).toContain("[workflow] OK");
     } finally {

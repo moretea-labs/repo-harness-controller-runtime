@@ -349,6 +349,7 @@ describe('hook command (Phase 1B)', () => {
         const env = {
           ...process.env,
           HOME: home,
+          VOLTA_HOME: process.env.VOLTA_HOME ?? path.join(process.env.HOME ?? '', '.volta'),
           HOOK_HOST: 'codex',
           REPO_HARNESS_CLI: CLI,
         };
@@ -358,7 +359,8 @@ describe('hook command (Phase 1B)', () => {
           [HOOK_ENTRY, 'SessionStart', '--route', 'default'],
           { cwd: repoRoot, encoding: 'utf-8', env },
         );
-        expect(first.status).toBe(0);
+        expect(first.status, `signal=${first.signal ?? "none"}\nstdout=${first.stdout}\nstderr=${first.stderr}`).toBe(0);
+        expect(first.stdout, `signal=${first.signal ?? "none"}\nstderr=${first.stderr}`).not.toBe("");
         const parsed = JSON.parse(first.stdout);
         expect(parsed.hookSpecificOutput.hookEventName).toBe('SessionStart');
         expect(parsed.hookSpecificOutput.additionalContext).toContain('[SecurityConfig]');
