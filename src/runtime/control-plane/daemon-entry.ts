@@ -171,40 +171,36 @@ export function startControllerDaemon(controllerHome: string): void {
     ...(bundledWorkerPath && existsSync(bundledWorkerPath) ? { workerEntrypoint: bundledWorkerPath } : {}),
     ...(ownership.ownerEpoch !== undefined ? { ownerEpoch: String(ownership.ownerEpoch) } : {}),
   });
+  let schedulerFailure: string | undefined;
   scheduler.run(abort.signal)
     .catch((error) => {
-      if (controllerDaemonOwnsPidFile(pidPath, process.pid)) {
-        writeJsonAtomic(statePath, {
-          schemaVersion: 1,
-          status: 'failed',
-          pid: process.pid,
-          error: error instanceof Error ? error.message : String(error),
-          updatedAt: new Date().toISOString(),
-          degraded: true,
-          recovery: runtime,
-          generation: runtime.generationRecord.generation,
-          source: runtime.generationRecord.source,
-          ...ownership,
-        });
-      }
+      schedulerFailure = error instanceof Error ? error.message : String(error);
       process.exitCode = 1;
     })
     .finally(() => {
       abort.abort();
       if (maxLifetimeTimer) clearTimeout(maxLifetimeTimer);
-      if (!controllerDaemonOwnsPidFile(pidPath, process.pid)) return;
+      if (!controllerDaemonOwnsPidFile(pidPath, process.pid)) {
+        setImmediate(() => process.exit(process.exitCode ?? 0));
+        return;
+      }
       rmSync(pidPath, { force: true });
+      const stoppedAt = new Date().toISOString();
       writeJsonAtomic(statePath, {
         schemaVersion: 1,
-        status: 'stopped',
+        status: schedulerFailure ? 'failed' : 'stopped',
         pid: process.pid,
-        stoppedAt: new Date().toISOString(),
-        degraded: runtime.degraded,
+        ...(schedulerFailure ? { error: schedulerFailure, updatedAt: stoppedAt } : { stoppedAt }),
+        degraded: schedulerFailure ? true : runtime.degraded,
         recovery: runtime,
         generation: runtime.generationRecord.generation,
-          source: runtime.generationRecord.source,
-          ...ownership,
+        source: runtime.generationRecord.source,
+        ...ownership,
       });
+      // The scheduler loop is the daemon lifecycle. Once it terminates, do not
+      // leave a live process shell that can be mistaken for an active daemon or
+      // retain stale handles after a Supervisor replacement.
+      setImmediate(() => process.exit(process.exitCode ?? 0));
     });
 }
 

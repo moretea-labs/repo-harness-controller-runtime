@@ -17,7 +17,7 @@ import { writeMcpServiceLocalConfig } from '../../src/cli/mcp/auth';
 import { writeActiveSlotAuthority } from '../../src/cli/controller/runtime-slots';
 import { readCurrentRelease, readCurrentSupervisorRelease, supervisorReleasesRoot } from '../../src/runtime/supervisor/paths';
 import { createSupervisorControlServer } from '../../src/runtime/supervisor/control-server';
-import type { SupervisorManagedProcess, SupervisorState } from '../../src/runtime/supervisor/types';
+import type { SupervisorManagedProcess, SupervisorOperation, SupervisorState } from '../../src/runtime/supervisor/types';
 import { evaluateRuntimeReleaseCoherence } from '../../src/runtime/supervisor/release-coherence';
 
 const servers: Server[] = [];
@@ -194,6 +194,44 @@ describe('Stable Supervisor production hardening', () => {
       consecutiveFailures: 0,
       shouldRecover: false,
     });
+  });
+
+  test('restart_controller preserves the Gateway and delegates only conditional generation reconciliation', async () => {
+    const controllerHome = mkdtempSync(join(tmpdir(), 'repo-harness-controller-only-restart-'));
+    try {
+      const runtime = new StableSupervisorRuntime({
+        repoRoot: process.cwd(),
+        controllerHome,
+        runtimeSourceRoot: process.cwd(),
+        ownerEpoch: 1,
+        logPath: join(controllerHome, 'supervisor.log'),
+      });
+      const accepted = createSupervisorOperation({
+        controllerHome,
+        repoRoot: process.cwd(),
+        requestId: 'controller-only-restart-test',
+        kind: 'restart_controller',
+        requestedBy: 'test',
+        actor: 'test',
+      });
+      const calls: string[] = [];
+      const internal = runtime as unknown as {
+        executeOperation: (operation: SupervisorOperation) => Promise<void>;
+        restartComponent: (component: 'controllerDaemon' | 'gatewayHost', operationId: string) => Promise<void>;
+        ensureRuntime: () => Promise<void>;
+        synchronizeActiveRuntimeGeneration: (requireAgreement?: boolean) => string | undefined;
+      };
+      internal.restartComponent = async (component) => { calls.push(`restart:${component}`); };
+      internal.ensureRuntime = async () => { calls.push('ensure-runtime'); };
+      internal.synchronizeActiveRuntimeGeneration = () => undefined;
+
+      await internal.executeOperation(accepted.operation);
+
+      expect(calls).toEqual(['restart:controllerDaemon', 'ensure-runtime']);
+      expect(readSupervisorOperation(controllerHome, accepted.operation.operationId)?.phase).toBe('succeeded');
+    } finally {
+      rmSync(controllerHome, { recursive: true, force: true });
+    }
   });
 
   test('Supervisor serializes monitor ticks so ingress recovery cannot overlap', async () => {

@@ -14,9 +14,10 @@ import {
 } from '../src/cli/mcp/toolset';
 
 // Versioned v8 stable surface. Update deliberately when the exported contract changes.
-// 128 baseline + process_get/process_wait/process_logs/process_cancel (Managed Process Runtime).
-const EXPECTED_STABLE_TOOL_COUNT = 132;
-const MAX_STABLE_TOOL_COUNT = 132;
+// The stable Controller surface currently publishes 133 unique tools. Keep the
+// exact count and upper budget aligned so accidental additions remain visible.
+const EXPECTED_STABLE_TOOL_COUNT = 133;
+const MAX_STABLE_TOOL_COUNT = 133;
 
 const policy = runtimePolicy(process.cwd(), {
   profile: 'controller',

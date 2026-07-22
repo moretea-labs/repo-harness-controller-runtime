@@ -93,7 +93,7 @@ The recovery token file is mode `0600` and must never enter Git or logs.
 
 The existing Repo Harness Connector continues to use the stable `/mcp` endpoint. Normal `rh_status` and `rh_work` facade operations can read Supervisor status and submit restart, rollout, rollback, operation-query, and lockout-recovery requests.
 
-Every mutation is persisted before child shutdown and returns an operation ID plus `reconnectContract=stable_domain_retry`. A Gateway restart can close the current socket; retry the same stable domain and query the original operation ID. Do not recreate the primary Connector unless authentication or its schema changed.
+Every mutation is persisted before child shutdown and returns an operation ID plus `reconnectContract=stable_domain_retry`. `restart_controller` preserves the Gateway connection when the writer generation remains unchanged; only a real generation mismatch triggers a dependent Gateway refresh. A Gateway restart can close the current socket; retry the same stable domain and query the original operation ID. Do not recreate the primary Connector unless authentication or its schema changed.
 
 ### Recovery Connector
 
@@ -141,7 +141,7 @@ Request IDs are idempotency keys. Repeating one returns the original durable ope
 
 ## Recovery and lockout policy
 
-The Supervisor independently observes the two top-level units: Controller Daemon and Gateway Host. A proven process exit recovers only that component. MCP serve and Local Controller health recovery remain inside Gateway KeepAlive. Projection freshness, queue state, WorkContracts, plugins, and historical events do not trigger process restarts.
+The Supervisor independently observes the two top-level units: Controller Daemon and Gateway Host. A proven process exit recovers only that component. Capability recovery routes Controller recovery to `restart_controller` and embedded Local Controller recovery to `restart_gateway`; it uses the legacy full-stack coordinator only when Stable Supervisor is not installed. MCP serve and Local Controller health recovery remain inside Gateway KeepAlive. Projection freshness, queue state, WorkContracts, plugins, and historical events do not trigger process restarts.
 
 Restart budgets are persisted per component and generation. The default budget permits five attempts per ten-minute window with bounded backoff and jitter, and resets after a stable interval. Exhaustion leaves the Supervisor and Rescue MCP running in `locked_out`; `runtime_unlock_and_recover` accepts one explicit bounded recovery attempt.
 

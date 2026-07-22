@@ -1163,44 +1163,57 @@ async function probeLocalControllerHealth(endpoint: string | undefined): Promise
   }
 }
 
-async function controllerReadiness(ctx: MultiRepositoryMcpToolContext, repository = ctx.explicitRepository) {
+export async function controllerReadiness(ctx: MultiRepositoryMcpToolContext, repository = ctx.explicitRepository) {
   const daemon = readControllerDaemonStatus(ctx.controllerHome);
   const scheduler = readSchedulerHealthSnapshot(ctx.controllerHome);
   const projectionSnapshot = repository ? readRepositoryProjectionSnapshot(ctx.controllerHome, repository.repoId) : undefined;
   const projection = projectionSnapshot?.projection;
-  const runtimeState = repository ? loadMcpRuntimeState(repository.canonicalRoot) : undefined;
-  const localBridge = runtimeState?.localController;
-  // Process-table scans are expensive (~100ms+). Only fall back when runtime state is missing.
-  const inferredLocalBridge = repository && !(localBridge?.running)
-    ? inferLocalControllerProcess(repository.canonicalRoot)
+  const localBridgeSurface = repository
+    ? resolveLocalBridgeSurface({
+      controllerHome: ctx.controllerHome,
+      repoRoot: repository.canonicalRoot,
+      allowProcessScan: false,
+    })
     : undefined;
-  const localBridgeEndpoint = localBridge?.endpoint ?? inferredLocalBridge?.endpoint;
-  const localBridgeLiveHealth = await probeLocalControllerHealth(localBridgeEndpoint);
+  const localBridgeEndpoint = localBridgeSurface?.endpoint;
+  const shouldProbeLocalBridge = Boolean(
+    localBridgeSurface?.enabled
+    && localBridgeSurface.endpointConfigured
+    && localBridgeEndpoint
+    && localBridgeSurface.mode !== 'disabled',
+  );
+  const localBridgeLiveHealth = shouldProbeLocalBridge
+    ? await probeLocalControllerHealth(localBridgeEndpoint)
+    : null;
   const localBridgeEndpointReachable = localBridgeLiveHealth !== null;
-  const localBridgeExpectedSurface = isExpectedLocalControllerHealth(localBridgeLiveHealth, {
-    repoRoot: repository?.canonicalRoot,
-    generation: runtimeState?.generation,
-  });
-  const expectedActiveSlot = readActiveSlotAuthority(ctx.controllerHome).activeSlot;
+  const localBridgeExpectedSurface = shouldProbeLocalBridge
+    ? isExpectedLocalControllerHealth(localBridgeLiveHealth, {
+      repoRoot: repository?.canonicalRoot,
+      generation: localBridgeSurface?.generation,
+    })
+    : true;
+  const expectedActiveSlot = localBridgeSurface?.activeSlot
+    ?? readActiveSlotAuthority(ctx.controllerHome).activeSlot;
   const observedSlot = localBridgeLiveHealth?.slot === 'blue' || localBridgeLiveHealth?.slot === 'green'
     ? localBridgeLiveHealth.slot
     : undefined;
   const schedulerHeartbeatAgeMs = ageMs(scheduler.lastTickAt);
   const dispatchHeartbeatAgeMs = ageMs(scheduler.lastDispatchAt);
   const localBridgeObservation = {
-    enabled: Boolean(localBridge || inferredLocalBridge) && localBridge?.mode !== 'disabled',
-    requiredForReadiness: Boolean(localBridge || inferredLocalBridge) && localBridge?.mode !== 'disabled',
-    mode: localBridge?.mode ?? (inferredLocalBridge ? 'standalone' as const : 'unknown' as const),
+    enabled: localBridgeSurface?.enabled ?? false,
+    requiredForReadiness: localBridgeSurface?.requiredForReadiness ?? false,
+    mode: localBridgeSurface?.mode ?? ('disabled' as const),
     endpoint: localBridgeEndpoint,
-    endpointReachable: localBridgeEndpointReachable,
+    endpointReachable: shouldProbeLocalBridge ? localBridgeEndpointReachable : true,
     expectedSurface: localBridgeExpectedSurface,
     activeSlot: observedSlot ? observedSlot === expectedActiveSlot : undefined,
-    generationMatches: runtimeState?.generation
-      ? localBridgeLiveHealth?.generation === runtimeState.generation
+    generationMatches: localBridgeSurface?.generation && localBridgeLiveHealth?.generation
+      ? localBridgeLiveHealth.generation === localBridgeSurface.generation
       : undefined,
-    processAlive: localBridge?.running ?? inferredLocalBridge?.running,
-    runtimeStateFresh: localBridge !== undefined,
-    error: localBridge?.error,
+    processAlive: localBridgeSurface?.processRunning,
+    runtimeStateFresh: localBridgeSurface?.source === 'service-runtime'
+      || localBridgeSurface?.source === 'repo-runtime',
+    error: localBridgeSurface?.error,
   };
   const runtimeHealth = evaluateRuntimeHealth({
     daemon: {
@@ -1279,11 +1292,13 @@ async function controllerReadiness(ctx: MultiRepositoryMcpToolContext, repositor
       consuming: (projection?.queueDepth ?? 0) === 0 || (projection?.runningWorkers ?? 0) > 0,
     },
     localBridge: repository ? {
-      running: runtimeHealth.components.localBridge.ready && localBridgeEndpointReachable && localBridgeExpectedSurface,
+      running: Boolean(localBridgeSurface?.enabled)
+        && runtimeHealth.components.localBridge.ready
+        && (!shouldProbeLocalBridge || (localBridgeEndpointReachable && localBridgeExpectedSurface)),
       endpoint: localBridgeEndpoint,
-      error: localBridge?.error,
-      inferredPid: inferredLocalBridge?.pid,
-      statusSource: localBridgeEndpointReachable ? 'endpoint' : localBridge?.running ? 'runtime-state' : inferredLocalBridge ? 'process-scan' : 'runtime-state',
+      error: localBridgeSurface?.error,
+      inferredPid: localBridgeSurface?.pid,
+      statusSource: localBridgeSurface?.source ?? 'none',
       activeSlot: observedSlot ? observedSlot === expectedActiveSlot : undefined,
       health: runtimeHealth.components.localBridge,
     } : undefined,
@@ -3489,17 +3504,43 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           }
           case 'recovery.restart_controller':
           case 'recovery.restart_local_bridge': {
+            const requestId = typeof args.request_id === 'string' && args.request_id.trim()
+              ? args.request_id.trim()
+              : `capability-recovery-${action.id}-${Date.now()}`;
+            const kind: SupervisorOperationKind = action.id === 'recovery.restart_local_bridge'
+              ? 'restart_gateway'
+              : 'restart_controller';
+            const supervisorRestart = await stableSupervisorFacadeMutation({
+              controllerHome: ctx.controllerHome,
+              requestId,
+              kind,
+              actor: 'capability_recovery_apply',
+              reason,
+            });
+            if (supervisorRestart.installed) {
+              if (!supervisorRestart.accepted || !supervisorRestart.operation) {
+                throw new Error(supervisorRestart.error ?? 'SUPERVISOR_OPERATION_REJECTED');
+              }
+              payload = {
+                runtimeSupervisor: supervisorRestart,
+                note: kind === 'restart_controller'
+                  ? 'The Stable Supervisor owns a controller-only restart and preserves the Gateway unless generation reconciliation requires a refresh.'
+                  : 'The Stable Supervisor owns the Gateway/embedded Local Controller restart. The request returns with a reconnect-safe operation ID.',
+              };
+              affectedPaths = ['_ops/controller-home/supervisor/operations'];
+              break;
+            }
             const restart = scheduleControllerServiceRestart({
               repo: repository.canonicalRoot,
               controllerHome: ctx.controllerHome,
-              requestId: typeof args.request_id === 'string' ? args.request_id : undefined,
+              requestId,
               requestedBy: 'capability_recovery_apply',
               reason,
               mode: 'detached',
             });
             payload = {
               restart,
-              note: 'The detached coordinator owns the full Controller stack restart. The current request returns before Gateway or Local Bridge shutdown.',
+              note: 'Stable Supervisor is not installed; the legacy detached coordinator owns the full Controller stack restart.',
             };
             affectedPaths = ['_ops/controller-home/restart'];
             break;

@@ -29,7 +29,7 @@ function stubCtx(toolset: 'core' | 'advanced' | 'full'): MultiRepositoryMcpToolC
 describe('MCP tool exposure profiles', () => {
   test('stable connector surface stays unique and below the schema budget', () => {
     expect(new Set(STABLE_CONTROLLER_TOOL_NAMES).size).toBe(STABLE_CONTROLLER_TOOL_NAMES.length);
-    expect(STABLE_CONTROLLER_TOOL_NAMES.length).toBeLessThanOrEqual(132);
+    expect(STABLE_CONTROLLER_TOOL_NAMES.length).toBeLessThanOrEqual(133);
     expect(STABLE_CONTROLLER_TOOL_NAMES).toEqual(expect.arrayContaining([
       'process_get',
       'process_wait',

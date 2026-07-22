@@ -1169,9 +1169,10 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
     try {
       if (current.kind === 'restart_controller') {
         await this.restartComponent('controllerDaemon', current.operationId);
-        // Daemon startup rotates the slot generation. Refresh the dependent
-        // Gateway so Connector and daemon generation identities cannot diverge.
-        await this.restartComponent('gatewayHost', current.operationId);
+        // A normal Supervisor-owned daemon restart preserves the writer generation.
+        // Keep the Gateway connection stable unless the observed generation really
+        // changed; ensureRuntime performs that conditional refresh and verification.
+        await this.ensureRuntime();
       } else if (current.kind === 'restart_gateway') {
         await this.restartComponent('gatewayHost', current.operationId);
       } else if (current.kind === 'restart_full') {

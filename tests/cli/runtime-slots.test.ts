@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import {
+  activeSlotAuthorityPath,
   allocateSlotPorts,
   ensureSlotHome,
   isRollbackWindowOpen,
@@ -30,6 +31,25 @@ function temp(prefix: string): string {
 }
 
 describe('runtime slot authority (level 1)', () => {
+  test('slot homes resolve active-slot authority from the controller root', () => {
+    const home = temp('repo-harness-slot-authority-root-');
+    writeActiveSlotAuthority(home, {
+      activeSlot: 'green',
+      previousSlot: 'blue',
+      generation: 'generation-green',
+      reason: 'test-cutover',
+    });
+    const greenHome = ensureSlotHome(home, 'green');
+
+    expect(activeSlotAuthorityPath(greenHome)).toBe(join(home, 'active-slot.json'));
+    expect(readActiveSlotAuthority(greenHome)).toMatchObject({
+      activeSlot: 'green',
+      previousSlot: 'blue',
+      generation: 'generation-green',
+    });
+    expect(ensureSlotHome(greenHome, 'blue')).toBe(join(home, 'runtime-slots', 'blue'));
+  });
+
   test('defaults to blue and never shares slot homes', () => {
     const home = temp('repo-harness-slots-');
     const authority = readActiveSlotAuthority(home);

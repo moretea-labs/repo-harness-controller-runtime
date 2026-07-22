@@ -10,13 +10,14 @@ import {
 } from "fs";
 import { tmpdir } from "os";
 import { spawnSync } from "child_process";
+import { createServer as createHttpServer } from "http";
 import { join } from "path";
 import { writeJsonAtomic } from "../../src/runtime/shared/json-files";
 import { appendControllerWorklogEvent } from "../../src/cli/controller/worklog";
 import { createExecutionJob, getExecutionJob, updateExecutionJob } from "../../src/runtime/execution/jobs/store";
 import { readControllerDaemonStatus } from "../../src/runtime/control-plane/daemon-client";
 import { terminateProcessTree } from "../../src/runtime/shared/process-tree";
-import { callRuntimeTool } from "../../src/runtime/gateway/mcp/runtime-tools";
+import { callRuntimeTool, controllerReadiness } from "../../src/runtime/gateway/mcp/runtime-tools";
 import { executeExecutionJob } from "../../src/runtime/execution/workers/executor";
 import { getMcpPolicy } from "../../src/cli/mcp/policy";
 import { createMcpToolContext as createMultiRepositoryContext } from "../../src/cli/mcp/multi-repository";
@@ -29,7 +30,14 @@ import {
   controllerExpectedToolNames,
   type McpToolContext,
 } from "../../src/cli/mcp/tools";
-import { controllerToolSurfaceFingerprint } from "../../src/cli/controller/runtime-config";
+import {
+  CONTROLLER_SCHEMA_VERSION,
+  CONTROLLER_TOOL_SURFACE,
+  CONTROLLER_TOOL_SURFACE_VERSION,
+  controllerToolSurfaceFingerprint,
+} from "../../src/cli/controller/runtime-config";
+import { ensureSlotHome, writeActiveSlotAuthority } from "../../src/cli/controller/runtime-slots";
+import { writeMcpServiceRuntimeState } from "../../src/cli/mcp/auth";
 import {
   readControllerContextProjection,
   writeControllerContextProjection,
@@ -140,6 +148,87 @@ function writeStoredPluginManifest(
     ...overrides,
   });
 }
+
+test("uses the active slot service runtime for aggregate Local Bridge health", async () => {
+  await withController(async (repoRoot, ctx) => {
+    const controllerHome = process.env.REPO_HARNESS_CONTROLLER_HOME!;
+    const generation = "runtime-active-green";
+    const server = createHttpServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({
+        status: "ok",
+        localOnly: true,
+        mode: "embedded",
+        slot: "green",
+        toolSurface: CONTROLLER_TOOL_SURFACE,
+        schemaVersion: CONTROLLER_SCHEMA_VERSION,
+        toolSurfaceVersion: CONTROLLER_TOOL_SURFACE_VERSION,
+        generation,
+      }));
+    });
+    await new Promise<void>((resolvePromise, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolvePromise);
+    });
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("local bridge test server did not bind");
+      writeActiveSlotAuthority(controllerHome, {
+        activeSlot: "green",
+        previousSlot: "blue",
+        generation,
+        reason: "test-active-slot",
+      });
+      const greenHome = ensureSlotHome(controllerHome, "green");
+      const now = new Date().toISOString();
+      writeMcpServiceRuntimeState(greenHome, {
+        version: 1,
+        repo: repoRoot,
+        startedAt: now,
+        updatedAt: now,
+        status: "running",
+        tunnelMode: "none",
+        generation,
+        server: {
+          endpoint: "http://127.0.0.1:8795/mcp",
+          generation,
+          running: true,
+          healthy: true,
+          restartCount: 0,
+          profile: "controller",
+          toolSurface: CONTROLLER_TOOL_SURFACE,
+          schemaVersion: CONTROLLER_SCHEMA_VERSION,
+          toolSurfaceVersion: CONTROLLER_TOOL_SURFACE_VERSION,
+          toolset: "advanced",
+        },
+        localController: {
+          endpoint: `http://127.0.0.1:${address.port}/`,
+          running: true,
+          mode: "embedded",
+          pid: process.pid,
+          generation,
+        },
+        tunnel: { running: false, healthy: true, restartCount: 0 },
+      });
+
+      const repository = registerRepository({ path: repoRoot, controllerHome });
+      const multi = createMultiRepositoryContext({
+        repo: repoRoot,
+        profile: "controller",
+        toolset: "advanced",
+        controllerHome,
+      });
+      const readiness = await controllerReadiness(multi, repository);
+      expect(readiness.health.components.localBridge).toMatchObject({
+        state: "healthy",
+        ready: true,
+      });
+      expect(readiness.health.components.localBridge.activeBlockers).toEqual([]);
+    } finally {
+      await new Promise<void>((resolvePromise, reject) => server.close((error) => error ? reject(error) : resolvePromise()));
+    }
+  });
+});
 
 test("returns compact default dispatch and verification payloads", async () => {
   await withController(async (repoRoot, baseCtx) => {

@@ -1356,8 +1356,16 @@ export async function controllerServiceLogs(opts: ControllerServiceOptions & { t
 }
 
 export function formatControllerServiceStatus(status: ControllerServiceStatus): string {
+  const stackState = status.ready
+    ? "running"
+    : status.supervisor.alive
+      ? "recovering/degraded"
+      : "not running";
+  const infos = [...new Set(status.infos)];
+  const warnings = [...new Set(status.warnings)];
+  const problems = [...new Set(status.problems)];
   const lines = [
-    `Controller stack: ${status.running ? (status.ready ? "running" : "running (degraded)") : "not running"}`,
+    `Controller stack: ${stackState}`,
     `Repo: ${status.repoRoot}`,
     `Version: ${status.packageVersion}${status.bunVersion ? ` (Bun ${status.bunVersion})` : ""}`,
     `Runtime generation: ${status.runtimeGeneration ?? "missing"}`,
@@ -1369,9 +1377,9 @@ export function formatControllerServiceStatus(status: ControllerServiceStatus): 
     `Readiness: gateway=${status.readiness.gateway ? "ok" : "down"} daemon=${status.readiness.daemon ? "ok" : "degraded"} projection=${status.readiness.projection ? "ok" : "stale"} connector=${status.readiness.connector ? "ok" : "stale"} public=${status.readiness.public ? "ok" : "stale"}`,
     `Log: ${status.logPath}`,
   ];
-  if (status.infos.length > 0) lines.push("", ...status.infos.map((line) => `info: ${line}`));
-  if (status.restartRequired) lines.push(`Restart required: ${status.restartReasons.join("; ")}`);
-  if (status.warnings.length > 0) lines.push("", ...status.warnings.map((line) => `warning: ${line}`));
-  if (status.problems.length > 0) lines.push("", ...status.problems.map((line) => `problem: ${line}`));
+  if (infos.length > 0) lines.push("", ...infos.map((line) => `info: ${line}`));
+  if (status.restartRequired) lines.push(`Restart required: ${[...new Set(status.restartReasons)].join("; ")}`);
+  if (warnings.length > 0) lines.push("", ...warnings.map((line) => `warning: ${line}`));
+  if (problems.length > 0) lines.push("", ...problems.map((line) => `problem: ${line}`));
   return lines.join("\n");
 }

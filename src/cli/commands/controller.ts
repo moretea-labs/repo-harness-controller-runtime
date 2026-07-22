@@ -741,13 +741,15 @@ export function buildControllerCommand(): Command {
     .option('--repo <path>', 'Repository root')
     .option('--controller-home <path>', 'Controller state root')
     .option('--skip-durable-job', 'Skip minimal durable job smoke during verification')
+    .option('--reason <text>', 'Operator-visible rollout reason stored with the Supervisor operation')
     .option('--wait', 'Wait for the Supervisor operation to complete (only safe from external CLI, not inside managed runtime)')
     .option('--json', 'Output JSON')
-    .action(async (opts: { repo?: string; controllerHome?: string; skipDurableJob?: boolean; wait?: boolean; json?: boolean }) => {
+    .action(async (opts: { repo?: string; controllerHome?: string; skipDurableJob?: boolean; reason?: string; wait?: boolean; json?: boolean }) => {
       const result = await controllerRollout({
         repo: opts.repo,
         controllerHome: opts.controllerHome,
         skipDurableJob: opts.skipDurableJob === true,
+        reason: opts.reason,
         wait: opts.wait === true,
       });
       output(result, opts.json === true);

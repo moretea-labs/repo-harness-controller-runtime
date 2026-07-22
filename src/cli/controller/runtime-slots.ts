@@ -66,12 +66,17 @@ function readJson<T>(path: string): T | null {
   }
 }
 
+export function controllerAuthorityHome(controllerHome: string): string {
+  const home = ensureControllerHome(controllerHome);
+  return runtimeSlotForHome(home) ? dirname(dirname(home)) : home;
+}
+
 export function activeSlotAuthorityPath(controllerHome: string): string {
-  return join(ensureControllerHome(controllerHome), 'active-slot.json');
+  return join(controllerAuthorityHome(controllerHome), 'active-slot.json');
 }
 
 export function runtimeSlotsRoot(controllerHome: string): string {
-  return join(ensureControllerHome(controllerHome), 'runtime-slots');
+  return join(controllerAuthorityHome(controllerHome), 'runtime-slots');
 }
 
 export function slotHomePath(controllerHome: string, slot: RuntimeSlotId): string {

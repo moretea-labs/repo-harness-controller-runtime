@@ -5,6 +5,7 @@ import { createServer } from "net";
 import { tmpdir } from "os";
 import { join } from "path";
 import { terminateProcessesByCommand, waitForNoProcessesByCommand } from "../runtime/process-hygiene";
+import { formatControllerServiceStatus, type ControllerServiceStatus } from "../../src/cli/controller/lifecycle";
 
 const ROOT = join(import.meta.dir, "../..");
 const CLI = join(ROOT, "src/cli/index.ts");
@@ -27,6 +28,43 @@ afterEach(async () => {
     rmSync(fixture.repoRoot, { recursive: true, force: true });
     rmSync(fixture.controllerHome, { recursive: true, force: true });
   }
+});
+
+test("status formatting reports a live Supervisor as recovering and deduplicates diagnostics", () => {
+  const text = formatControllerServiceStatus({
+    repoRoot: "/tmp/repo",
+    packageVersion: "1.0.0",
+    bunVersion: "1.3.14",
+    runtimeGeneration: "generation-test",
+    authority: { runtimeState: { authority: "controller-home", path: "/tmp/controller-home/mcp/mcp.runtime.json" } },
+    supervisor: { alive: true, pid: 1234 },
+    daemon: { status: "ready", pid: 5678 },
+    ports: { mcp: 8795, localController: 8776, mcpReachable: false, localControllerReachable: false },
+    health: { mcp: false, localController: false },
+    readiness: { gateway: false, daemon: true, scheduler: true, localController: true, projection: true, connector: false, public: false },
+    logPath: "/tmp/supervisor.log",
+    ready: false,
+    running: false,
+    restartRequired: false,
+    restartReasons: [],
+    infos: ["same info", "same info"],
+    warnings: ["same warning", "same warning"],
+    problems: ["same problem", "same problem"],
+  } as unknown as ControllerServiceStatus);
+
+  expect(text).toContain("Controller stack: recovering/degraded");
+  expect(text.match(/info: same info/g)).toHaveLength(1);
+  expect(text.match(/warning: same warning/g)).toHaveLength(1);
+  expect(text.match(/problem: same problem/g)).toHaveLength(1);
+});
+
+test("controller rollout CLI accepts an operator-visible reason", () => {
+  const result = spawnSync("bun", [CLI, "controller", "rollout", "--help"], {
+    cwd: ROOT,
+    encoding: "utf-8",
+  });
+  expect(result.status).toBe(0);
+  expect(result.stdout).toContain("--reason <text>");
 });
 
 async function freePort(): Promise<number> {
