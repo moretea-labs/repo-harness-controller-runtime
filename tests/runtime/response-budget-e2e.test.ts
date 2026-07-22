@@ -314,19 +314,18 @@ describe('E2E response budgets (full MCP tool responses)', () => {
     expect(embedded.requiredForReadiness).toBe(false);
     expect(embedded.endpoint).not.toContain(':8766');
 
-    writeMcpLocalConfig(repoRoot, {
-      localController: { enabled: false, mode: 'disabled' },
-    });
-    // Clear service runtime so disabled config wins for a clean case
+    // Isolated homes — do not share fixture repoRoot (may carry unrelated mcp config).
     const disabledHome = mkdtempSync(join(tmpdir(), 'lb-disabled-'));
+    const disabledRepo = join(disabledHome, 'repo');
     roots.push(disabledHome);
+    mkdirSync(disabledRepo, { recursive: true });
     ensureControllerHome(disabledHome);
     writeMcpServiceLocalConfig(disabledHome, {
       localController: { enabled: false, mode: 'disabled', host: '127.0.0.1', port: 8766 },
     });
     const disabled = resolveLocalBridgeSurface({
       controllerHome: disabledHome,
-      repoRoot,
+      repoRoot: disabledRepo,
       allowProcessScan: false,
     });
     expect(disabled.mode).toBe('disabled');
@@ -335,14 +334,16 @@ describe('E2E response budgets (full MCP tool responses)', () => {
 
     // Standalone required keeps readiness gate.
     const standHome = mkdtempSync(join(tmpdir(), 'lb-stand-'));
+    const standRepo = join(standHome, 'repo');
     roots.push(standHome);
+    mkdirSync(standRepo, { recursive: true });
     ensureControllerHome(standHome);
     writeMcpServiceLocalConfig(standHome, {
       localController: { enabled: true, mode: 'standalone', host: '127.0.0.1', port: 8766 },
     });
     const standalone = resolveLocalBridgeSurface({
       controllerHome: standHome,
-      repoRoot,
+      repoRoot: standRepo,
       allowProcessScan: false,
     });
     expect(standalone.mode).toBe('standalone');
@@ -356,6 +357,72 @@ describe('E2E response budgets (full MCP tool responses)', () => {
     expect(greenInactive.localControllerPort).toBe(8776);
     const greenActive = allocateSlotPorts('green', 'green', base);
     expect(greenActive.localControllerPort).toBe(8766);
+  });
+
+  test('active blue/green slot home wins over root controller-home runtime', () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'lb-slot-authority-'));
+    roots.push(workspace);
+    const controllerHome = join(workspace, 'controller-home');
+    const repoRoot = join(workspace, 'repo');
+    mkdirSync(repoRoot, { recursive: true });
+    ensureControllerHome(controllerHome);
+    // Root home points at legacy 8766 (stale template).
+    writeMcpServiceRuntimeState(controllerHome, {
+      version: 1,
+      repo: repoRoot,
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      status: 'running',
+      tunnelMode: 'none',
+      generation: 'gen-root',
+      server: { endpoint: 'http://127.0.0.1:8765/', running: true, healthy: true, restartCount: 0 },
+      localController: {
+        endpoint: 'http://127.0.0.1:8766/',
+        running: false,
+        mode: 'embedded',
+        generation: 'gen-root',
+      },
+    });
+    writeMcpServiceLocalConfig(controllerHome, {
+      localController: { enabled: true, mode: 'embedded', host: '127.0.0.1', port: 8766 },
+    });
+    // Active green slot has live 8776.
+    const { writeActiveSlotAuthority, ensureSlotHome } = require('../../src/cli/controller/runtime-slots') as typeof import('../../src/cli/controller/runtime-slots');
+    writeActiveSlotAuthority(controllerHome, {
+      activeSlot: 'green',
+      previousSlot: 'blue',
+      generation: 'gen-green',
+      reason: 'test',
+    });
+    const greenHome = ensureSlotHome(controllerHome, 'green');
+    writeMcpServiceRuntimeState(greenHome, {
+      version: 1,
+      repo: repoRoot,
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      status: 'running',
+      tunnelMode: 'none',
+      generation: 'gen-green',
+      server: { endpoint: 'http://127.0.0.1:8775/', running: true, healthy: true, restartCount: 0 },
+      localController: {
+        endpoint: 'http://127.0.0.1:8776/',
+        running: true,
+        mode: 'embedded',
+        pid: 4242,
+        generation: 'gen-green',
+      },
+    });
+    writeMcpServiceLocalConfig(greenHome, {
+      localController: { enabled: true, mode: 'embedded', host: '127.0.0.1', port: 8776 },
+    });
+
+    const surface = resolveLocalBridgeSurface({ controllerHome, repoRoot, allowProcessScan: false });
+    expect(surface.endpoint).toBe('http://127.0.0.1:8776/');
+    expect(surface.mode).toBe('embedded');
+    expect(surface.processRunning).toBe(true);
+    expect(surface.activeSlot).toBe('green');
+    expect(surface.requiredForReadiness).toBe(false);
+    expect(surface.endpoint).not.toContain(':8766');
   });
 
   test('standalone required endpoint not reachable remains degraded/blocked observation', async () => {

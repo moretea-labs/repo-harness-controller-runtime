@@ -2515,6 +2515,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             processRunning: processAlive ?? null,
             expectedSurface: surface.expectedSurface,
             requiredForReadiness: surface.requiredForReadiness,
+            ...(surface.activeSlot ? { activeSlot: surface.activeSlot } : {}),
             warnings: bridgeWarnings,
             activeJobCount,
             recentJobSummary,
