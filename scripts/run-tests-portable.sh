@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 if command -v bun >/dev/null 2>&1; then
-  exec bun test "$@"
+  exec bun test --isolate "$@"
 fi
 
 cat >&2 <<'MSG'
