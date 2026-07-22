@@ -702,7 +702,10 @@ function inspectWazaSkill(host, skill, skillLock, skillItems, upstreamSkills) {
 function detectWaza() {
   const skillLockPath = path.join(HOME, ".agents", ".skill-lock.json");
   const skillLock = readJson(skillLockPath);
-  const skillsResult = run("npx", ["-y", "skills", "ls", "-g", "--json"], { timeoutMs: 1500 });
+  const skillsBin = resolvePathCommand("skills");
+  const skillsResult = skillsBin
+    ? run(skillsBin, ["ls", "-g", "--json"], { timeoutMs: 1500 })
+    : { ok: false, status: null, stdout: "", stderr: "", error: "skills CLI is not installed", timed_out: false };
   const skillItems = skillsResult.ok ? parseJson(skillsResult.stdout) || [] : [];
   const wazaEntries = Object.entries(skillLock?.skills || {}).filter(([, meta]) => meta?.source === WAZA_SOURCE_REPO);
   const upstream = fetchWazaUpstreamSkills();
@@ -882,7 +885,7 @@ function detectRuntimeCapabilities(waza) {
       owner: "external-skills-cli",
       required: false,
       required_for: "Waza/Mermaid external skill bootstrap; repo-harness reports this as an explicit exception boundary",
-      command: "npx -y skills ls -g --json",
+      command: "skills ls -g --json",
     },
     bash: commandCapability(
       "bash",

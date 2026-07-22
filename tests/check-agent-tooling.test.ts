@@ -135,6 +135,21 @@ function writeFakeNpx(fakeBin: string, logFile?: string) {
       "",
     ].join("\n")
   );
+  writeExecutable(
+    join(fakeBin, "skills"),
+    [
+      "#!/bin/bash",
+      "set -euo pipefail",
+      logFile ? `echo "skills $*" >> "${logFile}"` : "",
+      "if [[ \"$*\" == \"ls -g --json\" ]]; then",
+      `  echo '[${items}]'`,
+      "  exit 0",
+      "fi",
+      "echo 'unexpected mutating skill command' >&2",
+      "exit 2",
+      "",
+    ].join("\n")
+  );
 }
 
 function writeFakeGbrain(fakeBin: string, logFile?: string) {
@@ -510,6 +525,22 @@ describe("check-agent-tooling", () => {
           "  exit 2",
           "fi",
           "exit 1",
+          "",
+        ].join("\n")
+      );
+
+      writeExecutable(
+        join(envRoot.fakeBin, "skills"),
+        [
+          "#!/bin/bash",
+          "set -euo pipefail",
+          `echo "skills $*" >> "${logFile}"`,
+          "if [[ \"$*\" == \"ls -g --json\" ]]; then",
+          `  echo '[${WAZA_SKILLS.map((skill) => JSON.stringify({ name: skill, agents: ["Claude Code", "Codex"] })).join(",")}]'`,
+          "  exit 0",
+          "fi",
+          "echo 'unexpected mutating skill command' >&2",
+          "exit 2",
           "",
         ].join("\n")
       );
