@@ -1,4 +1,4 @@
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync } from 'fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { spawn } from 'child_process';
 import { dirname, join, resolve } from 'path';
 import { Command } from 'commander';
@@ -6,8 +6,9 @@ import { ensureControllerHome, resolveRepoPreferredControllerHome } from '../rep
 import { bootstrapLaunchAgentWithRetry, installLaunchAgent, launchAgentPath, restoreLaunchAgent, snapshotLaunchAgent, type LaunchAgentFileSnapshot } from '../controller/launch-agents';
 import { launchStableSupervisor } from '../../runtime/supervisor/bridge';
 import { sendSupervisorCommand } from '../../runtime/supervisor/control-server';
-import { installSupervisorRelease, startRegisteredSupervisorService, supervisorServiceLabel, supervisorSystemdUnitName } from '../../runtime/supervisor/installer';
-import { isStableSupervisorInstalled, publishCurrentRelease, readCurrentRelease, readCurrentSupervisorRelease, readPreviousRelease, supervisorLogPath, supervisorRoot } from '../../runtime/supervisor/paths';
+import { installSupervisorRelease, stageSupervisorRelease, startRegisteredSupervisorService, supervisorServiceLabel, supervisorSystemdUnitName } from '../../runtime/supervisor/installer';
+import { isStableSupervisorInstalled, publishCurrentRelease, readCurrentRelease, readCurrentSupervisorRelease, supervisorLogPath, supervisorRoot } from '../../runtime/supervisor/paths';
+import { extractSupervisorServiceRelease, readSupervisorServiceReleaseCoherence, type SupervisorServiceReleaseCoherence, type SupervisorServiceReleaseDescriptor } from '../../runtime/supervisor/release-coherence';
 import { readSupervisorState } from '../../runtime/supervisor/state-store';
 import { processIdentityMatches } from '../../runtime/supervisor/identity';
 import { isProcessAlive, terminateProcessTree } from '../../runtime/shared/process-tree';
@@ -114,7 +115,11 @@ export async function waitForServiceActivation(input: {
   throw new Error(`SUPERVISOR_ACTIVATION_TIMEOUT: ${input.activationId}`);
 }
 
-export function supervisorActivationMatchesRelease(control: unknown, expectedReleaseRevision: string): boolean {
+export function supervisorActivationMatchesRelease(
+  control: unknown,
+  expectedReleaseRevision: string,
+  serviceCoherence?: SupervisorServiceReleaseCoherence,
+): boolean {
   if (!control || typeof control !== 'object') return false;
   const response = control as { ok?: unknown; state?: unknown };
   if (response.ok !== true || !response.state || typeof response.state !== 'object') return false;
@@ -127,7 +132,17 @@ export function supervisorActivationMatchesRelease(control: unknown, expectedRel
   return state.observedState === 'healthy'
     && state.supervisor?.releaseRevision === expectedReleaseRevision
     && state.controllerDaemon?.releaseRevision === expectedReleaseRevision
-    && state.gatewayHost?.releaseRevision === expectedReleaseRevision;
+    && state.gatewayHost?.releaseRevision === expectedReleaseRevision
+    && serviceCoherence?.ok !== false;
+}
+
+export function selectSupervisorRollbackRelease(input: {
+  running?: SupervisorServiceReleaseDescriptor;
+  installed?: SupervisorServiceReleaseDescriptor;
+  current?: SupervisorServiceReleaseDescriptor;
+}): SupervisorServiceReleaseDescriptor | undefined {
+  const candidates = [input.running, input.installed, input.current];
+  return candidates.find((candidate) => Boolean(candidate?.releasePath && candidate.releaseRevision));
 }
 
 export function scheduleServiceActivation(
@@ -194,9 +209,22 @@ async function activateInstalledService(
 ): Promise<Record<string, unknown>> {
   const update = (phase: string, extra: Record<string, unknown> = {}) => writeActivationState(home, { activationId, phase, repoRoot: repo, ...extra });
   const label = supervisorServiceLabel(home);
-  const rollback: { previousReleasePath?: string; launchAgent: LaunchAgentFileSnapshot } = {
-    previousReleasePath: readPreviousRelease(home),
-    launchAgent: snapshotLaunchAgent(launchAgentPath(label)),
+  const launchAgent = snapshotLaunchAgent(launchAgentPath(label));
+  const generatedServicePath = join(supervisorRoot(home), 'launchd', `${label}.plist`);
+  const runningState = readSupervisorState(home);
+  const installedDescriptor = extractSupervisorServiceRelease(launchAgent.content?.toString('utf8'));
+  const rollback: { release?: SupervisorServiceReleaseDescriptor; launchAgent: LaunchAgentFileSnapshot; generatedServicePath: string } = {
+    release: selectSupervisorRollbackRelease({
+      running: runningState?.supervisor.releasePath && runningState.supervisor.releaseRevision
+        ? { releasePath: runningState.supervisor.releasePath, releaseRevision: runningState.supervisor.releaseRevision }
+        : undefined,
+      installed: installedDescriptor?.releasePath && installedDescriptor.releaseRevision
+        ? { releasePath: installedDescriptor.releasePath, releaseRevision: installedDescriptor.releaseRevision }
+        : undefined,
+      current: readCurrentSupervisorRelease(home),
+    }),
+    launchAgent,
+    generatedServicePath,
   };
   const expectedRelease = readCurrentSupervisorRelease(home);
   const expectedReleaseRevision = expectedRelease?.releaseRevision;
@@ -220,23 +248,29 @@ async function activateInstalledService(
     const service = await registerService(home);
     const deadline = Date.now() + 90_000;
     let control: unknown;
+    let serviceCoherence: SupervisorServiceReleaseCoherence | undefined;
     while (Date.now() < deadline) {
       try {
         control = await sendSupervisorCommand(home, { command: 'status' });
-        if (supervisorActivationMatchesRelease(control, expectedReleaseRevision)) break;
+        const controlState = control && typeof control === 'object' && (control as { state?: unknown }).state
+          ? (control as { state: unknown }).state
+          : readSupervisorState(home);
+        serviceCoherence = readSupervisorServiceReleaseCoherence(home, controlState as ReturnType<typeof readSupervisorState>);
+        if (supervisorActivationMatchesRelease(control, expectedReleaseRevision, serviceCoherence)) break;
       } catch {
         // OS service startup is asynchronous.
       }
       await new Promise((resolveWait) => setTimeout(resolveWait, 500));
     }
-    if (!supervisorActivationMatchesRelease(control, expectedReleaseRevision)) {
-      throw new Error(`SUPERVISOR_ACTIVATION_VERIFY_TIMEOUT: expected releaseRevision=${expectedReleaseRevision}`);
+    if (!supervisorActivationMatchesRelease(control, expectedReleaseRevision, serviceCoherence)) {
+      throw new Error(`SUPERVISOR_ACTIVATION_VERIFY_TIMEOUT: expected releaseRevision=${expectedReleaseRevision}; ${serviceCoherence?.failures.join('; ') || 'service coherence unavailable'}`);
     }
     update('succeeded', {
       completedAt: new Date().toISOString(),
       service,
       releaseRevision: expectedRelease.releaseRevision,
       releasePath: expectedRelease.releasePath,
+      serviceCoherence,
     });
     return { ok: true, activationId, stopped, service, control };
   } catch (error) {
@@ -255,15 +289,17 @@ async function activateInstalledService(
 async function restorePreviousActivation(
   repo: string,
   home: string,
-  rollback: { previousReleasePath?: string; launchAgent: LaunchAgentFileSnapshot },
+  rollback: { release?: SupervisorServiceReleaseDescriptor; launchAgent: LaunchAgentFileSnapshot; generatedServicePath: string },
 ): Promise<Record<string, unknown>> {
   try { unregisterService(home); } catch { /* recovery below may still use a detached Supervisor */ }
   const current = readCurrentRelease(home);
-  const previous = rollback.previousReleasePath ?? readPreviousRelease(home);
+  const previous = rollback.release?.releasePath;
   if (previous) publishCurrentRelease(home, previous, current);
   restoreLaunchAgent(rollback.launchAgent);
 
   if (process.platform === 'darwin' && rollback.launchAgent.content !== undefined) {
+    mkdirSync(dirname(rollback.generatedServicePath), { recursive: true, mode: 0o700 });
+    writeFileSync(rollback.generatedServicePath, rollback.launchAgent.content, { mode: 0o600 });
     const uid = typeof process.getuid === 'function'
       ? process.getuid()
       : Number(runProcess('id', ['-u'], { timeoutMs: 2_000, maxOutputBytes: 1_024 }).stdout.trim());
@@ -273,7 +309,24 @@ async function restorePreviousActivation(
         plistPath: rollback.launchAgent.path,
         domain: `gui/${uid}`,
       });
-      return { ok: true, mode: 'previous_launch_agent', plistPath: rollback.launchAgent.path, bootstrapAttempts: attempts };
+      const deadline = Date.now() + 60_000;
+      let control: unknown;
+      let serviceCoherence: SupervisorServiceReleaseCoherence | undefined;
+      while (Date.now() < deadline && rollback.release?.releaseRevision) {
+        try {
+          control = await sendSupervisorCommand(home, { command: 'status' });
+          const controlState = control && typeof control === 'object' && (control as { state?: unknown }).state
+            ? (control as { state: unknown }).state
+            : readSupervisorState(home);
+          serviceCoherence = readSupervisorServiceReleaseCoherence(home, controlState as ReturnType<typeof readSupervisorState>);
+          if (supervisorActivationMatchesRelease(control, rollback.release.releaseRevision, serviceCoherence)) break;
+        } catch { /* service startup is asynchronous */ }
+        await new Promise((resolveWait) => setTimeout(resolveWait, 500));
+      }
+      if (rollback.release?.releaseRevision && !supervisorActivationMatchesRelease(control, rollback.release.releaseRevision, serviceCoherence)) {
+        throw new Error(`SUPERVISOR_ROLLBACK_VERIFY_FAILED: expected=${rollback.release.releaseRevision}; ${serviceCoherence?.failures.join('; ') || 'service coherence unavailable'}`);
+      }
+      return { ok: true, mode: 'previous_launch_agent', plistPath: rollback.launchAgent.path, bootstrapAttempts: attempts, release: rollback.release, serviceCoherence };
     } catch (error) {
       if (!previous) throw error;
       const launched = launchStableSupervisor({ repoRoot: repo, controllerHome: home, logPath: supervisorLogPath(home) });
@@ -362,14 +415,20 @@ export function buildSupervisorCommand(): Command {
     .option('--repo <path>', 'Repository root')
     .option('--controller-home <path>', 'Controller-scoped state root')
     .option('--source-root <path>', 'Controller runtime source root')
-    .option('--register-service', 'Register launchd/systemd service after installing')
+    .option('--register-service', 'Compatibility flag; service activation is now the safe default')
+    .option('--stage-only', 'Build an immutable candidate without publishing current or changing the registered service')
     .option('--json', 'Output JSON')
-    .action((opts: { repo?: string; controllerHome?: string; sourceRoot?: string; registerService?: boolean; json?: boolean }) => {
+    .action((opts: { repo?: string; controllerHome?: string; sourceRoot?: string; registerService?: boolean; stageOnly?: boolean; json?: boolean }) => {
       const repo = repoRoot(opts.repo);
       const home = homeFor(repo, opts.controllerHome);
+      if (opts.stageOnly) {
+        const staged = stageSupervisorRelease({ controllerHome: home, repoRoot: repo, sourceRoot: opts.sourceRoot });
+        output({ ...staged, stagedOnly: true, service: { registrationScheduled: false } }, opts.json !== false);
+        return;
+      }
       const result = installSupervisorRelease({ controllerHome: home, repoRoot: repo, sourceRoot: opts.sourceRoot });
-      const activation = opts.registerService ? scheduleServiceActivation(repo, home) : undefined;
-      output({ ...result, ...(activation ? { activation, service: { registrationScheduled: true } } : {}) }, opts.json !== false);
+      const activation = scheduleServiceActivation(repo, home);
+      output({ ...result, activation, service: { registrationScheduled: true } }, opts.json !== false);
     });
 
   command.command('uninstall')

@@ -33,6 +33,8 @@ import { createExecutionJob, getExecutionJob } from '../../runtime/execution/job
 import { CONTROLLER_SCOPE_REPO_ID } from '../repositories/controller-home';
 import { randomUUID } from 'crypto';
 import { isStableSupervisorInstalled } from '../../runtime/supervisor/paths';
+import { readSupervisorState } from '../../runtime/supervisor/state-store';
+import { readSupervisorServiceReleaseCoherence } from '../../runtime/supervisor/release-coherence';
 import { stageSupervisorRelease } from '../../runtime/supervisor/installer';
 import { resolveControllerRuntimeSourceRoot } from '../../runtime/control-plane/runtime-generation';
 import { sendSupervisorCommand } from '../../runtime/supervisor/control-server';
@@ -100,6 +102,23 @@ async function stableSupervisorRollout(
   rootHome: string,
   opts: BlueGreenRolloutOptions,
 ): Promise<CompositeToolResult> {
+  const supervisorServiceCoherence = readSupervisorServiceReleaseCoherence(rootHome, readSupervisorState(rootHome));
+  if (!supervisorServiceCoherence.ok) {
+    return compositeFailed({
+      phase: 'supervisor-service-coherence',
+      summary: 'Stable Supervisor service definitions and running release have drifted',
+      failedCheck: 'supervisor_service_release_coherence',
+      keyOutput: supervisorServiceCoherence.failures.join('; '),
+      retryable: false,
+      nextAction: 'activate the published Supervisor release before attempting a business runtime rollout',
+      details: {
+        expectedReleaseRevision: supervisorServiceCoherence.expected?.releaseRevision,
+        runningReleaseRevision: supervisorServiceCoherence.running?.releaseRevision,
+        generatedServiceReleaseRevision: supervisorServiceCoherence.generated?.releaseRevision,
+        installedServiceReleaseRevision: supervisorServiceCoherence.installed?.releaseRevision,
+      },
+    });
+  }
   if (!supportsStagedRolloutRelease(rootHome)) {
     return compositeFailed({
       phase: 'supervisor-capability',

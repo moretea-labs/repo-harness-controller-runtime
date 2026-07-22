@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { bootstrapLaunchAgentWithRetry } from '../../src/cli/controller/launch-agents';
-import { serviceActivationStatePath, supervisorActivationMatchesRelease, waitForServiceActivation } from '../../src/cli/commands/supervisor';
+import { selectSupervisorRollbackRelease, serviceActivationStatePath, supervisorActivationMatchesRelease, waitForServiceActivation } from '../../src/cli/commands/supervisor';
 import { installSupervisorRelease, publishSupervisorRelease, renderLaunchdSupervisorPlist, renderSystemdSupervisorUnit, stageSupervisorRelease, supervisorServiceLabel, supervisorSystemdUnitName } from '../../src/runtime/supervisor/installer';
 import { createStableIngressRouter } from '../../src/runtime/supervisor/ingress-router';
 import { createStableIngressProcess } from '../../src/runtime/supervisor/ingress-process';
@@ -18,7 +18,7 @@ import { writeActiveSlotAuthority } from '../../src/cli/controller/runtime-slots
 import { readCurrentRelease, readCurrentSupervisorRelease, supervisorReleasesRoot } from '../../src/runtime/supervisor/paths';
 import { createSupervisorControlServer } from '../../src/runtime/supervisor/control-server';
 import type { SupervisorManagedProcess, SupervisorOperation, SupervisorState } from '../../src/runtime/supervisor/types';
-import { evaluateRuntimeReleaseCoherence } from '../../src/runtime/supervisor/release-coherence';
+import { evaluateRuntimeReleaseCoherence, evaluateSupervisorServiceReleaseCoherence, extractSupervisorServiceRelease } from '../../src/runtime/supervisor/release-coherence';
 
 const servers: Server[] = [];
 
@@ -472,6 +472,65 @@ describe('Stable Supervisor production hardening', () => {
         gatewayHost: { releaseRevision: 'new-revision' },
       },
     }, 'new-revision')).toBe(true);
+  });
+
+  test('service activation requires current, generated, installed, and running Supervisor releases to agree', () => {
+    const serviceFor = (revision: string) => renderLaunchdSupervisorPlist({
+      label: 'com.example.supervisor',
+      bunPath: '/usr/local/bin/bun',
+      supervisorPath: `/tmp/releases/${revision}/supervisor.js`,
+      repoRoot: '/tmp/repo',
+      controllerHome: '/tmp/home',
+      runtimeSourceRoot: '/tmp/repo',
+      releaseRevision: revision,
+      logPath: '/tmp/supervisor.log',
+      homeDir: '/Users/example',
+    });
+    const expected = extractSupervisorServiceRelease(serviceFor('revision-a'));
+    const coherent = evaluateSupervisorServiceReleaseCoherence({
+      expected,
+      running: expected,
+      generated: expected,
+      installed: expected,
+    });
+    expect(coherent.ok).toBe(true);
+
+    const detached = evaluateSupervisorServiceReleaseCoherence({
+      expected,
+      running: expected,
+      generated: expected,
+    });
+    expect(detached.ok).toBe(true);
+    expect(detached.serviceRegistered).toBe(false);
+
+    const installed = extractSupervisorServiceRelease(serviceFor('revision-old'));
+    const drifted = evaluateSupervisorServiceReleaseCoherence({
+      expected,
+      running: expected,
+      generated: expected,
+      installed,
+      serviceRegistered: true,
+    });
+    expect(drifted.ok).toBe(false);
+    expect(drifted.failures.join('; ')).toContain('installed service Supervisor release mismatch');
+    expect(supervisorActivationMatchesRelease({
+      ok: true,
+      state: {
+        observedState: 'healthy',
+        supervisor: { releaseRevision: 'revision-a' },
+        controllerDaemon: { releaseRevision: 'revision-a' },
+        gatewayHost: { releaseRevision: 'revision-a' },
+      },
+    }, 'revision-a', drifted)).toBe(false);
+  });
+
+  test('activation rollback prefers the proven running release over stale current and previous service metadata', () => {
+    const selected = selectSupervisorRollbackRelease({
+      running: { releasePath: '/tmp/releases/running', releaseRevision: 'running-revision' },
+      installed: { releasePath: '/tmp/releases/installed', releaseRevision: 'installed-revision' },
+      current: { releasePath: '/tmp/releases/current', releaseRevision: 'current-revision' },
+    });
+    expect(selected).toEqual({ releasePath: '/tmp/releases/running', releaseRevision: 'running-revision' });
   });
 
   test('release coherence requires exact path, revision, generation, and active slot agreement', () => {

@@ -1,5 +1,10 @@
-import { resolve } from 'path';
+import { readFileSync, realpathSync } from 'fs';
+import { homedir } from 'os';
+import { dirname, join, resolve } from 'path';
 import type { ActiveSlotAuthority, SlotIdentity } from '../../cli/controller/runtime-slots';
+import { launchAgentPath } from '../../cli/controller/launch-agents';
+import { supervisorServiceLabel, supervisorSystemdUnitName } from './installer';
+import { readCurrentSupervisorRelease, supervisorRoot, type SupervisorReleaseDescriptor } from './paths';
 import type { SupervisorState } from './types';
 
 export interface RuntimeReleaseCoherence {
@@ -117,4 +122,123 @@ export function evaluateRuntimeReleaseCoherence(input: {
     slotCoherent,
     failures,
   };
+}
+
+export interface SupervisorServiceReleaseDescriptor {
+  releasePath?: string;
+  releaseRevision?: string;
+}
+
+export interface SupervisorServiceReleaseCoherence {
+  ok: boolean;
+  expected?: SupervisorServiceReleaseDescriptor;
+  running?: SupervisorServiceReleaseDescriptor;
+  generated?: SupervisorServiceReleaseDescriptor;
+  installed?: SupervisorServiceReleaseDescriptor;
+  serviceRegistered: boolean;
+  failures: string[];
+}
+
+function decodeXml(value: string): string {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+
+/** Extract the immutable Supervisor release carried by a launchd plist or systemd unit. */
+export function extractSupervisorServiceRelease(text: string | undefined): SupervisorServiceReleaseDescriptor | undefined {
+  if (!text?.trim()) return undefined;
+  const xmlArguments = [...text.matchAll(/<string>([\s\S]*?)<\/string>/g)].map((match) => decodeXml(match[1] ?? ''));
+  const argumentsList = xmlArguments.length > 0 ? xmlArguments : text.split(/\s+/).filter(Boolean);
+  const executable = argumentsList.find((value) => /(?:^|\/)supervisor\.js$/.test(value));
+  const revisionFlag = argumentsList.indexOf('--release-revision');
+  const releaseRevision = revisionFlag >= 0 ? argumentsList[revisionFlag + 1] : undefined;
+  const releasePath = executable ? dirname(resolve(executable)) : undefined;
+  if (!releasePath && !releaseRevision) return undefined;
+  return { releasePath, releaseRevision };
+}
+
+function canonicalReleasePath(path: string): string {
+  try { return realpathSync.native(path); } catch { return resolve(path); }
+}
+
+function compareServiceRelease(
+  label: string,
+  expected: SupervisorServiceReleaseDescriptor | undefined,
+  actual: SupervisorServiceReleaseDescriptor | undefined,
+  failures: string[],
+): void {
+  if (!expected?.releasePath || !expected.releaseRevision) {
+    failures.push('current Supervisor release metadata is missing');
+    return;
+  }
+  if (!actual?.releasePath || !actual.releaseRevision) {
+    failures.push(`${label} Supervisor release metadata is missing`);
+    return;
+  }
+  const expectedPath = canonicalReleasePath(expected.releasePath);
+  const actualPath = canonicalReleasePath(actual.releasePath);
+  if (actualPath !== expectedPath || actual.releaseRevision !== expected.releaseRevision) {
+    failures.push(`${label} Supervisor release mismatch: expected=${expected.releaseRevision}@${expectedPath} actual=${actual.releaseRevision}@${actualPath}`);
+  }
+}
+
+export function evaluateSupervisorServiceReleaseCoherence(input: {
+  expected?: SupervisorServiceReleaseDescriptor;
+  running?: SupervisorServiceReleaseDescriptor;
+  generated?: SupervisorServiceReleaseDescriptor;
+  installed?: SupervisorServiceReleaseDescriptor;
+  serviceRegistered?: boolean;
+}): SupervisorServiceReleaseCoherence {
+  const failures: string[] = [];
+  const serviceRegistered = input.serviceRegistered ?? Boolean(input.installed?.releasePath || input.installed?.releaseRevision);
+  compareServiceRelease('running', input.expected, input.running, failures);
+  compareServiceRelease('generated service', input.expected, input.generated, failures);
+  if (serviceRegistered) compareServiceRelease('installed service', input.expected, input.installed, failures);
+  return { ok: failures.length === 0, ...input, serviceRegistered, failures };
+}
+
+function readText(path: string): string | undefined {
+  try { return readFileSync(path, 'utf8'); } catch { return undefined; }
+}
+
+/**
+ * Compare the published `current` release, generated service definition,
+ * system-installed service definition, and live Supervisor process. A current
+ * Daemon can still be owned by a stale lifecycle Supervisor and leave the
+ * stable ingress at 502, so slot coherence alone is not sufficient.
+ */
+export function readSupervisorServiceReleaseCoherence(
+  controllerHome: string,
+  supervisorState: SupervisorState | null | undefined,
+): SupervisorServiceReleaseCoherence {
+  const expectedRelease: SupervisorReleaseDescriptor | undefined = readCurrentSupervisorRelease(controllerHome);
+  const label = supervisorServiceLabel(controllerHome);
+  const root = supervisorRoot(controllerHome);
+  let generatedText: string | undefined;
+  let installedText: string | undefined;
+  if (process.platform === 'linux') {
+    const unit = supervisorSystemdUnitName(controllerHome);
+    generatedText = readText(join(root, 'systemd', unit));
+    installedText = readText(join(homedir(), '.config', 'systemd', 'user', unit));
+  } else {
+    generatedText = readText(join(root, 'launchd', `${label}.plist`));
+    installedText = readText(launchAgentPath(label));
+  }
+  const expected = expectedRelease
+    ? { releasePath: expectedRelease.releasePath, releaseRevision: expectedRelease.releaseRevision }
+    : undefined;
+  const running = supervisorState?.supervisor
+    ? { releasePath: supervisorState.supervisor.releasePath, releaseRevision: supervisorState.supervisor.releaseRevision }
+    : undefined;
+  return evaluateSupervisorServiceReleaseCoherence({
+    expected,
+    running,
+    generated: extractSupervisorServiceRelease(generatedText),
+    installed: extractSupervisorServiceRelease(installedText),
+    serviceRegistered: Boolean(installedText?.trim()),
+  });
 }

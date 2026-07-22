@@ -49,6 +49,9 @@ import { ensureRepositoryRuntimeStorage } from '../../../cli/repositories/runtim
 import { assessWorkMode } from '../../../cli/controller/work-mode';
 import { scheduleControllerServiceRestart } from '../../../cli/controller/restart-coordinator';
 import { stableSupervisorFacadeMutation, stableSupervisorFacadeOperation, stableSupervisorFacadeStatus } from '../../supervisor/facade';
+import { readSupervisorState } from '../../supervisor/state-store';
+import { isStableSupervisorInstalled } from '../../supervisor/paths';
+import { readSupervisorServiceReleaseCoherence } from '../../supervisor/release-coherence';
 import type { SupervisorOperationKind } from '../../supervisor/types';
 import { projectBoard } from '../../../cli/controller/issue-store';
 import {
@@ -82,6 +85,7 @@ import {
 import { loadMcpRuntimeState } from '../../../cli/mcp/auth';
 import { isExpectedLocalControllerHealth } from '../../../cli/mcp/keepalive';
 import { readActiveSlotAuthority } from '../../../cli/controller/runtime-slots';
+import { resolveStableControllerHome } from '../../../cli/controller/stable-state/stable-home';
 import { redactMcpText } from '../../../cli/mcp/redaction';
 import { resolveLocalBridgeSurface, summarizeRecentJobs } from '../../shared/local-bridge-surface';
 import { controllerPluginRepository, executeAssistantPluginReadDirect, getAssistantPluginManifest, isDirectPluginReadAction, listAssistantPluginManifests, submitAssistantPluginAction } from '../../plugins/store';
@@ -3073,7 +3077,13 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         const exposure = toolset.controllerExposureSnapshot(ctx);
         const localRegisteredToolNames = toolset.allControllerToolDefinitions(ctx).map((tool) => tool.name).sort();
         const toolSurfaceReady = exposure.ready && exposure.missingToolNames.length === 0;
-        const effectiveReady = readiness.ready && toolSurfaceReady;
+        const stableHome = resolveStableControllerHome(ctx.controllerHome);
+        const supervisorState = readSupervisorState(stableHome);
+        const stableSupervisorPresent = Boolean(supervisorState) || isStableSupervisorInstalled(stableHome);
+        const supervisorServiceCoherence = stableSupervisorPresent
+          ? readSupervisorServiceReleaseCoherence(stableHome, supervisorState)
+          : { ok: true, serviceRegistered: false, failures: [], expected: undefined, running: undefined, generated: undefined, installed: undefined };
+        const effectiveReady = readiness.ready && toolSurfaceReady && supervisorServiceCoherence.ok;
         const taskLedger = repository ? buildControllerTaskLedgerProjection(repository.canonicalRoot) : undefined;
         const agentExecutors = readAgentExecutableReadinessSnapshot(ctx.controllerHome);
         return result({
@@ -3098,7 +3108,19 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           agentExecutors: agentExecutors
             ? { status: 'probed', ...agentExecutors }
             : { status: 'not_probed', executors: {} },
-          reasons: toolSurfaceReady ? readiness.reasons : [...readiness.reasons, { code: 'MCP_TOOL_SURFACE_INCOMPLETE', message: 'Registered and exposed MCP tool schemas do not match.' }],
+          stableSupervisor: stableSupervisorPresent ? {
+            ready: supervisorServiceCoherence.ok,
+            expectedReleaseRevision: supervisorServiceCoherence.expected?.releaseRevision,
+            runningReleaseRevision: supervisorServiceCoherence.running?.releaseRevision,
+            generatedServiceReleaseRevision: supervisorServiceCoherence.generated?.releaseRevision,
+            installedServiceReleaseRevision: supervisorServiceCoherence.installed?.releaseRevision,
+            failures: supervisorServiceCoherence.failures,
+          } : { ready: true, installed: false, failures: [] },
+          reasons: [
+            ...readiness.reasons,
+            ...(!toolSurfaceReady ? [{ code: 'MCP_TOOL_SURFACE_INCOMPLETE', message: 'Registered and exposed MCP tool schemas do not match.' }] : []),
+            ...(!supervisorServiceCoherence.ok ? [{ code: 'SUPERVISOR_SERVICE_RELEASE_DRIFT', message: supervisorServiceCoherence.failures.join('; ') }] : []),
+          ],
           toolSurface: {
             ready: toolSurfaceReady,
             localExpectedTools: exposure.expectedToolNames,

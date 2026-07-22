@@ -58,6 +58,8 @@ const required = [
   'src/runtime/workflow/portfolio/engine.ts',
   'src/runtime/workflow/findings/store.ts',
   'src/runtime/release/release-gate.ts',
+  'src/runtime/supervisor/release-coherence.ts',
+  'src/cli/commands/supervisor.ts',
   'docs/architecture/current/implementation-status.md',
   'docs/architecture/current/runtime-directory-map.md',
   'docs/architecture/current/operations-runbook.md',
@@ -106,6 +108,17 @@ requireText('src/runtime/gateway/mcp/runtime-tools.ts', "case 'local_bridge_stat
 requireText('src/runtime/gateway/mcp/runtime-tools.ts', 'readAgentExecutableReadinessSnapshot');
 requireText('src/runtime/gateway/mcp/runtime-tools.ts', 'connectorExposedTools');
 requireText('src/runtime/gateway/mcp/runtime-tools.ts', 'currentCallableTools');
+requireText('src/runtime/gateway/mcp/runtime-tools.ts', 'SUPERVISOR_SERVICE_RELEASE_DRIFT');
+requireText('src/runtime/gateway/mcp/runtime-tools.ts', 'readSupervisorServiceReleaseCoherence');
+requireText('src/runtime/supervisor/release-coherence.ts', 'evaluateSupervisorServiceReleaseCoherence');
+requireText('src/runtime/supervisor/release-coherence.ts', "compareServiceRelease('installed service'");
+requireText('src/cli/commands/supervisor.ts', 'selectSupervisorRollbackRelease');
+requireText('src/cli/commands/supervisor.ts', "option('--stage-only'");
+requireText('src/cli/commands/supervisor.ts', 'serviceCoherence');
+requireText('src/cli/commands/supervisor.ts', 'generatedServicePath');
+requireMatch('src/cli/commands/supervisor.ts', /writeFileSync\(rollback\.generatedServicePath, rollback\.launchAgent\.content/, 'restore the generated service definition together with the installed service during rollback');
+requireText('src/cli/controller/bluegreen-rollout.ts', 'supervisor-service-coherence');
+forbid('src/cli/commands/supervisor.ts', /readPreviousRelease\s*\(\s*home\s*\)/, 'Supervisor activation rollback must restore the proven running/installed release, not an unrelated previous symlink');
 forbid('src/runtime/gateway/mcp/runtime-tools.ts', /inspectAgentExecutableReadiness|resolveAgentExecutable|writeAgentExecutableReadinessSnapshot/, 'Gateway readiness must only read the Daemon-produced Agent executable snapshot');
 forbidBetween(
   'src/runtime/gateway/mcp/runtime-tools.ts',

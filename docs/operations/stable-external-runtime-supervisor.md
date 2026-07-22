@@ -10,7 +10,6 @@ Run installation from the canonical, verified source tree:
 bun src/cli/index.ts supervisor install \
   --repo /path/to/repo-harness-controller-runtime \
   --controller-home /path/to/controller-home \
-  --register-service \
   --json
 ```
 
@@ -20,15 +19,18 @@ Installation builds an immutable release under:
 <controller-home>/supervisor/releases/<timestamp>-<revision>/
 ```
 
-The release contains `supervisor.js`, `repo-harness.js`, `daemon.js`, and `manifest.json`. `current` and `previous` are updated atomically.
+The release contains `supervisor.js`, `repo-harness.js`, `daemon.js`, and `manifest.json`. A normal install publishes the candidate and schedules service activation by default. Use `--stage-only` only to build an immutable candidate without changing `current` or the registered service.
 
-When `--register-service` is used while the legacy stack is running, the command first persists and launches a detached activation handoff. The current request can return before shutdown. Activation then:
+While the legacy stack is running, installation persists and launches a detached activation handoff. The current request can return before shutdown. Activation then:
 
 1. stops the legacy Controller tree with full identity-scoped ownership checks;
 2. removes an obsolete service registration;
 3. registers launchd or systemd against the immutable `current` release;
-4. waits for the Supervisor control surface to become healthy;
-5. records the result in `<controller-home>/supervisor/activation.json`.
+4. verifies that the published `current` release, generated service definition, system-installed service definition, and running Supervisor process all identify the same immutable release;
+5. waits for the Supervisor, Controller Daemon, Gateway Host, and stable ingress to become healthy;
+6. records the result in `<controller-home>/supervisor/activation.json`.
+
+If activation fails, rollback restores the proven previously running release and both copies of its service definition before restarting it. `controller_ready` reports `SUPERVISOR_SERVICE_RELEASE_DRIFT`, and business runtime rollout fails closed, whenever these identities diverge.
 
 Do not start a second KeepAlive manually during this handoff.
 
