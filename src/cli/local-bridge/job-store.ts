@@ -666,16 +666,24 @@ function tryReadLocalBridgeJob(repoRoot: string, jobId: string): LocalBridgeJob 
 }
 
 function cleanupEphemeralJob(repoRoot: string, job: LocalBridgeJob): void {
-  if (!job.ephemeral || !job.issueId || job.cleanupAt) return;
-  try {
-    removeEphemeralIssue(repoRoot, job.issueId);
-  } catch (_error) {
-    // Cleanup is best-effort and idempotent; Run evidence remains durable.
+  if (!job.ephemeral || !job.issueId || job.cleanupAt || job.status !== "succeeded") return;
+  const runStatus = job.result && typeof job.result === "object"
+    ? (job.result as { runStatus?: unknown }).runStatus
+    : undefined;
+  const removeIssue = runStatus === "succeeded";
+  if (removeIssue) {
+    try {
+      removeEphemeralIssue(repoRoot, job.issueId);
+    } catch (_error) {
+      // Cleanup is best-effort and idempotent; Run evidence remains durable.
+    }
   }
   job.cleanupAt = now();
   appendEvent(repoRoot, job.jobId, {
     type: "job_cleaned",
-    message: `Ephemeral Quick Agent metadata for ${job.issueId} was cleaned.`,
+    message: removeIssue
+      ? `Ephemeral Quick Agent metadata for ${job.issueId} was cleaned.`
+      : `Ephemeral Quick Agent Local Job settled; hidden metadata for ${job.issueId} was retained for retry.`,
   });
 }
 

@@ -77,6 +77,15 @@ const RUN_INDEX_LOCK = ".ai/harness/controller/run-index.lock";
 const RUN_LAUNCH_LOCK_STALE_MS = 30_000;
 const RUN_LAUNCH_LOCK_WAIT_MS = 500;
 const RUN_LAUNCH_LOCK_POLL_MS = 10;
+const DEFAULT_AGENT_STARTUP_TIMEOUT_MS = 90_000;
+const MIN_AGENT_STARTUP_TIMEOUT_MS = 30_000;
+const MAX_AGENT_STARTUP_TIMEOUT_MS = 300_000;
+
+export function agentStartupTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const configured = Number(env.REPO_HARNESS_AGENT_STARTUP_TIMEOUT_MS);
+  if (!Number.isFinite(configured)) return DEFAULT_AGENT_STARTUP_TIMEOUT_MS;
+  return Math.max(MIN_AGENT_STARTUP_TIMEOUT_MS, Math.min(Math.trunc(configured), MAX_AGENT_STARTUP_TIMEOUT_MS));
+}
 
 function shortId(): string {
   return randomBytes(4).toString("hex");
@@ -772,7 +781,9 @@ function reconcileLatestTerminalRun(repoRoot: string, meta: AgentJobMeta): void 
       transition: "run_sync",
       note: `${meta.runId} ended as ${meta.status}; explicit retry is required.${meta.error ? ` ${meta.error}` : ""}`,
     });
-    cleanupEphemeralIssueAfterRun(repoRoot, issue.id);
+    // Failed/unknown/cancelled ephemeral Runs remain retryable evidence. Keep
+    // their hidden Issue/Task metadata until a successful continuation reaches
+    // done or an explicit lifecycle cleanup removes it.
   } catch (_error) {
     // Run evidence remains authoritative if Issue metadata changed concurrently.
   }
@@ -1200,7 +1211,7 @@ function baseMeta(
     resultPath: relative(opts.repoRoot, paths.resultPath).replace(/\\/g, "/"),
     eventsPath: relative(opts.repoRoot, paths.eventsPath).replace(/\\/g, "/"),
     timeoutMs: opts.timeoutMs,
-    startupDeadlineAt: new Date(Date.now() + 30_000).toISOString(),
+    startupDeadlineAt: new Date(Date.now() + agentStartupTimeoutMs()).toISOString(),
     autoIntegrate: executionMode === "worktree",
     progress: {
       phase: "starting",

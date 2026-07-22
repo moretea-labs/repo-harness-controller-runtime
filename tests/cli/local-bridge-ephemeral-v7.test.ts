@@ -24,7 +24,7 @@ function repo(): string {
 }
 
 describe("Quick Agent v7 ephemeral lifecycle", () => {
-  test("ephemeral Quick Agent metadata never pollutes the durable board and is cleaned after failure", () => {
+  test("ephemeral Quick Agent metadata stays hidden and remains available after failure for retry", () => {
     const root = repo();
     const job = submitLocalBridgeJob(root, {
       action: "quick-agent-session",
@@ -88,8 +88,9 @@ describe("Quick Agent v7 ephemeral lifecycle", () => {
     const refreshed = getLocalBridgeJob(root, job.jobId);
     expect(refreshed.status).toBe("failed");
     expect(refreshed.finishedAt).toBeTruthy();
-    expect(refreshed.cleanupAt).toBeTruthy();
-    expect(() => getIssue(root, issue.id)).toThrow("issue not found");
+    expect(refreshed.cleanupAt).toBeUndefined();
+    const retained = getIssue(root, issue.id);
+    expect(retained.ephemeral).toBe(true);
     expect(listIssues(root)).toEqual([]);
   });
 });

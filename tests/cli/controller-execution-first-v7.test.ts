@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { getAgentJob, startTaskJob } from "../../src/cli/agent-jobs/job-manager";
+import { agentStartupTimeoutMs, getAgentJob, startTaskJob } from "../../src/cli/agent-jobs/job-manager";
 import type { AgentJobMeta } from "../../src/cli/agent-jobs/types";
 import {
   invalidateAgentWorker,
@@ -87,6 +87,13 @@ function writeRun(
 }
 
 describe("Controller v7 compatibility on the V8 execution bridge", () => {
+  test("agent startup grace survives bounded rollout handoff delays", () => {
+    expect(agentStartupTimeoutMs({})).toBe(90_000);
+    expect(agentStartupTimeoutMs({ REPO_HARNESS_AGENT_STARTUP_TIMEOUT_MS: "120000" })).toBe(120_000);
+    expect(agentStartupTimeoutMs({ REPO_HARNESS_AGENT_STARTUP_TIMEOUT_MS: "1000" })).toBe(30_000);
+    expect(agentStartupTimeoutMs({ REPO_HARNESS_AGENT_STARTUP_TIMEOUT_MS: "999999" })).toBe(300_000);
+  });
+
   test("high-risk metadata does not block local execution", () => {
     const root = repo();
     const issue = createIssue(root, {

@@ -905,12 +905,13 @@ if (ok) {
   }
 }
 
-if (!ok || continuationStatus === "done") {
+if (continuationStatus === "done") {
   try {
     const issue = getIssue(finalMeta.repoRoot, finalMeta.issueId);
     if (issue.ephemeral) removeEphemeralIssue(finalMeta.repoRoot, issue.id);
   } catch (_error) {
-    // Ephemeral Quick Agent metadata is best-effort; Run logs remain durable.
+    // Successful completion cleanup is best-effort; failed ephemeral Runs keep
+    // hidden Issue/Task metadata so retry_task_run remains available.
   }
 }
 
