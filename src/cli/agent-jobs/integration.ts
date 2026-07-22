@@ -20,6 +20,7 @@ import { resolveMcpPath } from "../mcp/paths";
 import type { McpPolicy } from "../mcp/types";
 import { getAgentJob, markAgentJobClosure, markAgentJobIntegrated, markAgentJobIntegrationReview } from "./job-manager";
 import type { AgentJobMeta, AgentJobPreservationReason } from "./types";
+import { assertThisRuntimeMayWriteOrThrow } from "../controller/stable-state/runtime-writer-context";
 
 type IntegrationChangeOutcome = "changed" | "already_integrated";
 
@@ -502,7 +503,6 @@ export function integrateAgentJob(
   // Active-writer fencing before any integration mutation (workspace, git index,
   // task/run state, worktree, branch). Preview/diff paths do not call this.
   try {
-    const { assertThisRuntimeMayWriteOrThrow } = require('../controller/stable-state/runtime-writer-context') as typeof import('../controller/stable-state/runtime-writer-context');
     const controllerHome = process.env.REPO_HARNESS_CONTROLLER_HOME
       ?? process.env.CONTROLLER_HOME
       ?? undefined;

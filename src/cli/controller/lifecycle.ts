@@ -512,7 +512,16 @@ function collectControllerServiceProcesses(
   return Array.from(seen.values()).sort((a, b) => a.pid - b.pid);
 }
 
-function resolveServiceConfig(repoRoot: string, explicitLogFile?: string, explicitControllerHome?: string): {
+function isRuntimeSlotHome(path: string): boolean {
+  return /[/\\]runtime-slots[/\\](?:blue|green)$/.test(resolve(path));
+}
+
+function resolveServiceConfig(
+  repoRoot: string,
+  explicitLogFile?: string,
+  explicitControllerHome?: string,
+  slotLocalLifecycle = false,
+): {
   repoRoot: string;
   controllerHome: string;
   packageVersion: string;
@@ -534,27 +543,30 @@ function resolveServiceConfig(repoRoot: string, explicitLogFile?: string, explic
   logPath: string;
 } {
   const controllerHome = resolveRepoPreferredControllerHome(repoRoot, explicitControllerHome);
+  const useSlotLocalLifecycle = slotLocalLifecycle || isRuntimeSlotHome(controllerHome);
   // Prefer active blue/green slot mcp config when present so status probes the
   // live Local Controller / MCP ports (e.g. green slot 8776) instead of the
   // root template default (8766).
   let slotHome: string | undefined;
-  try {
-    slotHome = ensureSlotHome(controllerHome, readActiveSlotAuthority(controllerHome).activeSlot);
-  } catch {
-    slotHome = undefined;
+  if (!useSlotLocalLifecycle) {
+    try {
+      slotHome = ensureSlotHome(controllerHome, readActiveSlotAuthority(controllerHome).activeSlot);
+    } catch {
+      slotHome = undefined;
+    }
   }
   const slotLocalConfig = slotHome ? loadMcpServiceLocalConfig(slotHome) : null;
-  const rootLocalConfig = loadMcpServiceLocalConfig(controllerHome, repoRoot);
+  const rootLocalConfig = loadMcpServiceLocalConfig(controllerHome, useSlotLocalLifecycle ? undefined : repoRoot);
   const localConfig = (slotLocalConfig?.localController || slotLocalConfig?.server
     ? slotLocalConfig
     : null)
     ?? rootLocalConfig
-    ?? loadMcpLocalConfig(repoRoot);
-  const localBridgeConfig = loadLocalBridgeConfig(repoRoot);
+    ?? (useSlotLocalLifecycle ? null : loadMcpLocalConfig(repoRoot));
+  const localBridgeConfig = useSlotLocalLifecycle ? { version: 1 as const } : loadLocalBridgeConfig(repoRoot);
   const slotRuntime = slotHome ? loadMcpServiceRuntimeState(slotHome) : null;
   const runtime = (slotRuntime?.localController || slotRuntime?.server ? slotRuntime : null)
-    ?? loadMcpServiceRuntimeState(controllerHome, repoRoot)
-    ?? loadMcpRuntimeState(repoRoot);
+    ?? loadMcpServiceRuntimeState(controllerHome, useSlotLocalLifecycle ? undefined : repoRoot)
+    ?? (useSlotLocalLifecycle ? null : loadMcpRuntimeState(repoRoot));
   // Runtime-observed endpoint/port is authoritative when present; config is fallback.
   const runtimeLocalEndpoint = runtime?.localController?.endpoint?.trim();
   const runtimeLocalPort = runtimeLocalEndpoint
@@ -698,7 +710,7 @@ function controllerHomeConfigAuthoritative(controllerHome: string): boolean {
 
 export async function controllerServiceStatus(opts: ControllerServiceOptions = {}): Promise<ControllerServiceStatus> {
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? ".");
-  const config = resolveServiceConfig(repoRoot, opts.logFile, opts.controllerHome);
+  const config = resolveServiceConfig(repoRoot, opts.logFile, opts.controllerHome, opts.slotLocalLifecycle);
   const state = loadControllerServiceState(repoRoot, config.controllerHome);
   const stableInstalled = !opts.slotLocalLifecycle && isStableSupervisorInstalled(config.controllerHome);
   const stableState = stableInstalled ? readStableSupervisorState(config.controllerHome) : null;
@@ -871,7 +883,7 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
   if (runtime?.server.healthMismatch) problems.push(`MCP runtime generation/tool surface mismatch: ${runtime.server.healthMismatch}`);
   if (!projectionReady) problems.push(`Runtime projection is stale for ${blockingStaleProjectionRepos.join(", ") || "active runtime state"}.`);
   if (staleProjectionRepos.length > 0 && blockingStaleProjectionRepos.length === 0) {
-    infos.push(`Ignoring stale idle runtime projections for ${staleProjectionRepos.join(", ")}.`);
+    infos.push(...staleProjectionRepos.map((repoId) => `Ignoring stale idle runtime projections for ${repoId}.`));
   }
   if (!connectorReady && runtime?.tunnel?.publicEndpoint) problems.push("Connector readiness is stale; public endpoint changed or generation drifted.");
   if (orphanedProcesses.length > 0) warnings.push(`Detected ${orphanedProcesses.length} detached repo-harness process(es) outside the tracked supervisor.`);
@@ -998,7 +1010,7 @@ async function stopProcesses(processes: ControllerServiceProcess[], timeoutMs: n
 export async function startControllerService(opts: ControllerServiceOptions = {}): Promise<ControllerServiceActionResult> {
   if (!process.versions.bun) throw new Error("Bun is required to start the Controller stack.");
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? ".");
-  const config = resolveServiceConfig(repoRoot, opts.logFile, opts.controllerHome);
+  const config = resolveServiceConfig(repoRoot, opts.logFile, opts.controllerHome, opts.slotLocalLifecycle);
   let status = await controllerServiceStatus({
     repo: repoRoot,
     logFile: config.logPath,
@@ -1194,7 +1206,7 @@ export async function startControllerService(opts: ControllerServiceOptions = {}
 
 export async function stopControllerService(opts: ControllerServiceOptions = {}): Promise<ControllerServiceActionResult> {
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? ".");
-  const config = resolveServiceConfig(repoRoot, opts.logFile, opts.controllerHome);
+  const config = resolveServiceConfig(repoRoot, opts.logFile, opts.controllerHome, opts.slotLocalLifecycle);
   const state = loadControllerServiceState(repoRoot, config.controllerHome);
   const status = await controllerServiceStatus({
     repo: repoRoot,
@@ -1348,7 +1360,7 @@ export async function restartControllerService(opts: ControllerServiceOptions = 
 
 export async function controllerServiceLogs(opts: ControllerServiceOptions & { tail?: number } = {}): Promise<ControllerServiceLogsResult> {
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? ".");
-  const logPath = resolveServiceConfig(repoRoot, opts.logFile, opts.controllerHome).logPath;
+  const logPath = resolveServiceConfig(repoRoot, opts.logFile, opts.controllerHome, opts.slotLocalLifecycle).logPath;
   return {
     logPath,
     text: readLogTail(logPath, Math.max(1_000, (opts.tail ?? 200) * 200)),

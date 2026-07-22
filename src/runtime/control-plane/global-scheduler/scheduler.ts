@@ -5,12 +5,15 @@ import { dirname, join, resolve } from 'path';
 import { cpus, freemem, loadavg } from 'os';
 import { listRepositories } from '../../../cli/repositories/registry';
 import { ensureControllerHome } from '../../../cli/repositories/controller-home';
+import { writeAgentExecutableReadinessSnapshot } from '../../../cli/agent-jobs/executable-resolver';
 import { withControllerLock } from '../../../cli/repositories/locks';
+import { assertThisRuntimeMayWrite, getRuntimeWriterClaim } from '../../../cli/controller/stable-state/runtime-writer-context';
 import {
   attachExecutionWorker,
   executionJobRoot,
   getExecutionJob,
   listActiveExecutionJobs,
+  markExecutionJobSchedulerObserved,
   transitionExecutionJob,
   updateExecutionJob,
 } from '../../execution/jobs/store';
@@ -27,6 +30,7 @@ import { isProcessAlive, terminateProcessTree } from '../../shared/process-tree'
 import { readSchedulerWakeSignal, waitForSchedulerWakeSignal } from './wake-signal';
 import { cleanupControllerRuntimeState } from '../runtime-cleanup';
 import { rebuildRepositoryProjection } from '../../projections/materialized-view';
+import { sampleRepositoryGitStatusForRepositories } from '../../projections/git-status-sampler';
 
 const DARWIN_MEMORY_SAMPLE_TTL_MS = 5_000;
 const MAX_WORKER_STDERR_BYTES = 16 * 1024;
@@ -41,6 +45,7 @@ const WORKER_ENVIRONMENT_KEYS = [
   'REPO_HARNESS_SUPERVISOR_EPOCH',
 ] as const;
 const RUNTIME_CLEANUP_INTERVAL_MS = Math.max(30_000, Number(process.env.REPO_HARNESS_RUNTIME_CLEANUP_INTERVAL_MS ?? 60_000));
+const GIT_STATUS_SAMPLE_INTERVAL_MS = Math.max(1_000, Number(process.env.REPO_HARNESS_GIT_STATUS_SAMPLE_INTERVAL_MS ?? 5_000));
 const DARWIN_RECLAIMABLE_PAGE_LABELS = new Set([
   'Pages free',
   'Pages inactive',
@@ -177,6 +182,7 @@ export class GlobalScheduler {
   private lastDispatchAt: string | undefined;
   private lastReconcileAt: string | undefined;
   private lastCleanupAt = 0;
+  private lastGitStatusSampleAt = 0;
   private runtimeCleanup = cleanupControllerRuntimeState;
   private lastDarwinMemorySampleAt = 0;
   private cachedDarwinAvailableMemoryMb: number | undefined;
@@ -335,7 +341,6 @@ export class GlobalScheduler {
   private spawnWorker(repoId: string, jobId: string): boolean {
     // Passive / fenced runtimes must not consume the queue or dispatch workers.
     try {
-      const { assertThisRuntimeMayWrite } = require('../../../cli/controller/stable-state/runtime-writer-context') as typeof import('../../../cli/controller/stable-state/runtime-writer-context');
       const fence = assertThisRuntimeMayWrite('consume_queue', this.controllerHome);
       if (!fence.allowed) return false;
     } catch {
@@ -377,7 +382,6 @@ export class GlobalScheduler {
       fencingToken?: string;
     } = {};
     try {
-      const { getRuntimeWriterClaim } = require('../../../cli/controller/stable-state/runtime-writer-context') as typeof import('../../../cli/controller/stable-state/runtime-writer-context');
       const claim = getRuntimeWriterClaim();
       if (claim) {
         writerClaim = {
@@ -562,6 +566,21 @@ export class GlobalScheduler {
       this.lastReconcileAt = new Date(now).toISOString();
     }
     const repositories = listRepositories(this.controllerHome).filter((repo) => repo.enabled && !repo.removedAt);
+    if (now - this.lastGitStatusSampleAt >= GIT_STATUS_SAMPLE_INTERVAL_MS) {
+      this.lastGitStatusSampleAt = now;
+      sampleRepositoryGitStatusForRepositories(this.controllerHome, repositories);
+    }
+    // Scheduler observation ends admission and starts the independent queue
+    // budget. This runs outside the global dispatch lock because each Job owns
+    // its own atomic state transition.
+    for (const job of listActiveExecutionJobs(this.controllerHome)) {
+      if (job.status === 'running' || job.timings?.schedulerObservedAt) continue;
+      try {
+        markExecutionJobSchedulerObserved(this.controllerHome, job.repoId, job.jobId);
+      } catch {
+        // Another scheduler or a terminal transition won the Job-local race.
+      }
+    }
     if (now - this.lastScheduleTick >= 30_000) {
       await tickSchedules(this.controllerHome, repositories.map((repo) => repo.repoId));
       this.lastScheduleTick = now;
@@ -571,6 +590,7 @@ export class GlobalScheduler {
       this.lastPortfolioTick = now;
     }
     let activeJobs = 0;
+    const pendingSpawns: Array<{ repoId: string; jobId: string }> = [];
     try {
       activeJobs = withControllerLock(
         this.controllerHome,
@@ -662,7 +682,7 @@ export class GlobalScheduler {
             this.lastRepoDispatch.set(repoId, dispatchedAt);
             this.lastDispatchAt = new Date(dispatchedAt).toISOString();
             this.persistState(true);
-            this.spawnWorker(repoId, dispatch.job.jobId);
+            pendingSpawns.push({ repoId, jobId: dispatch.job.jobId });
           }
           return active.length;
         },
@@ -673,6 +693,12 @@ export class GlobalScheduler {
       // Another scheduler owns the global dispatch reservation. Fail closed and
       // leave all jobs queued for the next wake/tick rather than risking overrun.
       activeJobs = listActiveExecutionJobs(this.controllerHome).length;
+    }
+    // Process creation, lifecycle file writes, and Worker attachment are all
+    // deliberately outside the global dispatch reservation lock. The durable
+    // dispatched state is the capacity reservation while spawn proceeds.
+    for (const pending of pendingSpawns) {
+      this.spawnWorker(pending.repoId, pending.jobId);
     }
     // Dispatch is latency-sensitive. Run repository workflow maintenance only
     // after queued Jobs have had a chance to claim capacity. Campaign and Goal
@@ -697,6 +723,14 @@ export class GlobalScheduler {
   }
 
   async run(signal?: AbortSignal): Promise<void> {
+    try {
+      writeAgentExecutableReadinessSnapshot(this.controllerHome);
+    } catch (error) {
+      console.error(
+        '[repo-harness scheduler] Agent executable readiness probe failed:',
+        error instanceof Error ? error.message : String(error),
+      );
+    }
     this.persistState(true);
     let idleStreak = 0;
     try {

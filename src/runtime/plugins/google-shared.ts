@@ -359,7 +359,7 @@ export type GoogleReadinessMode =
 export function resolveGoogleReadinessMode(config: GooglePluginConfig, auth: GoogleAuthState): GoogleReadinessMode {
   if (!config.enabled) return 'disabled';
   if (config.provider === 'mock' && auth.ready) return 'mock_provider_ready';
-  if (config.provider === 'google-workspace' && auth.ready && auth.probed) return 'live_provider_ready';
+  if (config.provider === 'google-workspace' && auth.ready) return 'live_provider_ready';
   if (config.provider === 'google-workspace' && auth.authenticated) return 'live_token_unverified';
   return 'missing_token';
 }

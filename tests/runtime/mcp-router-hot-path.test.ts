@@ -1,5 +1,13 @@
 import { describe, expect, test } from 'bun:test';
-import { isDirectHotReadTool, isGatewayIsolatedTool, isSelfManagedDurableTool, waitTimeoutMs, wantsWaitForResult } from '../../src/runtime/gateway/mcp/router';
+import {
+  executionTimeoutPolicyForMcpCall,
+  operationExecutionTimeoutMsForMcpCall,
+  isDirectHotReadTool,
+  isGatewayIsolatedTool,
+  isSelfManagedDurableTool,
+  waitTimeoutMs,
+  wantsWaitForResult,
+} from '../../src/runtime/gateway/mcp/router';
 
 describe('MCP durable routing hot path', () => {
   test('wait_ms configures but never enables waiting', () => {
@@ -12,6 +20,27 @@ describe('MCP durable routing hot path', () => {
     expect(waitTimeoutMs({ wait: true, wait_ms: 10 })).toBe(200);
     expect(waitTimeoutMs({ wait: true, wait_ms: 30_000 })).toBe(30_000);
     expect(waitTimeoutMs({ wait: true, wait_ms: 999_999 })).toBe(120_000);
+  });
+
+  test('Agent execution timeout is preserved independently from the parent Job', () => {
+    const args = {
+      execution_timeout_ms: 3_600_000,
+      wait: true,
+      interactive_wait_ms: 30_000,
+    };
+    const policy = executionTimeoutPolicyForMcpCall('quick_agent_session', args);
+    expect(operationExecutionTimeoutMsForMcpCall('quick_agent_session', args)).toBe(3_600_000);
+    expect(policy).toEqual({
+      admissionTimeoutMs: 300_000,
+      queueTimeoutMs: 24 * 60 * 60_000,
+      executionTimeoutMs: 120_000,
+      interactiveWaitMs: 30_000,
+    });
+
+    const normal = executionTimeoutPolicyForMcpCall('run_check', { timeout_ms: 600_000 });
+    expect(normal.admissionTimeoutMs).toBe(600_000);
+    expect(normal.queueTimeoutMs).toBe(600_000);
+    expect(normal.executionTimeoutMs).toBe(600_000);
   });
 
   test('high-frequency reads bypass durable execution', () => {

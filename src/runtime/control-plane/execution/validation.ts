@@ -45,7 +45,7 @@ export function assertWorkHandleLifecycle(handle: WorkHandleState, operation: 'i
     inspect: ['prepared', 'editing', 'validating', 'committed', 'merged'],
     execute: ['prepared', 'editing'],
     validate: ['prepared', 'editing', 'validating', 'committed', 'merged'],
-    finalize: ['prepared', 'editing', 'validating', 'committed', 'merged', 'cleaned'],
+    finalize: ['prepared', 'editing', 'validating', 'committed', 'merged', 'cleaned', 'failed'],
   };
   if (!allowed[operation].includes(handle.state)) {
     fail('WORK_HANDLE_LIFECYCLE_INVALID', `${operation} is not valid while handle is ${handle.state}`);
@@ -60,13 +60,21 @@ export function validateWorkHandle(
   operation: 'inspect' | 'execute' | 'validate' | 'finalize',
 ): ValidatedWorkHandle {
   const session = requireExecutionSession(controllerHome, identity);
-  if (handle.sessionId !== session.sessionId) fail('WORK_HANDLE_SESSION_MISMATCH', 'work handle belongs to another session');
   if (handle.principalId !== session.principalId) fail('WORK_HANDLE_PRINCIPAL_MISMATCH', 'work handle belongs to another principal');
-  if (session.activeRepositoryId !== handle.repositoryId || session.activeCheckoutId !== handle.checkoutId) {
-    fail('WORK_HANDLE_NOT_ACTIVE', 'work handle is not bound to the active session repository/checkout');
-  }
-  if (session.activeWorkId !== handle.workId) fail('WORK_HANDLE_NOT_ACTIVE', 'work handle is not the active session work');
   assertWorkHandleLifecycle(handle, operation);
+  const warnings: string[] = [];
+  if (handle.sessionId !== session.sessionId) {
+    warnings.push('Work is controller-owned and was created by a different MCP session; current session is observing it by principal identity.');
+  }
+  if (session.activeRepositoryId && session.activeRepositoryId !== handle.repositoryId) {
+    warnings.push('Current session repository focus differs from the Work repository; using the Work handle repository authority.');
+  }
+  if (session.activeCheckoutId && session.activeCheckoutId !== handle.checkoutId) {
+    warnings.push('Current session checkout focus differs from the Work checkout; using the Work handle checkout authority.');
+  }
+  if (session.activeWorkId && session.activeWorkId !== handle.workId) {
+    warnings.push('Current session work focus differs from the requested Work; using the explicit Work handle.');
+  }
 
   const repository = getRepository(handle.repositoryId, controllerHome, { includeRemoved: true });
   if (repository.removedAt || repository.enabled === false) fail('REPOSITORY_NOT_EXECUTABLE', `repository ${repository.repoId} is disabled or removed`);
@@ -78,7 +86,6 @@ export function validateWorkHandle(
     fail('WORK_HANDLE_STALE_PERMISSION', `permission snapshot ${handle.permissionSnapshotVersion} is stale; current version is ${permissionVersion}`);
   }
 
-  const warnings: string[] = [];
   if (level === 'none') return { session, repository, worktreeRepository, handle, warnings };
 
   const root = worktreeRepository.canonicalRoot;

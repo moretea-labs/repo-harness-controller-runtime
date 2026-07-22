@@ -9,6 +9,7 @@ import { markRepositoryProjectionDirty } from '../../projections/invalidation';
 import { touchSchedulerWakeSignal } from '../../control-plane/global-scheduler/wake-signal';
 import { claimsConflict } from '../claims/conflicts';
 import { appendRuntimeEvent } from '../../evidence/event-ledger';
+import { assertThisRuntimeMayWrite, assertThisRuntimeMayWriteOrThrow } from '../../../cli/controller/stable-state/runtime-writer-context';
 import type {
   ExecutionLease,
   LeaseAcquisitionOptions,
@@ -98,7 +99,6 @@ export function acquireExecutionLeases(
 ): LeaseAcquisitionResult {
   // Writer fencing: passive / fenced runtimes must not acquire leases.
   try {
-    const { assertThisRuntimeMayWrite } = require('../../../cli/controller/stable-state/runtime-writer-context') as typeof import('../../../cli/controller/stable-state/runtime-writer-context');
     const fence = assertThisRuntimeMayWrite('renew_lease', controllerHome);
     if (!fence.allowed) {
       return {
@@ -194,7 +194,6 @@ export function renewExecutionLeases(
   expected?: ExpectedLeaseRef[],
 ): ExecutionLease[] {
   try {
-    const { assertThisRuntimeMayWriteOrThrow } = require('../../../cli/controller/stable-state/runtime-writer-context') as typeof import('../../../cli/controller/stable-state/runtime-writer-context');
     assertThisRuntimeMayWriteOrThrow('renew_lease', controllerHome);
   } catch (error) {
     if (error instanceof Error && error.message.startsWith('WRITER_FENCED:')) throw error;
@@ -227,7 +226,6 @@ export function releaseExecutionLeases(
   // Writer fencing: passive / fenced runtimes must not release leases belonging
   // to (or managed by) the active runtime, even if they still hold matching lease tokens.
   try {
-    const { assertThisRuntimeMayWriteOrThrow } = require('../../../cli/controller/stable-state/runtime-writer-context') as typeof import('../../../cli/controller/stable-state/runtime-writer-context');
     assertThisRuntimeMayWriteOrThrow('release_lease', controllerHome);
   } catch (error) {
     if (error instanceof Error && error.message.startsWith('WRITER_FENCED:')) throw error;

@@ -10,6 +10,8 @@ import { rebuildRepositoryProjection } from '../projections/materialized-view';
 import { readRepositoryProjectionDirty } from '../projections/invalidation';
 import { CONTROLLER_SCOPE_REPO_ID } from '../../cli/repositories/controller-home';
 import { reconcileStaleWorkContracts } from './facade/work-contract-store';
+import { recoverActivationTransaction } from '../bootstrap/activation-transaction';
+import { recoverManagedProcesses } from '../execution/process-runtime/runtime';
 
 export interface ControllerRecoveryError {
   repoId: string;
@@ -60,14 +62,12 @@ function projectionNeedsRebuild(controllerHome: string, repoId: string): boolean
 export function reconcileControllerStartup(controllerHome: string): ControllerStartupRecoveryResult {
   // Recover activation authority projections before durable reconciliation.
   try {
-    const { recoverActivationTransaction } = require('../bootstrap/activation-transaction') as typeof import('../bootstrap/activation-transaction');
     recoverActivationTransaction(controllerHome);
   } catch {
     /* non-fatal for pure unit fixtures without bootstrap layout */
   }
   // Recover process leases / terminal receipts for every repository.
   try {
-    const { recoverManagedProcesses } = require('../execution/process-runtime/runtime') as typeof import('../execution/process-runtime/runtime');
     for (const repository of listRepositories(controllerHome).filter((repo) => repo.enabled && !repo.removedAt)) {
       try {
         recoverManagedProcesses(controllerHome, repository.repoId);

@@ -5,6 +5,7 @@ import { join } from "path";
 import { spawn, type ChildProcess } from "child_process";
 import { isProcessAlive, terminateProcessTree } from "../../src/runtime/shared/process-tree";
 import type { AgentJobMeta, AgentJobWorkerConfig } from "../../src/cli/agent-jobs/types";
+import { resolveAgentExecutable } from "../../src/cli/agent-jobs/executable-resolver";
 
 type LegacyWorkerConfig = AgentJobWorkerConfig & {
   ownershipPollIntervalMs?: number;
@@ -44,6 +45,8 @@ function createFakeCodex(binRoot: string, agentPidPath: string): void {
   writeFileSync(
     executable,
     `#!/usr/bin/env bash
+if [ "$1" = "--version" ]; then echo "codex-cli 0.test"; exit 0; fi
+if [ "$1" = "login" ] && [ "$2" = "status" ]; then echo "Logged in using ChatGPT"; exit 0; fi
 echo "$$" > "${agentPidPath}"
 printf '%s\n' '{"type":"turn.started"}'
 trap 'exit 0' TERM INT
@@ -64,6 +67,8 @@ function writeWorkerFixture(
   configPath: string;
   metaPath: string;
   resultPath: string;
+  eventsPath: string;
+  stderrPath: string;
   epochPath: string;
 } {
   const runId = "RUN-legacy-worker";
@@ -122,6 +127,8 @@ function writeWorkerFixture(
     eventsPath,
     timeoutMs: 15_000,
     autoIntegrate: false,
+    readOnly: false,
+    executableIdentity: resolveAgentExecutable("codex"),
     controllerPid: epoch.pid,
     controllerEpoch: epoch.epoch,
     controllerEpochPath: epochPath,
@@ -136,7 +143,28 @@ function writeWorkerFixture(
   writeFileSync(eventsPath, "");
   writeFileSync(metaPath, `${JSON.stringify(meta, null, 2)}\n`);
   writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
-  return { jobDir, configPath, metaPath, resultPath, epochPath };
+  return { jobDir, configPath, metaPath, resultPath, eventsPath, stderrPath, epochPath };
+}
+
+function fixtureDiagnostics(fixture: { metaPath: string; eventsPath: string; stderrPath: string }): string {
+  const read = (path: string) => existsSync(path) ? readFileSync(path, "utf-8").slice(-8_000) : "<missing>";
+  return `meta=${read(fixture.metaPath)}\nevents=${read(fixture.eventsPath)}\nstderr=${read(fixture.stderrPath)}`;
+}
+
+async function waitForAgentPid(
+  fixture: { metaPath: string; eventsPath: string; stderrPath: string },
+): Promise<number> {
+  try {
+    return await waitFor(() => {
+      if (!existsSync(fixture.metaPath)) return undefined;
+      const current = JSON.parse(readFileSync(fixture.metaPath, "utf-8")) as AgentJobMeta;
+      return Number.isInteger(current.agentPid) && (current.agentPid ?? 0) > 0
+        ? current.agentPid
+        : undefined;
+    });
+  } catch (error) {
+    throw new Error(`${error instanceof Error ? error.message : String(error)}\n${fixtureDiagnostics(fixture)}`);
+  }
 }
 
 async function waitForExit(child: ChildProcess, timeoutMs = 5_000): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
@@ -180,15 +208,11 @@ describe("legacy worker lifecycle hardening", () => {
 
     const worker = spawn(process.execPath, [workerEntry(), fixture.configPath], {
       cwd: root,
-      stdio: "ignore",
+      stdio: ["ignore", "ignore", "inherit"],
     });
     trackedPids.add(worker.pid!);
 
-    const agentPid = await waitFor(() => {
-      if (!existsSync(agentPidPath)) return undefined;
-      const value = Number.parseInt(readFileSync(agentPidPath, "utf-8").trim(), 10);
-      return Number.isInteger(value) && value > 0 ? value : undefined;
-    });
+    const agentPid = await waitForAgentPid(fixture);
     trackedPids.add(agentPid);
     await waitFor(() => (isProcessAlive(agentPid) ? true : undefined));
 
@@ -218,7 +242,7 @@ const workerPidPath = process.argv[4];
 const config = JSON.parse(readFileSync(configPath, "utf8"));
 config.parentPid = process.pid;
 writeFileSync(configPath, JSON.stringify(config, null, 2) + "\\n", "utf8");
-const child = spawn(process.execPath, [workerEntry, configPath], { cwd: ${JSON.stringify(root)}, stdio: "ignore" });
+const child = spawn(process.execPath, [workerEntry, configPath], { cwd: ${JSON.stringify(root)}, stdio: ["ignore", "ignore", "inherit"] });
 writeFileSync(workerPidPath, String(child.pid), "utf8");
 setTimeout(() => process.exit(0), 800);
 `,
@@ -226,7 +250,7 @@ setTimeout(() => process.exit(0), 800);
 
     const launcher = spawn(process.execPath, [launcherScript, fixture.configPath, workerEntry(), workerPidPath], {
       cwd: root,
-      stdio: "ignore",
+      stdio: ["ignore", "ignore", "inherit"],
     });
     trackedPids.add(launcher.pid!);
 
@@ -237,11 +261,7 @@ setTimeout(() => process.exit(0), 800);
     });
     trackedPids.add(workerPid);
 
-    const agentPid = await waitFor(() => {
-      if (!existsSync(agentPidPath)) return undefined;
-      const value = Number.parseInt(readFileSync(agentPidPath, "utf-8").trim(), 10);
-      return Number.isInteger(value) && value > 0 ? value : undefined;
-    });
+    const agentPid = await waitForAgentPid(fixture);
     trackedPids.add(agentPid);
     await waitFor(() => (isProcessAlive(workerPid) && isProcessAlive(agentPid) ? true : undefined));
 

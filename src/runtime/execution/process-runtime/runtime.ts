@@ -20,6 +20,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   renameSync,
   statSync,
   writeFileSync,
@@ -28,6 +29,10 @@ import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { capProcessOutput, redactProcessOutput } from '../../../effects/process-runner';
 import { isProcessAlive, terminateProcessTree } from '../../shared/process-tree';
+import { acquireExecutionLeases, releaseExecutionLeases, renewExecutionLeases } from '../../resources/leases/store';
+import { assertThisRuntimeMayWrite, assertThisRuntimeMayWriteOrThrow } from '../../../cli/controller/stable-state/runtime-writer-context';
+import { readWriterAuthority } from '../../../cli/controller/stable-state/writer-authority';
+import { resolveStableControllerHome } from '../../../cli/controller/stable-state/stable-home';
 import { defaultProcessIdentityProbe, executableFingerprint } from '../../supervisor/identity';
 import {
   createProcessRecord,
@@ -121,7 +126,7 @@ export function readFileTailBytes(path: string, maxBytes: number): { text: strin
   try {
     const buf = Buffer.alloc(readSize);
     const offset = size - readSize;
-    const bytesRead = require('fs').readSync(fd, buf, 0, readSize, offset) as number;
+    const bytesRead = readSync(fd, buf, 0, readSize, offset);
     let start = 0;
     // Skip incomplete leading UTF-8 continuation bytes when we started mid-sequence.
     if (offset > 0) {
@@ -262,7 +267,6 @@ export function releaseProcessLeasesOnce(
     return updateProcessRecord(controllerHome, repoId, processId, { leasesReleased: true }, { allowTerminal: true });
   }
   try {
-    const { releaseExecutionLeases } = require('../../resources/leases/store') as typeof import('../../resources/leases/store');
     releaseExecutionLeases(
       controllerHome,
       repoId,
@@ -313,14 +317,11 @@ export function completeProcessFromEvidence(
   // Passive / fenced runtimes may observe exit but must not write shared durable terminal state.
   let mayWriteTerminal = true;
   try {
-    const { assertThisRuntimeMayWrite } = require('../../../cli/controller/stable-state/runtime-writer-context') as typeof import('../../../cli/controller/stable-state/runtime-writer-context');
     const fence = assertThisRuntimeMayWrite('write_process_terminal', controllerHome);
     if (!fence.allowed) mayWriteTerminal = false;
   } catch {
     // Unbound: only allow when no stable authority exists (legacy single-runtime).
     try {
-      const { readWriterAuthority } = require('../../../cli/controller/stable-state/writer-authority') as typeof import('../../../cli/controller/stable-state/writer-authority');
-      const { resolveStableControllerHome } = require('../../../cli/controller/stable-state/stable-home') as typeof import('../../../cli/controller/stable-state/stable-home');
       const authority = readWriterAuthority(resolveStableControllerHome(controllerHome));
       if (authority) mayWriteTerminal = false;
     } catch {
@@ -798,7 +799,6 @@ export async function spawnManagedProcess(input: SpawnManagedProcessInput): Prom
   // Acquire real execution leases BEFORE spawning the runner. Fail closed on conflict.
   let leaseRefs: ProcessLeaseRef[] = [];
   if (resourceClaims.length > 0) {
-    const { acquireExecutionLeases } = require('../../resources/leases/store') as typeof import('../../resources/leases/store');
     const acquisition = acquireExecutionLeases(
       input.controllerHome,
       input.repoId,
@@ -1075,15 +1075,12 @@ export async function cancelProcess(
   // Process control is itself a writer mutation. Fence BEFORE sending any
   // signal so a passive/stale runtime cannot kill the active runtime's work.
   try {
-    const { assertThisRuntimeMayWriteOrThrow } = require('../../../cli/controller/stable-state/runtime-writer-context') as typeof import('../../../cli/controller/stable-state/runtime-writer-context');
     assertThisRuntimeMayWriteOrThrow('cancel_process', controllerHome);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     // Always rethrow fencing denials. Legacy unbound is only allowed when no authority file exists.
     if (message.startsWith('WRITER_FENCED:')) throw error;
     if (message.includes('WRITER_CLAIM_UNBOUND') || message.includes('writer_claim_unbound')) {
-      const { readWriterAuthority } = require('../../../cli/controller/stable-state/writer-authority') as typeof import('../../../cli/controller/stable-state/writer-authority');
-      const { resolveStableControllerHome } = require('../../../cli/controller/stable-state/stable-home') as typeof import('../../../cli/controller/stable-state/stable-home');
       if (readWriterAuthority(resolveStableControllerHome(controllerHome))) {
         throw new Error(`WRITER_FENCED:cancel_process:writer_claim_unbound_while_authority_present`);
       }
@@ -1219,7 +1216,6 @@ export function recoverManagedProcesses(
       // Renew leases for recovered running processes when possible.
       if ((record.leaseRefs?.length ?? 0) > 0) {
         try {
-          const { renewExecutionLeases } = require('../../resources/leases/store') as typeof import('../../resources/leases/store');
           renewExecutionLeases(
             controllerHome,
             repoId,

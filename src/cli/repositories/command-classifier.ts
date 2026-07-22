@@ -275,6 +275,7 @@ export function isSafeFixedShellCombination(command: string): boolean {
   const normalized = command.trim();
   if (!normalized) return false;
   if (shellCommandHasUnsafeConstructs(normalized).unsafe) return false;
+  if (hasRepositoryOutputRedirection(normalized)) return false;
   // Reject bare pipes that feed dynamic interpreters
   if (/\|\s*(?:sh|bash|zsh|python|node|perl|ruby)\b/i.test(normalized)) return false;
   const segments = shellSegments(normalized);
@@ -486,6 +487,10 @@ function classifyShellCommand(
   for (const [pattern, reason] of remoteWritePatterns) if (pattern.test(normalized)) reasons.push(reason);
   if (reasons.length > 0) return { risk: 'remote_write', confirmation: 'authorization', reasons };
 
+  if (hasRepositoryOutputRedirection(normalized)) reasons.push('redirects output into a repository file');
+  if (shellSegments(normalized).some(isSedInPlaceSegment)) reasons.push('edits repository files in place');
+  if (reasons.length > 0) return { risk: 'workspace_write', confirmation: 'authorization', reasons };
+
   // Safe fixed validation combinations are already handled above. Remaining shell
   // package runners that are validation-only (test/check/lint/typecheck) are
   // workspace_write with no confirmation — they may write caches/snapshots but
@@ -510,8 +515,6 @@ function classifyShellCommand(
     [/(?:^|[;&|]\s*)(?:npm|bun|pnpm|yarn)\s+run\s+(?!test|check|lint|typecheck|format:check|tsc)[a-z0-9:_-]+/i, 'may modify dependencies, generated files, or the working tree'],
   ];
   for (const [pattern, reason] of workspaceWritePatterns) if (pattern.test(normalized)) reasons.push(reason);
-  if (hasRepositoryOutputRedirection(normalized)) reasons.push('redirects output into a repository file');
-  if (shellSegments(normalized).some(isSedInPlaceSegment)) reasons.push('edits repository files in place');
   if (reasons.length > 0) return { risk: 'workspace_write', confirmation: 'authorization', reasons };
 
   const segments = shellSegments(normalized.toLowerCase());

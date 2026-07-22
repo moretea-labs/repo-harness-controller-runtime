@@ -1,6 +1,7 @@
 import { withControllerLock } from '../../../cli/repositories/locks';
 import { claimExecutionJobForDispatch, findExecutionJob, listActiveExecutionJobs, transitionExecutionJob, updateExecutionJob } from '../../execution/jobs/store';
 import type { ExecutionJob, ExecutionJobStatus } from '../../execution/jobs/types';
+import { executionTimeoutDecision } from '../../execution/jobs/timeouts';
 import { normalizeClaims } from '../../resources/claims/conflicts';
 import { acquireExecutionLeases, releaseExecutionLeases } from '../../resources/leases/store';
 import { rebuildRepositoryProjection } from '../../projections/materialized-view';
@@ -82,7 +83,7 @@ export class RepoActor {
   }
 
   tryClaimNext(): RepoActorDispatch | undefined {
-    return withControllerLock(
+    const dispatch = withControllerLock(
       this.controllerHome,
       { scope: 'worktree', repoId: this.repoId, worktreeId: 'repo-actor-mailbox' },
       `repo-actor:${this.repoId}`,
@@ -96,9 +97,15 @@ export class RepoActor {
           .sort(candidateSort);
 
         for (const job of candidates) {
-          if (job.deadlineAt && Date.parse(job.deadlineAt) <= Date.now()) {
+          const timeout = executionTimeoutDecision(job);
+          if (timeout) {
             transitionExecutionJob(this.controllerHome, job.repoId, job.jobId, 'timed_out', {
-              error: { code: 'DEADLINE_EXCEEDED', message: 'Job deadline elapsed before dispatch.', retryable: false },
+              error: {
+                code: timeout.code,
+                message: timeout.message,
+                retryable: false,
+                details: { timeoutPhase: timeout.phase, deadlineAt: timeout.deadlineAt },
+              },
             });
             continue;
           }
@@ -149,16 +156,23 @@ export class RepoActor {
             releaseExecutionLeases(this.controllerHome, dispatchJob.repoId, dispatchJob.jobId, acquisition.leases);
             continue;
           }
-          rebuildRepositoryProjection(this.controllerHome, this.repoId);
           return {
             job: dispatchedJob,
             fencingTokens: dispatchedJob.leaseRefs.map(({ leaseId, resourceKey, fencingToken }) => ({ leaseId, resourceKey, fencingToken })),
           };
         }
-        rebuildRepositoryProjection(this.controllerHome, this.repoId);
         return undefined;
       },
       10_000,
     );
+    // Projection materialization performs filesystem scans and must never extend
+    // the Repo Actor mailbox critical section. Durable mutations above already
+    // leave a dirty marker, so a failed refresh remains recoverable.
+    try {
+      rebuildRepositoryProjection(this.controllerHome, this.repoId);
+    } catch {
+      // Startup recovery, scheduler reconciliation, or the next status read can retry.
+    }
+    return dispatch;
   }
 }

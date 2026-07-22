@@ -7,6 +7,7 @@ import { writeJsonAtomic } from '../shared/json-files';
 import { bootstrapManagedRuntimeEnv } from '../shared/managed-env';
 import { controllerDaemonOwnsPidFile } from './daemon-ownership';
 import { GlobalScheduler } from './global-scheduler/scheduler';
+import { bindRuntimeWriterClaim } from '../../cli/controller/stable-state/runtime-writer-context';
 import {
   collectRuntimeSourceIdentity,
   CONTROLLER_RUNTIME_SOURCE_ROOT_ENV,
@@ -17,6 +18,7 @@ import {
 } from './runtime-generation';
 import { reconcileControllerStartup, type ControllerStartupRecoveryResult } from './startup-recovery';
 import { applyRuntimeCleanup, type RuntimeCleanupApplyResult } from '../maintenance/cleanup';
+import { recoverActivationTransaction, readActivationAuthority } from '../bootstrap/activation-transaction';
 
 function option(name: string): string | undefined {
   const index = process.argv.indexOf(name);
@@ -123,7 +125,6 @@ export function startControllerDaemon(controllerHome: string): void {
   // Daemon is the active-runtime owner and may adopt current authority at startup.
   // Workers must NOT re-adopt; they inherit the daemon's captured claim via spawn args.
   try {
-    const { bindRuntimeWriterClaim } = require('../../cli/controller/stable-state/runtime-writer-context') as typeof import('../../cli/controller/stable-state/runtime-writer-context');
     const ownershipEarly = childOwnershipMetadata();
     const inheritedEpoch = process.env.REPO_HARNESS_WRITER_EPOCH?.trim() || undefined;
     const inheritedToken = process.env.REPO_HARNESS_WRITER_FENCING_TOKEN?.trim() || undefined;
@@ -227,7 +228,6 @@ export function publishReadyAfterStartupRecovery(
   }
   // Recover / materialize activation authority before generation decisions.
   try {
-    const { recoverActivationTransaction, readActivationAuthority } = require('../bootstrap/activation-transaction') as typeof import('../bootstrap/activation-transaction');
     const recovery = recoverActivationTransaction(controllerHome);
     if (recovery.status === 'incomplete' || recovery.status === 'prepared') {
       throw new Error(
@@ -242,8 +242,6 @@ export function publishReadyAfterStartupRecovery(
     if (inheritedGeneration) {
       const existing = readRuntimeGeneration(controllerHome);
       const source = collectRuntimeSourceIdentity(resolvedSource.root);
-      const { writeJsonAtomic } = require('../shared/json-files') as typeof import('../shared/json-files');
-      const { ensureControllerHome } = require('../../cli/repositories/controller-home') as typeof import('../../cli/repositories/controller-home');
       const path = join(ensureControllerHome(controllerHome), 'system', 'runtime-generation.json');
       if (existing && existing.generation === inheritedGeneration) {
         // Reuse the generation but refresh the source identity when the
@@ -284,7 +282,6 @@ export function publishReadyAfterStartupRecovery(
   }
   // Fail closed when authority generation and daemon generation diverge.
   try {
-    const { readActivationAuthority } = require('../bootstrap/activation-transaction') as typeof import('../bootstrap/activation-transaction');
     const authority = readActivationAuthority(controllerHome);
     if (authority?.generation && generation.generation !== authority.generation) {
       throw new Error(

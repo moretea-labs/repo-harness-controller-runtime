@@ -3,7 +3,13 @@ import { spawnSync } from 'child_process';
 import { basename, isAbsolute, relative, resolve } from 'path';
 import type { McpToolDefinition, CallToolResult } from '../../../cli/mcp/tools';
 import type { MultiRepositoryMcpToolContext } from '../../../cli/mcp/multi-repository';
-import { getRepository, resolveRepositorySelection, selectRepositoryCheckout } from '../../../cli/repositories/registry';
+import {
+  getRepository,
+  listRepositories,
+  resolveRepositorySelection,
+  selectRepositoryCheckout,
+  setRepositoryCheckoutLifecycle,
+} from '../../../cli/repositories/registry';
 import { withControllerLock } from '../../../cli/repositories/locks';
 import { repositoryGitCommit, repositoryGitDeleteBranch, repositoryGitFinishWorkflow, repositoryGitStatus, repositoryGitDiff } from '../../../cli/repositories/structured-git';
 import { executeRepositoryCommand, previewRepositoryCommandExecution } from '../../../cli/repositories/command-executor';
@@ -13,13 +19,14 @@ import { listControllerChecks, runControllerCheck } from '../../../cli/controlle
 import { readRepositoryAccessPolicy } from '../../control-plane/governance/access-policy';
 import { createWorkContract, getWorkContract, updateWorkContract, appendVerificationRecord } from '../../control-plane/facade/work-contract-store';
 import { currentControllerInstanceId, requireExecutionSession, startExecutionSession, updateExecutionSession, type ExecutionSessionContext, type SessionIdentity } from '../../control-plane/execution/session-store';
-import { currentPermissionSnapshotVersion, validateWorkHandle, type ValidationLevel } from '../../control-plane/execution/validation';
+import { currentPermissionSnapshotVersion, validateWorkHandle } from '../../control-plane/execution/validation';
 import { markWorkHandleFailed, newWorkId, readWorkHandle, transitionWorkHandle, writeWorkHandle, type WorkFinalizationStages, type WorkHandleState } from '../../control-plane/execution/work-handle-store';
 import { assertResolvedAuthorization, createGoalDelegation, decideAuthorization, resolveAuthorizationRequest, type AuthorizationDecision, type AuthorizationRiskClass } from '../../control-plane/governance/authorization';
 import { readControllerResult, searchControllerResult, writeControllerResult } from '../../evidence/result-store';
 import { resumeExecutionJobAfterApproval } from '../../execution/jobs/store';
 import { recordMcpTiming, type McpTimingTrace } from '../../diagnostics/mcp-timing';
 import { commandValue, normalizeRepositoryCommand, type RepositoryCommandValue } from '../../../cli/repositories/command-normalization';
+import { markRepositoryProjectionDirty } from '../../projections/invalidation';
 
 const MAX_INLINE_RESULT_BYTES = 64 * 1024;
 
@@ -39,17 +46,17 @@ export const executionToolDefinitions: McpToolDefinition[] = [
     objective: { type: 'string' }, goal_id: { type: 'string' }, acceptance_criteria: { type: 'array', items: { type: 'string' } }, allowed_paths: { type: 'array', items: { type: 'string' } }, checks: { type: 'array', items: { type: 'string' } },
     isolation: { type: 'string', enum: ['reuse', 'new_worktree', 'auto'] }, base_ref: { type: 'string' },
   }, [], false),
-  definition('work_inspect', 'Collect bounded Git, WorkContract, path, check, and readiness evidence through one work handle.', { session_id: sessionId, work_id: workId, detail: { type: 'string', enum: ['summary', 'detail'] } }, ['work_id'], true),
+  definition('work_inspect', 'Collect bounded Git, WorkContract, path, check, and readiness evidence through one work handle.', { session_id: sessionId, repo_id: repoId, work_id: workId, detail: { type: 'string', enum: ['summary', 'detail'] } }, ['work_id'], true),
   definition('work_execute', 'Execute approved, repository-scoped commands against a validated work handle while preserving the existing command policy and audit path.', {
-    session_id: sessionId, work_id: workId,
+    session_id: sessionId, repo_id: repoId, work_id: workId,
     command: { anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' }, minItems: 1 }] }, approval_token: { type: 'string' }, cwd: { type: 'string' }, timeout_ms: { type: 'number' }, max_output_bytes: { type: 'number' },
     commands: { type: 'array', items: { type: 'object' } }, approval_request_id: { type: 'string' },
   }, ['work_id'], false),
   definition('work_validate', 'Run targeted checks or read-only validation commands against a work handle with full current-state validation.', {
-    session_id: sessionId, work_id: workId, check_ids: { type: 'array', items: { type: 'string' } }, commands: { type: 'array', items: { type: 'object' } },
+    session_id: sessionId, repo_id: repoId, work_id: workId, check_ids: { type: 'array', items: { type: 'string' } }, commands: { type: 'array', items: { type: 'object' } },
   }, ['work_id'], false),
   definition('work_finalize', 'Idempotently validate, commit, merge, clean a managed worktree, and complete the existing WorkContract in independently recorded stages.', {
-    session_id: sessionId, work_id: workId, commit: { type: 'boolean' }, message: { type: 'string' }, merge: { type: 'boolean' }, target_branch: { type: 'string' }, delete_branch: { type: 'boolean' }, cleanup: { type: 'boolean' }, no_ff: { type: 'boolean' }, approval_request_id: { type: 'string' },
+    session_id: sessionId, repo_id: repoId, work_id: workId, commit: { type: 'boolean' }, message: { type: 'string' }, merge: { type: 'boolean' }, target_branch: { type: 'string' }, delete_branch: { type: 'boolean' }, cleanup: { type: 'boolean' }, no_ff: { type: 'boolean' }, approval_request_id: { type: 'string' },
   }, ['work_id'], false, true),
   definition('approval_resolve', 'Resolve a controller approval request from the current conversation; GUI approval is optional and not required for continuation.', { session_id: sessionId, repo_id: repoId, work_id: workId, approval_request_id: { type: 'string' }, confirm_authorization: { type: 'boolean' } }, ['approval_request_id', 'confirm_authorization'], false),
   definition('result_read', 'Read a session-scoped result reference with bounded pagination.', { session_id: sessionId, result_ref: { type: 'string' }, work_id: workId, cursor: { type: 'number' }, limit: { type: 'number' } }, ['result_ref'], true),
@@ -149,13 +156,46 @@ function contractFor(ctx: MultiRepositoryMcpToolContext, handle: WorkHandleState
   return handle.workContractId ? getWorkContract({ controllerHome: ctx.controllerHome, repoId: handle.repositoryId }, handle.workContractId) : undefined;
 }
 
-function workForSession(ctx: MultiRepositoryMcpToolContext, session: ExecutionSessionContext, args: Record<string, unknown>): WorkHandleState {
+function findWorkHandle(
+  ctx: MultiRepositoryMcpToolContext,
+  session: ExecutionSessionContext,
+  args: Record<string, unknown>,
+): WorkHandleState {
   const requested = typeof args.work_id === 'string' ? args.work_id.trim() : '';
   const workIdValue = requested || session.activeWorkId || '';
-  if (!workIdValue || !session.activeRepositoryId) throw new Error('WORK_ID_REQUIRED: call work_prepare first');
-  if (session.activeWorkId && requested && requested !== session.activeWorkId) throw new Error('WORK_HANDLE_NOT_ACTIVE: requested work is not the active session work');
-  const handle = readWorkHandle(ctx.controllerHome, session.activeRepositoryId, workIdValue);
-  if (!handle) throw new Error(`WORK_HANDLE_NOT_FOUND: ${workIdValue}`);
+  if (!workIdValue) throw new Error('WORK_ID_REQUIRED: provide work_id or call work_prepare first');
+  const repoCandidates = [
+    typeof args.repo_id === 'string' && args.repo_id.trim() ? args.repo_id.trim() : undefined,
+    session.activeRepositoryId,
+  ].filter((value, index, values): value is string => Boolean(value) && values.indexOf(value) === index);
+  for (const repositoryId of repoCandidates) {
+    const handle = readWorkHandle(ctx.controllerHome, repositoryId, workIdValue);
+    if (handle) return handle;
+  }
+  const matches = listRepositories(ctx.controllerHome, { includeRemoved: true })
+    .map((repository) => readWorkHandle(ctx.controllerHome, repository.repoId, workIdValue))
+    .filter((handle): handle is WorkHandleState => Boolean(handle));
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) throw new Error('WORK_HANDLE_AMBIGUOUS: provide repo_id with work_id');
+  throw new Error(`WORK_HANDLE_NOT_FOUND: ${workIdValue}`);
+}
+
+function workForSession(ctx: MultiRepositoryMcpToolContext, session: ExecutionSessionContext, args: Record<string, unknown>): WorkHandleState {
+  const handle = findWorkHandle(ctx, session, args);
+  if (handle.principalId !== session.principalId) throw new Error('WORK_HANDLE_PRINCIPAL_MISMATCH: work handle belongs to another principal');
+  if (
+    session.activeRepositoryId !== handle.repositoryId
+    || session.activeCheckoutId !== handle.checkoutId
+    || session.activeWorkId !== handle.workId
+  ) {
+    updateExecutionSession(ctx.controllerHome, identityFor(ctx, args), {
+      activeRepositoryId: handle.repositoryId,
+      activeCheckoutId: handle.checkoutId,
+      activeWorkId: handle.workId,
+      permissionSnapshotVersion: handle.permissionSnapshotVersion,
+      lastValidatedAt: new Date().toISOString(),
+    });
+  }
   return handle;
 }
 
@@ -189,9 +229,9 @@ function prepareWork(ctx: MultiRepositoryMcpToolContext, args: Record<string, un
   }
   const existingId = typeof args.work_id === 'string' ? args.work_id.trim() : '';
   if (existingId) {
-    const existing = readWorkHandle(ctx.controllerHome, repository.repoId, existingId);
-    if (!existing) throw new Error(`WORK_HANDLE_NOT_FOUND: ${existingId}`);
-    if (existing.sessionId !== session.sessionId || existing.principalId !== session.principalId) throw new Error('WORK_HANDLE_ACCESS_DENIED');
+    const existing = readWorkHandle(ctx.controllerHome, repository.repoId, existingId)
+      ?? findWorkHandle(ctx, session, { ...args, work_id: existingId, repo_id: repository.repoId });
+    if (existing.principalId !== session.principalId) throw new Error('WORK_HANDLE_ACCESS_DENIED');
     validateWorkHandle(ctx.controllerHome, existing, identityFor(ctx, args), 'cheap', 'inspect');
     updateExecutionSession(ctx.controllerHome, identityFor(ctx, args), { activeRepositoryId: existing.repositoryId, activeCheckoutId: existing.checkoutId, activeWorkId: existing.workId, permissionSnapshotVersion: existing.permissionSnapshotVersion });
     return { session: requireSession(ctx, args), work: compactHandle(existing), reused: true };
@@ -403,130 +443,211 @@ function validateWork(ctx: MultiRepositoryMcpToolContext, args: Record<string, u
 
 function runCleanup(targetRoot: string, worktreePath: string): { ok: boolean; message?: string } {
   if (targetRoot === worktreePath) return { ok: true };
+  if (!existsSync(worktreePath)) return { ok: true, message: 'managed worktree already removed' };
   const status = repositoryGitStatus({ repoId: 'cleanup', activeCheckoutId: 'cleanup', canonicalRoot: worktreePath, localRoot: worktreePath, checkouts: [], schemaVersion: 1, displayName: basename(worktreePath), repositoryType: 'git', enabled: true, createdAt: '', updatedAt: '', lastSeenAt: '', configurationPath: '', stateStorageStrategy: 'controller-home' });
   if (!status.clean) return { ok: false, message: 'managed worktree is dirty; cleanup preserved it' };
   const process = spawnSync('git', ['-C', targetRoot, 'worktree', 'remove', worktreePath], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 });
   return process.status === 0 ? { ok: true } : { ok: false, message: String(process.stderr ?? 'git worktree remove failed').trim() };
 }
 
+function resetFailedFinalizationStages(stages: WorkFinalizationStages, wants: { commit: boolean; merge: boolean; cleanup: boolean }): WorkFinalizationStages {
+  const next = { ...stages };
+  let reset = false;
+  if (next.validation === 'failed') {
+    next.validation = 'pending';
+    reset = true;
+  }
+  if (wants.commit && next.commit === 'failed') {
+    next.commit = 'pending';
+    reset = true;
+  }
+  if (wants.merge && next.merge === 'failed') {
+    next.merge = 'pending';
+    reset = true;
+  }
+  if (wants.cleanup && next.worktreeCleanup === 'failed') {
+    next.worktreeCleanup = 'pending';
+    reset = true;
+  }
+  if (wants.cleanup && next.branchCleanup === 'failed') {
+    next.branchCleanup = 'pending';
+    reset = true;
+  }
+  if (reset) delete next.lastError;
+  return next;
+}
+
+function finalizationComplete(stages: WorkFinalizationStages): boolean {
+  return stages.validation === 'done'
+    && stages.commit !== 'pending'
+    && stages.merge !== 'pending'
+    && stages.branchCleanup !== 'pending'
+    && stages.worktreeCleanup !== 'pending'
+    && stages.commit !== 'failed'
+    && stages.merge !== 'failed'
+    && stages.branchCleanup !== 'failed'
+    && stages.worktreeCleanup !== 'failed'
+    && !stages.lastError;
+}
+
+function finalStateForStages(stages: WorkFinalizationStages, fallback: WorkHandleState['state']): WorkHandleState['state'] {
+  if (stages.worktreeCleanup === 'done') return 'cleaned';
+  if (stages.merge === 'done') return 'merged';
+  if (stages.commit === 'done') return 'committed';
+  return fallback === 'failed' ? 'editing' : fallback;
+}
+
 function finalizeWork(ctx: MultiRepositoryMcpToolContext, args: Record<string, unknown>): Record<string, unknown> {
   const session = requireSession(ctx, args);
-  const handle = workForSession(ctx, session, args);
-  if (handle.state === 'cleaned') {
-    validateWorkHandle(ctx.controllerHome, handle, identityFor(ctx, args), 'none', 'finalize');
-    return { idempotent: true, work: compactHandle(handle) };
+  let current = workForSession(ctx, session, args);
+  if (current.state === 'cleaned') {
+    validateWorkHandle(ctx.controllerHome, current, identityFor(ctx, args), 'none', 'finalize');
+    return { idempotent: true, work: compactHandle(current) };
   }
-  return withControllerLock(ctx.controllerHome, { scope: 'worktree', repoId: handle.repositoryId, worktreeId: handle.checkoutId }, `work-finalize:${handle.workId}`, () => {
-    let current = readWorkHandle(ctx.controllerHome, handle.repositoryId, handle.workId) ?? handle;
-    const identity = identityFor(ctx, args);
+  const identity = identityFor(ctx, args);
+  const wants = { commit: args.commit === true, merge: args.merge === true, cleanup: args.cleanup === true };
+
+  const transact = (label: string, update: (fresh: WorkHandleState) => WorkHandleState): WorkHandleState =>
+    withControllerLock(ctx.controllerHome, { scope: 'worktree', repoId: current.repositoryId, worktreeId: current.checkoutId }, `work-finalize:${current.workId}:${label}`, () => {
+      const fresh = readWorkHandle(ctx.controllerHome, current.repositoryId, current.workId) ?? current;
+      return update(fresh);
+    }, 10_000);
+
+  const failStage = (stage: keyof WorkFinalizationStages, reason: string): Record<string, unknown> => {
+    current = transact(`fail:${String(stage)}`, (fresh) => {
+      const finalization = { ...fresh.finalization, [stage]: 'failed', lastError: reason } as WorkFinalizationStages;
+      return markWorkHandleFailed(ctx.controllerHome, { ...fresh, finalization }, reason);
+    });
+    if (current.workContractId) updateWorkContract({ controllerHome: ctx.controllerHome, repoId: current.repositoryId }, current.workContractId, { status: 'failed' });
+    markRepositoryProjectionDirty(ctx.controllerHome, current.repositoryId, `cleanup:${current.workId}:failed`);
+    return { work: compactHandle(current), stages: current.finalization, completed: false };
+  };
+
+  current = transact('begin', (fresh) => writeWorkHandle(ctx.controllerHome, {
+    ...fresh,
+    state: fresh.state === 'failed' ? 'validating' : fresh.state,
+    failureReason: undefined,
+    finalization: resetFailedFinalizationStages(fresh.finalization, wants),
+  }));
+
+  const approvalRequestId = typeof args.approval_request_id === 'string' ? args.approval_request_id.trim() : '';
+  const resolvedAuthorization = approvalRequestId
+    ? assertResolvedAuthorization({ controllerHome: ctx.controllerHome, repositoryId: current.repositoryId, approvalRequestId, sessionId: session.sessionId, principalId: session.principalId, workId: current.workId, permissionSnapshotVersion: current.permissionSnapshotVersion, command: 'work_finalize' })
+    : undefined;
+  const gitAuthorization = resolvedAuthorization
+    ? { decision: 'allow', source: 'user_confirmation', reason: 'The user resolved the exact finalization approval request.' } as const
+    : decideAuthorization({
+      controllerHome: ctx.controllerHome,
+      accessMode: readRepositoryAccessPolicy(ctx.controllerHome, current.repositoryId).mode,
+      risk: 'local_git',
+      repositoryId: current.repositoryId,
+      currentRepositoryId: current.repositoryId,
+      workId: current.workId,
+      boundWorkId: current.workId,
+      goalId: current.goalId,
+      boundGoalId: current.goalId,
+      sessionId: session.sessionId,
+      principalId: session.principalId,
+      permissionSnapshotVersion: current.permissionSnapshotVersion,
+      delegation: session.goalDelegation,
+      command: 'work_finalize',
+    });
+  if (gitAuthorization.decision !== 'allow') return { authorization: gitAuthorization, work: compactHandle(current), stages: current.finalization };
+
+  if (current.finalization.validation !== 'done') {
+    current = transact('validation-start', (fresh) => writeWorkHandle(ctx.controllerHome, {
+      ...fresh,
+      state: 'validating',
+      finalization: { ...fresh.finalization, validation: 'pending', lastError: undefined },
+    }));
+    try {
+      validateWorkHandle(ctx.controllerHome, current, identity, 'full', 'finalize');
+    } catch (error) {
+      return failStage('validation', error instanceof Error ? error.message : String(error));
+    }
+    current = transact('validation-done', (fresh) => writeWorkHandle(ctx.controllerHome, {
+      ...fresh,
+      state: fresh.state === 'validating' ? 'editing' : fresh.state,
+      finalization: { ...fresh.finalization, validation: 'done', lastError: undefined },
+    }));
+  }
+
+  if (wants.commit && current.finalization.commit === 'pending') {
     const validated = validateWorkHandle(ctx.controllerHome, current, identity, 'full', 'finalize');
-    const approvalRequestId = typeof args.approval_request_id === 'string' ? args.approval_request_id.trim() : '';
-    const resolvedAuthorization = approvalRequestId
-      ? assertResolvedAuthorization({ controllerHome: ctx.controllerHome, repositoryId: current.repositoryId, approvalRequestId, sessionId: session.sessionId, principalId: session.principalId, workId: current.workId, permissionSnapshotVersion: current.permissionSnapshotVersion, command: 'work_finalize' })
-      : undefined;
-    const gitAuthorization = resolvedAuthorization
-      ? { decision: 'allow', source: 'user_confirmation', reason: 'The user resolved the exact finalization approval request.' } as const
-      : decideAuthorization({
-        controllerHome: ctx.controllerHome,
-        accessMode: readRepositoryAccessPolicy(ctx.controllerHome, current.repositoryId).mode,
-        risk: 'local_git',
-        repositoryId: current.repositoryId,
-        currentRepositoryId: current.repositoryId,
-        workId: current.workId,
-        boundWorkId: current.workId,
-        goalId: current.goalId,
-        boundGoalId: current.goalId,
-        sessionId: session.sessionId,
-        principalId: session.principalId,
-        permissionSnapshotVersion: current.permissionSnapshotVersion,
-        delegation: session.goalDelegation,
-        command: 'work_finalize',
-      });
-    if (gitAuthorization.decision !== 'allow') return { authorization: gitAuthorization, work: compactHandle(current), stages: current.finalization };
-    let stages = { ...current.finalization, validation: 'done' as const };
-    current = writeWorkHandle(ctx.controllerHome, { ...current, finalization: stages });
-    const wantsCommit = args.commit === true;
-    const wantsMerge = args.merge === true;
-    const wantsCleanup = args.cleanup === true;
-    if (wantsCommit && stages.commit === 'pending') {
-      const contract = contractFor(ctx, current);
-      if (contract?.constraints.allowCommit === false) throw new Error('WORK_COMMIT_NOT_ALLOWED: WorkContract disallows commit');
-      const committed = repositoryGitCommit(ctx.controllerHome, validated.worktreeRepository, { message: String(args.message ?? `Complete ${current.workId}`), allowEmpty: false, authorizationDecision: gitAuthorization, sessionId: session.sessionId, principalId: session.principalId, workId: current.workId, goalId: current.goalId });
-      const pendingAuthorization = [committed.stage, committed.commit].find((execution) => execution?.authorizationDecision?.decision === 'user_confirmation_required')?.authorizationDecision;
-      if (pendingAuthorization) return { authorization: pendingAuthorization, work: compactHandle(current), stages: current.finalization };
-      if (!committed.committed) {
-        const reason = committed.error?.message ?? 'commit failed';
-        stages = { ...stages, commit: 'failed', lastError: reason };
-        current = markWorkHandleFailed(ctx.controllerHome, { ...current, finalization: stages }, reason);
-        return { work: compactHandle(current), stages, completed: false };
-      }
-      stages = { ...stages, commit: 'done' };
-      current = transitionWorkHandle(ctx.controllerHome, current, 'committed', { expectedHead: gitHead(validated.worktreeRepository.canonicalRoot), finalization: stages });
-    } else if (!wantsCommit && stages.commit === 'pending') {
-      stages = { ...stages, commit: 'skipped' };
-      current = writeWorkHandle(ctx.controllerHome, { ...current, finalization: stages });
-    }
-    if (wantsMerge && stages.merge === 'pending') {
-      const contract = contractFor(ctx, current);
-      if (contract?.constraints.allowMerge === false) throw new Error('WORK_MERGE_NOT_ALLOWED: WorkContract disallows merge');
+    const contract = contractFor(ctx, current);
+    if (contract?.constraints.allowCommit === false) throw new Error('WORK_COMMIT_NOT_ALLOWED: WorkContract disallows commit');
+    const status = repositoryGitStatus(validated.worktreeRepository);
+    const commitPaths = [...new Set([...status.staged, ...status.unstaged, ...status.untracked])];
+    const committed = repositoryGitCommit(ctx.controllerHome, validated.worktreeRepository, { message: String(args.message ?? `Complete ${current.workId}`), paths: commitPaths, allowEmpty: false, authorizationDecision: gitAuthorization, sessionId: session.sessionId, principalId: session.principalId, workId: current.workId, goalId: current.goalId });
+    const pendingAuthorization = [committed.stage, committed.commit].find((execution) => execution?.authorizationDecision?.decision === 'user_confirmation_required')?.authorizationDecision;
+    if (pendingAuthorization) return { authorization: pendingAuthorization, work: compactHandle(current), stages: current.finalization };
+    if (!committed.committed) return { ...failStage('commit', committed.error?.message ?? 'commit failed'), commit: committed };
+    current = transact('commit-done', (fresh) => transitionWorkHandle(ctx.controllerHome, fresh, 'committed', {
+      expectedHead: gitHead(validated.worktreeRepository.canonicalRoot),
+      finalization: { ...fresh.finalization, commit: 'done', lastError: undefined },
+      failureReason: undefined,
+    }));
+  } else if (!wants.commit && current.finalization.commit === 'pending') {
+    current = transact('commit-skipped', (fresh) => writeWorkHandle(ctx.controllerHome, { ...fresh, finalization: { ...fresh.finalization, commit: 'skipped' } }));
+  }
+
+  if (wants.merge && current.finalization.merge === 'pending') {
+    validateWorkHandle(ctx.controllerHome, current, identity, 'full', 'finalize');
+    const contract = contractFor(ctx, current);
+    if (contract?.constraints.allowMerge === false) throw new Error('WORK_MERGE_NOT_ALLOWED: WorkContract disallows merge');
+    const target = selectRepositoryCheckout(getRepository(current.repositoryId, ctx.controllerHome), current.sourceCheckoutId ?? current.checkoutId);
+    const deleteAfterWorktreeCleanup = current.managedWorktree && args.delete_branch !== false;
+    const merged = repositoryGitFinishWorkflow(ctx.controllerHome, target, { featureBranch: current.branch, targetBranch: typeof args.target_branch === 'string' ? args.target_branch : undefined, deleteBranch: !deleteAfterWorktreeCleanup && args.delete_branch !== false, noFf: args.no_ff === true, authorizationDecision: gitAuthorization, sessionId: session.sessionId, principalId: session.principalId, workId: current.workId, goalId: current.goalId });
+    const pendingAuthorization = merged.steps.find((step) => step.execution.authorizationDecision?.decision === 'user_confirmation_required')?.execution.authorizationDecision;
+    if (pendingAuthorization) return { authorization: pendingAuthorization, work: compactHandle(current), stages: current.finalization };
+    if (!merged.completed) return { ...failStage('merge', merged.error?.message ?? 'merge failed'), merge: merged };
+    current = transact('merge-done', (fresh) => transitionWorkHandle(ctx.controllerHome, fresh, 'merged', {
+      finalization: { ...fresh.finalization, merge: 'done', branchCleanup: args.delete_branch === false ? 'skipped' : deleteAfterWorktreeCleanup ? 'pending' : 'done', lastError: undefined },
+      failureReason: undefined,
+    }));
+  } else if (!wants.merge && current.finalization.merge === 'pending') {
+    current = transact('merge-skipped', (fresh) => writeWorkHandle(ctx.controllerHome, { ...fresh, finalization: { ...fresh.finalization, merge: 'skipped', branchCleanup: 'skipped' } }));
+  }
+
+  if (wants.cleanup && current.finalization.worktreeCleanup === 'pending') {
+    const contract = contractFor(ctx, current);
+    if (contract?.constraints.allowCleanup === false) throw new Error('WORK_CLEANUP_NOT_ALLOWED: WorkContract disallows cleanup');
+    if (!current.managedWorktree) {
+      current = transact('worktree-cleanup-skipped', (fresh) => writeWorkHandle(ctx.controllerHome, { ...fresh, finalization: { ...fresh.finalization, worktreeCleanup: 'skipped' } }));
+    } else {
       const target = selectRepositoryCheckout(getRepository(current.repositoryId, ctx.controllerHome), current.sourceCheckoutId ?? current.checkoutId);
-      const deleteAfterWorktreeCleanup = current.managedWorktree && args.delete_branch !== false;
-      const merged = repositoryGitFinishWorkflow(ctx.controllerHome, target, { featureBranch: current.branch, targetBranch: typeof args.target_branch === 'string' ? args.target_branch : undefined, deleteBranch: !deleteAfterWorktreeCleanup && args.delete_branch !== false, noFf: args.no_ff === true, authorizationDecision: gitAuthorization, sessionId: session.sessionId, principalId: session.principalId, workId: current.workId, goalId: current.goalId });
-      const pendingAuthorization = merged.steps.find((step) => step.execution.authorizationDecision?.decision === 'user_confirmation_required')?.execution.authorizationDecision;
-      if (pendingAuthorization) return { authorization: pendingAuthorization, work: compactHandle(current), stages: current.finalization };
-      if (!merged.completed) {
-        const reason = merged.error?.message ?? 'merge failed';
-        stages = { ...stages, merge: 'failed', lastError: reason };
-        current = markWorkHandleFailed(ctx.controllerHome, { ...current, finalization: stages }, reason);
-        return { work: compactHandle(current), stages, completed: false, merge: merged };
-      }
-      stages = { ...stages, merge: 'done', branchCleanup: args.delete_branch === false ? 'skipped' : deleteAfterWorktreeCleanup ? 'pending' : 'done' };
-      current = transitionWorkHandle(ctx.controllerHome, current, 'merged', { finalization: stages });
-    } else if (!wantsMerge && stages.merge === 'pending') {
-      stages = { ...stages, merge: 'skipped', branchCleanup: 'skipped' };
-      current = writeWorkHandle(ctx.controllerHome, { ...current, finalization: stages });
+      const cleanup = runCleanup(target.canonicalRoot, current.worktreePath);
+      if (!cleanup.ok) return failStage('worktreeCleanup', cleanup.message ?? 'worktree cleanup failed');
+      current = transact('worktree-cleanup-done', (fresh) => {
+        setRepositoryCheckoutLifecycle({ controllerHome: ctx.controllerHome, repoId: fresh.repositoryId, checkoutId: fresh.checkoutId, lifecycle: 'removed', reason: `Work ${fresh.workId} cleanup completed.` });
+        markRepositoryProjectionDirty(ctx.controllerHome, fresh.repositoryId, `cleanup:${fresh.workId}:worktree`);
+        return writeWorkHandle(ctx.controllerHome, { ...fresh, finalization: { ...fresh.finalization, worktreeCleanup: 'done', lastError: undefined } });
+      });
     }
-    if (wantsCleanup && stages.worktreeCleanup === 'pending') {
-      const contract = contractFor(ctx, current);
-      if (contract?.constraints.allowCleanup === false) throw new Error('WORK_CLEANUP_NOT_ALLOWED: WorkContract disallows cleanup');
-      if (!current.managedWorktree) {
-        stages = { ...stages, worktreeCleanup: 'skipped' };
-      } else {
-        const target = selectRepositoryCheckout(getRepository(current.repositoryId, ctx.controllerHome), current.sourceCheckoutId ?? current.checkoutId);
-        const cleanup = runCleanup(target.canonicalRoot, current.worktreePath);
-        stages = { ...stages, worktreeCleanup: cleanup.ok ? 'done' : 'failed', ...(cleanup.message ? { lastError: cleanup.message } : {}) };
-        if (!cleanup.ok) {
-          current = markWorkHandleFailed(ctx.controllerHome, { ...current, finalization: stages }, cleanup.message ?? 'worktree cleanup failed');
-          return { work: compactHandle(current), stages, completed: false };
-        }
-      }
-      current = writeWorkHandle(ctx.controllerHome, { ...current, finalization: stages });
-      if (stages.branchCleanup === 'pending' && stages.merge === 'done') {
-        const target = selectRepositoryCheckout(getRepository(current.repositoryId, ctx.controllerHome), current.sourceCheckoutId ?? current.checkoutId);
-        const deleted = repositoryGitDeleteBranch(ctx.controllerHome, target, { branch: current.branch, force: false, authorizationDecision: gitAuthorization, sessionId: session.sessionId, principalId: session.principalId, workId: current.workId, goalId: current.goalId });
-        if (deleted.execution.authorizationDecision?.decision === 'user_confirmation_required') return { authorization: deleted.execution.authorizationDecision, work: compactHandle(current), stages: current.finalization };
-        if (deleted.execution.status !== 'executed' || deleted.execution.ok !== true) {
-          const reason = deleted.execution.stderr || 'feature branch cleanup failed';
-          stages = { ...stages, branchCleanup: 'failed', lastError: reason };
-          current = markWorkHandleFailed(ctx.controllerHome, { ...current, finalization: stages }, reason);
-          return { work: compactHandle(current), stages, completed: false };
-        }
-        stages = { ...stages, branchCleanup: 'done' };
-        current = writeWorkHandle(ctx.controllerHome, { ...current, finalization: stages });
-      }
-    } else if (!wantsCleanup && stages.worktreeCleanup === 'pending') {
-      stages = { ...stages, worktreeCleanup: 'skipped' };
-      current = writeWorkHandle(ctx.controllerHome, { ...current, finalization: stages });
+    if (current.finalization.branchCleanup === 'pending' && current.finalization.merge === 'done') {
+      const target = selectRepositoryCheckout(getRepository(current.repositoryId, ctx.controllerHome), current.sourceCheckoutId ?? current.checkoutId);
+      const deleted = repositoryGitDeleteBranch(ctx.controllerHome, target, { branch: current.branch, force: false, authorizationDecision: gitAuthorization, sessionId: session.sessionId, principalId: session.principalId, workId: current.workId, goalId: current.goalId });
+      if (deleted.execution.authorizationDecision?.decision === 'user_confirmation_required') return { authorization: deleted.execution.authorizationDecision, work: compactHandle(current), stages: current.finalization };
+      if (deleted.execution.status !== 'executed' || deleted.execution.ok !== true) return failStage('branchCleanup', deleted.execution.stderr || 'feature branch cleanup failed');
+      current = transact('branch-cleanup-done', (fresh) => {
+        markRepositoryProjectionDirty(ctx.controllerHome, fresh.repositoryId, `cleanup:${fresh.workId}:branch`);
+        return writeWorkHandle(ctx.controllerHome, { ...fresh, finalization: { ...fresh.finalization, branchCleanup: 'done', lastError: undefined } });
+      });
     }
-    const complete = stages.validation === 'done' && stages.commit !== 'pending' && stages.merge !== 'pending' && stages.branchCleanup !== 'pending' && stages.worktreeCleanup !== 'pending' && !stages.lastError;
-    if (complete) {
-      const finalState = stages.worktreeCleanup === 'done' ? 'cleaned' : stages.merge === 'done' ? 'merged' : stages.commit === 'done' ? 'committed' : current.state === 'prepared' ? 'prepared' : 'editing';
-      current = transitionWorkHandle(ctx.controllerHome, current, finalState, { finalization: stages });
-      updateWorkContract({ controllerHome: ctx.controllerHome, repoId: current.repositoryId }, current.workContractId ?? current.workId, { status: 'succeeded' });
-      if (finalState === 'cleaned') updateExecutionSession(ctx.controllerHome, identity, { activeWorkId: undefined, activeCheckoutId: current.sourceCheckoutId ?? session.activeCheckoutId });
+  } else if (!wants.cleanup && current.finalization.worktreeCleanup === 'pending') {
+    current = transact('worktree-cleanup-skipped', (fresh) => writeWorkHandle(ctx.controllerHome, { ...fresh, finalization: { ...fresh.finalization, worktreeCleanup: 'skipped' } }));
+  }
+
+  const complete = finalizationComplete(current.finalization);
+  if (complete) {
+    const finalState = finalStateForStages(current.finalization, current.state);
+    current = transact('complete', (fresh) => transitionWorkHandle(ctx.controllerHome, fresh, finalState, { finalization: current.finalization, failureReason: undefined }));
+    updateWorkContract({ controllerHome: ctx.controllerHome, repoId: current.repositoryId }, current.workContractId ?? current.workId, { status: 'succeeded' });
+    if (finalState === 'cleaned') {
+      updateExecutionSession(ctx.controllerHome, identity, { activeWorkId: undefined, activeCheckoutId: current.sourceCheckoutId ?? session.activeCheckoutId });
     }
-    return { work: compactHandle(current), stages, completed: complete, idempotent: !wantsCommit && !wantsMerge && !wantsCleanup && current.finalization.validation === 'done' };
-  });
+  }
+  return { work: compactHandle(current), stages: current.finalization, completed: complete, idempotent: !wants.commit && !wants.merge && !wants.cleanup && current.finalization.validation === 'done' };
 }
 
 export async function callExecutionTool(ctx: MultiRepositoryMcpToolContext, name: string, args: Record<string, unknown>): Promise<CallToolResult | undefined> {

@@ -15,6 +15,7 @@ import {
 import { dirname, join, resolve } from 'path';
 import { ensureRepositoryControllerLayout } from './controller-home';
 import type { RepositoryRecord } from './types';
+import { resolveStableControllerHome } from '../controller/stable-state/stable-home';
 
 export type RuntimeStorageBindingStatus =
   | 'linked'
@@ -391,7 +392,6 @@ export function ensureRepositoryRuntimeStorage(
     .filter((binding) => binding.status === 'legacy-active' || binding.status === 'conflict')
     .map((binding) => `${binding.name}: ${binding.message ?? binding.status}`);
 
-  const { resolveStableControllerHome } = require('../controller/stable-state/stable-home') as typeof import('../controller/stable-state/stable-home');
   const stableHome = resolveStableControllerHome(controllerHome ?? '');
   const normalizedRoot = resolve(controllerRoot).replace(/\\/g, '/');
   const usesStableRoot = !/\/runtime-slots\/(blue|green)\//.test(normalizedRoot)

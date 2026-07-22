@@ -18,6 +18,7 @@ import { markOperationCompleted, markOperationStarted, operationReceiptMatchesJo
 import { markScheduledExecutionRunning } from '../../workflow/schedules/settlement';
 import { invalidateExecutionWorker } from './ownership';
 import { rebuildRepositoryProjection } from '../../projections/materialized-view';
+import { bindRuntimeWriterClaim } from '../../../cli/controller/stable-state/runtime-writer-context';
 
 function option(name: string): string | undefined {
   const index = process.argv.indexOf(name);
@@ -28,7 +29,6 @@ const controllerHome = ensureControllerHome(option('--controller-home'));
 // Bind ONLY the writer claim inherited from the parent daemon/scheduler.
 // Never re-read current authority and treat it as "mine" (cutover fencing bypass).
 try {
-  const { bindRuntimeWriterClaim } = require('../../../cli/controller/stable-state/runtime-writer-context') as typeof import('../../../cli/controller/stable-state/runtime-writer-context');
   const slotOpt = option('--writer-slot');
   const slot = slotOpt === 'blue' || slotOpt === 'green'
     ? slotOpt

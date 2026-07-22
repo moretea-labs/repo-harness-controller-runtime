@@ -22,6 +22,7 @@ import { loadExternalFilesystemGrants } from '../../runtime/safe-tooling/externa
 import type { RepositoryRecord } from './types';
 import { readRepositoryAccessPolicy } from '../../runtime/control-plane/governance/access-policy';
 import { assertResolvedAuthorization, decideAuthorization, type AuthorizationDecision } from '../../runtime/control-plane/governance/authorization';
+import { assertThisRuntimeMayWriteOrThrow } from '../controller/stable-state/runtime-writer-context';
 
 export { classifyRepositoryCommand } from './command-classifier';
 export type {
@@ -844,7 +845,6 @@ export function executeRepositoryCommand(
   const risk = base.classification?.risk;
   if (risk === 'remote_write' || risk === 'destructive') {
     try {
-      const { assertThisRuntimeMayWriteOrThrow } = require('../controller/stable-state/runtime-writer-context') as typeof import('../controller/stable-state/runtime-writer-context');
       assertThisRuntimeMayWriteOrThrow('remote_side_effect', controllerHome);
     } catch (error) {
       if (error instanceof Error && error.message.startsWith('WRITER_FENCED:')) throw error;
@@ -923,7 +923,6 @@ export async function executeRepositoryCommandAsync(
   const asyncRisk = base.classification?.risk;
   if (asyncRisk === 'remote_write' || asyncRisk === 'destructive') {
     try {
-      const { assertThisRuntimeMayWriteOrThrow } = require('../controller/stable-state/runtime-writer-context') as typeof import('../controller/stable-state/runtime-writer-context');
       assertThisRuntimeMayWriteOrThrow('remote_side_effect', controllerHome);
     } catch (error) {
       if (error instanceof Error && error.message.startsWith('WRITER_FENCED:')) throw error;

@@ -13,6 +13,10 @@ import type {
   AgentJobWorkerConfig,
   AgentProgressPhase,
 } from "./types";
+import {
+  AgentExecutableError,
+  revalidateAgentExecutable,
+} from "./executable-resolver";
 
 const configPath = process.argv[2];
 if (!configPath) throw new Error("agent job worker requires a config path");
@@ -230,14 +234,18 @@ function appendBounded(
   if (written >= MAX_STREAM_BYTES) return { written, truncated: true };
   const remaining = MAX_STREAM_BYTES - written;
   const accepted = chunk.subarray(0, remaining);
-  if (accepted.length > 0) appendFileSync(path, accepted);
+  const append = (value: Buffer | string, encoding?: BufferEncoding) => {
+    try {
+      if (encoding) appendFileSync(path, value, encoding);
+      else appendFileSync(path, value);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  };
+  if (accepted.length > 0) append(accepted);
   const nextTruncated = truncated || accepted.length < chunk.length;
   if (nextTruncated && !truncated)
-    appendFileSync(
-      path,
-      "\n[repo-harness] output truncated at 4 MiB\n",
-      "utf-8",
-    );
+    append("\n[repo-harness] output truncated at 4 MiB\n", "utf-8");
   return { written: written + accepted.length, truncated: nextTruncated };
 }
 
@@ -417,6 +425,45 @@ function genericActivity(
   return { phase: "inspecting", message: text, percent: 24 };
 }
 
+function failExecutableValidation(error: unknown): never {
+  const message = error instanceof AgentExecutableError
+    ? `${error.code}: ${error.message}`
+    : `AGENT_EXECUTABLE_REVALIDATION_FAILED: ${error instanceof Error ? error.message : String(error)}`;
+  meta.status = "failed";
+  meta.error = message;
+  meta.finishedAt = new Date().toISOString();
+  meta.lastHeartbeatAt = meta.finishedAt;
+  meta.terminationReason = "spawn_error";
+  meta.progress = {
+    phase: "failed",
+    percent: 100,
+    currentActivity: message,
+    lastActivityAt: meta.finishedAt,
+    activityCount: (meta.progress?.activityCount ?? 0) + 1,
+  };
+  writeFileSync(config.stderrPath, message, "utf-8");
+  persistMeta(meta);
+  event("run_failed", message, { failureClass: "executable_revalidation" });
+  try {
+    updateTask(meta.repoRoot, meta.issueId, meta.taskId, {
+      status: "blocked",
+      runId: meta.runId,
+      transition: "run_sync",
+      note: `${meta.runId} failed executable revalidation and requires an explicit retry: ${message}`,
+    });
+  } catch {
+    // Durable Run metadata remains authoritative if Issue state changed.
+  }
+  throw new Error(message);
+}
+
+let executableIdentity;
+try {
+  executableIdentity = revalidateAgentExecutable(config.executableIdentity);
+} catch (error) {
+  failExecutableValidation(error);
+}
+meta.executableIdentity = executableIdentity;
 meta.status = "running";
 meta.startedAt = meta.startedAt ?? new Date().toISOString();
 meta.timeoutMs = config.timeoutMs;
@@ -435,15 +482,28 @@ persistMeta(meta);
 event("run_started", `${config.agent} process starting.`, {
   executionMode: meta.executionMode,
   autoIntegrate: config.autoIntegrate,
+  executablePath: executableIdentity.executablePath,
+  executableVersion: executableIdentity.version,
+  authenticationReadiness: executableIdentity.authenticationReadiness,
 });
 
 const command =
   config.agent === "codex"
     ? {
-        bin: "codex",
-        args: ["exec", "--json", "--cd", config.worktree, prompt],
+        bin: executableIdentity.executablePath,
+        args: [
+          "exec",
+          "--ephemeral",
+          ...(config.readOnly ? ["--sandbox", "read-only"] : []),
+          "--color",
+          "never",
+          "--json",
+          "--cd",
+          config.worktree,
+          prompt,
+        ],
       }
-    : { bin: "claude", args: ["-p", prompt] };
+    : { bin: executableIdentity.executablePath, args: ["-p", prompt] };
 
 writeFileSync(config.stdoutPath, "", "utf-8");
 writeFileSync(config.stderrPath, "", "utf-8");
@@ -703,6 +763,10 @@ finalMeta.progress = {
   lastActivityAt: finishedAt,
   activityCount: (finalMeta.progress?.activityCount ?? 0) + 1,
 };
+if (autoFinalizing) {
+  finalMeta.closureState = "ready_to_integrate";
+  finalMeta.closureUpdatedAt = finishedAt;
+}
 persistMeta(finalMeta);
 event("log_updated", "Agent output stream closed.", {
   stdoutBytes,

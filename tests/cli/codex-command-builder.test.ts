@@ -49,7 +49,13 @@ describe("codex command builder", () => {
     const executable = join(binRoot, "codex");
     writeFileSync(
       executable,
-      '#!/usr/bin/env bash\nprintf \'%s\\n\' "codex-args:$1:$2:$3:$4"\n',
+      `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "codex-cli 0.test"; exit 0; fi
+if [ "$1" = "login" ] && [ "$2" = "status" ]; then echo "Logged in using ChatGPT"; exit 0; fi
+printf "codex-args:"
+for arg in "$@"; do printf "%s:" "$arg"; done
+printf "\\n"
+`,
     );
     chmodSync(executable, 0o755);
     process.env.PATH = `${binRoot}:${originalPath ?? ""}`;
@@ -94,7 +100,12 @@ describe("codex command builder", () => {
         run = getAgentJob(root, dispatched.runId as string);
       }
       expect(run.status).toBe("succeeded");
-      expect(run.stdoutTail).toContain("codex-args:exec:--json:--cd:");
+      expect(run.stdoutTail).toContain("codex-args:exec:--ephemeral:--color:never:--json:--cd:");
+      expect(run.executableIdentity).toMatchObject({
+        executablePath: executable,
+        version: "codex-cli 0.test",
+        authenticationReadiness: "ready",
+      });
       expect(run.stdoutTail).toContain(root);
     } finally {
       process.env.PATH = originalPath;

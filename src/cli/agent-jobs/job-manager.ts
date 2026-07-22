@@ -62,6 +62,11 @@ import {
   isExecutorHealthError,
   type LocalExecutorPolicy,
 } from "./executor-health";
+import {
+  AgentExecutableError,
+  assertAgentExecutableReady,
+  resolveAgentExecutable,
+} from "./executable-resolver";
 
 const JOB_ROOT = ".ai/harness/jobs";
 const RUN_LAUNCH_LOCK = ".ai/harness/controller/run-launch.lock";
@@ -1446,6 +1451,37 @@ ${meta.supervisorInstructions}
     }
   }
 
+  let executableIdentity;
+  try {
+    executableIdentity = resolveAgentExecutable(meta.agent as Exclude<ControllerAgent, "github-copilot">);
+    assertAgentExecutableReady(executableIdentity);
+    meta.executableIdentity = executableIdentity;
+    writeAgentMeta(repoRoot, absoluteMetaPath, meta);
+  } catch (error) {
+    const message = error instanceof AgentExecutableError
+      ? `${error.code}: ${error.message}`
+      : `AGENT_EXECUTABLE_PROBE_FAILED: ${error instanceof Error ? error.message : String(error)}`;
+    meta.status = "failed";
+    meta.error = message;
+    meta.finishedAt = new Date().toISOString();
+    meta.terminationReason = "spawn_error";
+    writeFileSync(paths.stderrPath, message, "utf-8");
+    attachExecutorFailureHealth(meta);
+    writeAgentMeta(repoRoot, absoluteMetaPath, meta);
+    appendAgentJobEvent(repoRoot, runId, {
+      type: "run_failed",
+      message,
+      data: { failureClass: "executable_readiness" },
+    });
+    updateTask(repoRoot, issue.id, task.id, {
+      status: "blocked",
+      runId,
+      transition: "run_sync",
+      note: `${runId} failed executable readiness and requires an explicit retry: ${message}`,
+    });
+    return meta;
+  }
+
   const configPath = join(paths.dir, "worker-config.json");
   const controllerEpoch = ensureControllerEpoch(repoRoot);
   meta.controllerPid = controllerEpoch.pid;
@@ -1463,6 +1499,8 @@ ${meta.supervisorInstructions}
     eventsPath: paths.eventsPath,
     timeoutMs: meta.timeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS,
     autoIntegrate: executionMode === "worktree",
+    readOnly: meta.executionClass === "read_only",
+    executableIdentity,
     controllerPid: meta.controllerPid,
     controllerEpoch: meta.controllerEpoch,
     controllerEpochPath: controllerEpoch.path,
@@ -1498,7 +1536,13 @@ ${meta.supervisorInstructions}
     appendAgentJobEvent(repoRoot, runId, {
       type: "run_started",
       message: `Local ${meta.agent} worker started in ${executionMode} mode.`,
-      data: { executionMode, worktree: meta.worktree },
+      data: {
+        executionMode,
+        worktree: meta.worktree,
+        executablePath: executableIdentity.executablePath,
+        executableVersion: executableIdentity.version,
+        authenticationReadiness: executableIdentity.authenticationReadiness,
+      },
     });
     updateTask(repoRoot, issue.id, task.id, {
       status: "running",

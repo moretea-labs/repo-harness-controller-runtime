@@ -21,13 +21,25 @@ function requireMatch(path, expression, description) {
 function forbid(path, expression, description) {
   if (expression.test(text(path))) failures.push(`${path} violates ${description}`);
 }
+function forbidBetween(path, startNeedle, endNeedle, expression, description) {
+  const source = text(path);
+  const start = source.indexOf(startNeedle);
+  const end = start >= 0 ? source.indexOf(endNeedle, start + startNeedle.length) : -1;
+  if (start < 0 || end < 0) {
+    failures.push(`${path} must expose the checked architecture region for ${description}`);
+    return;
+  }
+  if (expression.test(source.slice(start, end))) failures.push(`${path} violates ${description}`);
+}
 
 const required = [
   'src/runtime/gateway/mcp/router.ts',
+  'src/cli/agent-jobs/executable-resolver.ts',
   'src/runtime/control-plane/daemon-entry.ts',
   'src/runtime/control-plane/global-scheduler/scheduler.ts',
   'src/runtime/control-plane/repo-actor/actor.ts',
   'src/runtime/execution/jobs/store.ts',
+  'src/runtime/execution/jobs/timeouts.ts',
   'src/runtime/execution/jobs/receipt-store.ts',
   'src/runtime/execution/workers/worker-entry.ts',
   'src/runtime/execution/thin-harness/index.ts',
@@ -38,6 +50,7 @@ const required = [
   'src/runtime/evidence/evidence-store.ts',
   'src/runtime/evidence/artifact-store.ts',
   'src/runtime/projections/materialized-view.ts',
+  'src/runtime/projections/git-status-sampler.ts',
   'src/runtime/projections/controller-context.ts',
   'src/runtime/projections/invalidation.ts',
   'src/runtime/workflow/schedules/engine.ts',
@@ -71,12 +84,33 @@ requireMatch(
 requireText('src/runtime/gateway/mcp/router.ts', "name === 'repository_workbench'");
 requireText('src/runtime/gateway/mcp/runtime-tools.ts', "case 'controller_context'");
 requireText('src/runtime/gateway/mcp/runtime-tools.ts', "case 'local_bridge_status'");
+requireText('src/runtime/gateway/mcp/runtime-tools.ts', 'readAgentExecutableReadinessSnapshot');
+requireText('src/runtime/gateway/mcp/runtime-tools.ts', 'connectorExposedTools');
+requireText('src/runtime/gateway/mcp/runtime-tools.ts', 'currentCallableTools');
+forbid('src/runtime/gateway/mcp/runtime-tools.ts', /inspectAgentExecutableReadiness|resolveAgentExecutable|writeAgentExecutableReadinessSnapshot/, 'Gateway readiness must only read the Daemon-produced Agent executable snapshot');
+forbidBetween(
+  'src/runtime/gateway/mcp/runtime-tools.ts',
+  "case 'repository_runtime_snapshot':",
+  "case 'runtime_performance_diagnostics':",
+  /rebuildRepositoryProjection\s*\(/,
+  'repository_runtime_snapshot must be a bounded materialized-view read, never a live rebuild',
+);
 requireText('src/cli/local-bridge/job-store.ts', 'listLocalBridgeJobSnapshots');
 requireText('src/runtime/execution/workers/executor.ts', 'writeControllerContextProjection');
 forbid('src/runtime/gateway/mcp/router.ts', /const DIRECT_HOT_READ_TOOLS = new Set\([\s\S]*?['"]controller_context['"][\s\S]*?\);/, 'controller_context must use a materialized projection or Durable Job, never the legacy Gateway path');
 forbid('src/runtime/gateway/mcp/router.ts', /const DIRECT_HOT_READ_TOOLS = new Set\([\s\S]*?['"](?:local_bridge_status|get_local_job|get_local_job_output)['"][\s\S]*?\);/, 'Local Bridge observations must use bounded snapshots, never reconciliation in the Gateway');
 requireText('src/runtime/execution/jobs/types.ts', 'requestId: string');
 requireText('src/runtime/execution/jobs/types.ts', 'semanticKey: string');
+requireText('src/runtime/execution/jobs/types.ts', 'admissionTimeoutMs: number');
+requireText('src/runtime/execution/jobs/types.ts', 'queueTimeoutMs: number');
+requireText('src/runtime/execution/jobs/types.ts', 'executionTimeoutMs: number');
+requireText('src/runtime/execution/jobs/types.ts', 'interactiveWaitMs: number');
+requireText('src/runtime/execution/jobs/timeouts.ts', 'executionTimeoutDecision');
+requireText('src/runtime/control-plane/facade/operation-digest.ts', 'operationId');
+requireText('src/runtime/control-plane/facade/operation-digest.ts', 'resultRef');
+requireText('src/runtime/control-plane/facade/operation-digest.ts', 'nextActions');
+requireText('src/runtime/control-plane/facade/operation-digest.ts', 'admissionTimeoutMs');
+forbid('src/runtime/gateway/mcp/router.ts', /Math\.min\(\s*typeof args\.timeout_ms[\s\S]{0,140}?,\s*120_000\s*\)/, 'Agent parent timeout must never silently truncate timeout_ms to 120 seconds');
 requireText('src/runtime/execution/jobs/store.ts', "'active.json'");
 requireText('src/runtime/execution/jobs/store.ts', "'recent.json'");
 requireText('src/runtime/execution/jobs/store.ts', "'requests'");
@@ -94,7 +128,48 @@ requireText('src/runtime/control-plane/repo-actor/actor.ts', 'repo-actor-mailbox
 requireText('src/runtime/control-plane/global-scheduler/scheduler.ts', 'maxConcurrentRepositories');
 requireText('src/runtime/control-plane/global-scheduler/scheduler.ts', 'maxHeavyChecks');
 requireText('src/runtime/control-plane/global-scheduler/scheduler.ts', 'maxAgentProcesses');
+requireText('src/runtime/control-plane/global-scheduler/scheduler.ts', 'writeAgentExecutableReadinessSnapshot');
+requireText('src/runtime/control-plane/global-scheduler/scheduler.ts', 'sampleRepositoryGitStatusForRepositories');
+requireText('src/cli/agent-jobs/executable-resolver.ts', 'revalidateAgentExecutable');
+requireText('src/cli/agent-jobs/executable-resolver.ts', 'AGENT_EXECUTABLE_IDENTITY_CHANGED');
+forbidBetween(
+  'src/runtime/control-plane/global-scheduler/scheduler.ts',
+  'activeJobs = withControllerLock(',
+  '} catch (error) {',
+  /this\.spawnWorker\s*\(/,
+  'Execution Worker spawn must happen outside the global scheduler lock',
+);
+forbidBetween(
+  'src/runtime/control-plane/repo-actor/actor.ts',
+  'const dispatch = withControllerLock(',
+  '// Projection materialization',
+  /rebuildRepositoryProjection\s*\(/,
+  'Projection rebuild must happen outside the Repo Actor mailbox lock',
+);
 requireText('src/runtime/workflow/schedules/store.ts', "'occurrences.json'");
+requireText('src/runtime/projections/git-status-sampler.ts', 'writeRepositoryGitStatusSample');
+requireText('src/runtime/projections/git-status-sampler.ts', 'readRepositoryGitStatusSample');
+requireText('src/cli/mcp/repository-tools.ts', 'readRepositoryGitStatusSample');
+requireText('src/cli/mcp/repository-tools.ts', 'args.refresh === true');
+forbidBetween(
+  'src/cli/mcp/repository-tools.ts',
+  "case 'repository_git_status':",
+  "case 'repository_git_diff':",
+  /repositoryGitStatus\s*\(/,
+  'repository_git_status must default to daemon samples; live refresh must be explicit and sampled',
+);
+requireText('src/runtime/control-plane/execution/session-store.ts', 'lastValidatedAt: now');
+requireText('src/runtime/control-plane/execution/validation.ts', 'warnings.push');
+requireText('src/runtime/control-plane/execution/work-handle-store.ts', "failed: ['validating', 'editing', 'committed', 'merged', 'cleaned']");
+requireText('src/runtime/gateway/mcp/execution-tools.ts', 'resetFailedFinalizationStages');
+requireText('src/runtime/gateway/mcp/execution-tools.ts', 'finalizationComplete');
+forbidBetween(
+  'src/runtime/gateway/mcp/execution-tools.ts',
+  'function finalizeWork(',
+  'export async function callExecutionTool',
+  /withControllerLock\([\s\S]{0,900}?(?:repositoryGitCommit|repositoryGitFinishWorkflow|runCleanup|repositoryGitDeleteBranch)/,
+  'work_finalize must not hold the controller lock while committing, merging, deleting branches, or removing worktrees',
+);
 requireText('src/runtime/workflow/schedules/types.ts', "'repository-event'");
 requireText('src/runtime/workflow/schedules/types.ts', "'dependency-checkpoint'");
 requireText('src/runtime/workflow/schedules/store.ts', 'saveScheduleDecision');

@@ -72,6 +72,24 @@ async function waitForRun(
   return run;
 }
 
+function writeFakeCodexExecutable(path: string, body: string): void {
+  writeFileSync(
+    path,
+    `#!/usr/bin/env bash
+if [[ "$1" == "--version" ]]; then
+  echo "codex-cli 0.0.0-test"
+  exit 0
+fi
+if [[ "$1" == "login" && "$2" == "status" ]]; then
+  echo "Logged in as test@example.com"
+  exit 0
+fi
+${body}
+`,
+  );
+  chmodSync(path, 0o755);
+}
+
 async function withController<T>(
   fn: (repoRoot: string, ctx: McpToolContext) => Promise<T>,
 ): Promise<T> {
@@ -236,8 +254,7 @@ test("returns compact default dispatch and verification payloads", async () => {
     const originalPath = process.env.PATH;
     try {
       const fakeCodex = join(binRoot, "codex");
-      writeFileSync(fakeCodex, '#!/usr/bin/env bash\necho "compact-run-ok"\nexit 0\n');
-      chmodSync(fakeCodex, 0o755);
+      writeFakeCodexExecutable(fakeCodex, 'echo "compact-run-ok"\nexit 0\n');
       process.env.PATH = `${binRoot}:${originalPath ?? ""}`;
       const ctx = {
         ...baseCtx,
@@ -702,8 +719,7 @@ describe("MCP controller profile", () => {
       const originalPath = process.env.PATH;
       try {
         const fakeCodex = join(binRoot, "codex");
-        writeFileSync(fakeCodex, '#!/usr/bin/env bash\necho "local-job-ok"\nexit 0\n');
-        chmodSync(fakeCodex, 0o755);
+        writeFakeCodexExecutable(fakeCodex, 'echo "local-job-ok"\nexit 0\n');
         process.env.PATH = `${binRoot}:${originalPath ?? ""}`;
         const ctx = {
           ...baseCtx,
@@ -1650,11 +1666,7 @@ describe("MCP controller profile", () => {
       const originalPath = process.env.PATH;
       try {
         const fakeCodex = join(binRoot, "codex");
-        writeFileSync(
-          fakeCodex,
-          '#!/usr/bin/env bash\necho "controller-run-ok"\nexit 0\n',
-        );
-        chmodSync(fakeCodex, 0o755);
+        writeFakeCodexExecutable(fakeCodex, 'echo "controller-run-ok"\nexit 0\n');
         process.env.PATH = `${binRoot}:${originalPath ?? ""}`;
         const ctx = {
           ...baseCtx,
@@ -1748,10 +1760,9 @@ describe("MCP controller profile", () => {
       const originalPath = process.env.PATH;
       try {
         const fakeCodex = join(binRoot, "codex");
-        writeFileSync(
+        writeFakeCodexExecutable(
           fakeCodex,
-          `#!/usr/bin/env bash
-printf '%s\n' '{"type":"thread.started"}'
+          `printf '%s\n' '{"type":"thread.started"}'
 printf '%s\n' '{"type":"turn.started"}'
 sleep 0.2
 printf '%s\n' '{"type":"item.started","item":{"type":"command_execution","command":"bun test focused"}}'
@@ -1759,7 +1770,6 @@ sleep 0.2
 printf '%s\n' '{"type":"turn.completed"}'
 `,
         );
-        chmodSync(fakeCodex, 0o755);
         process.env.PATH = `${binRoot}:${originalPath ?? ""}`;
         const ctx = {
           ...baseCtx,
@@ -1835,11 +1845,7 @@ printf '%s\n' '{"type":"turn.completed"}'
       const originalPath = process.env.PATH;
       try {
         const fakeCodex = join(binRoot, "codex");
-        writeFileSync(
-          fakeCodex,
-          '#!/usr/bin/env bash\necho "timeout-propagation-ok"\n',
-        );
-        chmodSync(fakeCodex, 0o755);
+        writeFakeCodexExecutable(fakeCodex, 'echo "timeout-propagation-ok"\n');
         process.env.PATH = `${binRoot}:${originalPath ?? ""}`;
         const ctx = {
           ...baseCtx,
@@ -1952,11 +1958,7 @@ printf '%s\n' '{"type":"turn.completed"}'
       const originalPath = process.env.PATH;
       try {
         const fakeCodex = join(binRoot, "codex");
-        writeFileSync(
-          fakeCodex,
-          '#!/usr/bin/env bash\necho "stream-first"\nsleep 1\necho "stream-second"\n',
-        );
-        chmodSync(fakeCodex, 0o755);
+        writeFakeCodexExecutable(fakeCodex, 'echo "stream-first"\nsleep 1\necho "stream-second"\n');
         process.env.PATH = `${binRoot}:${originalPath ?? ""}`;
         const ctx = {
           ...baseCtx,
@@ -2044,11 +2046,7 @@ printf '%s\n' '{"type":"turn.completed"}'
       const originalPath = process.env.PATH;
       try {
         const fakeCodex = join(binRoot, "codex");
-        writeFileSync(
-          fakeCodex,
-          '#!/usr/bin/env bash\necho "idempotent-run"\nsleep 0.2\n',
-        );
-        chmodSync(fakeCodex, 0o755);
+        writeFakeCodexExecutable(fakeCodex, 'echo "idempotent-run"\nsleep 0.2\n');
         process.env.PATH = `${binRoot}:${originalPath ?? ""}`;
         const ctx = {
           ...baseCtx,
@@ -2098,14 +2096,12 @@ printf '%s\n' '{"type":"turn.completed"}'
       const originalPath = process.env.PATH;
       try {
         const fakeCodex = join(binRoot, "codex");
-        writeFileSync(
+        writeFakeCodexExecutable(
           fakeCodex,
-          `#!/usr/bin/env bash
-sleep 1.2
+          `sleep 1.2
 echo "slow-start-ok"
 `,
         );
-        chmodSync(fakeCodex, 0o755);
         process.env.PATH = `${binRoot}:${originalPath ?? ""}`;
         const ctx = {
           ...baseCtx,
@@ -2153,11 +2149,7 @@ echo "slow-start-ok"
       const originalPath = process.env.PATH;
       try {
         const fakeCodex = join(binRoot, "codex");
-        writeFileSync(
-          fakeCodex,
-          '#!/usr/bin/env bash\necho "concurrent-idem"\nsleep 0.2\n',
-        );
-        chmodSync(fakeCodex, 0o755);
+        writeFakeCodexExecutable(fakeCodex, 'echo "concurrent-idem"\nsleep 0.2\n');
         process.env.PATH = `${binRoot}:${originalPath ?? ""}`;
         const ctx = {
           ...baseCtx,
@@ -2212,8 +2204,7 @@ echo "slow-start-ok"
       const originalPath = process.env.PATH;
       try {
         const fakeCodex = join(binRoot, "codex");
-        writeFileSync(fakeCodex, '#!/usr/bin/env bash\necho "compact"\n');
-        chmodSync(fakeCodex, 0o755);
+        writeFakeCodexExecutable(fakeCodex, 'echo "compact"\n');
         process.env.PATH = `${binRoot}:${originalPath ?? ""}`;
         const ctx = {
           ...baseCtx,
@@ -2475,11 +2466,10 @@ process.exit(2);
       ).toBe(0);
 
       const fakeCodex = join(binRoot, "codex");
-      writeFileSync(
+      writeFakeCodexExecutable(
         fakeCodex,
-        '#!/usr/bin/env bash\nprintf "export const value = 2;\\n" > src/example.ts\necho "isolated-change-ok"\n',
+        'printf "export const value = 2;\\n" > src/example.ts\necho "isolated-change-ok"\n',
       );
-      chmodSync(fakeCodex, 0o755);
       process.env.PATH = `${binRoot}:${originalPath ?? ""}`;
       const ctx: McpToolContext = {
         repoRoot,

@@ -14,6 +14,8 @@ import {
   evidenceRef,
   RESPONSE_BUDGET,
 } from '../shared/response-budget';
+import { getLocalBridgeJob } from '../../cli/local-bridge/job-store';
+import { getAgentJob } from '../../cli/agent-jobs/job-manager';
 
 type SafeErrorClass = NonNullable<SafeJobResultSummary['safeError']>['class'];
 type SafeArtifactRef = NonNullable<SafeJobResultSummary['artifactRefs']>[number];
@@ -149,11 +151,6 @@ function enrichDelegatedDigest(
     return digest;
   }
   try {
-    // Lazy require keeps summary module free of circular import with job-store.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { getLocalBridgeJob } = require('../../cli/local-bridge/job-store') as typeof import('../../cli/local-bridge/job-store');
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { getAgentJob } = require('../../cli/agent-jobs/job-manager') as typeof import('../../cli/agent-jobs/job-manager');
     let childLocalJobStatus = digest.childLocalJobStatus;
     let childRunStatus = digest.childRunStatus;
     if (childReference.localJobId) {

@@ -8,6 +8,7 @@ import { classifyRepositoryCommand } from '../../../cli/repositories/command-cla
 import { normalizeRepositoryCommand } from '../../../cli/repositories/command-normalization';
 import { isFocusedCheckCommand } from '../thin-harness/execution-router';
 import type { ProcessResourceClaim } from './types';
+import { normalizeClaimPath } from '../../resources/claims/conflicts';
 
 export type ResourceClaimKind =
   | 'workspace_read'
@@ -36,8 +37,6 @@ export function claimWorkspaceRead(checkoutId?: string): ResourceClaimSpec {
 }
 
 export function claimPathWrite(path: string, checkoutId?: string): ResourceClaimSpec {
-  // Import path normalizer lazily to avoid circular imports in tests.
-  const { normalizeClaimPath } = require('../../resources/claims/conflicts') as typeof import('../../resources/claims/conflicts');
   const normalized = normalizeClaimPath(path);
   if (!normalized) {
     // Unsafe / ambiguous path → escalate to whole-checkout workspace write.

@@ -64,6 +64,7 @@ import {
 } from '../../../cli/controller/composite-operations';
 import { controllerRollback, controllerRollout } from '../../../cli/controller/bluegreen-rollout';
 import { listActiveAgentJobSnapshots } from '../../../cli/agent-jobs/job-manager';
+import { readAgentExecutableReadinessSnapshot } from '../../../cli/agent-jobs/executable-resolver';
 import {
   commitSelectedPaths,
   prepareFallbackHandoffArtifacts,
@@ -1910,7 +1911,9 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         const runtimeSource = runtimeSourceSnapshotStatus(readiness.daemon.source);
         const sourceSnapshotStale = runtimeSource.restartRequired;
         // Dynamic import avoids a static cycle: toolset.ts composes runtimeToolDefinitions.
-        const exposure = (await import('../../../cli/mcp/toolset')).controllerExposureSnapshot(ctx);
+        const toolset = await import('../../../cli/mcp/toolset');
+        const exposure = toolset.controllerExposureSnapshot(ctx);
+        const localRegisteredToolNames = toolset.allControllerToolDefinitions(ctx).map((tool) => tool.name).sort();
         const toolSurfaceReady = exposure.ready && exposure.missingToolNames.length === 0;
         const effectiveReady = readiness.ready && toolSurfaceReady && !sourceSnapshotStale;
         const readinessReasons = [...readiness.reasons];
@@ -3006,10 +3009,13 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           ? selected(ctx, args)
           : (ctx.explicitRepository ?? (registered.length === 1 ? registered[0] : undefined));
         const readiness = await controllerReadiness(ctx, repository);
-        const exposure = (await import('../../../cli/mcp/toolset')).controllerExposureSnapshot(ctx);
+        const toolset = await import('../../../cli/mcp/toolset');
+        const exposure = toolset.controllerExposureSnapshot(ctx);
+        const localRegisteredToolNames = toolset.allControllerToolDefinitions(ctx).map((tool) => tool.name).sort();
         const toolSurfaceReady = exposure.ready && exposure.missingToolNames.length === 0;
         const effectiveReady = readiness.ready && toolSurfaceReady;
         const taskLedger = repository ? buildControllerTaskLedgerProjection(repository.canonicalRoot) : undefined;
+        const agentExecutors = readAgentExecutableReadinessSnapshot(ctx.controllerHome);
         return result({
           ready: effectiveReady,
           state: effectiveReady ? readiness.state : 'degraded',
@@ -3029,9 +3035,16 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           durableScheduler: readiness.durableScheduler,
           workerLoop: readiness.workerLoop,
           localBridge: readiness.localBridge,
+          agentExecutors: agentExecutors
+            ? { status: 'probed', ...agentExecutors }
+            : { status: 'not_probed', executors: {} },
           reasons: toolSurfaceReady ? readiness.reasons : [...readiness.reasons, { code: 'MCP_TOOL_SURFACE_INCOMPLETE', message: 'Registered and exposed MCP tool schemas do not match.' }],
           toolSurface: {
             ready: toolSurfaceReady,
+            localExpectedTools: exposure.expectedToolNames,
+            localRegisteredTools: localRegisteredToolNames,
+            connectorExposedTools: exposure.actualToolNames,
+            currentCallableTools: exposure.actualToolNames,
             expectedTools: exposure.expectedToolNames,
             actualTools: exposure.actualToolNames,
             missingTools: exposure.missingToolNames,
@@ -3042,12 +3055,19 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
           },
           access: exposure.access,
           registeredRepositories: registered.length,
-          ...(repository ? { repository: summarizeRuntimeProjectionForReadiness(readiness.projection ?? rebuildRepositoryProjection(ctx.controllerHome, repository.repoId)) } : {}),
+          ...(repository ? { repository: summarizeRuntimeProjectionForReadiness(readiness.projection ?? readRepositoryProjectionSnapshot(ctx.controllerHome, repository.repoId).projection) } : {}),
         });
       }
       case 'repository_runtime_snapshot': {
         const repository = selected(ctx, args);
-        return result({ snapshot: summarizeRuntimeProjectionForReadiness(rebuildRepositoryProjection(ctx.controllerHome, repository.repoId)) });
+        const snapshot = readRepositoryProjectionSnapshot(ctx.controllerHome, repository.repoId);
+        return result({
+          snapshot: summarizeRuntimeProjectionForReadiness(snapshot.projection),
+          stale: snapshot.stale,
+          persisted: snapshot.persisted,
+          dirtySinceAt: snapshot.dirtySinceAt,
+          dirtyReason: snapshot.dirtyReason,
+        });
       }
       case 'runtime_performance_diagnostics': {
         const repository = selected(ctx, args);

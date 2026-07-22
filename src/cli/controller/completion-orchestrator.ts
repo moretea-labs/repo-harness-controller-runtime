@@ -1030,7 +1030,7 @@ function finishTaskRunUnlocked(repoRoot: string, options: FinishTaskRunOptions):
   const ownedAutoFinalization = run.status === 'running'
     && run.autoIntegrate === true
     && run.executionMode === 'worktree'
-    && run.progress?.phase === 'finalizing';
+    && (run.progress?.phase === 'finalizing' || run.closureState === 'ready_to_integrate');
   if (!['succeeded', 'waiting_for_user'].includes(run.status) && !ownedAutoFinalization) {
     return result(repoRoot, {
       action: 'blocked',

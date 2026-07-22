@@ -12,7 +12,12 @@ import { processToolDefinitions } from './process-tools';
 import { resolveRepositorySelection } from '../../../cli/repositories/registry';
 import { ensureRepositoryRuntimeStorage } from '../../../cli/repositories/runtime-storage';
 import { createExecutionJob, getExecutionJob } from '../../execution/jobs/store';
-import type { ExecutionJobPriority, ExecutionJobType, ExecutionOperationMetadata } from '../../execution/jobs/types';
+import type {
+  ExecutionJobPriority,
+  ExecutionJobType,
+  ExecutionOperationMetadata,
+  ExecutionTimeoutPolicy,
+} from '../../execution/jobs/types';
 import { waitForExecutionJob } from '../../execution/jobs/wait';
 import { ensureControllerDaemon } from '../../control-plane/daemon-client';
 import { buildAcceptedQueuedDigest, buildJobOperationDigest } from '../../control-plane/facade/operation-digest';
@@ -112,6 +117,19 @@ const INTERACTIVE_SYNC_WRITE_TOOLS = new Set([
 ]);
 const P0_TOOLS = new Set(['run_check', 'verify_edit_session', 'finish_edit_session', 'repository_command_execute']);
 const P2_TOOLS = new Set(['write_prd', 'write_sprint', 'write_plan', 'publish_issue_to_github']);
+const AGENT_DELEGATION_TOOLS = new Set([
+  'dispatch_task',
+  'launch_issue',
+  'dispatch_ready_tasks',
+  'retry_task_run',
+  'quick_agent_session',
+]);
+const MAX_DURABLE_TIMEOUT_MS = 24 * 60 * 60_000;
+
+function durableTimeoutMs(value: unknown, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+  return Math.max(1_000, Math.min(Math.trunc(value), MAX_DURABLE_TIMEOUT_MS));
+}
 
 function wantsAsyncExecution(args: Record<string, unknown>): boolean {
   return args.apply_mode === 'async'
@@ -135,13 +153,47 @@ export function wantsWaitForResult(args: Record<string, unknown>): boolean {
 }
 
 export function waitTimeoutMs(args: Record<string, unknown>): number {
-  if (typeof args.wait_ms === 'number' && Number.isFinite(args.wait_ms)) {
-    return Math.max(200, Math.min(Math.trunc(args.wait_ms), 120_000));
+  const explicitInteractiveWait = args.interactive_wait_ms ?? args.wait_ms;
+  if (typeof explicitInteractiveWait === 'number' && Number.isFinite(explicitInteractiveWait)) {
+    return Math.max(200, Math.min(Math.trunc(explicitInteractiveWait), 120_000));
   }
   if (typeof args.timeout_ms === 'number' && Number.isFinite(args.timeout_ms) && wantsWaitForResult(args)) {
     return Math.max(200, Math.min(Math.trunc(args.timeout_ms), 120_000));
   }
   return 15_000;
+}
+
+export function operationExecutionTimeoutMsForMcpCall(
+  name: string,
+  args: Record<string, unknown>,
+): number {
+  const requested = args.execution_timeout_ms ?? args.timeout_ms;
+  return durableTimeoutMs(requested, AGENT_DELEGATION_TOOLS.has(name) ? 60 * 60_000 : 15 * 60_000);
+}
+
+/**
+ * Build independent budgets for the durable Parent Job. Agent delegation keeps
+ * the caller's operation execution budget on the Child Run; the Parent only
+ * receives enough execution time to create and durably associate that child.
+ */
+export function executionTimeoutPolicyForMcpCall(
+  name: string,
+  args: Record<string, unknown>,
+): ExecutionTimeoutPolicy {
+  const operationExecutionMs = operationExecutionTimeoutMsForMcpCall(name, args);
+  const agentDelegation = AGENT_DELEGATION_TOOLS.has(name);
+  return {
+    admissionTimeoutMs: durableTimeoutMs(
+      args.admission_timeout_ms,
+      agentDelegation ? 5 * 60_000 : operationExecutionMs,
+    ),
+    queueTimeoutMs: durableTimeoutMs(
+      args.queue_timeout_ms,
+      agentDelegation ? MAX_DURABLE_TIMEOUT_MS : operationExecutionMs,
+    ),
+    executionTimeoutMs: agentDelegation ? 120_000 : operationExecutionMs,
+    interactiveWaitMs: waitTimeoutMs(args),
+  };
 }
 
 function result(value: Record<string, unknown>): CallToolResult {
@@ -352,6 +404,7 @@ export function operationMetadataForTool(
   timeoutMs: number,
   args: Record<string, unknown> = {},
   defaultBranch?: string,
+  timeoutPolicy?: ExecutionTimeoutPolicy,
 ): ExecutionOperationMetadata {
   if (name === 'repository_command_execute' && args.command !== undefined) {
     const classification = classifyRepositoryCommand(args.command as string | string[], defaultBranch);
@@ -368,6 +421,10 @@ export function operationMetadataForTool(
       idempotent: replay.idempotent,
       replayable: replay.replayable,
       timeoutMs,
+      admissionTimeoutMs: timeoutPolicy?.admissionTimeoutMs,
+      queueTimeoutMs: timeoutPolicy?.queueTimeoutMs,
+      executionTimeoutMs: timeoutPolicy?.executionTimeoutMs,
+      interactiveWaitMs: timeoutPolicy?.interactiveWaitMs,
       retryPolicy: replay.retryPolicy,
       approvalPolicy: classification.risk === 'readonly'
         ? 'none'
@@ -391,6 +448,10 @@ export function operationMetadataForTool(
     idempotent: readOnly,
     replayable: readOnly,
     timeoutMs,
+    admissionTimeoutMs: timeoutPolicy?.admissionTimeoutMs,
+    queueTimeoutMs: timeoutPolicy?.queueTimeoutMs,
+    executionTimeoutMs: timeoutPolicy?.executionTimeoutMs,
+    interactiveWaitMs: timeoutPolicy?.interactiveWaitMs,
     retryPolicy: readOnly ? 'safe_retry' : 'idempotent_request',
     approvalPolicy: destructive ? 'required' : remoteWrite || !readOnly ? 'request' : 'none',
     lockScope: claims.map((claim) => claim.resourceKey),
@@ -423,6 +484,22 @@ export function injectDurableCommandFields(tool: McpToolDefinition): McpToolDefi
         wait_ms: {
           type: 'number',
           description: 'Max wait for terminal job result. Only used when wait=true; never enables waiting by itself. Default 15000, max 120000.',
+        },
+        admission_timeout_ms: {
+          type: 'number',
+          description: 'Durable admission budget before the Scheduler first observes the Job.',
+        },
+        queue_timeout_ms: {
+          type: 'number',
+          description: 'Durable queue budget after Scheduler admission and before Worker start.',
+        },
+        execution_timeout_ms: {
+          type: 'number',
+          description: 'Operation execution budget. For Agent delegation this is the Child Run budget and is never silently reduced by the Parent Job.',
+        },
+        interactive_wait_ms: {
+          type: 'number',
+          description: 'Caller-side wait budget only. It never cancels or shortens the durable operation.',
         },
       },
     },
@@ -586,20 +663,24 @@ export async function routeDurableMcpCall(
   delete workerArgs.wait_ms;
   delete workerArgs.await_result;
   delete workerArgs.wait_for_result;
+  const agentDelegation = AGENT_DELEGATION_TOOLS.has(name);
+  const operationExecutionTimeoutMs = operationExecutionTimeoutMsForMcpCall(name, args);
+  if (agentDelegation) workerArgs.timeout_ms = operationExecutionTimeoutMs;
+  delete workerArgs.admission_timeout_ms;
+  delete workerArgs.queue_timeout_ms;
+  delete workerArgs.execution_timeout_ms;
+  delete workerArgs.interactive_wait_ms;
   const semanticKey = `${isRepositoryTool ? 'repository-tool' : 'mcp-tool'}:${name}:${repoId}:${hashArguments(workerArgs)}`;
   const claims = claimsForMcpOperation(name, workerArgs, repoId, checkoutId);
-  const agentDelegation = ['dispatch_task', 'launch_issue', 'dispatch_ready_tasks', 'retry_task_run', 'quick_agent_session'].includes(name);
-  // Parent Agent-delegation Jobs only accept the child Run; child timeout stays on the Agent Run.
-  const timeoutMs = agentDelegation
-    ? Math.min(typeof args.timeout_ms === 'number' ? args.timeout_ms : 120_000, 120_000)
-    : typeof args.timeout_ms === 'number' ? args.timeout_ms : undefined;
+  const timeoutPolicy = executionTimeoutPolicyForMcpCall(name, args);
   const operationMetadata = operationMetadataForTool(
     name,
     definition,
     claims,
-    Math.max(1_000, Math.min(timeoutMs ?? (agentDelegation ? 120_000 : 15 * 60_000), 24 * 60 * 60_000)),
+    operationExecutionTimeoutMs,
     workerArgs,
     repository?.defaultBranch,
+    timeoutPolicy,
   );
   // Refresh and fence the daemon before persisting work. Creating the Job first
   // can leave a newly submitted operation associated with a stale Controller
@@ -626,7 +707,8 @@ export async function routeDurableMcpCall(
       runnerMaxTimeoutMs: ctx.policy.execution.runnerMaxTimeoutMs,
     },
     resourceClaims: claims,
-    timeoutMs,
+    timeoutMs: timeoutPolicy.executionTimeoutMs,
+    timeoutPolicy,
     maxAttempts: 2,
     operationMetadata,
   });

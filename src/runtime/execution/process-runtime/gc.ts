@@ -11,6 +11,8 @@ import { join } from 'path';
 import { ensureRepositoryControllerLayout, repositoryControllerRoot } from '../../../cli/repositories/controller-home';
 import { getProcessRecord, listActiveProcessIds } from './store';
 import type { ProcessRuntimeStatus } from './types';
+import { assertThisRuntimeMayWrite } from '../../../cli/controller/stable-state/runtime-writer-context';
+import { isProcessAlive } from '../../shared/process-tree';
 
 const TERMINAL: ReadonlySet<ProcessRuntimeStatus> = new Set([
   'succeeded',
@@ -67,7 +69,6 @@ function safeUnlink(path: string): boolean {
 export function gcTerminalProcesses(options: ProcessGcOptions): ProcessGcResult {
   try {
     try {
-      const { assertThisRuntimeMayWrite } = require('../../../cli/controller/stable-state/runtime-writer-context') as typeof import('../../../cli/controller/stable-state/runtime-writer-context');
       const fence = assertThisRuntimeMayWrite('cleanup', options.controllerHome);
       if (!fence.allowed) {
         return {
@@ -105,7 +106,6 @@ export function gcTerminalProcesses(options: ProcessGcOptions): ProcessGcResult 
       // Skip still-alive identity matches even if status drifted.
       if (record.identity && !record.identityUntrusted && !record.identity.processStartTime.startsWith('untrusted:')) {
         try {
-          const { isProcessAlive } = require('../../shared/process-tree') as typeof import('../../shared/process-tree');
           if (isProcessAlive(record.identity.pid)) {
             skippedActive += 1;
             continue;

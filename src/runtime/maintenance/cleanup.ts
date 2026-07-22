@@ -3,6 +3,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync
 import { basename, dirname, join, relative, resolve } from 'path';
 import { tmpdir } from 'os';
 import type { CleanupCycleSummary } from '../control-plane/runtime-cleanup';
+import { assertThisRuntimeMayWrite } from '../../cli/controller/stable-state/runtime-writer-context';
 
 export interface RuntimeCleanupCandidate {
   kind: 'temp_dir' | 'local_job' | 'legacy_run' | 'attention_marker';
@@ -322,7 +323,6 @@ export function applyRuntimeCleanup(repoRoot: string, options: RuntimeCleanupOpt
   try {
     const controllerHome = process.env.REPO_HARNESS_CONTROLLER_HOME?.trim();
     if (controllerHome) {
-      const { assertThisRuntimeMayWrite } = require('../../cli/controller/stable-state/runtime-writer-context') as typeof import('../../cli/controller/stable-state/runtime-writer-context');
       const fence = assertThisRuntimeMayWrite('cleanup', controllerHome);
       if (!fence.allowed) {
         const generatedAt = now();

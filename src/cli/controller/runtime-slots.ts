@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname, join, resolve } from 'path';
 import { ensureControllerHome } from '../repositories/controller-home';
 import { managedResource, type ManagedResource } from '../../runtime/resources';
+import { atomicActivateRuntime } from '../../runtime/bootstrap/stable-bootstrap';
 
 export type RuntimeSlotId = 'blue' | 'green';
 
@@ -262,7 +263,6 @@ export function markCutoverAuthority(
   }
   // Stable Bootstrap writer fencing via activation transaction.
   // Failures must surface — silent ignore would leave split-brain authority.
-  const { atomicActivateRuntime } = require('../../runtime/bootstrap/stable-bootstrap') as typeof import('../../runtime/bootstrap/stable-bootstrap');
   const activated = atomicActivateRuntime(controllerHome, {
     activeSlot: authority.activeSlot,
     generation: authority.generation,
@@ -285,7 +285,6 @@ export function markRollbackAuthority(
 ): ActiveSlotAuthority {
   const current = readActiveSlotAuthority(controllerHome);
   const previous = current.previousSlot ?? oppositeSlot(current.activeSlot);
-  const { atomicActivateRuntime } = require('../../runtime/bootstrap/stable-bootstrap') as typeof import('../../runtime/bootstrap/stable-bootstrap');
   const activated = atomicActivateRuntime(controllerHome, {
     activeSlot: previous,
     previousSlot: current.activeSlot,

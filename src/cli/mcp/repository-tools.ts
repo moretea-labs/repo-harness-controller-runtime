@@ -30,6 +30,10 @@ import {
   repositoryGitSwitchBranch,
 } from '../repositories/structured-git';
 import {
+  readRepositoryGitStatusSample,
+  writeRepositoryGitStatusSample,
+} from '../../runtime/projections/git-status-sampler';
+import {
   executeFast,
   executeLightweightLanes,
   executeRepositoryBatch,
@@ -39,6 +43,10 @@ import {
   readFastReceipt,
   routeExecution,
 } from '../../runtime/execution/thin-harness';
+import {
+  classifyRepositoryCommandRoute,
+  executeRepositoryCommandViaProcessRuntime,
+} from '../../runtime/execution/process-runtime/command-facade';
 import { assessWorkMode } from '../controller/work-mode';
 import type { CallToolResult, McpToolDefinition } from './tools';
 import {
@@ -167,6 +175,7 @@ export const repositoryToolDefinitions: McpToolDefinition[] = [
   definition('repository_git_status', 'Return a structured Git status snapshot for the selected repository checkout.', {
     repo_id: repoId,
     checkout_id: { type: 'string', description: 'Optional checkout identity for repositories with multiple local clones.' },
+    refresh: { type: 'boolean', description: 'When true, explicitly refresh the Git status sample. The default public hot path only reads the latest daemon sample.' },
   }, [], true),
 
   definition('repository_git_diff', 'Return a bounded structured git diff for the selected repository, optionally staged and path-scoped.', {
@@ -552,7 +561,20 @@ export async function callRepositoryTool(
       }
       case 'repository_git_status': {
         const repository = resolveRepositorySelection({ repoId: repoIdValue || undefined, checkoutId: typeof args.checkout_id === 'string' ? args.checkout_id : undefined, controllerHome, allowSoleRepository: true });
-        return result({ status: repositoryGitStatus(repository) });
+        const status = args.refresh === true
+          ? writeRepositoryGitStatusSample(controllerHome, repository)
+          : readRepositoryGitStatusSample(controllerHome, repository.repoId, repository.activeCheckoutId);
+        return result({
+          status: status ?? {
+            repoId: repository.repoId,
+            checkoutId: repository.activeCheckoutId,
+            sampleSource: 'daemon-sample',
+            sampled: false,
+            observedAt: null,
+            staleAgeMs: null,
+            message: 'Git status has not been sampled by the Controller daemon yet. Retry after scheduler heartbeat or call with refresh=true for an explicit live refresh.',
+          },
+        });
       }
 
       case 'repository_git_diff': {
@@ -716,10 +738,6 @@ export async function callRepositoryTool(
         // Unified Process Runtime for local commands (Direct/Managed) when not forced durable.
         if (!forceDurable && !fromDurableWorker) {
           try {
-            const {
-              classifyRepositoryCommandRoute,
-              executeRepositoryCommandViaProcessRuntime,
-            } = require('../../runtime/execution/process-runtime/command-facade') as typeof import('../../runtime/execution/process-runtime/command-facade');
             const routeClass = classifyRepositoryCommandRoute(args.command as string | string[], {
               forceDurable: false,
               defaultBranch: repository.defaultBranch,
@@ -842,50 +860,61 @@ export async function callRepositoryTool(
           };
           return fast.ok ? result(fastPayload) : { ...result(fastPayload), isError: true };
         }
-        // Durable Worker already owns this request: execute the repository command
-        // directly instead of submitting another Local Bridge projection that could
-        // recurse into ExecutionJob ownership.
+        // Durable Worker calls skip Process/Fast above, then use the Local Bridge
+        // compatibility projection below for writes/long commands so the worker
+        // can settle the legacy child without creating a nested ExecutionJob.
+        // Short readonly commands keep the zero-Local-Job direct path.
         if (fromDurableWorker) {
-          const execution = executeRepositoryCommand(controllerHome, repository, {
-            command: args.command as string | string[],
-            cwd: typeof args.cwd === 'string' ? args.cwd : undefined,
-            authorization: 'confirmed_plan',
-            approvalToken: typeof args.approval_token === 'string' ? args.approval_token : undefined,
-            approvalRequestId: typeof args.approval_request_id === 'string' ? args.approval_request_id : undefined,
-            timeoutMs,
-            maxOutputBytes,
-          });
-          const ok = execution.ok === true && execution.status === 'executed';
-          const execRecord = execution as unknown as Record<string, unknown>;
-          const inlinePayload = {
-            accepted: ok,
-            mode: 'durable',
-            path: 'durable_worker_inline',
-            routing: compactRoutingSummary({
-              path: 'durable',
-              mode: 'durable',
-              reasons: ['durable_worker_inline_no_nested_job', ...routingDecision.reasons],
-            }),
-            repoId: repository.repoId,
-            checkoutId: repository.activeCheckoutId,
-            ok,
-            status: typeof execRecord.status === 'string' ? execRecord.status : undefined,
-            exitCode: typeof execRecord.exitCode === 'number' ? execRecord.exitCode : undefined,
-            ...compactCommandOutput(
-              typeof execRecord.stdout === 'string' ? execRecord.stdout : undefined,
-              typeof execRecord.stderr === 'string' ? execRecord.stderr : undefined,
-              { ok },
-            ),
-            durableSideEffects: {
-              executionJobCount: 0,
-              localJobCount: 0,
-              workerSpawnCount: 0,
-              projectionUpdateCount: 0,
-              schedulerWakeCount: 0,
-            },
-            next: 'Durable Worker executed the repository command inline without a nested ExecutionJob.',
-          };
-          return ok ? result(inlinePayload) : { ...result(inlinePayload), isError: true };
+          try {
+            const routeClass = classifyRepositoryCommandRoute(args.command as string | string[], {
+              forceDurable: false,
+              defaultBranch: repository.defaultBranch,
+              timeoutMs,
+            });
+            if (routeClass.route === 'process_direct') {
+              const processResult = await executeRepositoryCommandViaProcessRuntime({
+                controllerHome,
+                repository,
+                command: args.command as string | string[],
+                cwd: typeof args.cwd === 'string' ? args.cwd : undefined,
+                timeoutMs,
+                maxOutputBytes,
+                requestId: typeof args.request_id === 'string' ? args.request_id : undefined,
+              });
+              if (processResult.route === 'process_direct') {
+                const execRecord = processResult.process as unknown as Record<string, unknown> | undefined;
+                const ok = processResult.ok === true;
+                const inlinePayload = {
+                  accepted: ok,
+                  mode: 'durable',
+                  path: 'durable_worker_inline',
+                  routing: compactRoutingSummary({
+                    path: 'durable',
+                    mode: 'durable',
+                    reasons: ['durable_worker_inline_process_direct', routeClass.reason, ...routingDecision.reasons],
+                  }),
+                  repoId: repository.repoId,
+                  checkoutId: repository.activeCheckoutId,
+                  ok,
+                  processId: typeof execRecord?.processId === 'string' ? execRecord.processId : undefined,
+                  status: typeof execRecord?.status === 'string' ? execRecord.status : undefined,
+                  exitCode: typeof processResult.exitCode === 'number' ? processResult.exitCode : undefined,
+                  ...compactCommandOutput(
+                    typeof processResult.stdout === 'string' ? processResult.stdout : undefined,
+                    typeof processResult.stderr === 'string' ? processResult.stderr : undefined,
+                    { ok },
+                  ),
+                  durableSideEffects: processResult.durableSideEffects,
+                  next: 'Durable Worker executed a short readonly repository command inline without a Local Job.',
+                };
+                return ok ? result(inlinePayload) : { ...result(inlinePayload), isError: true };
+              }
+            }
+          } catch (error) {
+            if (process.env.REPO_HARNESS_DEBUG_PROCESS_RUNTIME === '1') {
+              console.error('[repository_command_execute] durable worker inline process runtime error', error);
+            }
+          }
         }
         const preview = previewRepositoryCommandExecution(repository, {
           command: args.command as string | string[],

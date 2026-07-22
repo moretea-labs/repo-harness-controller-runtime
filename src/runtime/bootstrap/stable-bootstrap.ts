@@ -19,7 +19,7 @@
  * ephemeral local ports and are fronted by stable ingress.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { isProcessAlive } from '../shared/process-tree';
 import { defaultProcessIdentityProbe, processIdentityMatches, type ProcessIdentityProbe } from '../supervisor/identity';
@@ -31,6 +31,12 @@ import {
 } from '../../cli/controller/stable-state/writer-authority';
 import { ensureStableLayout, type StableLayoutPaths } from '../../cli/controller/stable-state/layout';
 import type { RuntimeSlotId } from '../../cli/controller/runtime-slots';
+import {
+  commitActivationTransaction,
+  inspectActivationTransaction,
+  readActivationAuthority,
+  recoverActivationTransaction,
+} from './activation-transaction';
 
 export interface BootstrapIdentity {
   schemaVersion: 1;
@@ -156,10 +162,6 @@ export function atomicActivateRuntime(
     rollbackUntil?: string;
   },
 ): { pointer: ActiveRuntimePointer; authority: WriterAuthority } {
-  const {
-    commitActivationTransaction,
-    recoverActivationTransaction,
-  } = require('./activation-transaction') as typeof import('./activation-transaction');
   // Recover any partial previous transaction first.
   recoverActivationTransaction(controllerHome);
   const record = commitActivationTransaction(controllerHome, {
@@ -261,7 +263,7 @@ export function ensureControlSocketReady(
     const stat = statSync(path);
     const isLink = (() => {
       try {
-        return require('fs').lstatSync(path).isSymbolicLink();
+        return lstatSync(path).isSymbolicLink();
       } catch {
         return false;
       }
@@ -356,11 +358,6 @@ export function bootstrapStatus(controllerHome: string): {
   stableRepositoryRoot: string;
 } {
   const layout = ensureStableLayout(controllerHome);
-  const {
-    recoverActivationTransaction,
-    readActivationAuthority,
-    inspectActivationTransaction,
-  } = require('./activation-transaction') as typeof import('./activation-transaction');
   // Ensure activation authority exists when only projections remain.
   recoverActivationTransaction(controllerHome);
   const activationInspect = inspectActivationTransaction(controllerHome);

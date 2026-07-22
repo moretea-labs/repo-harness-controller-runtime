@@ -81,6 +81,26 @@ export interface AgentJobEvent {
   data?: Record<string, unknown>;
 }
 
+export type AgentAuthenticationReadiness = "ready" | "required" | "unknown";
+
+export interface AgentExecutableIdentity {
+  schemaVersion: 1;
+  agent: Exclude<ControllerAgent, "github-copilot">;
+  command: string;
+  source: "configured" | "path";
+  executablePath: string;
+  resolvedPath: string;
+  version: string;
+  authenticationReadiness: AgentAuthenticationReadiness;
+  probedAt: string;
+  fileIdentity: {
+    device: number;
+    inode: number;
+    size: number;
+    mtimeMs: number;
+  };
+}
+
 export interface AgentJobMeta {
   schemaVersion: 1 | 2 | 3;
   repoId?: string;
@@ -116,6 +136,7 @@ export interface AgentJobMeta {
   exitCode?: number | null;
   error?: string;
   executorHealth?: ExecutorHealth;
+  executableIdentity?: AgentExecutableIdentity;
   timeoutMs?: number;
   deadlineAt?: string;
   startupDeadlineAt?: string;
@@ -175,6 +196,8 @@ export interface AgentJobWorkerConfig {
   eventsPath: string;
   timeoutMs: number;
   autoIntegrate: boolean;
+  readOnly: boolean;
+  executableIdentity: AgentExecutableIdentity;
   controllerPid?: number;
   controllerEpoch?: string;
   controllerEpochPath?: string;

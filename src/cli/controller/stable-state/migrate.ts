@@ -32,6 +32,7 @@ import {
   writeStableStateMarker,
   type StableStateMarker,
 } from './layout';
+import { resolveStableControllerHome } from './stable-home';
 
 export interface MigrationOptions {
   controllerHome: string;
@@ -281,7 +282,6 @@ export function resolveRepositoryStatePath(
   repoId: string,
   options: { activeSlot?: 'blue' | 'green' } = {},
 ): { path: string; source: 'stable' | 'slot-blue' | 'slot-green' | 'missing' } {
-  const { resolveStableControllerHome } = require('./stable-home') as typeof import('./stable-home');
   const root = resolveStableControllerHome(controllerHome);
   const stable = join(root, 'repositories', repoId);
   if (existsSync(stable)) return { path: stable, source: 'stable' };

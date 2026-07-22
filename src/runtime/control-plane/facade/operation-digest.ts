@@ -34,7 +34,10 @@ export type UserFacingPhase =
 
 export interface OperationDigest {
   schemaVersion: 1;
+  operationId?: string;
+  operationType?: string;
   phase: UserFacingPhase;
+  status?: string;
   statusLabel: string;
   summary: string;
   terminal: boolean;
@@ -46,11 +49,29 @@ export interface OperationDigest {
   workId?: string;
   jobId?: string;
   requestId?: string;
+  semanticKey?: string;
+  createdAt?: string;
+  queuedAt?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  timeout?: {
+    admissionTimeoutMs?: number;
+    queueTimeoutMs?: number;
+    executionTimeoutMs?: number;
+    interactiveWaitMs?: number;
+    admissionDeadlineAt?: string;
+    queueDeadlineAt?: string;
+    executionDeadlineAt?: string;
+    effectiveDeadlineAt?: string;
+  };
+  resultRef?: string;
+  logRefs?: Array<{ title: string; path: string }>;
   changedFiles?: string[];
   evidenceRefs?: Array<{ title: string; summary?: string }>;
   errorClass?: UserFacingErrorClass;
   errorMessage?: string;
   suggestedNextActions: SuggestedNextAction[];
+  nextActions?: SuggestedNextAction[];
   rawAvailable: false;
   /** Present when the parent Job only accepted an Agent Run and is not the authority for run progress. */
   childReference?: ExecutionChildReference;
@@ -339,6 +360,16 @@ export function buildJobOperationDigest(job: ExecutionJob, options: {
     })
     : undefined;
   const child = childStatusFromResult(job);
+  const logRefs = [
+    job.outcome?.process?.stdoutPath ? { title: 'stdout', path: job.outcome.process.stdoutPath } : undefined,
+    job.outcome?.process?.stderrPath ? { title: 'stderr', path: job.outcome.process.stderrPath } : undefined,
+    job.workerLifecycle?.stderrPath ? { title: 'worker-stderr', path: job.workerLifecycle.stderrPath } : undefined,
+  ].filter((entry): entry is { title: string; path: string } => Boolean(entry?.path));
+  const resultRef = typeof job.result?.resultRef === 'string'
+    ? job.result.resultRef
+    : typeof job.result?.result_ref === 'string'
+      ? job.result.result_ref
+      : undefined;
 
   let summary: string;
   if (child.delegationAccepted && phase === 'succeeded') {
@@ -364,7 +395,10 @@ export function buildJobOperationDigest(job: ExecutionJob, options: {
 
   return {
     schemaVersion: 1,
+    operationId: job.jobId,
+    operationType: job.type,
     phase,
+    status: job.status,
     statusLabel: statusLabelForPhase(phase),
     summary: bound(summary, 500),
     terminal,
@@ -380,11 +414,29 @@ export function buildJobOperationDigest(job: ExecutionJob, options: {
     workId: job.jobId,
     jobId: job.jobId,
     requestId: job.requestId,
+    semanticKey: job.semanticKey,
+    createdAt: job.createdAt,
+    queuedAt: job.queuedAt,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt,
+    timeout: {
+      admissionTimeoutMs: job.timeoutPolicy?.admissionTimeoutMs ?? job.operationMetadata?.admissionTimeoutMs,
+      queueTimeoutMs: job.timeoutPolicy?.queueTimeoutMs ?? job.operationMetadata?.queueTimeoutMs,
+      executionTimeoutMs: job.timeoutPolicy?.executionTimeoutMs ?? job.operationMetadata?.executionTimeoutMs ?? job.operationMetadata?.timeoutMs,
+      interactiveWaitMs: job.timeoutPolicy?.interactiveWaitMs ?? job.operationMetadata?.interactiveWaitMs,
+      admissionDeadlineAt: job.admissionDeadlineAt,
+      queueDeadlineAt: job.queueDeadlineAt,
+      executionDeadlineAt: job.executionDeadlineAt,
+      effectiveDeadlineAt: job.deadlineAt,
+    },
+    resultRef,
+    logRefs,
     changedFiles: extractChangedFiles(job),
     evidenceRefs: job.evidenceIds.slice(-5).map((id) => ({ title: 'evidence', summary: id })),
     errorClass,
     errorMessage,
     suggestedNextActions: defaultNextActions(phase, job.jobId, errorClass),
+    nextActions: defaultNextActions(phase, job.jobId, errorClass),
     rawAvailable: false,
     ...child,
   };
@@ -399,7 +451,10 @@ export function buildAcceptedQueuedDigest(input: {
 }): OperationDigest {
   return {
     schemaVersion: 1,
+    operationId: input.jobId,
+    operationType: input.operation,
     phase: 'queued',
+    status: input.status ?? 'queued',
     statusLabel: '已排队',
     summary: input.deduplicated
       ? `已复用进行中的任务 ${input.jobId}（${input.operation ?? 'operation'}）。可用 wait 等待结果。`
@@ -413,6 +468,18 @@ export function buildAcceptedQueuedDigest(input: {
     jobId: input.jobId,
     requestId: input.requestId,
     suggestedNextActions: [
+      {
+        label: '等待任务完成',
+        tool: 'rh_work',
+        operation: 'continue',
+        payload: { work_id: input.jobId, wait: true },
+        risk: 'readonly',
+        confidence: 'high',
+        reason: '对长时间任务使用 wait/work_get 获取终态摘要。',
+      },
+      ...defaultNextActions('queued', input.jobId),
+    ],
+    nextActions: [
       {
         label: '等待任务完成',
         tool: 'rh_work',
@@ -440,7 +507,10 @@ export function buildSyncOperationDigest(input: {
   const phase: UserFacingPhase = input.ok ? 'succeeded' : 'failed';
   return {
     schemaVersion: 1,
+    operationId: input.operation,
+    operationType: input.operation,
     phase,
+    status: phase,
     statusLabel: statusLabelForPhase(phase),
     summary: bound(input.summary, 500),
     terminal: true,
@@ -452,6 +522,7 @@ export function buildSyncOperationDigest(input: {
     errorClass: input.errorClass,
     errorMessage: input.errorMessage ? bound(input.errorMessage) : undefined,
     suggestedNextActions: input.suggestedNextActions ?? defaultNextActions(phase),
+    nextActions: input.suggestedNextActions ?? defaultNextActions(phase),
     rawAvailable: false,
   };
 }

@@ -12,6 +12,9 @@ const MAX_PATHS = 256;
 export interface RepositoryGitStatusSnapshot {
   repoId: string;
   checkoutId: string;
+  observedAt: string;
+  staleAgeMs: number;
+  sampleSource: 'live' | 'daemon-sample';
   branch: string | null;
   head: string | null;
   upstream: string | null;
@@ -127,11 +130,15 @@ function splitStatus(porcelain: string): { staged: string[]; unstaged: string[];
 }
 
 export function repositoryGitStatus(repository: RepositoryRecord): RepositoryGitStatusSnapshot {
+  const observedAt = new Date().toISOString();
   const porcelain = runGit(repository, ['status', '--porcelain=v1', '--branch', '--untracked-files=all', '--', '.', ':(exclude).ai/harness/**']).stdout;
   const split = splitStatus(porcelain);
   return {
     repoId: repository.repoId,
     checkoutId: repository.activeCheckoutId,
+    observedAt,
+    staleAgeMs: 0,
+    sampleSource: 'live',
     branch: gitText(repository, ['branch', '--show-current']),
     head: gitText(repository, ['rev-parse', '--verify', 'HEAD']),
     upstream: gitText(repository, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']),

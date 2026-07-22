@@ -1,6 +1,10 @@
 import { listActiveExecutionJobs, transitionExecutionJob } from '../../execution/jobs/store';
 import type { ExecutionJob } from '../../execution/jobs/types';
 import {
+  executionTimeoutDecision,
+  type ExecutionTimeoutDecision,
+} from '../../execution/jobs/timeouts';
+import {
   childReferenceFromJob,
   childReferenceFromReceipt,
   hasDurableChildReference,
@@ -179,22 +183,28 @@ function reconcileExecutionJobsWith(
   let recovered = 0;
   for (const job of jobs) {
     if (job.status !== 'running') {
-      if (job.deadlineAt && Date.parse(job.deadlineAt) <= Date.now()) {
+      const timeout = executionTimeoutDecision(job);
+      if (timeout) {
         releaseExecutionLeases(controllerHome, job.repoId, job.jobId, job.leaseRefs);
         const terminalJob = transitionExecutionJob(controllerHome, job.repoId, job.jobId, 'timed_out', {
-          error: { code: 'DEADLINE_EXCEEDED', message: 'Execution deadline elapsed before dispatch.', retryable: false },
+          error: {
+            code: timeout.code,
+            message: timeout.message,
+            retryable: false,
+            details: { timeoutPhase: timeout.phase, deadlineAt: timeout.deadlineAt },
+          },
           leaseRefs: [],
         });
-        settleScheduledExecution(controllerHome, terminalJob, 'failed', 'Scheduled operation exceeded its execution deadline before dispatch.');
+        settleScheduledExecution(controllerHome, terminalJob, 'failed', `Scheduled operation exceeded its ${timeout.phase} timeout.`);
         terminal += 1;
       }
       continue;
     }
 
-    const deadlineElapsed = Boolean(job.deadlineAt && Date.parse(job.deadlineAt) <= Date.now());
+    const timeout = executionTimeoutDecision(job);
     const loss = workerLossContext(job);
     let lossReason: WorkerLossReason = loss.reason;
-    if (!deadlineElapsed && !loss.workerLost) {
+    if (!timeout && !loss.workerLost) {
       try {
         if (job.leaseRefs.length > 0) {
           renewExecutionLeases(controllerHome, job.repoId, job.jobId, 30_000, job.leaseRefs);
@@ -206,7 +216,7 @@ function reconcileExecutionJobsWith(
     }
 
     const termination = terminateWorker(job.workerPid);
-    const outcome = finalizeRunningJob(controllerHome, job, deadlineElapsed, termination, lossReason, loss.heartbeatAgeMs);
+    const outcome = finalizeRunningJob(controllerHome, job, timeout, termination, lossReason, loss.heartbeatAgeMs);
     requeued += outcome.requeued;
     terminal += outcome.terminal;
     recovered += outcome.recovered;
@@ -225,22 +235,28 @@ async function reconcileExecutionJobsAsyncWith(
   let recovered = 0;
   for (const job of jobs) {
     if (job.status !== 'running') {
-      if (job.deadlineAt && Date.parse(job.deadlineAt) <= Date.now()) {
+      const timeout = executionTimeoutDecision(job);
+      if (timeout) {
         releaseExecutionLeases(controllerHome, job.repoId, job.jobId, job.leaseRefs);
         const terminalJob = transitionExecutionJob(controllerHome, job.repoId, job.jobId, 'timed_out', {
-          error: { code: 'DEADLINE_EXCEEDED', message: 'Execution deadline elapsed before dispatch.', retryable: false },
+          error: {
+            code: timeout.code,
+            message: timeout.message,
+            retryable: false,
+            details: { timeoutPhase: timeout.phase, deadlineAt: timeout.deadlineAt },
+          },
           leaseRefs: [],
         });
-        settleScheduledExecution(controllerHome, terminalJob, 'failed', 'Scheduled operation exceeded its execution deadline before dispatch.');
+        settleScheduledExecution(controllerHome, terminalJob, 'failed', `Scheduled operation exceeded its ${timeout.phase} timeout.`);
         terminal += 1;
       }
       continue;
     }
 
-    const deadlineElapsed = Boolean(job.deadlineAt && Date.parse(job.deadlineAt) <= Date.now());
+    const timeout = executionTimeoutDecision(job);
     const loss = workerLossContext(job);
     let lossReason: WorkerLossReason = loss.reason;
-    if (!deadlineElapsed && !loss.workerLost) {
+    if (!timeout && !loss.workerLost) {
       try {
         if (job.leaseRefs.length > 0) {
           renewExecutionLeases(controllerHome, job.repoId, job.jobId, 30_000, job.leaseRefs);
@@ -252,7 +268,7 @@ async function reconcileExecutionJobsAsyncWith(
     }
 
     const termination = await terminateWorker(job.workerPid);
-    const outcome = finalizeRunningJob(controllerHome, job, deadlineElapsed, termination, lossReason, loss.heartbeatAgeMs);
+    const outcome = finalizeRunningJob(controllerHome, job, timeout, termination, lossReason, loss.heartbeatAgeMs);
     requeued += outcome.requeued;
     terminal += outcome.terminal;
     recovered += outcome.recovered;
@@ -263,11 +279,12 @@ async function reconcileExecutionJobsAsyncWith(
 function finalizeRunningJob(
   controllerHome: string,
   job: ExecutionJob,
-  deadlineElapsed: boolean,
+  timeout: ExecutionTimeoutDecision | undefined,
   termination: ProcessTreeTerminationResult,
   workerLostReason: WorkerLossReason,
   heartbeatAge: number,
 ): { requeued: number; terminal: number; recovered: number } {
+  const deadlineElapsed = Boolean(timeout);
   const receiptRecovery = recoverCompletedReceipt(controllerHome, job);
   if (receiptRecovery) {
     return { requeued: 0, terminal: 1, recovered: 1 };
@@ -345,8 +362,13 @@ function finalizeRunningJob(
     workerPid: undefined,
     heartbeatAt: undefined,
     leaseRefs: [],
-    error: deadlineElapsed
-      ? { code: 'DEADLINE_EXCEEDED', message: 'Execution deadline elapsed.', retryable: false }
+    error: timeout
+      ? {
+          code: timeout.code,
+          message: timeout.message,
+          retryable: false,
+          details: { timeoutPhase: timeout.phase, deadlineAt: timeout.deadlineAt },
+        }
       : {
           code: 'WORKER_LOST',
           message: workerLostMessage(workerLostReason, heartbeatAge, true),
@@ -358,7 +380,7 @@ function finalizeRunningJob(
     controllerHome,
     terminalJob,
     'failed',
-    deadlineElapsed ? 'Scheduled operation exceeded its execution deadline.' : 'Scheduled worker was lost after retries were exhausted.',
+    timeout ? `Scheduled operation exceeded its ${timeout.phase} timeout.` : 'Scheduled worker was lost after retries were exhausted.',
   );
   return { requeued: 0, terminal: 1, recovered: 0 };
 }

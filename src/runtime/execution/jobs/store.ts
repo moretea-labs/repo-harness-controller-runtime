@@ -10,6 +10,7 @@ import { touchSchedulerWakeSignal } from '../../control-plane/global-scheduler/w
 import { readJsonFile, removeFile, sanitizeFileComponent, writeJsonAtomic } from '../../shared/json-files';
 import { terminateProcessTree } from '../../shared/process-tree';
 import { releaseExecutionLeases } from '../../resources/leases/store';
+import { assertThisRuntimeMayWriteOrThrow } from '../../../cli/controller/stable-state/runtime-writer-context';
 import {
   ACTIVE_JOB_STATUSES,
   TERMINAL_JOB_STATUSES,
@@ -17,6 +18,7 @@ import {
   type ExecutionJob,
   type ExecutionJobStatus,
 } from './types';
+import { deadlineAfter, normalizeExecutionTimeoutPolicy } from './timeouts';
 
 interface ActiveJobIndex {
   schemaVersion: 1;
@@ -355,7 +357,17 @@ export function createExecutionJob(controllerHome: string, input: CreateExecutio
       return { job: existing, deduplicated: true };
     }
     const createdAt = now();
-    const timeoutMs = Math.max(1_000, Math.min(input.timeoutMs ?? 15 * 60_000, 24 * 60 * 60_000));
+    const timeoutPolicy = normalizeExecutionTimeoutPolicy(input.timeoutPolicy, input.timeoutMs);
+    const admissionDeadlineAt = deadlineAfter(createdAt, timeoutPolicy.admissionTimeoutMs);
+    const operationMetadata = input.operationMetadata
+      ? {
+          ...input.operationMetadata,
+          admissionTimeoutMs: timeoutPolicy.admissionTimeoutMs,
+          queueTimeoutMs: timeoutPolicy.queueTimeoutMs,
+          executionTimeoutMs: input.operationMetadata.executionTimeoutMs ?? input.operationMetadata.timeoutMs,
+          interactiveWaitMs: timeoutPolicy.interactiveWaitMs,
+        }
+      : undefined;
     const job: ExecutionJob = {
       schemaVersion: 1,
       revision: 1,
@@ -375,10 +387,12 @@ export function createExecutionJob(controllerHome: string, input: CreateExecutio
       createdAt,
       updatedAt: createdAt,
       queuedAt: createdAt,
-      deadlineAt: new Date(Date.now() + timeoutMs).toISOString(),
+      timeoutPolicy,
+      admissionDeadlineAt,
+      deadlineAt: admissionDeadlineAt,
       attempt: 0,
       maxAttempts: Math.max(1, Math.min(input.maxAttempts ?? 1, 10)),
-      operationMetadata: input.operationMetadata,
+      operationMetadata,
       resources: input.resources,
       timings: {
         durablePersistedAt: createdAt,
@@ -486,7 +500,6 @@ export function transitionExecutionJob(
   const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'timed_out', 'orphaned']);
   if (TERMINAL.has(status)) {
     try {
-      const { assertThisRuntimeMayWriteOrThrow } = require('../../../cli/controller/stable-state/runtime-writer-context') as typeof import('../../../cli/controller/stable-state/runtime-writer-context');
       assertThisRuntimeMayWriteOrThrow('write_workflow_terminal', controllerHome);
     } catch (error) {
       if (error instanceof Error && error.message.startsWith('WRITER_FENCED:')) throw error;
@@ -499,13 +512,52 @@ export function transitionExecutionJob(
     }
     const timestamp = now();
     const next: ExecutionJob = { ...current, ...patch, status };
-    if (status === 'running' && !next.startedAt) next.startedAt = timestamp;
+    if (status === 'running') {
+      if (!next.startedAt) next.startedAt = timestamp;
+      if (next.timeoutPolicy) {
+        next.executionDeadlineAt = deadlineAfter(timestamp, next.timeoutPolicy.executionTimeoutMs);
+        next.deadlineAt = next.executionDeadlineAt;
+      }
+    }
+    if (status === 'queued' && ['running', 'dispatched'].includes(current.status) && next.timeoutPolicy) {
+      next.queueDeadlineAt = deadlineAfter(timestamp, next.timeoutPolicy.queueTimeoutMs);
+      next.executionDeadlineAt = undefined;
+      next.deadlineAt = next.queueDeadlineAt;
+    }
     if (TERMINAL_JOB_STATUSES.has(status)) {
       next.finishedAt = timestamp;
       next.workerPid = undefined;
     }
     return next;
   }, `job_${status}`, eventData, true);
+}
+
+export function markExecutionJobSchedulerObserved(
+  controllerHome: string,
+  repoId: string,
+  jobId: string,
+): ExecutionJob | undefined {
+  return writeJobState(controllerHome, repoId, jobId, (current) => {
+    if (![...WAITING_JOB_STATUSES, 'dispatched'].includes(current.status)) return undefined;
+    if (current.timings?.schedulerObservedAt) return undefined;
+    const observedAt = now();
+    const queueDeadlineAt = current.timeoutPolicy
+      ? deadlineAfter(observedAt, current.timeoutPolicy.queueTimeoutMs)
+      : current.queueDeadlineAt;
+    return {
+      next: {
+        ...current,
+        queueDeadlineAt,
+        deadlineAt: queueDeadlineAt ?? current.deadlineAt,
+        timings: {
+          ...current.timings,
+          schedulerObservedAt: observedAt,
+        },
+      },
+      eventType: 'job_scheduler_observed',
+      eventData: { queueDeadlineAt },
+    };
+  }, `observe-job:${jobId}`);
 }
 
 export function claimExecutionJobForDispatch(
@@ -517,6 +569,9 @@ export function claimExecutionJobForDispatch(
 ): ExecutionJob | undefined {
   return writeJobState(controllerHome, repoId, jobId, (current) => {
     if (!WAITING_JOB_STATUSES.has(current.status)) return undefined;
+    const observedAt = current.timings?.schedulerObservedAt ?? now();
+    const queueDeadlineAt = current.queueDeadlineAt
+      ?? (current.timeoutPolicy ? deadlineAfter(observedAt, current.timeoutPolicy.queueTimeoutMs) : undefined);
     return {
       next: {
         ...current,
@@ -525,10 +580,12 @@ export function claimExecutionJobForDispatch(
         workerPid: undefined,
         heartbeatAt: undefined,
         leaseRefs,
+        queueDeadlineAt,
+        deadlineAt: queueDeadlineAt ?? current.deadlineAt,
         timings: {
           ...current.timings,
-          schedulerObservedAt: now(),
-          leaseCreatedAt: leaseRefs.length > 0 ? now() : current.timings?.leaseCreatedAt,
+          schedulerObservedAt: observedAt,
+          leaseCreatedAt: leaseRefs.length > 0 ? observedAt : current.timings?.leaseCreatedAt,
         },
       },
       eventType: 'job_dispatched',
@@ -548,11 +605,16 @@ export function attachExecutionWorker(
     if (!spawnable) return current.workerPid === workerPid ? { next: current } : undefined;
     if (current.workerPid !== undefined && current.workerPid !== workerPid) return undefined;
     const timestamp = now();
+    const executionDeadlineAt = current.timeoutPolicy
+      ? deadlineAfter(timestamp, current.timeoutPolicy.executionTimeoutMs)
+      : current.executionDeadlineAt;
     return {
       next: {
         ...current,
         status: 'running',
         workerPid,
+        executionDeadlineAt,
+        deadlineAt: executionDeadlineAt ?? current.deadlineAt,
         workerLifecycle: current.workerLifecycle
           ? {
               ...current.workerLifecycle,

@@ -14,6 +14,16 @@ import {
   collectRuntimeProcesses,
 } from '../../src/runtime/diagnostics/performance';
 import { clearGitSnapshotCacheForTest, gitSnapshot } from '../../src/cli/repository/inspector';
+import { registerRepository } from '../../src/cli/repositories/registry';
+import {
+  readRepositoryGitStatusSample,
+  writeRepositoryGitStatusSample,
+} from '../../src/runtime/projections/git-status-sampler';
+import {
+  readRepositoryProjectionSnapshot,
+  rebuildRepositoryProjection,
+} from '../../src/runtime/projections/materialized-view';
+import { markRepositoryProjectionDirty } from '../../src/runtime/projections/invalidation';
 
 const roots: string[] = [];
 const previousRuntimeSourceEnv = process.env[CONTROLLER_RUNTIME_SOURCE_ROOT_ENV];
@@ -74,5 +84,38 @@ describe('controller hotpath caches', () => {
     expect(second.map((entry) => entry.pid)).toEqual(first.map((entry) => entry.pid));
     const forced = collectRuntimeProcesses([], { forceRefresh: true });
     expect(Array.isArray(forced)).toBe(true);
+  });
+
+  test('repository git status reads daemon samples with stale age metadata', () => {
+    const root = temp('repo-harness-git-status-sample-');
+    const controllerHome = temp('repo-harness-git-status-home-');
+    initRepo(root);
+    const repository = registerRepository({ path: root, controllerHome });
+    const written = writeRepositoryGitStatusSample(controllerHome, repository);
+    const read = readRepositoryGitStatusSample(controllerHome, repository.repoId, repository.activeCheckoutId);
+    expect(read).toMatchObject({
+      repoId: repository.repoId,
+      checkoutId: repository.activeCheckoutId,
+      sampleSource: 'daemon-sample',
+      sampledBy: 'scheduler',
+      observedAt: written.observedAt,
+    });
+    expect(read!.staleAgeMs).toBeGreaterThanOrEqual(0);
+  });
+
+  test('dirty projection hot reads return the persisted snapshot without rebuilding', () => {
+    const root = temp('repo-harness-projection-hot-read-');
+    const controllerHome = temp('repo-harness-projection-home-');
+    initRepo(root);
+    const repository = registerRepository({ path: root, controllerHome });
+    const persisted = rebuildRepositoryProjection(controllerHome, repository.repoId);
+    markRepositoryProjectionDirty(controllerHome, repository.repoId, 'job:test:queued');
+
+    const snapshot = readRepositoryProjectionSnapshot(controllerHome, repository.repoId);
+    expect(snapshot.stale).toBe(true);
+    expect(snapshot.persisted).toBe(true);
+    expect(snapshot.dirtyReason).toBe('job:test:queued');
+    expect(snapshot.activeInvariantAtRisk).toBe(true);
+    expect(snapshot.projection.revision).toBe(persisted.revision);
   });
 });

@@ -6,6 +6,7 @@ import { ensureControllerDaemon } from '../../control-plane/daemon-client';
 import { createExecutionJob } from './store';
 import type { ResourceClaimSpec } from './types';
 import { commandValue, normalizeRepositoryCommand } from '../../../cli/repositories/command-normalization';
+import { claimsForRepositoryCommand } from '../process-runtime/resource-claims';
 
 const LEGACY_SETTLEMENT_GRACE_MS = 30_000;
 const MAX_DURABLE_EXECUTION_TIMEOUT_MS = 24 * 60 * 60_000;
@@ -61,7 +62,6 @@ function claims(job: LocalBridgeJob, repoId: string, checkoutId: string): Resour
     // Readonly repository commands must not claim exclusive git-refs.
     if (command !== undefined) {
       try {
-        const { claimsForRepositoryCommand } = require('../process-runtime/resource-claims') as typeof import('../process-runtime/resource-claims');
         return claimsForRepositoryCommand(command, repoId, checkoutId);
       } catch {
         // Fall through to conservative write claims when classifier is unavailable.

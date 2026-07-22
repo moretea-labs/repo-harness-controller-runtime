@@ -98,11 +98,7 @@ function fakeCodex(): { binRoot: string; restore(): void } {
   roots.push(binRoot);
   const originalPath = process.env.PATH;
   const executable = join(binRoot, "codex");
-  writeFileSync(
-    executable,
-    '#!/usr/bin/env bash\necho "local-bridge-codex-ok"\n',
-  );
-  chmodSync(executable, 0o755);
+  writeFakeCodexExecutable(executable, 'echo "local-bridge-codex-ok"\n');
   process.env.PATH = `${binRoot}:${originalPath ?? ""}`;
   return {
     binRoot,
@@ -110,6 +106,24 @@ function fakeCodex(): { binRoot: string; restore(): void } {
       process.env.PATH = originalPath;
     },
   };
+}
+
+function writeFakeCodexExecutable(executable: string, body: string): void {
+  writeFileSync(
+    executable,
+    `#!/usr/bin/env bash
+if [[ "$1" == "--version" ]]; then
+  echo "codex-cli 0.0.0-test"
+  exit 0
+fi
+if [[ "$1" == "login" && "$2" == "status" ]]; then
+  echo "Logged in as test@example.com"
+  exit 0
+fi
+${body}
+`,
+  );
+  chmodSync(executable, 0o755);
 }
 
 async function waitForRun(
@@ -205,15 +219,13 @@ describe("Local Execution Bridge", () => {
     roots.push(binRoot);
     const originalPath = process.env.PATH;
     const executable = join(binRoot, "codex");
-    writeFileSync(
+    writeFakeCodexExecutable(
       executable,
-      `#!/usr/bin/env bash
-printf '%s\n' '{"type":"turn.started"}'
+      `printf '%s\n' '{"type":"turn.started"}'
 sleep 0.4
 printf '%s\n' '{"type":"turn.completed"}'
 `,
     );
-    chmodSync(executable, 0o755);
     process.env.PATH = `${binRoot}:${originalPath ?? ""}`;
     try {
       const issue = createIssue(root, {
@@ -280,10 +292,9 @@ printf '%s\n' '{"type":"turn.completed"}'
     roots.push(binRoot);
     const originalPath = process.env.PATH;
     const executable = join(binRoot, "codex");
-    writeFileSync(
+    writeFakeCodexExecutable(
       executable,
-      `#!/usr/bin/env bash
-case "$*" in
+      `case "$*" in
   *"First workspace task"*)
     printf '%s\n' '{"type":"turn.started"}'
     sleep 0.8
@@ -297,7 +308,6 @@ case "$*" in
 esac
 `,
     );
-    chmodSync(executable, 0o755);
     process.env.PATH = `${binRoot}:${originalPath ?? ""}`;
     try {
       const issue = createIssue(root, {
@@ -380,15 +390,13 @@ esac
     roots.push(binRoot);
     const originalPath = process.env.PATH;
     const executable = join(binRoot, "codex");
-    writeFileSync(
+    writeFakeCodexExecutable(
       executable,
-      `#!/usr/bin/env bash
-printf '%s\n' '{"type":"thread.started"}' '{"type":"turn.started"}' '{"type":"item.started","item":{"type":"command_execution","command":"bun test focused"}}'
+      `printf '%s\n' '{"type":"thread.started"}' '{"type":"turn.started"}' '{"type":"item.started","item":{"type":"command_execution","command":"bun test focused"}}'
 sleep 0.4
 printf '%s\n' '{"type":"turn.completed"}'
 `,
     );
-    chmodSync(executable, 0o755);
     process.env.PATH = `${binRoot}:${originalPath ?? ""}`;
     try {
       const issue = createIssue(root, {

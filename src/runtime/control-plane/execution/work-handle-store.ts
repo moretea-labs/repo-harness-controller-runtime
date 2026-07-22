@@ -79,7 +79,7 @@ const TRANSITIONS: Record<WorkHandleStateName, readonly WorkHandleStateName[]> =
   committed: ['validating', 'merged', 'cleaned', 'failed'],
   merged: ['cleaned', 'failed'],
   cleaned: [],
-  failed: ['validating', 'editing'],
+  failed: ['validating', 'editing', 'committed', 'merged', 'cleaned'],
 };
 
 export function transitionWorkHandle(

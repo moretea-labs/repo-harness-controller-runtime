@@ -61,13 +61,6 @@ function newSessionId(): string {
   return `sess_${randomUUID().replace(/-/g, '')}`;
 }
 
-function invalidateStoredSession(controllerHome: string, session: ExecutionSessionContext, reason: string): ExecutionSessionContext {
-  const at = now();
-  const invalidated = { ...session, updatedAt: at, invalidatedAt: session.invalidatedAt ?? at, invalidationReason: session.invalidationReason ?? reason };
-  writeJsonAtomic(sessionPath(controllerHome, session.sessionId), invalidated);
-  return invalidated;
-}
-
 export function readExecutionSession(controllerHome: string, identity: SessionIdentity): ExecutionSessionContext | undefined {
   const sessionId = identity.sessionId?.trim();
   if (!sessionId) return undefined;
@@ -79,8 +72,14 @@ export function readExecutionSession(controllerHome: string, identity: SessionId
   if (session.invalidatedAt) throw new Error(`SESSION_INVALIDATED: ${session.invalidationReason ?? 'session is no longer valid'}`);
   const instanceId = identity.controllerInstanceId ?? currentControllerInstanceId();
   if (session.controllerInstanceId !== instanceId) {
-    invalidateStoredSession(controllerHome, session, 'controller instance changed; session was explicitly invalidated');
-    throw new Error('SESSION_INVALIDATED_CONTROLLER_RESTART: start a new controller session');
+    const recovered = {
+      ...session,
+      controllerInstanceId: instanceId,
+      updatedAt: now(),
+      lastValidatedAt: now(),
+    };
+    writeJsonAtomic(sessionPath(controllerHome, session.sessionId), recovered);
+    return recovered;
   }
   return session;
 }

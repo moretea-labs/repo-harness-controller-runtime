@@ -29,6 +29,7 @@ import { ensureControllerHome } from '../../cli/repositories/controller-home';
 import type { RuntimeSlotId } from '../../cli/controller/runtime-slots';
 import type { WriterAuthority } from '../../cli/controller/stable-state/writer-authority';
 import type { ActiveRuntimePointer } from './stable-bootstrap';
+import { assertThisRuntimeMayWriteOrThrow } from '../../cli/controller/stable-state/runtime-writer-context';
 
 export type ActivationTxStatus =
   | 'committed'
@@ -246,7 +247,6 @@ export function commitActivationTransaction(
   // Callers that want to require an active runtime claim must pass bootstrapMutation: false.
   if (input.bootstrapMutation === false) {
     try {
-      const { assertThisRuntimeMayWriteOrThrow } = require('../../cli/controller/stable-state/runtime-writer-context') as typeof import('../../cli/controller/stable-state/runtime-writer-context');
       assertThisRuntimeMayWriteOrThrow('release_mutation', home);
     } catch (error) {
       if (error instanceof Error && error.message.startsWith('WRITER_FENCED:')) throw error;

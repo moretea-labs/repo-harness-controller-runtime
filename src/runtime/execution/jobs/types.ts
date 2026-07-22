@@ -72,6 +72,21 @@ export interface ExecutionJobTimings {
   workerRunningAt?: string;
 }
 
+/**
+ * Independent timeout budgets for one durable operation.
+ *
+ * Admission starts when the Job is durably accepted and ends when the Scheduler
+ * first observes it. Queue starts at that observation and ends when a Worker is
+ * attached. Execution starts when the Worker is attached. Interactive wait is a
+ * caller-side response budget only and never terminates the durable operation.
+ */
+export interface ExecutionTimeoutPolicy {
+  admissionTimeoutMs: number;
+  queueTimeoutMs: number;
+  executionTimeoutMs: number;
+  interactiveWaitMs: number;
+}
+
 export interface ExecutionWorkerLifecycle {
   executable: string;
   args: string[];
@@ -100,7 +115,12 @@ export interface ExecutionOperationMetadata {
   mode: ExecutionOperationMode;
   idempotent: boolean;
   replayable: boolean;
+  /** Legacy alias for executionTimeoutMs. */
   timeoutMs: number;
+  admissionTimeoutMs?: number;
+  queueTimeoutMs?: number;
+  executionTimeoutMs?: number;
+  interactiveWaitMs?: number;
   retryPolicy: 'none' | 'safe_retry' | 'idempotent_request';
   approvalPolicy: 'none' | 'request' | 'required';
   lockScope: string[];
@@ -138,7 +158,12 @@ export interface ExecutionJob {
   startedAt?: string;
   finishedAt?: string;
   heartbeatAt?: string;
+  /** Effective phase deadline retained for legacy readers. */
   deadlineAt?: string;
+  timeoutPolicy?: ExecutionTimeoutPolicy;
+  admissionDeadlineAt?: string;
+  queueDeadlineAt?: string;
+  executionDeadlineAt?: string;
   workerPid?: number;
   workerLifecycle?: ExecutionWorkerLifecycle;
   attempt: number;
@@ -164,7 +189,9 @@ export interface CreateExecutionJobInput {
   priority?: ExecutionJobPriority;
   resourceClaims?: ResourceClaimSpec[];
   dependencies?: string[];
+  /** Legacy shorthand for timeoutPolicy.executionTimeoutMs. */
   timeoutMs?: number;
+  timeoutPolicy?: Partial<ExecutionTimeoutPolicy>;
   maxAttempts?: number;
   operationMetadata?: ExecutionOperationMetadata;
   resources?: ManagedResource[];
