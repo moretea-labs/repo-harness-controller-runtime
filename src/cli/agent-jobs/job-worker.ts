@@ -15,6 +15,7 @@ import type {
 } from "./types";
 import {
   AgentExecutableError,
+  agentProcessEnv,
   revalidateAgentExecutable,
 } from "./executable-resolver";
 
@@ -562,6 +563,7 @@ child = spawn(command.bin, command.args, {
   cwd: config.worktree,
   detached: process.platform !== "win32",
   stdio: ["ignore", "pipe", "pipe"],
+  env: agentProcessEnv(),
 });
 meta.agentPid = child.pid;
 persistMeta(meta);

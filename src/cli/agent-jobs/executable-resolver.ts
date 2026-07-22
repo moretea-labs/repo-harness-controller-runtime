@@ -76,12 +76,20 @@ function resolveFromPath(command: string, env: NodeJS.ProcessEnv): string | unde
   return undefined;
 }
 
+export function agentProcessEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const home = env.HOME?.trim();
+  return {
+    ...env,
+    ...(env.VOLTA_HOME?.trim() || !home ? {} : { VOLTA_HOME: join(home, '.volta') }),
+  };
+}
+
 function boundedProbe(executablePath: string, args: string[]): ReturnType<typeof spawnSync> {
   return spawnSync(executablePath, args, {
     encoding: 'utf8',
     timeout: 10_000,
     maxBuffer: 64 * 1024,
-    env: process.env,
+    env: agentProcessEnv(),
   });
 }
 

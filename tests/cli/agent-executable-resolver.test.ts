@@ -4,6 +4,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import {
   AgentExecutableError,
+  agentProcessEnv,
   assertAgentExecutableReady,
   inspectAgentExecutableReadiness,
   readAgentExecutableReadinessSnapshot,
@@ -14,6 +15,12 @@ import {
 
 const roots: string[] = [];
 const originalPath = process.env.PATH;
+
+test('Agent process env preserves or derives Volta authority from the original HOME', () => {
+  expect(agentProcessEnv({ HOME: '/Users/test', VOLTA_HOME: '/opt/volta' }).VOLTA_HOME).toBe('/opt/volta');
+  expect(agentProcessEnv({ HOME: '/Users/test' }).VOLTA_HOME).toBe('/Users/test/.volta');
+  expect(agentProcessEnv({}).VOLTA_HOME).toBeUndefined();
+});
 
 afterEach(() => {
   process.env.PATH = originalPath;
