@@ -457,6 +457,9 @@ describe("repository MCP command tools", () => {
   });
 
   test("long-running command execution runs through the async MCP path and captures output", async () => {
+    const longCommand = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(
+      "console.log('start'); setTimeout(() => console.log('ready'), 1000);",
+    )}`;
     const workspace = mkdtempSync(join(tmpdir(), "repo-harness-mcp-repo-command-async-"));
     const controllerHome = join(workspace, "controller-home");
     const repoRoot = join(workspace, "sample-repo");
@@ -473,12 +476,12 @@ describe("repository MCP command tools", () => {
       const repository = registerRepository({ path: repoRoot, controllerHome });
       const preview = await json(callRepositoryTool(controllerHome, "repository_command_preview", {
         repo_id: repository.repoId,
-        command: "python - <<'PY'\nimport time\nprint('start')\ntime.sleep(1)\nprint('ready')\nPY",
+        command: longCommand,
       }));
       expect(preview.status).toBe("preview");
       const executionPromise = callRepositoryTool(controllerHome, "repository_command_execute", {
         repo_id: repository.repoId,
-        command: "python - <<'PY'\nimport time\nprint('start')\ntime.sleep(1)\nprint('ready')\nPY",
+        command: longCommand,
         approval_token: preview.approvalToken,
         request_id: "repo-command-async-1",
       });

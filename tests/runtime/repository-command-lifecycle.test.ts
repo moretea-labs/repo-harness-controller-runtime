@@ -124,15 +124,10 @@ describe('repository command execution lifecycle', () => {
     const repoRoot = tempRoot('repo-harness-cmd-prop-repo-');
     const repository = seedRepo(controllerHome, repoRoot);
     const marker = join(repoRoot, 'lifecycle-ready.marker');
-    const command = [
-      'python - <<\'PY\'',
-      'import time',
-      'from pathlib import Path',
-      'time.sleep(0.6)',
-      `Path(${JSON.stringify(marker)}).write_text('ok')`,
-      "print('lifecycle-ready')",
-      'PY',
-    ].join('\n');
+    const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify([
+      "const { writeFileSync } = require('fs');",
+      `setTimeout(() => { writeFileSync(${JSON.stringify(marker)}, 'ok'); console.log('lifecycle-ready'); }, 600);`,
+    ].join(' '))}`;
 
     const preview = previewRepositoryCommandExecution(repository, {
       command,

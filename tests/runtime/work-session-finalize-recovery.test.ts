@@ -13,6 +13,8 @@ import {
 import { ensureControllerHome } from '../../src/cli/repositories/controller-home';
 import { writeRepositoryAccessPolicy } from '../../src/runtime/control-plane/governance/access-policy';
 import { callExecutionTool } from '../../src/runtime/gateway/mcp/execution-tools';
+import { createExecutionJob, listExecutionJobs } from '../../src/runtime/execution/jobs/store';
+import { executeExecutionJob } from '../../src/runtime/execution/workers/executor';
 
 const roots: string[] = [];
 
@@ -89,6 +91,53 @@ describe('controller-owned Work recovery and finalize cleanup', () => {
     }));
     expect(inspectedAfterSessionRestart.work.workId).toBe(workId);
     expect(inspectedAfterSessionRestart.readiness.warnings.join('\n')).toContain('different MCP session');
+  });
+
+  test('executes an admitted Work mutation inside the Execution Worker without creating a nested Job', async () => {
+    const { repoRoot, controllerHome, repository, context } = fixture();
+    const ctx = context('session-worker-work', 'controller-worker-work');
+    structured(await callExecutionTool(ctx, 'session_start', {}));
+    structured(await callExecutionTool(ctx, 'session_bind_repository', { repo_id: repository.repoId }));
+    const prepared = structured(await callExecutionTool(ctx, 'work_prepare', {
+      repo_id: repository.repoId,
+      objective: 'Execute only after durable admission',
+      isolation: 'reuse',
+    }));
+    const workId = String(prepared.work.workId);
+    const created = createExecutionJob(controllerHome, {
+      repoId: repository.repoId,
+      checkoutId: repository.activeCheckoutId,
+      type: 'mcp-tool',
+      requestId: 'durable-work-execute-test',
+      semanticKey: `work-execute:${workId}`,
+      priority: 'P1',
+      origin: { surface: 'mcp', actor: 'work_execute', correlationId: 'durable-work-execute-test' },
+      payload: {
+        operation: 'work_execute',
+        target: 'mcp-tool',
+        profile: 'controller',
+        toolset: 'advanced',
+        sessionId: 'session-worker-work',
+        principalId: 'principal-work-recovery',
+        controllerInstanceId: 'controller-worker-work',
+        arguments: {
+          repo_id: repository.repoId,
+          work_id: workId,
+          command: 'printf worker-owned > durable-worker.txt',
+        },
+      },
+      resourceClaims: [{ resourceKey: `work:${repository.repoId}:${workId}`, mode: 'exclusive' }],
+      timeoutMs: 60_000,
+      maxAttempts: 1,
+    });
+    const jobCount = listExecutionJobs(controllerHome, repository.repoId).length;
+    expect(existsSync(join(repoRoot, 'durable-worker.txt'))).toBe(false);
+
+    const executed = await executeExecutionJob(controllerHome, created.job);
+
+    expect(executed.ok).toBe(true);
+    expect(existsSync(join(repoRoot, 'durable-worker.txt'))).toBe(true);
+    expect(listExecutionJobs(controllerHome, repository.repoId).length).toBe(jobCount);
   });
 
   test('finalize commits, merges, removes managed checkout, deletes branch, and clears session focus', async () => {

@@ -65,6 +65,21 @@ export const executionToolDefinitions: McpToolDefinition[] = [
 
 const executionToolNames = new Set(executionToolDefinitions.map((tool) => tool.name));
 
+/**
+ * Work mutations are always admitted as durable Controller operations on the
+ * public MCP surface. The Execution Worker invokes the same implementation
+ * directly after it owns the Job, which avoids nested durable admission.
+ */
+const DURABLE_WORK_OPERATION_NAMES = new Set([
+  'work_execute',
+  'work_validate',
+  'work_finalize',
+]);
+
+export function isDurableWorkOperation(name: string): boolean {
+  return DURABLE_WORK_OPERATION_NAMES.has(name);
+}
+
 function result(value: Record<string, unknown>, isError = false): CallToolResult {
   return { content: [{ type: 'text', text: JSON.stringify(value, null, 2) }], structuredContent: value, ...(isError ? { isError: true } : {}) };
 }

@@ -613,7 +613,7 @@ export async function routeDurableMcpCall(
       durableSideEffects: facade.durableSideEffects,
       next: handle?.completed
         ? 'Check finished on Process Runtime without ExecutionJob / LocalBridgeJob / Worker.'
-        : `Check still running as managed process ${handle?.processId}. Use process_get / process_wait / process_logs; do not re-run the same check.`,
+        : `Check still running as managed process ${handle?.processId}. Poll work_status_digest with work_ref=${handle?.processId}; do not re-run the same check.`,
     });
   }
 
@@ -705,6 +705,14 @@ export async function routeDurableMcpCall(
       allowedAgents: [...ctx.policy.execution.allowedAgents],
       runnerTimeoutMs: ctx.policy.execution.runnerTimeoutMs,
       runnerMaxTimeoutMs: ctx.policy.execution.runnerMaxTimeoutMs,
+      // Preserve authenticated Controller identity for worker-side execution of
+      // durable Work operations. The public request may omit session_id because
+      // the MCP transport binds it in the context.
+      sessionId: typeof args.session_id === 'string' && args.session_id.trim()
+        ? args.session_id.trim()
+        : ctx.sessionId,
+      principalId: ctx.principalId,
+      controllerInstanceId: ctx.controllerInstanceId,
     },
     resourceClaims: claims,
     timeoutMs: timeoutPolicy.executionTimeoutMs,

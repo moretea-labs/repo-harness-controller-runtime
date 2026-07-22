@@ -84,6 +84,7 @@ const WORKSPACE_WRITE_TOOLS = new Set([
   'apply_patch', 'apply_edit_operations', 'rollback_edit_session', 'finalize_edit_session',
   'repository_command_execute',
 ]);
+const DURABLE_WORK_TOOLS = new Set(['work_execute', 'work_validate', 'work_finalize']);
 
 function operationPaths(args: Record<string, unknown>): string[] {
   const paths = new Set<string>();
@@ -149,6 +150,20 @@ export function claimsForMcpOperation(name: string, args: Record<string, unknown
     const requestId = typeof args.request_id === 'string' ? args.request_id.trim() : '';
     const dispatchKey = isolatedWorktreeKey(args) || requestId || name;
     return [{ resourceKey: `agent-dispatch:${repoId}:${dispatchKey}`, mode: 'write' }];
+  }
+  if (DURABLE_WORK_TOOLS.has(name)) {
+    const workId = typeof args.work_id === 'string' && args.work_id.trim()
+      ? args.work_id.trim()
+      : 'unresolved';
+    const claims: ResourceClaimSpec[] = [
+      { resourceKey: `work:${repoId}:${workId}`, mode: 'exclusive' },
+    ];
+    if (name === 'work_validate') claims.push(claimHeavyCheck(repoId));
+    if (name === 'work_finalize') claims.push(
+      { resourceKey: `integration:${repoId}`, mode: 'exclusive' },
+      { resourceKey: `git-refs:${repoId}`, mode: 'exclusive' },
+    );
+    return claims;
   }
   if (name === 'repository_command_execute' && args.command !== undefined) {
     return claimsForRepositoryCommand(

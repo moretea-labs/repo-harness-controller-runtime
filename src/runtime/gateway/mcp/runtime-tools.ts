@@ -8,6 +8,7 @@ import { repositoryControllerRoot } from '../../../cli/repositories/controller-h
 import { cancelExecutionJob, createExecutionJob, findExecutionJob, getExecutionJob, getExecutionJobByRequestId, listExecutionJobs } from '../../execution/jobs/store';
 import { waitForExecutionJob } from '../../execution/jobs/wait';
 import type { ExecutionJob } from '../../execution/jobs/types';
+import { getProcessHandle, waitForProcess } from '../../execution/process-runtime';
 import { buildJobOperationDigest } from '../../control-plane/facade/operation-digest';
 import { readJobEvents } from '../../evidence/event-ledger';
 import { readExecutionArtifact } from '../../evidence/artifact-store';
@@ -308,7 +309,7 @@ export const runtimeToolDefinitions: McpToolDefinition[] = [
     request_id: { type: 'string' },
     reason: { type: 'string' },
   }, [], false),
-  definition('work_wait', 'Wait for one Work/ExecutionJob to reach a terminal status and return a bounded operation digest.', {
+  definition('work_wait', 'Wait for one Work/ExecutionJob/managed process to reach a terminal status and return a bounded operation digest.', {
     repo_id: repoId,
     work_id: { type: 'string' },
     request_id: { type: 'string' },
@@ -1456,6 +1457,48 @@ function resolveWorkJob(
   return getExecutionJobByRequestId(ctx.controllerHome, requestId, repoId);
 }
 
+function managedProcessOperationDigest(
+  handle: NonNullable<ReturnType<typeof getProcessHandle>>,
+): Record<string, unknown> {
+  const terminal = handle.completed === true;
+  const phase = terminal
+    ? handle.ok === true
+      ? 'succeeded'
+      : handle.timedOut === true
+        ? 'timed_out'
+        : handle.cancelled === true
+          ? 'cancelled'
+          : 'failed'
+    : 'running';
+  return {
+    schemaVersion: 1,
+    operationId: handle.processId,
+    operationType: 'managed-process',
+    workRef: handle.processId,
+    status: handle.status,
+    phase,
+    terminal,
+    resumable: !terminal,
+    completed: handle.completed === true,
+    ok: handle.ok,
+    exitCode: handle.exitCode,
+    timedOut: handle.timedOut,
+    cancelled: handle.cancelled,
+    startedAt: handle.startedAt,
+    summary: terminal
+      ? `Managed process ${handle.processId} completed with status ${handle.status}.`
+      : `Managed process ${handle.processId} is still ${handle.status}.`,
+    suggestedNextActions: terminal ? [] : [{
+      label: 'Poll managed process',
+      tool: 'work_status_digest',
+      operation: 'get',
+      payload: { work_ref: handle.processId },
+      risk: 'readonly',
+      confidence: 'high',
+    }],
+  };
+}
+
 function invalidFacadeOperation(tool: FacadeTool, operation: string): CallToolResult {
   const allowed = allowedFacadeOperations(tool);
   const facade = buildFacadeResult({
@@ -2324,12 +2367,29 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
       case 'work_wait': {
         const repository = selected(ctx, args);
         const job = resolveWorkJob(ctx, repository.repoId, args);
-        if (!job) return result({ error: { code: 'WORK_NOT_FOUND', message: 'No Work matched this repository and identifier.', errorClass: 'not_found', summary: '未找到对应任务。' } }, true);
+        const waitMs = typeof args.wait_ms === 'number' ? args.wait_ms : 15_000;
+        if (!job) {
+          const processRef = String(args.work_id ?? args.request_id ?? '').trim();
+          const process = getProcessHandle(ctx.controllerHome, repository.repoId, processRef);
+          if (!process) return result({ error: { code: 'WORK_NOT_FOUND', message: 'No Work or managed process matched this repository and identifier.', errorClass: 'not_found', summary: '未找到对应任务。' } }, true);
+          const waitedProcess = await waitForProcess(ctx.controllerHome, repository.repoId, processRef, { timeoutMs: waitMs });
+          const digest = managedProcessOperationDigest(waitedProcess);
+          return result({
+            work: { kind: 'managed_process', processId: processRef },
+            digest,
+            summary: digest.summary,
+            phase: digest.phase,
+            suggestedNextActions: digest.suggestedNextActions,
+            waited: true,
+            timedOut: waitedProcess.completed !== true,
+            waitedMs: waitMs,
+          }, digest.phase === 'failed' || digest.phase === 'timed_out');
+        }
         const waited = await waitForExecutionJob({
           controllerHome: ctx.controllerHome,
           repoId: repository.repoId,
           jobId: job.jobId,
-          timeoutMs: typeof args.wait_ms === 'number' ? args.wait_ms : 15_000,
+          timeoutMs: waitMs,
         });
         const digest = buildJobOperationDigest(waited.job, { waited: true, stillRunning: waited.timedOut });
         return result({
@@ -3976,14 +4036,29 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
       case 'work_status_digest': {
         const repository = selected(ctx, args);
         const workRef = String(args.work_ref ?? '').trim();
-        const job = getExecutionJob(ctx.controllerHome, repository.repoId, workRef);
+        let job: ExecutionJob | undefined;
+        try { job = getExecutionJob(ctx.controllerHome, repository.repoId, workRef); }
+        catch { job = undefined; }
         const taskLedger = buildControllerTaskLedgerProjection(repository.canonicalRoot);
+        if (job) {
+          return result({
+            digest: summarizeJobResultForLowInterception(job),
+            workRef,
+            taskLedgerStatus: taskLedger.status,
+            next: taskLedger.status.nextAction,
+          });
+        }
+        const process = getProcessHandle(ctx.controllerHome, repository.repoId, workRef);
+        if (!process) return result({ error: { code: 'WORK_NOT_FOUND', message: 'No Work or managed process matched work_ref.', errorClass: 'not_found', summary: '未找到对应任务。' } }, true);
+        const digest = managedProcessOperationDigest(process);
         return result({
-          digest: summarizeJobResultForLowInterception(job),
+          digest,
           workRef,
           taskLedgerStatus: taskLedger.status,
-          next: taskLedger.status.nextAction,
-        });
+          next: process.completed === true
+            ? 'Managed process is terminal; inspect the bounded digest above.'
+            : `Poll work_status_digest with work_ref ${workRef}; do not re-run the original operation.`,
+        }, digest.phase === 'failed' || digest.phase === 'timed_out');
       }
       case 'model_clients_summary': {
         return result({ clients: buildModelClientSummary(), policyOwner: 'repo-harness', transportEncryption: 'not-configured-by-this-tool' });

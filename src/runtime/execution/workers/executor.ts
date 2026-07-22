@@ -543,7 +543,16 @@ export async function executeExecutionJob(controllerHome: string, job: Execution
       devRunnerTimeoutMs: typeof job.payload.runnerTimeoutMs === 'number' ? job.payload.runnerTimeoutMs : undefined,
       devRunnerMaxTimeoutMs: typeof job.payload.runnerMaxTimeoutMs === 'number' ? job.payload.runnerMaxTimeoutMs : undefined,
     });
-    const context: McpToolContext = { repoRoot, policy, enableChatgptBrowser: job.payload.enableChatgptBrowser === true };
+    const context: McpToolContext = {
+      repoRoot,
+      policy,
+      enableChatgptBrowser: job.payload.enableChatgptBrowser === true,
+      sessionId: typeof job.payload.sessionId === 'string' ? job.payload.sessionId : undefined,
+      principalId: typeof job.payload.principalId === 'string' ? job.payload.principalId : undefined,
+      controllerInstanceId: typeof job.payload.controllerInstanceId === 'string'
+        ? job.payload.controllerInstanceId
+        : undefined,
+    };
     const runtimeContext: MultiRepositoryMcpToolContext = {
       ...context,
       controllerHome,
@@ -551,9 +560,26 @@ export async function executeExecutionJob(controllerHome: string, job: Execution
       toolset: job.payload.toolset === 'core' || job.payload.toolset === 'full' ? job.payload.toolset : 'advanced',
       toolsetLocked: true,
     };
-    const runtimeResult = policy.profile === 'controller'
-      ? await callRuntimeTool(runtimeContext, job.payload.operation, job.payload.arguments ?? {})
+    // Public Work mutations are admitted by the Gateway, then executed exactly
+    // once here. Calling the implementation directly avoids recursive Job
+    // creation while preserving the existing Work validation/authorization path.
+    const durableWorkOperation = job.payload.operation === 'work_execute'
+      || job.payload.operation === 'work_validate'
+      || job.payload.operation === 'work_finalize';
+    // Load the Work implementation only for Work Jobs. A static import here
+    // creates an initialization cycle through repository command and Local Bridge
+    // modules, changing unrelated execution behavior.
+    const executionResult = durableWorkOperation
+      ? await import('../../gateway/mcp/execution-tools').then(({ callExecutionTool }) =>
+        callExecutionTool(runtimeContext, job.payload.operation, {
+          ...(job.payload.arguments ?? {}),
+          __from_durable_worker: true,
+          __execution_job_id: job.jobId,
+        }))
       : undefined;
+    const runtimeResult = executionResult ?? (policy.profile === 'controller'
+      ? await callRuntimeTool(runtimeContext, job.payload.operation, job.payload.arguments ?? {})
+      : undefined);
     const result = runtimeResult ?? await callMcpTool(context, job.payload.operation, job.payload.arguments ?? {});
     let record: Record<string, unknown> = {
       ...toolResultRecord(result),

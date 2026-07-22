@@ -13,7 +13,7 @@ import {
 import { callAccessTool } from './access-tools';
 import { callRepositoryTool } from './repository-tools';
 import { callRuntimeTool } from '../../runtime/gateway/mcp/runtime-tools';
-import { callExecutionTool } from '../../runtime/gateway/mcp/execution-tools';
+import { callExecutionTool, isDurableWorkOperation } from '../../runtime/gateway/mcp/execution-tools';
 import { callProcessTool } from '../../runtime/gateway/mcp/process-tools';
 import { injectDurableCommandFields, isGatewayIsolatedTool, routeDurableMcpCall } from '../../runtime/gateway/mcp/router';
 import {
@@ -66,6 +66,19 @@ export function createRepoHarnessMcpServerFromContext(ctx: ServerToolContext): S
       }
       const accessResult = callAccessTool(ctx, name, args);
       if (accessResult) return accessResult;
+      if (isDurableWorkOperation(name)) {
+        // Work mutations never execute on the public MCP request stack. The
+        // default interactive mode waits only for a bounded result; async mode
+        // returns the durable receipt immediately.
+        const durableArgs = args.apply_mode === 'async'
+          ? args
+          : { ...args, wait: args.wait ?? true };
+        const workResult = await routeDurableMcpCall(ctx, name, durableArgs, {
+          allowReadOnly: true,
+          forceDurable: true,
+        });
+        if (workResult) return workResult;
+      }
       const executionResult = await callExecutionTool(ctx, name, args);
       if (executionResult) return executionResult;
       const processResult = await callProcessTool(ctx, name, args);

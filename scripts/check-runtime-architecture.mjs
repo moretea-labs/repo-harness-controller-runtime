@@ -73,9 +73,28 @@ const legacyCall = server.indexOf('callMultiRepositoryTool(ctx, name, args)');
 if (!(runtimeCall >= 0 && durableCall > runtimeCall && legacyCall > durableCall)) {
   failures.push('MCP routing must evaluate runtime reads/control, then durable acceptance, before the legacy Worker-only implementation');
 }
+const durableWorkGuard = server.indexOf('if (isDurableWorkOperation(name))');
+const executionToolCall = server.indexOf('const executionResult = await callExecutionTool(ctx, name, args)');
+if (!(durableWorkGuard >= 0 && executionToolCall > durableWorkGuard)) {
+  failures.push('Public MCP Work mutations must enter durable admission before callExecutionTool can run');
+}
+const durableWorkRegion = durableWorkGuard >= 0 && executionToolCall > durableWorkGuard
+  ? server.slice(durableWorkGuard, executionToolCall)
+  : '';
+if (!durableWorkRegion.includes('routeDurableMcpCall') || !durableWorkRegion.includes('forceDurable: true')) {
+  failures.push('Public MCP Work mutations must force the durable Operation path');
+}
 requireText('src/runtime/gateway/mcp/router.ts', 'createExecutionJob');
 requireText('src/runtime/gateway/mcp/router.ts', 'requestId');
 requireText('src/runtime/gateway/mcp/router.ts', 'semanticKey');
+requireText('src/runtime/gateway/mcp/execution-tools.ts', 'isDurableWorkOperation');
+requireText('src/runtime/gateway/mcp/execution-tools.ts', "'work_execute'");
+requireText('src/runtime/gateway/mcp/execution-tools.ts', "'work_validate'");
+requireText('src/runtime/gateway/mcp/execution-tools.ts', "'work_finalize'");
+requireText('src/runtime/execution/workers/executor.ts', 'callExecutionTool(runtimeContext');
+requireText('src/runtime/execution/workers/executor.ts', '__from_durable_worker');
+requireText('src/runtime/gateway/mcp/runtime-tools.ts', 'managedProcessOperationDigest');
+forbid('src/runtime/gateway/mcp/router.ts', /Use process_get \/ process_wait \/ process_logs/, 'Gateway follow-up instructions must use an always-exposed neutral Work facade');
 requireMatch(
   'src/runtime/gateway/mcp/router.ts',
   /const DIRECT_REPOSITORY_TOOLS = new Set\(\[[\s\S]*?'repository_list'[\s\S]*?'repository_get'[\s\S]*?\]\);/,
