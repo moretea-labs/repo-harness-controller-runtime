@@ -135,6 +135,13 @@ describe('Thin Harness execution router', () => {
       operation: 'repository_command_execute',
       command: ['git', 'reset', '--hard', 'HEAD'],
     }).mode).toBe('reject');
+    const approvedDestructive = routeExecution({
+      operation: 'repository_command_execute',
+      command: ['git', 'reset', '--hard', 'HEAD'],
+      approvalContinuation: true,
+    });
+    expect(approvedDestructive.mode).toBe('durable');
+    expect(approvedDestructive.risk).toBe('destructive');
     expect(routeExecution({
       operation: 'repository_command_execute',
       command: ['completely-unknown-binary', '--mutate'],

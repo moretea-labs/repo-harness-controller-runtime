@@ -734,6 +734,8 @@ export async function callRepositoryTool(
           timeoutMs,
           background: args.background === true || args.async === true,
           defaultBranch: repository.defaultBranch,
+          approvalContinuation: typeof args.approval_request_id === 'string'
+            || typeof args.approval_token === 'string',
         });
         // Unified Process Runtime for local commands (Direct/Managed) when not forced durable.
         if (!forceDurable && !fromDurableWorker) {

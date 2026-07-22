@@ -39,6 +39,7 @@ export interface RouteExecutionInput {
   patchPaths?: string[];
   steps?: RepositoryBatchStep[];
   defaultBranch?: string;
+  approvalContinuation?: boolean;
 }
 
 const FAST_OPERATIONS = new Set<string>([
@@ -316,6 +317,23 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
   }
 
   if (commandLooksDestructive(input.command) || operation.includes('destructive')) {
+    if (input.approvalContinuation === true && operation === 'repository_command_execute') {
+      return decisionBase({
+        mode: 'durable',
+        reasons: ['destructive_approval_continuation'],
+        risk: 'destructive',
+        estimatedClass: 'unknown',
+        requiresIsolation: true,
+        requiresRecovery: false,
+        suggestedOperation: 'repository_command_execute through Durable Work / Local Job',
+        effects: {
+          readsWorkspace: true,
+          mutatesWorkspace: true,
+          mutatesGitRefs: true,
+          remoteWrite: false,
+        },
+      }, operation);
+    }
     return decisionBase({
       mode: 'reject',
       reasons: ['destructive_operation_requires_strong_confirmation'],
@@ -393,6 +411,18 @@ export function routeExecution(input: RouteExecutionInput): ExecutionDecision {
       }
       if (classification.risk === 'remote_write') reasons.push('command_classified_remote_write');
       if (classification.risk === 'destructive') {
+        if (input.approvalContinuation === true && operation === 'repository_command_execute') {
+          return decisionBase({
+            mode: 'durable',
+            reasons: ['destructive_approval_continuation', ...classification.reasons],
+            risk: 'destructive',
+            estimatedClass: 'unknown',
+            requiresIsolation: true,
+            requiresRecovery: false,
+            suggestedOperation: 'repository_command_execute through Durable Work / Local Job',
+            effects: commandEffectsValue,
+          }, operation);
+        }
         return decisionBase({
           mode: 'reject',
           reasons: ['command_classified_destructive', ...classification.reasons],
