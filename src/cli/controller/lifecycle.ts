@@ -534,9 +534,36 @@ function resolveServiceConfig(repoRoot: string, explicitLogFile?: string, explic
   logPath: string;
 } {
   const controllerHome = resolveRepoPreferredControllerHome(repoRoot, explicitControllerHome);
-  const localConfig = loadMcpServiceLocalConfig(controllerHome, repoRoot) ?? loadMcpLocalConfig(repoRoot);
+  // Prefer active blue/green slot mcp config when present so status probes the
+  // live Local Controller / MCP ports (e.g. green slot 8776) instead of the
+  // root template default (8766).
+  let slotHome: string | undefined;
+  try {
+    slotHome = ensureSlotHome(controllerHome, readActiveSlotAuthority(controllerHome).activeSlot);
+  } catch {
+    slotHome = undefined;
+  }
+  const slotLocalConfig = slotHome ? loadMcpServiceLocalConfig(slotHome) : null;
+  const rootLocalConfig = loadMcpServiceLocalConfig(controllerHome, repoRoot);
+  const localConfig = (slotLocalConfig?.localController || slotLocalConfig?.server
+    ? slotLocalConfig
+    : null)
+    ?? rootLocalConfig
+    ?? loadMcpLocalConfig(repoRoot);
   const localBridgeConfig = loadLocalBridgeConfig(repoRoot);
-  const runtime = loadMcpServiceRuntimeState(controllerHome, repoRoot) ?? loadMcpRuntimeState(repoRoot);
+  const slotRuntime = slotHome ? loadMcpServiceRuntimeState(slotHome) : null;
+  const runtime = (slotRuntime?.localController || slotRuntime?.server ? slotRuntime : null)
+    ?? loadMcpServiceRuntimeState(controllerHome, repoRoot)
+    ?? loadMcpRuntimeState(repoRoot);
+  // Runtime-observed endpoint/port is authoritative when present; config is fallback.
+  const runtimeLocalEndpoint = runtime?.localController?.endpoint?.trim();
+  const runtimeLocalPort = runtimeLocalEndpoint
+    ? Number((/^[a-z]+:\/\/[^/:]+:(\d+)/i.exec(runtimeLocalEndpoint) ?? [])[1])
+    : undefined;
+  const runtimeMcpEndpoint = runtime?.server?.endpoint?.trim();
+  const runtimeMcpPort = runtimeMcpEndpoint
+    ? Number((/^[a-z]+:\/\/[^/:]+:(\d+)/i.exec(runtimeMcpEndpoint) ?? [])[1])
+    : undefined;
   const publicEndpoint = normalizeKeepalivePublicEndpoint(localConfig?.chatgpt?.endpoint);
   const tunnelMode = publicEndpoint || runtime?.tunnel?.name
     ? inferMcpTunnelMode(runtime?.tunnelMode, publicEndpoint, runtime?.tunnel?.name)
@@ -551,9 +578,14 @@ function resolveServiceConfig(repoRoot: string, explicitLogFile?: string, explic
     controllerHome,
     packageVersion: currentPackageVersion(),
     mcpHost: localConfig?.server?.host ?? "127.0.0.1",
-    mcpPort: localConfig?.server?.port ?? 8765,
+    mcpPort: (Number.isFinite(runtimeMcpPort) ? runtimeMcpPort : undefined)
+      ?? localConfig?.server?.port
+      ?? 8765,
     localControllerHost: localBridgeConfig.host ?? localConfig?.localController?.host ?? "127.0.0.1",
-    localControllerPort: localBridgeConfig.port ?? localConfig?.localController?.port ?? 8766,
+    localControllerPort: (Number.isFinite(runtimeLocalPort) ? runtimeLocalPort : undefined)
+      ?? localBridgeConfig.port
+      ?? localConfig?.localController?.port
+      ?? 8766,
     localControllerEnabled: localConfig?.localController?.enabled ?? true,
     allowLanMobileIntents: localBridgeConfig.allowLanMobileIntents === true,
     tunnelMode,
@@ -765,7 +797,10 @@ export async function controllerServiceStatus(opts: ControllerServiceOptions = {
     projection: projectionHealth,
     localBridge: {
       enabled: config.localControllerEnabled,
-      requiredForReadiness: config.localControllerEnabled,
+      // Embedded Local Controller is operationally useful but not a hard readiness
+      // gate unless standalone mode is the configured expectation.
+      requiredForReadiness: config.localControllerEnabled
+        && (runtime?.localController?.mode ?? "standalone") === "standalone",
       mode: config.localControllerEnabled ? runtime?.localController?.mode ?? "standalone" : "disabled",
       endpoint: localControllerHealthUrl(config.localControllerHost, config.localControllerPort),
       endpointReachable: ports.localControllerReachable,
