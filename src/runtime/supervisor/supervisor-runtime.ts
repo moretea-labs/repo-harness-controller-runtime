@@ -637,11 +637,11 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
     const manager = this.managerForSlot(slot, release);
     const home = ensureSlotHome(this.options.controllerHome, slot);
     const activeHome = this.state.controllerDaemon?.controllerHome ?? this.options.controllerHome;
-    const template = loadMcpServiceLocalConfig(activeHome, this.options.repoRoot)
-      ?? loadMcpServiceLocalConfig(this.options.controllerHome, this.options.repoRoot);
+    const rootTemplate = loadMcpServiceLocalConfig(this.options.controllerHome, this.options.repoRoot);
+    const template = rootTemplate
+      ?? loadMcpServiceLocalConfig(activeHome, this.options.repoRoot);
     if (!template) throw new Error('SUPERVISOR_SLOT_CONFIG_UNAVAILABLE');
-    const rootTemplate = loadMcpServiceLocalConfig(this.options.controllerHome, this.options.repoRoot) ?? template;
-    const baseLocalPort = rootTemplate.localController?.port ?? 8766;
+    const baseLocalPort = template.localController?.port ?? 8766;
     const localControllerPort = baseLocalPort + (slot === 'green' ? 10 : 0);
     const binding = manager.gatewayBinding(slot);
     writeMcpServiceLocalConfig(home, {

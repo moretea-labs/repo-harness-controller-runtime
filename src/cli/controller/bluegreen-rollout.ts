@@ -649,7 +649,10 @@ export async function startInactiveSlot(
       ?? 8766,
   };
   const ports = allocateSlotPorts(candidate, active, basePorts, opts.candidatePorts);
-  writeSlotConfig(candidateHome, ports, loadMcpServiceLocalConfig(activeHome, repoRoot) ?? rootConfig);
+  // Root Controller Home owns operational policy. Active-slot configuration may
+  // contain stale rollout-era values, so it is only a fallback when the root
+  // configuration is unavailable.
+  writeSlotConfig(candidateHome, ports, rootConfig ?? loadMcpServiceLocalConfig(activeHome, repoRoot));
 
   // Ensure active is not sharing candidate home.
   if (activeHome === candidateHome) {

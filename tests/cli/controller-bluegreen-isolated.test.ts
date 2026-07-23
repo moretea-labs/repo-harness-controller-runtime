@@ -13,7 +13,7 @@ import {
   writeActiveSlotAuthority,
   writeSlotIdentity,
 } from '../../src/cli/controller/runtime-slots';
-import { writeMcpServiceLocalConfig } from '../../src/cli/mcp/auth';
+import { loadMcpServiceLocalConfig, writeMcpServiceLocalConfig } from '../../src/cli/mcp/auth';
 import {
   controllerServiceStatus,
   startControllerService,
@@ -44,6 +44,12 @@ function seedSlotConfig(
       host: '127.0.0.1',
       port: ports.localControllerPort,
       autoOpen: false,
+    },
+    devMode: {
+      agentRunner: true,
+      allowedAgents: ['codex'],
+      timeoutMs: 3_600_000,
+      maxTimeoutMs: 43_200_000,
     },
   });
 }
@@ -142,6 +148,12 @@ describe('blue/green isolated lifecycle (level 2)', () => {
           port: fixture.localControllerPort,
           autoOpen: false,
         },
+        devMode: {
+          agentRunner: true,
+          allowedAgents: ['codex', 'claude'],
+          timeoutMs: 3_600_000,
+          maxTimeoutMs: 43_200_000,
+        },
       });
 
       await startControllerService({
@@ -166,6 +178,8 @@ describe('blue/green isolated lifecycle (level 2)', () => {
       }
       expect(rollout.status).toBe('succeeded');
       expect(readActiveSlotAuthority(fixture.controllerHome).activeSlot).toBe('green');
+      expect(loadMcpServiceLocalConfig(ensureSlotHome(fixture.controllerHome, 'green'), fixture.repoRoot)?.devMode?.allowedAgents)
+        .toEqual(['codex', 'claude']);
 
       const rollback = await controllerRollback({
         repo: fixture.repoRoot,
@@ -220,6 +234,12 @@ describe('blue/green isolated lifecycle (level 2)', () => {
           port: fixture.localControllerPort,
           autoOpen: false,
         },
+        devMode: {
+          agentRunner: true,
+          allowedAgents: ['codex', 'claude'],
+          timeoutMs: 3_600_000,
+          maxTimeoutMs: 43_200_000,
+        },
       });
 
       const initialRelease = installSupervisorRelease({
@@ -233,6 +253,12 @@ describe('blue/green isolated lifecycle (level 2)', () => {
         startTimeoutMs: 60_000,
       });
       expect(started.status.ready).toBe(true);
+      // Simulate a stale active-slot policy left by an earlier rollout. The
+      // root Controller Home remains authoritative for the candidate.
+      seedSlotConfig(ensureSlotHome(fixture.controllerHome, 'blue'), {
+        mcpPort: fixture.mcpPort,
+        localControllerPort: fixture.localControllerPort,
+      });
       const supervisorPid = started.status.supervisor.pid;
       if (!supervisorPid) throw new Error('isolated Stable Supervisor PID missing');
       expect(supervisorPid).toBeNumber();
@@ -250,6 +276,8 @@ describe('blue/green isolated lifecycle (level 2)', () => {
       }
       expect(readActiveSlotAuthority(fixture.controllerHome).activeSlot).toBe('green');
       expect(readCurrentRelease(fixture.controllerHome)).not.toBe(initialRelease.releasePath);
+      expect(loadMcpServiceLocalConfig(ensureSlotHome(fixture.controllerHome, 'green'), fixture.repoRoot)?.devMode?.allowedAgents)
+        .toEqual(['codex', 'claude']);
 
       const afterRollout = await controllerServiceStatus({
         repo: fixture.repoRoot,
