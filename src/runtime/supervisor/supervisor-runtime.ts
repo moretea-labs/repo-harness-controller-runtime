@@ -76,6 +76,22 @@ export function supervisorGatewayHealthDecision(
   };
 }
 
+export const SUPERVISOR_INGRESS_HEALTH_FAILURE_THRESHOLD = SUPERVISOR_GATEWAY_HEALTH_FAILURE_THRESHOLD;
+
+export function supervisorIngressHealthDecision(
+  previousFailures: number,
+  healthy: boolean,
+  recoverySuppressed = false,
+): { consecutiveFailures: number; shouldReplace: boolean } {
+  const consecutiveFailures = healthy ? 0 : Math.max(0, previousFailures) + 1;
+  return {
+    consecutiveFailures,
+    shouldReplace: !recoverySuppressed
+      && !healthy
+      && consecutiveFailures >= SUPERVISOR_INGRESS_HEALTH_FAILURE_THRESHOLD,
+  };
+}
+
 export async function probeSupervisorGatewayHealth(
   endpoint: string,
   timeoutMs = 2_000,
@@ -742,6 +758,19 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
       if (expectedGeneration && payload.generation !== expectedGeneration) {
         throw new Error(`generation=${String(payload.generation)} expected=${expectedGeneration}`);
       }
+      this.persist({
+        ingress: {
+          ...this.state.ingress,
+          state: 'running',
+          activeUpstreamSlot: this.state.activeSlot,
+          activeUpstreamPort: this.manager.gatewayBinding(this.state.activeSlot).port,
+          ...(this.ingressProcess ? { pid: this.ingressProcess.pid } : {}),
+          consecutiveFailures: 0,
+          lastHealthyAt: new Date().toISOString(),
+          lastFailureAt: undefined,
+          lastFailureDetail: undefined,
+        },
+      });
     } catch (error) {
       throw new Error(`SUPERVISOR_STABLE_INGRESS_VERIFY_FAILED: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -1301,23 +1330,34 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
   private async monitorTick(): Promise<void> {
     if (this.stopping || this.state.desiredState !== 'running') return;
     let degraded = !this.synchronizeActiveRuntimeGeneration(false);
+    let ingressDegraded = false;
     if (!this.ingressProcess?.alive()) {
-      degraded = true;
+      ingressDegraded = true;
+      const now = new Date().toISOString();
       try {
         this.ingressProcess = await this.replaceIngressProcess();
         this.persist({
           ingress: {
             ...this.state.ingress,
-            state: 'running',
-            lastHealthyAt: new Date().toISOString(),
+            state: 'degraded',
+            pid: this.ingressProcess.pid,
+            consecutiveFailures: 0,
+            lastFailureAt: now,
+            lastFailureDetail: 'stable ingress process was not alive and was replaced; awaiting full-path verification',
           },
         });
       } catch (error) {
+        const detail = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 200);
         this.persist({
-          ingress: { ...this.state.ingress, state: 'degraded' },
+          ingress: {
+            ...this.state.ingress,
+            state: 'degraded',
+            lastFailureAt: now,
+            lastFailureDetail: detail,
+          },
           lastIncident: {
-            at: new Date().toISOString(),
-            reason: `stable ingress process recovery failed: ${error instanceof Error ? error.message : String(error)}`,
+            at: now,
+            reason: `stable ingress process recovery failed: ${detail}`,
           },
         });
       }
@@ -1384,12 +1424,113 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
       const gatewayHealthy = gatewayAlive
         && this.state.gatewayHost?.state === 'running'
         && this.state.gatewayHost.consecutiveFailures === 0;
+      const operationActive = Boolean(this.state.currentOperationId);
+      let ingressPathHealthy = false;
+      if (gatewayHealthy && this.ingressProcess?.alive()) {
+        if (operationActive) {
+          ingressPathHealthy = this.state.ingress.state === 'running'
+            && (this.state.ingress.consecutiveFailures ?? 0) === 0;
+        } else {
+          const ingressEndpoint = `http://${this.ingressProcess.host}:${this.ingressProcess.port}/ready`;
+          const health = await probeSupervisorGatewayHealth(ingressEndpoint);
+          const decision = supervisorIngressHealthDecision(
+            this.state.ingress.consecutiveFailures ?? 0,
+            health.healthy,
+          );
+          if (health.healthy) {
+            ingressPathHealthy = true;
+            ingressDegraded = false;
+            this.persist({
+              ingress: {
+                ...this.state.ingress,
+                state: 'running',
+                activeUpstreamSlot: this.state.activeSlot,
+                activeUpstreamPort: this.manager.gatewayBinding(this.state.activeSlot).port,
+                pid: this.ingressProcess.pid,
+                consecutiveFailures: 0,
+                lastHealthyAt: new Date().toISOString(),
+              },
+            });
+          } else {
+            ingressDegraded = true;
+            const now = new Date().toISOString();
+            const failureReason = `stable ingress full-path probe failed ${decision.consecutiveFailures}/${SUPERVISOR_INGRESS_HEALTH_FAILURE_THRESHOLD} slot=${this.state.activeSlot} targetPort=${this.manager.gatewayBinding(this.state.activeSlot).port}: ${health.detail}`;
+            if (decision.shouldReplace) {
+              const previousPid = this.ingressProcess.pid;
+              try {
+                this.ingressProcess = await this.replaceIngressProcess();
+                const replacementHealth = await probeSupervisorGatewayHealth(
+                  `http://${this.ingressProcess.host}:${this.ingressProcess.port}/ready`,
+                );
+                if (replacementHealth.healthy) {
+                  ingressPathHealthy = true;
+                  ingressDegraded = false;
+                  this.persist({
+                    ingress: {
+                      ...this.state.ingress,
+                      state: 'running',
+                      activeUpstreamSlot: this.state.activeSlot,
+                      activeUpstreamPort: this.manager.gatewayBinding(this.state.activeSlot).port,
+                      pid: this.ingressProcess.pid,
+                      consecutiveFailures: 0,
+                      lastHealthyAt: new Date().toISOString(),
+                    },
+                    lastIncident: {
+                      at: now,
+                      reason: `stable ingress false-health recovered by process replacement oldPid=${previousPid} newPid=${this.ingressProcess.pid}`,
+                    },
+                  });
+                } else {
+                  const replacementDetail = `replacement full-path probe failed: ${replacementHealth.detail}`;
+                  this.persist({
+                    ingress: {
+                      ...this.state.ingress,
+                      state: 'degraded',
+                      pid: this.ingressProcess.pid,
+                      consecutiveFailures: 1,
+                      lastFailureAt: now,
+                      lastFailureDetail: replacementDetail,
+                    },
+                    lastIncident: { at: now, reason: replacementDetail },
+                  });
+                }
+              } catch (error) {
+                const detail = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 200);
+                this.persist({
+                  ingress: {
+                    ...this.state.ingress,
+                    state: 'degraded',
+                    consecutiveFailures: decision.consecutiveFailures,
+                    lastFailureAt: now,
+                    lastFailureDetail: detail,
+                  },
+                  lastIncident: { at: now, reason: `stable ingress replacement failed: ${detail}` },
+                });
+              }
+            } else {
+              this.persist({
+                ingress: {
+                  ...this.state.ingress,
+                  state: 'degraded',
+                  pid: this.ingressProcess.pid,
+                  consecutiveFailures: decision.consecutiveFailures,
+                  lastFailureAt: now,
+                  lastFailureDetail: health.detail,
+                },
+                lastIncident: { at: now, reason: failureReason },
+              });
+            }
+          }
+        }
+      } else {
+        ingressDegraded = true;
+      }
+      const stableIngressHealthy = gatewayHealthy && ingressPathHealthy && !ingressDegraded;
       this.persist({
-        observedState: degraded || Boolean(this.state.currentOperationId) ? 'degraded' : 'healthy',
+        observedState: degraded || ingressDegraded || operationActive ? 'degraded' : 'healthy',
         ingress: {
           ...this.state.ingress,
-          state: gatewayHealthy ? 'running' : 'degraded',
-          ...(gatewayHealthy ? { lastHealthyAt: new Date().toISOString() } : {}),
+          state: stableIngressHealthy ? 'running' : 'degraded',
         },
       });
     }

@@ -11,7 +11,7 @@ import { createStableIngressRouter } from '../../src/runtime/supervisor/ingress-
 import { createStableIngressProcess } from '../../src/runtime/supervisor/ingress-process';
 import { controllerDaemonMaxLifetimeMs } from '../../src/runtime/control-plane/daemon-entry';
 import { createSupervisorOperation, readSupervisorOperation, updateSupervisorOperation } from '../../src/runtime/supervisor/operation-store';
-import { StableSupervisorRuntime, SUPERVISOR_GATEWAY_HEALTH_FAILURE_THRESHOLD, automaticRecoveryRequestId, managedProcessNeedsReleaseRefresh, probeSupervisorGatewayHealth, reconcileActiveManagedGenerations, reconcileSupervisorStateWithAuthority, supervisorGatewayHealthDecision, terminalizeInterruptedSupervisorOperations } from '../../src/runtime/supervisor/supervisor-runtime';
+import { StableSupervisorRuntime, SUPERVISOR_GATEWAY_HEALTH_FAILURE_THRESHOLD, SUPERVISOR_INGRESS_HEALTH_FAILURE_THRESHOLD, automaticRecoveryRequestId, managedProcessNeedsReleaseRefresh, probeSupervisorGatewayHealth, reconcileActiveManagedGenerations, reconcileSupervisorStateWithAuthority, supervisorGatewayHealthDecision, supervisorIngressHealthDecision, terminalizeInterruptedSupervisorOperations } from '../../src/runtime/supervisor/supervisor-runtime';
 import { decideRestart, newRestartBudgetRecord, recordFailure, recordRestart, recordStable } from '../../src/runtime/supervisor/restart-policy';
 import { SupervisorProcessManager } from '../../src/runtime/supervisor/process-manager';
 import { writeMcpServiceLocalConfig } from '../../src/cli/mcp/auth';
@@ -200,6 +200,20 @@ describe('Stable Supervisor production hardening', () => {
       consecutiveFailures: 0,
       shouldRecover: false,
     });
+    expect(SUPERVISOR_INGRESS_HEALTH_FAILURE_THRESHOLD).toBe(SUPERVISOR_GATEWAY_HEALTH_FAILURE_THRESHOLD);
+    expect(supervisorIngressHealthDecision(SUPERVISOR_INGRESS_HEALTH_FAILURE_THRESHOLD - 2, false)).toEqual({
+      consecutiveFailures: SUPERVISOR_INGRESS_HEALTH_FAILURE_THRESHOLD - 1,
+      shouldReplace: false,
+    });
+    expect(supervisorIngressHealthDecision(SUPERVISOR_INGRESS_HEALTH_FAILURE_THRESHOLD - 1, false)).toEqual({
+      consecutiveFailures: SUPERVISOR_INGRESS_HEALTH_FAILURE_THRESHOLD,
+      shouldReplace: true,
+    });
+    expect(supervisorIngressHealthDecision(SUPERVISOR_INGRESS_HEALTH_FAILURE_THRESHOLD - 1, false, true)).toEqual({
+      consecutiveFailures: SUPERVISOR_INGRESS_HEALTH_FAILURE_THRESHOLD,
+      shouldReplace: false,
+    });
+    expect(supervisorIngressHealthDecision(7, true)).toEqual({ consecutiveFailures: 0, shouldReplace: false });
   });
 
   test('restart_controller preserves the Gateway and delegates only conditional generation reconciliation', async () => {
@@ -311,6 +325,40 @@ describe('Stable Supervisor production hardening', () => {
       rmSync(controllerHome, { recursive: true, force: true });
     }
     expect(ingress.alive()).toBe(false);
+  });
+
+  test('stable ingress false-health is observable while its child process remains alive', async () => {
+    const controllerHome = mkdtempSync(join(tmpdir(), 'repo-harness-ingress-false-health-'));
+    const unavailableUpstream = await listen((_request, response) => {
+      response.end('temporary');
+    });
+    await new Promise<void>((resolve) => unavailableUpstream.server.close(() => resolve()));
+    const serverIndex = servers.indexOf(unavailableUpstream.server);
+    if (serverIndex >= 0) servers.splice(serverIndex, 1);
+    const rescue = await listen((_request, response) => {
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify({ status: 'ok' }));
+    });
+    const ingress = await createStableIngressProcess({
+      executable: join(process.cwd(), 'src/runtime/supervisor/entry.ts'),
+      repoRoot: process.cwd(),
+      controllerHome,
+      host: '127.0.0.1',
+      port: 0,
+      rescueHost: '127.0.0.1',
+      rescuePort: rescue.port,
+      blueUpstreamPort: unavailableUpstream.port,
+      greenUpstreamPort: unavailableUpstream.port,
+    });
+    try {
+      expect(ingress.alive()).toBe(true);
+      const health = await probeSupervisorGatewayHealth(`http://127.0.0.1:${ingress.port}/ready`);
+      expect(health).toMatchObject({ healthy: false, statusCode: 503 });
+      expect(ingress.alive()).toBe(true);
+    } finally {
+      await ingress.close();
+      rmSync(controllerHome, { recursive: true, force: true });
+    }
   });
 
   test('temporary harness daemons self-expire while production homes do not', () => {

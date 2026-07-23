@@ -96,7 +96,11 @@ export interface SupervisorState {
     state: 'running' | 'degraded' | 'stopped';
     activeUpstreamSlot: RuntimeSlotId;
     activeUpstreamPort?: number;
+    pid?: number;
+    consecutiveFailures?: number;
     lastHealthyAt?: string;
+    lastFailureAt?: string;
+    lastFailureDetail?: string;
   };
   control?: {
     host: string;
