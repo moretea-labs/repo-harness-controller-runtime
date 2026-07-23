@@ -20,6 +20,7 @@ import { readCurrentRelease, readCurrentSupervisorRelease, supervisorReleasesRoo
 import { createSupervisorControlServer } from '../../src/runtime/supervisor/control-server';
 import type { SupervisorManagedProcess, SupervisorOperation, SupervisorState } from '../../src/runtime/supervisor/types';
 import { evaluateRuntimeReleaseCoherence, evaluateSupervisorServiceReleaseCoherence, extractSupervisorServiceRelease } from '../../src/runtime/supervisor/release-coherence';
+import { publishAndScheduleSupervisorRelease } from '../../src/runtime/supervisor/service-activation';
 
 const servers: Server[] = [];
 
@@ -37,6 +38,20 @@ async function listen(handler: (request: IncomingMessage, response: ServerRespon
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('test server address unavailable');
   return { server, port: address.port };
+}
+
+function fakeSupervisorRelease(home: string, name: string, revision: string): string {
+  const releasePath = join(supervisorReleasesRoot(home), name);
+  mkdirSync(releasePath, { recursive: true });
+  for (const executable of ['supervisor.js', 'repo-harness.js', 'daemon.js']) {
+    writeFileSync(join(releasePath, executable), '');
+  }
+  writeFileSync(join(releasePath, 'manifest.json'), `${JSON.stringify({
+    schemaVersion: 1,
+    releaseRevision: revision,
+    sourceRoot: process.cwd(),
+  })}\n`);
+  return releasePath;
 }
 
 function managedProcess(slot: 'blue' | 'green', pid: number, generation: string): SupervisorManagedProcess {
@@ -97,6 +112,51 @@ describe('Stable Supervisor production hardening', () => {
       rmSync(controllerHome, { recursive: true, force: true });
     }
   }, 180_000);
+
+  test('release publication schedules one activation and restores the previous release when scheduling fails', () => {
+    const controllerHome = mkdtempSync(join(tmpdir(), 'repo-harness-release-activation-'));
+    try {
+      const previous = fakeSupervisorRelease(controllerHome, 'previous', 'revision-previous');
+      const candidate = fakeSupervisorRelease(controllerHome, 'candidate', 'revision-candidate');
+      const failedCandidate = fakeSupervisorRelease(controllerHome, 'failed-candidate', 'revision-failed');
+      publishSupervisorRelease({ controllerHome, repoRoot: process.cwd(), releasePath: previous });
+
+      const scheduled: Array<{ repo: string; home: string; delay: number }> = [];
+      const activated = publishAndScheduleSupervisorRelease({
+        controllerHome,
+        repoRoot: process.cwd(),
+        releasePath: candidate,
+        handoffDelayMs: 2_000,
+      }, {
+        schedule: (repo, home, delay) => {
+          scheduled.push({ repo, home, delay: delay ?? 0 });
+          return {
+            activationId: 'activation-candidate',
+            pid: 123,
+            statePath: join(home, 'supervisor', 'activation.json'),
+            logPath: join(home, 'supervisor', 'logs', 'activation.log'),
+            expectedReleaseRevision: 'revision-candidate',
+            expectedReleasePath: candidate,
+          };
+        },
+      });
+      expect(readCurrentRelease(controllerHome)).toBe(candidate);
+      expect(activated.activation.expectedReleaseRevision).toBe('revision-candidate');
+      expect(scheduled).toEqual([{ repo: process.cwd(), home: controllerHome, delay: 2_000 }]);
+
+      expect(() => publishAndScheduleSupervisorRelease({
+        controllerHome,
+        repoRoot: process.cwd(),
+        releasePath: failedCandidate,
+      }, {
+        schedule: () => { throw new Error('spawn denied'); },
+      })).toThrow('SUPERVISOR_ACTIVATION_SCHEDULE_FAILED');
+      expect(readCurrentRelease(controllerHome)).toBe(candidate);
+      expect(readCurrentSupervisorRelease(controllerHome)?.releaseRevision).toBe('revision-candidate');
+    } finally {
+      rmSync(controllerHome, { recursive: true, force: true });
+    }
+  });
 
   test('unexpected runtime stop is restartable while explicit signal remains successful', () => {
     expect(stableSupervisorExitCode('unexpected_runtime_stop')).toBe(1);

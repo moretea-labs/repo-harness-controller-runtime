@@ -1,12 +1,11 @@
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'fs';
-import { spawn } from 'child_process';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { dirname, join, resolve } from 'path';
 import { Command } from 'commander';
 import { ensureControllerHome, resolveRepoPreferredControllerHome } from '../repositories/controller-home';
 import { bootstrapLaunchAgentWithRetry, installLaunchAgent, launchAgentPath, restoreLaunchAgent, snapshotLaunchAgent, type LaunchAgentFileSnapshot } from '../controller/launch-agents';
 import { launchStableSupervisor } from '../../runtime/supervisor/bridge';
 import { sendSupervisorCommand } from '../../runtime/supervisor/control-server';
-import { installSupervisorRelease, stageSupervisorRelease, startRegisteredSupervisorService, supervisorServiceLabel, supervisorSystemdUnitName } from '../../runtime/supervisor/installer';
+import { stageSupervisorRelease, startRegisteredSupervisorService, supervisorServiceLabel, supervisorSystemdUnitName } from '../../runtime/supervisor/installer';
 import { isStableSupervisorInstalled, publishCurrentRelease, readCurrentRelease, readCurrentSupervisorRelease, supervisorLogPath, supervisorRoot } from '../../runtime/supervisor/paths';
 import { extractSupervisorServiceRelease, readSupervisorServiceReleaseCoherence, type SupervisorServiceReleaseCoherence, type SupervisorServiceReleaseDescriptor } from '../../runtime/supervisor/release-coherence';
 import { readSupervisorState } from '../../runtime/supervisor/state-store';
@@ -15,6 +14,11 @@ import { isProcessAlive, terminateProcessTree } from '../../runtime/shared/proce
 import { runProcess } from '../../effects/process-runner';
 import { stopControllerService } from '../controller/lifecycle';
 import { writeJsonAtomic } from '../../runtime/shared/json-files';
+import {
+  publishAndScheduleSupervisorRelease,
+  scheduleServiceActivation as scheduleRuntimeServiceActivation,
+  serviceActivationStatePath as runtimeServiceActivationStatePath,
+} from '../../runtime/supervisor/service-activation';
 
 function output(value: unknown, json = true): void {
   console.log(json ? JSON.stringify(value, null, 2) : String(value));
@@ -65,7 +69,7 @@ export interface SupervisorActivationState {
 }
 
 export function serviceActivationStatePath(home: string): string {
-  return join(supervisorRoot(home), 'activation.json');
+  return runtimeServiceActivationStatePath(home);
 }
 
 export function readServiceActivationState(home: string): SupervisorActivationState | undefined {
@@ -149,56 +153,8 @@ export function scheduleServiceActivation(
   repo: string,
   home: string,
   handoffDelayMs = 750,
-): { activationId: string; pid: number; statePath: string; logPath: string; expectedReleaseRevision?: string; expectedReleasePath?: string } {
-  const activationId = `sup-activate-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-  const expectedRelease = readCurrentSupervisorRelease(home);
-  const currentRelease = readCurrentRelease(home);
-  const installedCli = currentRelease ? join(currentRelease, 'repo-harness.js') : undefined;
-  const cliEntry = installedCli && existsSync(installedCli)
-    ? installedCli
-    : process.argv[1] ? resolve(process.argv[1]) : undefined;
-  if (!cliEntry) throw new Error('SUPERVISOR_ACTIVATION_ENTRY_UNAVAILABLE');
-  const logPath = join(supervisorRoot(home), 'logs', 'activation.log');
-  mkdirSync(dirname(logPath), { recursive: true, mode: 0o700 });
-  const logFd = openSync(logPath, 'a');
-  let child;
-  try {
-    child = spawn(process.execPath, [
-      cliEntry,
-      'supervisor',
-      '__activate',
-      '--repo', repo,
-      '--controller-home', home,
-      '--activation-id', activationId,
-      '--handoff-delay-ms', String(Math.max(750, Math.min(Math.trunc(handoffDelayMs), 30_000))),
-    ], {
-      cwd: repo,
-      detached: true,
-      stdio: ['ignore', logFd, logFd],
-      env: { ...process.env, REPO_HARNESS_CONTROLLER_HOME: home },
-    });
-    child.unref();
-  } finally {
-    closeSync(logFd);
-  }
-  if (!child.pid) throw new Error('SUPERVISOR_ACTIVATION_SPAWN_FAILED');
-  writeActivationState(home, {
-    activationId,
-    phase: 'scheduled',
-    pid: child.pid,
-    repoRoot: repo,
-    startedAt: new Date().toISOString(),
-    ...(expectedRelease?.releaseRevision ? { expectedReleaseRevision: expectedRelease.releaseRevision } : {}),
-    ...(expectedRelease?.releasePath ? { expectedReleasePath: expectedRelease.releasePath } : {}),
-  });
-  return {
-    activationId,
-    pid: child.pid,
-    statePath: serviceActivationStatePath(home),
-    logPath,
-    ...(expectedRelease?.releaseRevision ? { expectedReleaseRevision: expectedRelease.releaseRevision } : {}),
-    ...(expectedRelease?.releasePath ? { expectedReleasePath: expectedRelease.releasePath } : {}),
-  };
+) {
+  return scheduleRuntimeServiceActivation(repo, home, handoffDelayMs);
 }
 
 async function activateInstalledService(
@@ -426,9 +382,13 @@ export function buildSupervisorCommand(): Command {
         output({ ...staged, stagedOnly: true, service: { registrationScheduled: false } }, opts.json !== false);
         return;
       }
-      const result = installSupervisorRelease({ controllerHome: home, repoRoot: repo, sourceRoot: opts.sourceRoot });
-      const activation = scheduleServiceActivation(repo, home);
-      output({ ...result, activation, service: { registrationScheduled: true } }, opts.json !== false);
+      const staged = stageSupervisorRelease({ controllerHome: home, repoRoot: repo, sourceRoot: opts.sourceRoot });
+      const { publication, activation } = publishAndScheduleSupervisorRelease({
+        controllerHome: home,
+        repoRoot: repo,
+        releasePath: staged.releasePath,
+      });
+      output({ ...publication, activation, service: { registrationScheduled: true } }, opts.json !== false);
     });
 
   command.command('uninstall')

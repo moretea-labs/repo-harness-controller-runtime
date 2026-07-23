@@ -26,7 +26,11 @@ import { DEFAULT_RESTART_POLICY, decideRestart, lockout, newRestartBudgetRecord,
 import { SupervisorProcessManager, type SpawnedSupervisorProcess, type SupervisorProcessManagerOptions } from './process-manager';
 import { createSupervisorState, readSupervisorState, writeSupervisorState } from './state-store';
 import { readCurrentSupervisorRelease, readPreviousSupervisorRelease, readSupervisorRelease, supervisorControlSocketPath, supervisorReleasesRoot, type SupervisorReleaseDescriptor } from './paths';
-import { publishSupervisorRelease } from './installer';
+import {
+  publishAndScheduleSupervisorRelease,
+  scheduleServiceActivation,
+  type SupervisorReleaseActivationResult,
+} from './service-activation';
 import type { RestartBudgetRecord, SupervisorComponentName, SupervisorManagedProcess, SupervisorOperation, SupervisorOperationKind, SupervisorState } from './types';
 
 export interface StableSupervisorRuntimeOptions extends SupervisorProcessManagerOptions {
@@ -35,6 +39,7 @@ export interface StableSupervisorRuntimeOptions extends SupervisorProcessManager
   rescueAuthToken?: string;
   releaseRevision?: string;
   ingressExecutable?: string;
+  serviceActivationScheduler?: typeof scheduleServiceActivation;
   onStopped?: () => void;
 }
 
@@ -818,7 +823,7 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
     }
   }
 
-  private async rollout(operation: SupervisorOperation): Promise<void> {
+  private async rollout(operation: SupervisorOperation): Promise<SupervisorReleaseActivationResult | undefined> {
     const operationId = operation.operationId;
     const authority = readActiveSlotAuthority(this.options.controllerHome);
     const previousSlot = authority.activeSlot;
@@ -900,31 +905,16 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
       });
       const previousIdentity = readSlotIdentity(this.options.controllerHome, previousSlot);
       if (previousIdentity) writeSlotIdentity(this.options.controllerHome, { ...previousIdentity, role: 'standby' });
-      // Publish the candidate release as the new current release so the
-      // supervisor, daemon, and gateway all reference the same immutable
-      // release. This MUST happen inside the supervisor process (which
-      // survives cutover) rather than in the calling CLI/Worker (which may
-      // be killed when the old slot is stopped).
-      if (candidateRelease) {
-        try {
-          publishSupervisorRelease({
-            controllerHome: this.options.controllerHome,
-            repoRoot: this.options.repoRoot,
-            releasePath: candidateRelease.releasePath,
-          });
-        } catch (publishError) {
-          // Publication failure is non-fatal for the cutover itself but is
-          // recorded so operators can repair the current/previous pointers.
-          this.persist({
-            lastIncident: {
-              at: new Date().toISOString(),
-              reason: `rollout release publication failed: ${publishError instanceof Error ? publishError.message : String(publishError)}`,
-              operationId,
-            },
-          });
-        }
-      }
       updateSupervisorOperation(this.options.controllerHome, operationId, { phase: 'cutover' });
+      if (!candidateRelease) return undefined;
+      return publishAndScheduleSupervisorRelease({
+        controllerHome: this.options.controllerHome,
+        repoRoot: this.options.repoRoot,
+        releasePath: candidateRelease.releasePath,
+        handoffDelayMs: 2_000,
+      }, this.options.serviceActivationScheduler
+        ? { schedule: this.options.serviceActivationScheduler }
+        : undefined);
     } catch (error) {
       let restoredDaemon = previousDaemon;
       let restoredGateway = previousGateway;
@@ -963,7 +953,7 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
     }
   }
 
-  private async rollback(operationId: string): Promise<void> {
+  private async rollback(operationId: string): Promise<SupervisorReleaseActivationResult | undefined> {
     const authority = readActiveSlotAuthority(this.options.controllerHome);
     const currentSlot = authority.activeSlot;
     const targetSlot = authority.previousSlot ?? this.state.standby?.slot;
@@ -1065,27 +1055,17 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
     if (targetIdentity) writeSlotIdentity(this.options.controllerHome, { ...targetIdentity, role: 'active' });
     const failedIdentity = readSlotIdentity(this.options.controllerHome, currentSlot);
     if (failedIdentity) writeSlotIdentity(this.options.controllerHome, { ...failedIdentity, role: 'failed' });
-    // Publish the rollback target release as current so release pointers stay
-    // coherent. Same rationale as rollout: the supervisor survives cutover.
-    const rollbackReleasePath = activatedTarget.controllerDaemon.releasePath;
-    if (rollbackReleasePath) {
-      try {
-        publishSupervisorRelease({
-          controllerHome: this.options.controllerHome,
-          repoRoot: this.options.repoRoot,
-          releasePath: rollbackReleasePath,
-        });
-      } catch (publishError) {
-        this.persist({
-          lastIncident: {
-            at: new Date().toISOString(),
-            reason: `rollback release publication failed: ${publishError instanceof Error ? publishError.message : String(publishError)}`,
-            operationId,
-          },
-        });
-      }
-    }
     updateSupervisorOperation(this.options.controllerHome, operationId, { phase: 'cutover' });
+    const rollbackReleasePath = activatedTarget.controllerDaemon.releasePath;
+    if (!rollbackReleasePath) return undefined;
+    return publishAndScheduleSupervisorRelease({
+      controllerHome: this.options.controllerHome,
+      repoRoot: this.options.repoRoot,
+      releasePath: rollbackReleasePath,
+      handoffDelayMs: 2_000,
+    }, this.options.serviceActivationScheduler
+      ? { schedule: this.options.serviceActivationScheduler }
+      : undefined);
   }
 
   private async cleanupExpiredStandby(): Promise<void> {
@@ -1193,6 +1173,7 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
   }
 
   private async executeOperation(operation: SupervisorOperation): Promise<void> {
+    let releaseActivation: SupervisorReleaseActivationResult | undefined;
     let current = updateSupervisorOperation(this.options.controllerHome, operation.operationId, { phase: 'scheduled', scheduledAt: new Date().toISOString() });
     this.persist({ currentOperationId: operation.operationId, observedState: 'degraded' });
     try {
@@ -1222,9 +1203,9 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
         await this.waitForReady('controllerDaemon');
         await this.waitForReady('gatewayHost');
       } else if (current.kind === 'rollout') {
-        await this.rollout(current);
+        releaseActivation = await this.rollout(current);
       } else {
-        await this.rollback(current.operationId);
+        releaseActivation = await this.rollback(current.operationId);
       }
       this.synchronizeActiveRuntimeGeneration(true);
       current = updateSupervisorOperation(this.options.controllerHome, current.operationId, {
@@ -1234,6 +1215,10 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
           operationId: current.operationId,
           runtimeGeneration: this.state.activeGeneration,
           reconnectContract: 'stable_domain_retry',
+          ...(releaseActivation ? {
+            supervisorReleaseRevision: releaseActivation.publication.releaseRevision,
+            supervisorActivation: releaseActivation.activation,
+          } : {}),
         },
       });
       this.persist({ currentOperationId: null, observedState: 'healthy' });
