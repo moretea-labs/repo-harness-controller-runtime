@@ -7,6 +7,7 @@ import { listAgentJobs, reconcileAgentJobs } from "../agent-jobs/job-manager";
 import { bootoutRepoLaunchAgents, findRepoLaunchAgents } from "./launch-agents";
 import { ensureSlotHome, readActiveSlotAuthority } from "./runtime-slots";
 import { CONTROLLER_LIFECYCLE_OWNER_ENV } from "./lifecycle-authority";
+import { defaultLocalAgentRunners } from "./runtime-config";
 import { listLocalBridgeJobs, loadLocalBridgeConfig, reconcileLocalBridgeJobs } from "../local-bridge/job-store";
 import {
   loadMcpLocalConfig,
@@ -606,7 +607,7 @@ function resolveServiceConfig(
     profile: localConfig?.profile ?? "controller",
     authMode: localConfig?.auth?.mode === "bearer" ? "bearer" : "oauth",
     enableDevRunner: localConfig?.devMode?.agentRunner === true,
-    devRunnerAgents: localConfig?.devMode?.allowedAgents ?? ["codex"],
+    devRunnerAgents: localConfig?.devMode?.allowedAgents ?? defaultLocalAgentRunners(),
     devRunnerTimeoutMs: localConfig?.devMode?.timeoutMs,
     devRunnerMaxTimeoutMs: localConfig?.devMode?.maxTimeoutMs,
     logPath: resolve(explicitLogFile ?? defaultControllerServiceLogPath(repoRoot, controllerHome)),

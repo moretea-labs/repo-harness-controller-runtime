@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
-import { DEFAULT_AGENT_TIMEOUT_MS, MAX_AGENT_TIMEOUT_MS } from '../controller/runtime-config';
+import { DEFAULT_AGENT_TIMEOUT_MS, defaultLocalAgentRunners, MAX_AGENT_TIMEOUT_MS } from '../controller/runtime-config';
 import type { McpAgentRunnerName, McpPolicy, McpProfileName } from './types';
 
 const COMMON_DENY_GLOBS = [
@@ -196,7 +196,7 @@ export function getMcpPolicy(profile: McpProfileName, opts: McpPolicyOptions = {
         fixedWorkflowCheck: true,
         codexRunner: devRunner,
         agentRunner: devRunner,
-        allowedAgents: devRunner ? (opts.allowedAgents?.length ? opts.allowedAgents : ['codex']) : [],
+        allowedAgents: devRunner ? (opts.allowedAgents?.length ? opts.allowedAgents : defaultLocalAgentRunners()) : [],
         runnerTimeoutMs: opts.runnerTimeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS,
         runnerMaxTimeoutMs: opts.runnerMaxTimeoutMs ?? MAX_AGENT_TIMEOUT_MS,
       }),
@@ -214,7 +214,7 @@ export function getMcpPolicy(profile: McpProfileName, opts: McpPolicyOptions = {
       execution: executionPolicy({
         codexRunner: devRunner,
         agentRunner: devRunner,
-        allowedAgents: devRunner ? (opts.allowedAgents?.length ? opts.allowedAgents : ['codex']) : [],
+        allowedAgents: devRunner ? (opts.allowedAgents?.length ? opts.allowedAgents : defaultLocalAgentRunners()) : [],
         runnerTimeoutMs: opts.runnerTimeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS,
         runnerMaxTimeoutMs: opts.runnerMaxTimeoutMs ?? MAX_AGENT_TIMEOUT_MS,
       }),

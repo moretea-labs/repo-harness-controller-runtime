@@ -18,7 +18,7 @@ import { resolveControllerAccessState } from './access-mode';
 import { applyDirectNetworkProxyBypass, withDirectNetworkProxyBypass } from './proxy-env';
 import { resolveMcpRepoRoot } from './repo';
 import { runMcpDoctor, runMcpSetupChatgpt, runMcpSetupCodex, type McpSetupResult } from './setup';
-import { CONTROLLER_TOOL_SURFACE } from '../controller/runtime-config';
+import { CONTROLLER_TOOL_SURFACE, defaultLocalAgentRunners } from '../controller/runtime-config';
 import { requestControllerServiceRestart } from '../controller/restart-coordinator';
 import { ensureRepoPreferredControllerHome } from '../repositories/controller-home';
 import { getGitHubPluginStatus, loadGitHubPluginConfig, saveGitHubPluginConfig } from '../github/plugin';
@@ -377,7 +377,7 @@ function resolveRestartConfig(repoRoot: string, explicitLogFile?: string, explic
     defaultServerName,
     expectedToolSurface,
     devRunner: localConfig?.devMode?.agentRunner === true,
-    devRunnerAgents: localConfig?.devMode?.allowedAgents ?? ['codex'],
+    devRunnerAgents: localConfig?.devMode?.allowedAgents ?? defaultLocalAgentRunners(),
     devRunnerTimeoutMs: localConfig?.devMode?.timeoutMs ?? 3_600_000,
     devRunnerMaxTimeoutMs: localConfig?.devMode?.maxTimeoutMs ?? 43_200_000,
     localUiEnabled: localConfig?.localController?.enabled ?? true,

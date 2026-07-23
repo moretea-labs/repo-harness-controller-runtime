@@ -133,6 +133,7 @@ import {
   CONTROLLER_TOOL_SURFACE,
   CONTROLLER_TOOL_SURFACE_VERSION,
   controllerToolSurfaceFingerprint,
+  defaultLocalAgentRunners,
 } from "../controller/runtime-config";
 import { taskExecutionPolicy, taskWriteScopesConflict } from "../controller/execution-policy";
 import { scheduleControllerServiceRestart } from "../controller/restart-coordinator";
@@ -543,7 +544,7 @@ export function buildLocalControllerSnapshot(repoRoot: string) {
     execution: {
       defaultMode: "direct-edit",
       agentRunner: mcpConfig?.devMode?.agentRunner === true,
-      allowedAgents: mcpConfig?.devMode?.allowedAgents ?? ["codex"],
+      allowedAgents: mcpConfig?.devMode?.allowedAgents ?? defaultLocalAgentRunners(),
       taskAgentBinding: false,
       localRiskApprovalGate: false,
     },

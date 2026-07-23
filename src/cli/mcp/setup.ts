@@ -18,6 +18,7 @@ import { resolveMcpRepoRoot } from "./repo";
 import {
   CONTROLLER_TOOL_SURFACE,
   DEFAULT_AGENT_TIMEOUT_MS,
+  defaultLocalAgentRunners,
   MAX_AGENT_TIMEOUT_MS,
 } from "../controller/runtime-config";
 import { ensureControllerHome, ensureRepoPreferredControllerHome } from "../repositories/controller-home";
@@ -490,7 +491,7 @@ export function runMcpSetupChatgpt(opts: {
     devMode: {
       ...existingConfig?.devMode,
       agentRunner: existingConfig?.devMode?.agentRunner ?? true,
-      allowedAgents: existingConfig?.devMode?.allowedAgents ?? ["codex"],
+      allowedAgents: existingConfig?.devMode?.allowedAgents ?? defaultLocalAgentRunners(),
       timeoutMs:
         !existingConfig?.devMode?.timeoutMs ||
         existingConfig.devMode.timeoutMs === 120_000
@@ -843,7 +844,7 @@ export function runMcpDoctor(opts: {
       },
       devMode: {
         agentRunner: localConfig?.devMode?.agentRunner === true,
-        allowedAgents: localConfig?.devMode?.allowedAgents ?? ["codex"],
+        allowedAgents: localConfig?.devMode?.allowedAgents ?? defaultLocalAgentRunners(),
         timeoutMs: localConfig?.devMode?.timeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS,
         maxTimeoutMs:
           localConfig?.devMode?.maxTimeoutMs ?? MAX_AGENT_TIMEOUT_MS,

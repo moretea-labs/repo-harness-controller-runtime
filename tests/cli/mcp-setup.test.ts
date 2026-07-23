@@ -78,7 +78,7 @@ describe("mcp setup", () => {
       });
       expect(config.devMode).toMatchObject({
         agentRunner: true,
-        allowedAgents: ["codex"],
+        allowedAgents: ["codex", "claude"],
         timeoutMs: 3_600_000,
         maxTimeoutMs: 43_200_000,
       });

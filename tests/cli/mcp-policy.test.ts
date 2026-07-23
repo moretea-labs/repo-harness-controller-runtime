@@ -140,6 +140,9 @@ describe('mcp policy and paths', () => {
       expect(buildMcpToolDefinitions(disabled).some((tool) => tool.name === 'run_agent_goal')).toBe(false);
       expect(resolveMcpPath(tmp, '.ai/harness/handoff/codex-goal.md', disabled, 'read')).toMatchObject({ ok: false });
 
+      const defaults = getMcpPolicy('orchestrator', { devAgentRunner: true, runnerTimeoutMs: 5000 });
+      expect(defaults.execution.allowedAgents).toEqual(['codex', 'claude']);
+
       const enabled = getMcpPolicy('orchestrator', { devAgentRunner: true, allowedAgents: ['codex'], runnerTimeoutMs: 5000 });
       expect(enabled.execution.agentRunner).toBe(true);
       expect(enabled.execution.allowedAgents).toEqual(['codex']);

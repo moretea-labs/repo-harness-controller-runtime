@@ -17,6 +17,15 @@ describe("executor health classifier", () => {
     expect(health?.fallback).toBe("use_direct_edit");
   });
 
+  test("allows Claude when explicitly permitted", () => {
+    const health = classifyLocalExecutorHealth(
+      "claude",
+      { agentRunner: true, allowedAgents: ["codex", "claude"] },
+      { allowedPaths: ["src/a.ts"] },
+    );
+    expect(health).toBeNull();
+  });
+
   test("classifies dev runner disabled", () => {
     const health = classifyLocalExecutorHealth(
       "codex",
