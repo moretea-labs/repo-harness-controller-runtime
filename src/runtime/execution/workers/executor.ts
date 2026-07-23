@@ -32,6 +32,21 @@ import { isAbsolute, relative, resolve, sep } from 'path';
 import { isAssistantPluginError } from '../../plugins/errors';
 import { executeAssistantRoutineRuntime } from '../../assistant/routine-runtime';
 
+export function runtimeToolArgumentsForExecutionJob(
+  job: Pick<ExecutionJob, 'requestId' | 'payload'>,
+): Record<string, unknown> {
+  const args = { ...(job.payload.arguments ?? {}) };
+  if (job.payload.operation !== 'controller_restart_verify') return args;
+
+  const explicitRequestId = typeof args.request_id === 'string' && args.request_id.trim()
+    ? args.request_id.trim()
+    : typeof args.requestId === 'string' && args.requestId.trim()
+      ? args.requestId.trim()
+      : undefined;
+  args.request_id = explicitRequestId ?? job.requestId;
+  return args;
+}
+
 function childReferenceFromLocalJob(
   localJob: LocalBridgeJob,
   requestId?: string,
@@ -569,18 +584,19 @@ export async function executeExecutionJob(controllerHome: string, job: Execution
     // Load the Work implementation only for Work Jobs. A static import here
     // creates an initialization cycle through repository command and Local Bridge
     // modules, changing unrelated execution behavior.
+    const toolArguments = runtimeToolArgumentsForExecutionJob(job);
     const executionResult = durableWorkOperation
       ? await import('../../gateway/mcp/execution-tools').then(({ callExecutionTool }) =>
         callExecutionTool(runtimeContext, job.payload.operation, {
-          ...(job.payload.arguments ?? {}),
+          ...toolArguments,
           __from_durable_worker: true,
           __execution_job_id: job.jobId,
         }))
       : undefined;
     const runtimeResult = executionResult ?? (policy.profile === 'controller'
-      ? await callRuntimeTool(runtimeContext, job.payload.operation, job.payload.arguments ?? {})
+      ? await callRuntimeTool(runtimeContext, job.payload.operation, toolArguments)
       : undefined);
-    const result = runtimeResult ?? await callMcpTool(context, job.payload.operation, job.payload.arguments ?? {});
+    const result = runtimeResult ?? await callMcpTool(context, job.payload.operation, toolArguments);
     let record: Record<string, unknown> = {
       ...toolResultRecord(result),
       repoId: repository.repoId,

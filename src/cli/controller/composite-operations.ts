@@ -243,6 +243,34 @@ function resolveSlotHome(repoRoot: string, controllerHome: string | undefined, s
   return ensureSlotHome(root, slot);
 }
 
+export interface ControllerRestartWaitDependencies {
+  now?: () => number;
+  read?: (slotHome: string, requestId: string) => ControllerRestartState | undefined;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+function restartStateIsTerminal(state: ControllerRestartState): boolean {
+  return state.phase === 'succeeded' || state.phase === 'failed';
+}
+
+export async function waitForControllerRestartState(
+  slotHome: string,
+  initial: ControllerRestartState,
+  options: Pick<ControllerRestartVerifyInput, 'waitTimeoutMs' | 'pollIntervalMs'> = {},
+  dependencies: ControllerRestartWaitDependencies = {},
+): Promise<ControllerRestartState> {
+  const now = dependencies.now ?? Date.now;
+  const read = dependencies.read ?? readControllerRestartState;
+  const sleep = dependencies.sleep ?? ((ms: number) => Bun.sleep(ms));
+  const deadline = now() + Math.max(5_000, options.waitTimeoutMs ?? 90_000);
+  let state = initial;
+  while (!restartStateIsTerminal(state) && now() < deadline) {
+    await sleep(Math.max(0, options.pollIntervalMs ?? 500));
+    state = read(slotHome, state.requestId) ?? state;
+  }
+  return state;
+}
+
 /**
  * Persist restart request, wait for generation, verify all surfaces, allow resume by requestId.
  */
@@ -267,10 +295,13 @@ export async function controllerRestartVerify(input: ControllerRestartVerifyInpu
 
   if (input.requestId) {
     const existing = readControllerRestartState(slotHome, input.requestId);
-    if (existing && (existing.phase === 'succeeded' || existing.phase === 'failed' || existing.phase !== undefined)) {
-      // Always prefer resume over double-submit for the same request id.
+    if (existing) {
+      // Always prefer resume over double-submit for the same durable request id.
       if (existing.phase !== 'failed' || input.pollOnly) {
-        return formatRestartState(repoRoot, slotHome, existing, input, evidenceRefs);
+        const resumed = !input.pollOnly && !restartStateIsTerminal(existing)
+          ? await waitForControllerRestartState(slotHome, existing, input)
+          : existing;
+        return formatRestartState(repoRoot, slotHome, resumed, input, evidenceRefs);
       }
     }
   }
@@ -294,14 +325,7 @@ export async function controllerRestartVerify(input: ControllerRestartVerifyInpu
   if (requested.action === 'restart_scheduled') {
     const scheduled = requested as ControllerRestartScheduledResult;
     evidenceRefs.push(scheduled.statePath, scheduled.logPath);
-    // Wait for terminal phase when possible.
-    const deadline = Date.now() + Math.max(5_000, input.waitTimeoutMs ?? 90_000);
-    let state = scheduled.state;
-    while (Date.now() < deadline) {
-      state = readControllerRestartState(slotHome, scheduled.requestId) ?? state;
-      if (state.phase === 'succeeded' || state.phase === 'failed') break;
-      await Bun.sleep(input.pollIntervalMs ?? 500);
-    }
+    const state = await waitForControllerRestartState(slotHome, scheduled.state, input);
     return formatRestartState(repoRoot, slotHome, state, input, evidenceRefs, oldPids);
   }
 
