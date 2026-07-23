@@ -98,6 +98,10 @@ export async function runStableIngressChild(): Promise<void> {
   await new Promise<void>(() => { /* ingress server and parent monitor own the event loop */ });
 }
 
+export function stableSupervisorExitCode(reason: 'unexpected_runtime_stop' | 'explicit_signal'): number {
+  return reason === 'unexpected_runtime_stop' ? 1 : 0;
+}
+
 export async function runStableSupervisor(): Promise<void> {
   const repoRoot = resolveMcpRepoRoot(option('--repo') ?? process.cwd());
   const controllerHome = ensureControllerHome(option('--controller-home'));
@@ -131,7 +135,10 @@ export async function runStableSupervisor(): Promise<void> {
     controlHost: option('--control-host') ?? '127.0.0.1',
     controlPort: numberOption('--control-port', 8770),
     releaseRevision: option('--release-revision'),
-    onStopped: () => completeExit(0),
+    // A runtime-owned stop is unexpected at the top-level service boundary.
+    // Exit non-zero so launchd/systemd restart the Stable Supervisor instead
+    // of treating the outage as an intentional operator shutdown.
+    onStopped: () => completeExit(stableSupervisorExitCode('unexpected_runtime_stop')),
   });
   runtime.adoptSupervisorIdentity({
     ...lock.metadata,
@@ -147,7 +154,7 @@ export async function runStableSupervisor(): Promise<void> {
     console.error(`[repo-harness supervisor] ${signal}: stopping managed runtime`);
     try {
       await runtime.stop();
-      completeExit(0);
+      completeExit(stableSupervisorExitCode('explicit_signal'));
     } catch {
       completeExit(1);
     }

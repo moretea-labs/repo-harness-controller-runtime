@@ -6,6 +6,7 @@ import { tmpdir } from 'os';
 import { bootstrapLaunchAgentWithRetry } from '../../src/cli/controller/launch-agents';
 import { selectSupervisorRollbackRelease, serviceActivationStatePath, supervisorActivationMatchesRelease, waitForServiceActivation } from '../../src/cli/commands/supervisor';
 import { installSupervisorRelease, publishSupervisorRelease, renderLaunchdSupervisorPlist, renderSystemdSupervisorUnit, stageSupervisorRelease, supervisorServiceLabel, supervisorSystemdUnitName } from '../../src/runtime/supervisor/installer';
+import { stableSupervisorExitCode } from '../../src/runtime/supervisor/entry';
 import { createStableIngressRouter } from '../../src/runtime/supervisor/ingress-router';
 import { createStableIngressProcess } from '../../src/runtime/supervisor/ingress-process';
 import { controllerDaemonMaxLifetimeMs } from '../../src/runtime/control-plane/daemon-entry';
@@ -96,6 +97,11 @@ describe('Stable Supervisor production hardening', () => {
       rmSync(controllerHome, { recursive: true, force: true });
     }
   }, 180_000);
+
+  test('unexpected runtime stop is restartable while explicit signal remains successful', () => {
+    expect(stableSupervisorExitCode('unexpected_runtime_stop')).toBe(1);
+    expect(stableSupervisorExitCode('explicit_signal')).toBe(0);
+  });
 
   test('OS services restart crashes but preserve explicit successful stop', () => {
     const plist = renderLaunchdSupervisorPlist({
