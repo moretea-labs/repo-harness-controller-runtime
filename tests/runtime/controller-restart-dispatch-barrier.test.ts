@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'bun:test';
+import { mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import type { ControllerRestartState } from '../../src/cli/controller/restart-coordinator';
 import { shouldDeferControllerRestartRetry } from '../../src/runtime/control-plane/repo-actor/actor';
 import type { ExecutionJob } from '../../src/runtime/execution/jobs/types';
@@ -7,26 +10,12 @@ function job(options: {
   operation?: string;
   requestId?: string;
   explicitRequestId?: string;
-  ownerPid?: number;
-  ownerStartedAt?: string;
 } = {}): ExecutionJob {
   return {
     requestId: options.requestId ?? 'execution-request-1',
     payload: {
       operation: options.operation ?? 'controller_restart_verify',
       arguments: options.explicitRequestId ? { request_id: options.explicitRequestId } : {},
-    },
-    workerLifecycle: {
-      executable: '/worker',
-      args: [],
-      cwd: '/repo',
-      environment: {},
-      ownerPid: options.ownerPid ?? 42,
-      ownerStartedAt: options.ownerStartedAt ?? 'controller-start-a',
-      attempt: 1,
-      maxAttempts: 2,
-      spawnedAt: '2026-07-23T00:00:00.000Z',
-      startupState: 'exited',
     },
   } as unknown as ExecutionJob;
 }
@@ -46,65 +35,63 @@ function state(phase: ControllerRestartState['phase']): ControllerRestartState {
 }
 
 describe('controller restart retry dispatch barrier', () => {
-  it('defers a nonterminal restart retry on the same Controller process identity', () => {
-    expect(shouldDeferControllerRestartRetry(
-      '/controller',
-      job(),
-      42,
-      'controller-start-a',
-      () => state('starting'),
-    )).toBe(true);
+  it('defers a restart retry for every nonterminal operation phase', () => {
+    for (const phase of ['scheduled', 'coordinator_started', 'waiting_for_handoff', 'stopping', 'starting', 'verifying'] as const) {
+      expect(shouldDeferControllerRestartRetry('/controller', job(), () => state(phase))).toBe(true);
+    }
   });
 
-  it('allows the new Controller process to claim the durable retry', () => {
-    expect(shouldDeferControllerRestartRetry(
-      '/controller',
-      job(),
-      43,
-      'controller-start-b',
-      () => state('starting'),
-    )).toBe(false);
+  it('reads restart state from the root authority when Scheduler runs in a slot home', () => {
+    const root = mkdtempSync(join(tmpdir(), 'repo-harness-restart-barrier-'));
+    const slotHome = join(root, 'runtime-slots', 'blue');
+    let observedHome = '';
+    try {
+      const deferred = shouldDeferControllerRestartRetry(slotHome, job(), (home) => {
+        observedHome = home;
+        return state('verifying');
+      });
+      expect(deferred).toBe(true);
+      expect(observedHome).toBe(root);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
-  it('does not confuse PID reuse with the same Controller process', () => {
-    expect(shouldDeferControllerRestartRetry(
-      '/controller',
-      job(),
-      42,
-      'controller-start-b',
-      () => state('starting'),
-    )).toBe(false);
-  });
-
-  it('preserves ordinary retry when coordinator state is absent or terminal', () => {
-    expect(shouldDeferControllerRestartRetry('/controller', job(), 42, 'controller-start-a', () => undefined)).toBe(false);
-    expect(shouldDeferControllerRestartRetry('/controller', job(), 42, 'controller-start-a', () => state('succeeded'))).toBe(false);
-    expect(shouldDeferControllerRestartRetry('/controller', job(), 42, 'controller-start-a', () => state('failed'))).toBe(false);
+  it('preserves ordinary retry when operation state is absent or terminal', () => {
+    const root = mkdtempSync(join(tmpdir(), 'repo-harness-restart-terminal-'));
+    try {
+      expect(shouldDeferControllerRestartRetry(root, job(), () => undefined)).toBe(false);
+      expect(shouldDeferControllerRestartRetry(root, job(), () => state('succeeded'))).toBe(false);
+      expect(shouldDeferControllerRestartRetry(root, job(), () => state('failed'))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('uses the explicit restart request id when one was supplied', () => {
+    const root = mkdtempSync(join(tmpdir(), 'repo-harness-restart-request-id-'));
     let observedRequestId = '';
-    const deferred = shouldDeferControllerRestartRetry(
-      '/controller',
-      job({ explicitRequestId: 'explicit-restart-1' }),
-      42,
-      'controller-start-a',
-      (_home, requestId) => {
-        observedRequestId = requestId;
-        return state('verifying');
-      },
-    );
+    try {
+      const deferred = shouldDeferControllerRestartRetry(
+        root,
+        job({ explicitRequestId: 'explicit-restart-1' }),
+        (_home, requestId) => {
+          observedRequestId = requestId;
+          return state('verifying');
+        },
+      );
 
-    expect(deferred).toBe(true);
-    expect(observedRequestId).toBe('explicit-restart-1');
+      expect(deferred).toBe(true);
+      expect(observedRequestId).toBe('explicit-restart-1');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('does not defer unrelated operations', () => {
     expect(shouldDeferControllerRestartRetry(
       '/controller',
       job({ operation: 'controller_ready' }),
-      42,
-      'controller-start-a',
       () => state('starting'),
     )).toBe(false);
   });

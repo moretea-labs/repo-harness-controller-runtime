@@ -1,4 +1,5 @@
 import { readControllerRestartState, type ControllerRestartState } from '../../../cli/controller/restart-coordinator';
+import { controllerAuthorityHome } from '../../../cli/controller/runtime-slots';
 import { withControllerLock } from '../../../cli/repositories/locks';
 import { controllerRestartRequestIdForExecutionJob } from '../../execution/jobs/restart-resume';
 import { claimExecutionJobForDispatch, findExecutionJob, listActiveExecutionJobs, transitionExecutionJob, updateExecutionJob } from '../../execution/jobs/store';
@@ -16,8 +17,6 @@ export type ControllerRestartStateReader = (
 export interface RepoActorConfig {
   maxConcurrentWorkers: number;
   leaseTtlMs: number;
-  controllerPid: number;
-  controllerStartedAt?: string;
   restartStateReader: ControllerRestartStateReader;
 }
 
@@ -78,32 +77,22 @@ function candidateSort(left: ExecutionJob, right: ExecutionJob): number {
   return left.queuedAt.localeCompare(right.queuedAt) || left.jobId.localeCompare(right.jobId);
 }
 
-function sameControllerProcess(
-  lifecycle: ExecutionJob['workerLifecycle'],
-  controllerPid: number,
-  controllerStartedAt?: string,
-): boolean {
-  if (!lifecycle || lifecycle.ownerPid !== controllerPid) return false;
-  if (!lifecycle.ownerStartedAt || !controllerStartedAt) return true;
-  return lifecycle.ownerStartedAt === controllerStartedAt;
-}
-
 export function shouldDeferControllerRestartRetry(
   controllerHome: string,
   job: ExecutionJob,
-  controllerPid: number,
-  controllerStartedAt?: string,
   readState: ControllerRestartStateReader = readControllerRestartState,
 ): boolean {
   if (job.payload.operation !== 'controller_restart_verify') return false;
-  if (!sameControllerProcess(job.workerLifecycle, controllerPid, controllerStartedAt)) return false;
 
   try {
-    const state = readState(controllerHome, controllerRestartRequestIdForExecutionJob(job));
+    const state = readState(
+      controllerAuthorityHome(controllerHome),
+      controllerRestartRequestIdForExecutionJob(job),
+    );
     return Boolean(state && state.phase !== 'succeeded' && state.phase !== 'failed');
   } catch {
-    // A partially-written coordinator state must not let the initiating Daemon
-    // redispatch the retry into the same shutdown window.
+    // A partially-written operation state must not dispatch another verifier
+    // while Stable Supervisor ownership is unresolved.
     return true;
   }
 }
@@ -119,8 +108,6 @@ export class RepoActor {
     this.config = {
       maxConcurrentWorkers: Math.max(1, config.maxConcurrentWorkers ?? 2),
       leaseTtlMs: Math.max(10_000, config.leaseTtlMs ?? 30_000),
-      controllerPid: config.controllerPid ?? process.pid,
-      controllerStartedAt: config.controllerStartedAt,
       restartStateReader: config.restartStateReader ?? readControllerRestartState,
     };
   }
@@ -143,8 +130,6 @@ export class RepoActor {
           if (shouldDeferControllerRestartRetry(
             this.controllerHome,
             job,
-            this.config.controllerPid,
-            this.config.controllerStartedAt,
             this.config.restartStateReader,
           )) return undefined;
 

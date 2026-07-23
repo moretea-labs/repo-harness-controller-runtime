@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'bun:test';
-import { waitForControllerRestartState } from '../../src/cli/controller/composite-operations';
+import { mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import {
+  replacedManagedPidsForRestart,
+  resolveControllerRestartHome,
+  waitForControllerRestartState,
+} from '../../src/cli/controller/composite-operations';
 import type { ControllerRestartState } from '../../src/cli/controller/restart-coordinator';
 import { runtimeToolArgumentsForExecutionJob } from '../../src/runtime/execution/jobs/restart-resume';
 
@@ -41,6 +48,42 @@ describe('controller restart durable resume', () => {
     });
 
     expect(args.request_id).toBe('explicit-restart-1');
+  });
+
+  it('uses the root Controller Home when Stable Supervisor is installed', () => {
+    const root = mkdtempSync(join(tmpdir(), 'repo-harness-restart-root-'));
+    const slotHome = join(root, 'runtime-slots', 'blue');
+    try {
+      const resolved = resolveControllerRestartHome('/repo', slotHome, undefined, {
+        stableSupervisorInstalled: (candidate) => candidate === root,
+      });
+      expect(resolved).toBe(root);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps slot-local fallback for an isolated nonregistered lifecycle', () => {
+    const root = mkdtempSync(join(tmpdir(), 'repo-harness-restart-slot-'));
+    try {
+      const resolved = resolveControllerRestartHome('/repo', root, 'green', {
+        stableSupervisorInstalled: () => false,
+      });
+      expect(resolved).toBe(join(root, 'runtime-slots', 'green'));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the Stable Supervisor PID while requiring Daemon and Gateway replacement', () => {
+    const status = {
+      supervisor: { pid: 101 },
+      daemon: { pid: 202 },
+      mcpRuntime: { server: { pid: 303 } },
+    } as Parameters<typeof replacedManagedPidsForRestart>[0];
+
+    expect(replacedManagedPidsForRestart(status, true)).toEqual([202, 303]);
+    expect(replacedManagedPidsForRestart(status, false)).toEqual([101, 202, 303]);
   });
 
   it('waits for an existing nonterminal coordinator request instead of resubmitting', async () => {

@@ -196,10 +196,7 @@ export class GlobalScheduler {
     this.controllerHome = controllerHome;
     this.controllerPid = runtime.controllerPid ?? process.pid;
     this.controllerStartedAt = runtime.controllerStartedAt;
-    this.actors = new RepoActorRegistry(controllerHome, {
-      controllerPid: this.controllerPid,
-      controllerStartedAt: this.controllerStartedAt,
-    });
+    this.actors = new RepoActorRegistry(controllerHome);
     this.config = {
       maxWorkers: Math.max(1, config.maxWorkers ?? Number(process.env.REPO_HARNESS_MAX_WORKERS ?? 4)),
       maxConcurrentRepositories: Math.max(1, config.maxConcurrentRepositories ?? Number(process.env.REPO_HARNESS_MAX_ACTIVE_REPOS ?? 4)),

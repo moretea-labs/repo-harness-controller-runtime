@@ -25,11 +25,13 @@ import {
 import { validatePatchSuccess, validateRestartSuccess } from './postcondition';
 import { gitSnapshot } from '../repository/inspector';
 import {
+  controllerAuthorityHome,
   ensureSlotHome,
   readActiveSlotAuthority,
   type RuntimeSlotId,
 } from './runtime-slots';
 import { controllerRollout } from './bluegreen-rollout';
+import { isStableSupervisorInstalled } from '../../runtime/supervisor/paths';
 
 function fileSha(repoRoot: string, relativePath: string): string | null {
   const absolute = join(repoRoot, relativePath);
@@ -216,7 +218,7 @@ export function repositoryChangeVerify(input: RepositoryChangeVerifyInput): Comp
 export interface ControllerRestartVerifyInput {
   repo?: string;
   controllerHome?: string;
-  /** Active slot by default; tests may target a specific slot home. */
+  /** Isolated nonregistered lifecycle tests may target a specific slot home. */
   slot?: RuntimeSlotId;
   requestId?: string;
   reason?: string;
@@ -243,10 +245,38 @@ function resolveSlotHome(repoRoot: string, controllerHome: string | undefined, s
   return ensureSlotHome(root, slot);
 }
 
+export interface ControllerRestartHomeDependencies {
+  stableSupervisorInstalled?: (controllerHome: string) => boolean;
+}
+
+export function resolveControllerRestartHome(
+  repoRoot: string,
+  controllerHome: string | undefined,
+  slot?: RuntimeSlotId,
+  dependencies: ControllerRestartHomeDependencies = {},
+): string {
+  const preferredHome = resolveRepoPreferredControllerHome(repoRoot, controllerHome);
+  const rootHome = controllerAuthorityHome(preferredHome);
+  const stableInstalled = dependencies.stableSupervisorInstalled ?? isStableSupervisorInstalled;
+  if (stableInstalled(rootHome)) return rootHome;
+  return resolveSlotHome(repoRoot, preferredHome, slot);
+}
+
 export interface ControllerRestartWaitDependencies {
   now?: () => number;
-  read?: (slotHome: string, requestId: string) => ControllerRestartState | undefined;
+  read?: (controllerHome: string, requestId: string) => ControllerRestartState | undefined;
   sleep?: (ms: number) => Promise<void>;
+}
+
+export function replacedManagedPidsForRestart(
+  status: Pick<ControllerServiceStatus, 'supervisor' | 'daemon' | 'mcpRuntime'>,
+  stableSupervisorManaged: boolean,
+): number[] {
+  return [
+    ...(stableSupervisorManaged ? [] : [status.supervisor.pid]),
+    status.daemon.pid,
+    status.mcpRuntime?.server.pid,
+  ].filter((pid): pid is number => Number.isInteger(pid) && Number(pid) > 0);
 }
 
 function restartStateIsTerminal(state: ControllerRestartState): boolean {
@@ -254,7 +284,7 @@ function restartStateIsTerminal(state: ControllerRestartState): boolean {
 }
 
 export async function waitForControllerRestartState(
-  slotHome: string,
+  controllerHome: string,
   initial: ControllerRestartState,
   options: Pick<ControllerRestartVerifyInput, 'waitTimeoutMs' | 'pollIntervalMs'> = {},
   dependencies: ControllerRestartWaitDependencies = {},
@@ -266,7 +296,7 @@ export async function waitForControllerRestartState(
   let state = initial;
   while (!restartStateIsTerminal(state) && now() < deadline) {
     await sleep(Math.max(0, options.pollIntervalMs ?? 500));
-    state = read(slotHome, state.requestId) ?? state;
+    state = read(controllerHome, state.requestId) ?? state;
   }
   return state;
 }
@@ -276,11 +306,11 @@ export async function waitForControllerRestartState(
  */
 export async function controllerRestartVerify(input: ControllerRestartVerifyInput = {}): Promise<CompositeToolResult> {
   const repoRoot = resolveMcpRepoRoot(input.repo ?? '.');
-  const slotHome = resolveSlotHome(repoRoot, input.controllerHome, input.slot);
+  const restartHome = resolveControllerRestartHome(repoRoot, input.controllerHome, input.slot);
   const evidenceRefs: string[] = [];
 
   if (input.pollOnly && input.requestId) {
-    const state = readControllerRestartState(slotHome, input.requestId);
+    const state = readControllerRestartState(restartHome, input.requestId);
     if (!state) {
       return compositeFailed({
         phase: 'poll',
@@ -290,32 +320,29 @@ export async function controllerRestartVerify(input: ControllerRestartVerifyInpu
         nextAction: 'submit controller_restart_verify without pollOnly',
       });
     }
-    return formatRestartState(repoRoot, slotHome, state, input, evidenceRefs);
+    return formatRestartState(repoRoot, restartHome, state, input, evidenceRefs);
   }
 
   if (input.requestId) {
-    const existing = readControllerRestartState(slotHome, input.requestId);
+    const existing = readControllerRestartState(restartHome, input.requestId);
     if (existing) {
       // Always prefer resume over double-submit for the same durable request id.
       if (existing.phase !== 'failed' || input.pollOnly) {
         const resumed = !input.pollOnly && !restartStateIsTerminal(existing)
-          ? await waitForControllerRestartState(slotHome, existing, input)
+          ? await waitForControllerRestartState(restartHome, existing, input)
           : existing;
-        return formatRestartState(repoRoot, slotHome, resumed, input, evidenceRefs);
+        return formatRestartState(repoRoot, restartHome, resumed, input, evidenceRefs);
       }
     }
   }
 
-  const before = await controllerServiceStatus({ repo: repoRoot, controllerHome: slotHome });
-  const oldPids = [
-    before.supervisor.pid,
-    before.daemon.pid,
-    before.mcpRuntime?.server.pid,
-  ].filter((pid): pid is number => Number.isInteger(pid) && Number(pid) > 0);
+  const before = await controllerServiceStatus({ repo: repoRoot, controllerHome: restartHome });
+  const stableSupervisorManaged = isStableSupervisorInstalled(restartHome);
+  const oldPids = replacedManagedPidsForRestart(before, stableSupervisorManaged);
 
   const requested = await requestControllerServiceRestart({
     repo: repoRoot,
-    controllerHome: slotHome,
+    controllerHome: restartHome,
     requestId: input.requestId,
     reason: input.reason ?? 'controller_restart_verify',
     requestedBy: 'composite-controller-restart-verify',
@@ -325,8 +352,8 @@ export async function controllerRestartVerify(input: ControllerRestartVerifyInpu
   if (requested.action === 'restart_scheduled') {
     const scheduled = requested as ControllerRestartScheduledResult;
     evidenceRefs.push(scheduled.statePath, scheduled.logPath);
-    const state = await waitForControllerRestartState(slotHome, scheduled.state, input);
-    return formatRestartState(repoRoot, slotHome, state, input, evidenceRefs, oldPids);
+    const state = await waitForControllerRestartState(restartHome, scheduled.state, input);
+    return formatRestartState(repoRoot, restartHome, state, input, evidenceRefs, oldPids);
   }
 
   // Sync restart completed inline.
@@ -335,7 +362,7 @@ export async function controllerRestartVerify(input: ControllerRestartVerifyInpu
     schemaVersion: 1,
     requestId: input.requestId ?? `sync-${Date.now()}`,
     repoRoot,
-    controllerHome: slotHome,
+    controllerHome: restartHome,
     phase: 'succeeded',
     requestedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -380,15 +407,15 @@ export async function controllerRestartVerify(input: ControllerRestartVerifyInpu
 
 async function formatRestartState(
   repoRoot: string,
-  slotHome: string,
+  controllerHome: string,
   state: ControllerRestartState,
   input: ControllerRestartVerifyInput,
   evidenceRefs: string[],
   oldPids: number[] = [],
 ): Promise<CompositeToolResult> {
   evidenceRefs.push(
-    join(slotHome, 'restart', 'current.json'),
-    join(slotHome, 'restart', 'requests', `${state.requestId}.json`),
+    join(controllerHome, 'restart', 'current.json'),
+    join(controllerHome, 'restart', 'requests', `${state.requestId}.json`),
   );
   if (state.phase === 'failed') {
     return compositeFailed({
@@ -413,7 +440,7 @@ async function formatRestartState(
     });
   }
 
-  const status = await controllerServiceStatus({ repo: repoRoot, controllerHome: slotHome });
+  const status = await controllerServiceStatus({ repo: repoRoot, controllerHome });
   const post = validateRestartSuccess({
     state,
     status,
