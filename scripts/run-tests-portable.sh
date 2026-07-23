@@ -17,7 +17,7 @@ if command -v bun >/dev/null 2>&1; then
     exec bun test --isolate "$@"
   fi
 
-  test_parallelism="${REPO_HARNESS_TEST_PARALLELISM:-4}"
+  test_parallelism="${REPO_HARNESS_TEST_PARALLELISM:-1}"
   case "$test_parallelism" in
     ''|*[!0-9]*)
       echo "[tests] REPO_HARNESS_TEST_PARALLELISM must be a positive integer." >&2
@@ -29,18 +29,21 @@ if command -v bun >/dev/null 2>&1; then
     exit 2
   fi
 
-  # Each file gets an independent Bun process. This isolates process.env and
-  # open handles while bounded xargs concurrency keeps the exhaustive suite
-  # within the Controller execution budget.
-  git ls-files -z 'tests/*.test.ts' 'tests/**/*.test.ts' 'tests/**/*.test.mjs' |
-    xargs -0 -n 1 -P "$test_parallelism" bash -c '
-      args=("$@")
-      last=$(( ${#args[@]} - 1 ))
-      file="${args[$last]}"
-      unset "args[$last]"
-      exec bun test --no-orphans "${args[@]}" "$file"
-    ' _ "$@"
-  exit $?
+  max_test_parallelism=4
+  if [[ "$test_parallelism" -gt "$max_test_parallelism" ]]; then
+    echo "[tests] bounding file-level parallelism to ${max_test_parallelism} to preserve subprocess headroom." >&2
+    test_parallelism="$max_test_parallelism"
+  fi
+
+  # Run the exhaustive suite in one Bun process. File isolation is provided by
+  # --isolate, while bounded concurrency prevents shared host-level Git, hook,
+  # launchd, process-tree, and user-tooling state from racing across files.
+  test_files=()
+  while IFS= read -r -d '' test_file; do
+    test_files+=("$test_file")
+  done < <(git ls-files -z 'tests/*.test.ts' 'tests/**/*.test.ts' 'tests/**/*.test.mjs')
+
+  exec bun test --isolate --max-concurrency "$test_parallelism" "$@" "${test_files[@]}"
 fi
 
 cat >&2 <<'MSG'

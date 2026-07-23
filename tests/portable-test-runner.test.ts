@@ -9,8 +9,11 @@ describe("portable test runner", () => {
     const script = readFileSync(join(ROOT, "scripts", "run-tests-portable.sh"), "utf8");
 
     expect(script).toContain("git ls-files -z");
-    expect(script).toContain('xargs -0 -n 1 -P "$test_parallelism"');
-    expect(script).toContain('exec bun test --no-orphans "${args[@]}" "$file"');
+    expect(script).toContain('REPO_HARNESS_TEST_PARALLELISM:-1');
+    expect(script).toContain('max_test_parallelism=4');
+    expect(script).toContain('test_files=()');
+    expect(script).toContain('exec bun test --isolate --max-concurrency "$test_parallelism" "$@" "${test_files[@]}"');
+    expect(script).not.toContain("xargs -0");
     expect(script).not.toContain("bun test --parallel");
   });
 

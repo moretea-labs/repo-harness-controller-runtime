@@ -94,8 +94,22 @@ export function readActivationState(home: string): ActivationStateRecord | undef
 
 function migrateV1State(v1: Record<string, unknown>): ActivationStateRecord {
   const phase = (v1.phase as string) as ActivationPhase;
+  const legacyReleaseRevision = typeof v1.releaseRevision === 'string' ? v1.releaseRevision : undefined;
+  const legacyReleasePath = typeof v1.releasePath === 'string' ? v1.releasePath : undefined;
+  const expectedReleaseRevision = typeof v1.expectedReleaseRevision === 'string'
+    ? v1.expectedReleaseRevision
+    : phase === 'succeeded' ? legacyReleaseRevision : undefined;
+  const expectedReleasePath = typeof v1.expectedReleasePath === 'string'
+    ? v1.expectedReleasePath
+    : phase === 'succeeded' ? legacyReleasePath : undefined;
+  const previousReleaseRevision = typeof v1.previousReleaseRevision === 'string'
+    ? v1.previousReleaseRevision
+    : phase === 'succeeded' ? undefined : legacyReleaseRevision;
+  const previousReleasePath = typeof v1.previousReleasePath === 'string'
+    ? v1.previousReleasePath
+    : phase === 'succeeded' ? undefined : legacyReleasePath;
   const phases: PhaseRecord[] = phase === 'succeeded' || phase === 'failed'
-    ? [{ phase, timestamp: (v1.updatedAt as string) ?? new Date().toISOString(), expectedReleaseRevision: v1.expectedReleaseRevision as string, expectedReleasePath: v1.expectedReleasePath as string }]
+    ? [{ phase, timestamp: (v1.updatedAt as string) ?? new Date().toISOString(), expectedReleaseRevision, expectedReleasePath }]
     : [];
   return {
     schemaVersion: 2,
@@ -105,10 +119,10 @@ function migrateV1State(v1: Record<string, unknown>): ActivationStateRecord {
     startedAt: (v1.startedAt as string) ?? (v1.updatedAt as string) ?? new Date().toISOString(),
     updatedAt: (v1.updatedAt as string) ?? new Date().toISOString(),
     completedAt: v1.completedAt as string | undefined,
-    expectedReleaseRevision: v1.expectedReleaseRevision as string | undefined,
-    expectedReleasePath: v1.expectedReleasePath as string | undefined,
-    previousReleaseRevision: v1.releaseRevision as string | undefined,
-    previousReleasePath: v1.releasePath as string | undefined,
+    expectedReleaseRevision,
+    expectedReleasePath,
+    previousReleaseRevision,
+    previousReleasePath,
     serviceLabel: (v1.service as Record<string, unknown> | undefined)?.label as string | undefined,
     pid: v1.pid as number | undefined,
     error: v1.error as string | undefined,

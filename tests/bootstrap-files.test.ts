@@ -55,6 +55,15 @@ describe("Bootstrap Script Contracts", () => {
     expect(agents).toContain("check-agent-tooling.sh --host both --check-updates");
   });
 
+  test("portable test runner preserves subprocess headroom", () => {
+    const runner = read("scripts/run-tests-portable.sh");
+    expect(runner).toContain('REPO_HARNESS_TEST_PARALLELISM:-1');
+    expect(runner).toContain('max_test_parallelism=4');
+    expect(runner).toContain('test_files=()');
+    expect(runner).toContain('exec bun test --isolate --max-concurrency "$test_parallelism" "$@" "${test_files[@]}"');
+    expect(runner).not.toContain("xargs -0");
+  });
+
   test("repo package should expose workflow verification scripts", () => {
     const pkg = JSON.parse(read("package.json"));
     const cliEntry = read("src/cli/index.ts");

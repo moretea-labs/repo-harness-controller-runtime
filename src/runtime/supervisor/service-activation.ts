@@ -77,8 +77,10 @@ export async function waitForServiceActivation(input: {
         throw new Error(`SUPERVISOR_ACTIVATION_FAILED: ${state.error ?? 'unknown activation failure'}`);
       }
       if (state.phase === 'succeeded') {
-        if (input.expectedReleaseRevision && state.expectedReleaseRevision !== input.expectedReleaseRevision) {
-          throw new Error(`SUPERVISOR_ACTIVATION_RELEASE_MISMATCH: expected=${input.expectedReleaseRevision} actual=${state.expectedReleaseRevision ?? 'missing'}`);
+        const actualReleaseRevision = state.expectedReleaseRevision
+          ?? (typeof state.releaseRevision === 'string' ? state.releaseRevision : undefined);
+        if (input.expectedReleaseRevision && actualReleaseRevision !== input.expectedReleaseRevision) {
+          throw new Error(`SUPERVISOR_ACTIVATION_RELEASE_MISMATCH: expected=${input.expectedReleaseRevision} actual=${actualReleaseRevision ?? 'missing'}`);
         }
         return state;
       }

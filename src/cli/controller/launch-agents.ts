@@ -128,7 +128,7 @@ export function restoreLaunchAgent(snapshot: LaunchAgentFileSnapshot): void {
  */
 function isBootoutAlreadyGone(result: LaunchctlCommandResult): boolean {
   const detail = `${result.stderr}\n${result.stdout}`;
-  return /not found|no such process|could not be found|service is not loaded/i.test(detail);
+  return /not found|no such process|could not be found|could not find service|service is not loaded/i.test(detail);
 }
 
 /**

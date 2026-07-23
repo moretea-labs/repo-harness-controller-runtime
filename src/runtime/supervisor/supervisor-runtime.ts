@@ -99,6 +99,19 @@ export function supervisorIngressHealthDecision(
   };
 }
 
+export const SUPERVISOR_MONITOR_FAILURE_THRESHOLD = 3;
+
+export function supervisorMonitorFailureDecision(
+  previousFailures: number,
+  healthy: boolean,
+): { consecutiveFailures: number; shouldRestart: boolean } {
+  const consecutiveFailures = healthy ? 0 : Math.max(0, previousFailures) + 1;
+  return {
+    consecutiveFailures,
+    shouldRestart: !healthy && consecutiveFailures >= SUPERVISOR_MONITOR_FAILURE_THRESHOLD,
+  };
+}
+
 export async function probeSupervisorGatewayHealth(
   endpoint: string,
   timeoutMs = 2_000,
@@ -355,6 +368,8 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
   private monitorPromise?: Promise<void>;
   private executionPromise?: Promise<void>;
   private stopping = false;
+  private monitorFailureCount = 0;
+  private selfRestartRequested = false;
 
   constructor(options: StableSupervisorRuntimeOptions) {
     const serviceConfig = loadMcpServiceLocalConfig(options.controllerHome, options.repoRoot);
@@ -426,6 +441,40 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
     return accepted;
   }
 
+  private resetMonitorFailures(): void {
+    this.monitorFailureCount = 0;
+  }
+
+  private requestSupervisorSelfRestart(reason: string): void {
+    if (this.selfRestartRequested || this.stopping) return;
+    this.selfRestartRequested = true;
+    if (this.monitorTimer) {
+      clearInterval(this.monitorTimer);
+      this.monitorTimer = undefined;
+    }
+    this.persist({
+      observedState: 'degraded',
+      lastIncident: {
+        at: new Date().toISOString(),
+        reason: `Stable Supervisor requested OS-service restart: ${reason}`,
+      },
+    });
+    this.options.onStopped?.();
+  }
+
+  private recordMonitorFailure(reason: string): void {
+    const decision = supervisorMonitorFailureDecision(this.monitorFailureCount, false);
+    this.monitorFailureCount = decision.consecutiveFailures;
+    this.persist({
+      observedState: 'degraded',
+      lastIncident: {
+        at: new Date().toISOString(),
+        reason: `${reason} (${decision.consecutiveFailures}/${SUPERVISOR_MONITOR_FAILURE_THRESHOLD})`,
+      },
+    });
+    if (decision.shouldRestart) this.requestSupervisorSelfRestart(reason);
+  }
+
   private async replaceIngressProcess(): Promise<StableIngressProcessHandle> {
     await this.ingressProcess?.close();
     const ingressExecutable = this.options.ingressExecutable ?? process.argv[1];
@@ -446,6 +495,8 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
 
   async start(): Promise<void> {
     this.stopping = false;
+    this.selfRestartRequested = false;
+    this.resetMonitorFailures();
     this.reconcileInterruptedOperations();
     this.state = reconcileSupervisorStateWithAuthority(this.state, readActiveSlotAuthority(this.options.controllerHome));
     writeSupervisorState(this.options.controllerHome, this.state);
@@ -1331,7 +1382,7 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
   }
 
   private async monitorTick(): Promise<void> {
-    if (this.stopping || this.state.desiredState !== 'running') return;
+    if (this.stopping || this.selfRestartRequested || this.state.desiredState !== 'running') return;
     let degraded = !this.synchronizeActiveRuntimeGeneration(false);
     let ingressDegraded = false;
     if (!this.ingressProcess?.alive()) {
@@ -1363,6 +1414,7 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
             reason: `stable ingress process recovery failed: ${detail}`,
           },
         });
+        this.recordMonitorFailure(`stable ingress process recovery failed: ${detail}`);
       }
     }
     for (const component of ['controllerDaemon', 'gatewayHost'] as const) {
@@ -1496,6 +1548,7 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
                     },
                     lastIncident: { at: now, reason: replacementDetail },
                   });
+                  this.requestSupervisorSelfRestart(replacementDetail);
                 }
               } catch (error) {
                 const detail = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 200);
@@ -1509,6 +1562,7 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
                   },
                   lastIncident: { at: now, reason: `stable ingress replacement failed: ${detail}` },
                 });
+                this.requestSupervisorSelfRestart(`stable ingress replacement failed: ${detail}`);
               }
             } else {
               this.persist({
@@ -1529,6 +1583,7 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
         ingressDegraded = true;
       }
       const stableIngressHealthy = gatewayHealthy && ingressPathHealthy && !ingressDegraded;
+      if (stableIngressHealthy) this.resetMonitorFailures();
       this.persist({
         observedState: degraded || ingressDegraded || operationActive ? 'degraded' : 'healthy',
         ingress: {
@@ -1542,12 +1597,15 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
   }
 
   private scheduleMonitorTick(): void {
-    if (this.monitorPromise) return;
-    const run = this.monitorTick();
+    if (this.monitorPromise || this.selfRestartRequested) return;
+    const run = this.monitorTick().catch((error) => {
+      const detail = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 200);
+      this.recordMonitorFailure(`Supervisor monitor tick failed: ${detail || 'unknown error'}`);
+    });
     this.monitorPromise = run;
     void run.finally(() => {
       if (this.monitorPromise === run) this.monitorPromise = undefined;
-    }).catch(() => undefined);
+    });
   }
 
   async stop(): Promise<void> {

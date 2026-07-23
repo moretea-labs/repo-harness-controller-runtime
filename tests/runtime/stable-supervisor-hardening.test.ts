@@ -11,7 +11,7 @@ import { createStableIngressRouter } from '../../src/runtime/supervisor/ingress-
 import { createStableIngressProcess } from '../../src/runtime/supervisor/ingress-process';
 import { controllerDaemonMaxLifetimeMs } from '../../src/runtime/control-plane/daemon-entry';
 import { createSupervisorOperation, readSupervisorOperation, updateSupervisorOperation } from '../../src/runtime/supervisor/operation-store';
-import { StableSupervisorRuntime, SUPERVISOR_GATEWAY_HEALTH_FAILURE_THRESHOLD, SUPERVISOR_INGRESS_HEALTH_FAILURE_THRESHOLD, automaticRecoveryRequestId, managedProcessNeedsReleaseRefresh, probeSupervisorGatewayHealth, reconcileActiveManagedGenerations, reconcileSupervisorStateWithAuthority, supervisorGatewayHealthDecision, supervisorIngressHealthDecision, terminalizeInterruptedSupervisorOperations } from '../../src/runtime/supervisor/supervisor-runtime';
+import { StableSupervisorRuntime, SUPERVISOR_GATEWAY_HEALTH_FAILURE_THRESHOLD, SUPERVISOR_INGRESS_HEALTH_FAILURE_THRESHOLD, SUPERVISOR_MONITOR_FAILURE_THRESHOLD, automaticRecoveryRequestId, managedProcessNeedsReleaseRefresh, probeSupervisorGatewayHealth, reconcileActiveManagedGenerations, reconcileSupervisorStateWithAuthority, supervisorGatewayHealthDecision, supervisorIngressHealthDecision, supervisorMonitorFailureDecision, terminalizeInterruptedSupervisorOperations } from '../../src/runtime/supervisor/supervisor-runtime';
 import { decideRestart, newRestartBudgetRecord, recordFailure, recordRestart, recordStable } from '../../src/runtime/supervisor/restart-policy';
 import { SupervisorProcessManager } from '../../src/runtime/supervisor/process-manager';
 import { writeMcpServiceLocalConfig } from '../../src/cli/mcp/auth';
@@ -353,6 +353,46 @@ describe('Stable Supervisor production hardening', () => {
       internal.scheduleMonitorTick();
       await internal.monitorPromise;
       expect(runs).toBe(2);
+    } finally {
+      rmSync(controllerHome, { recursive: true, force: true });
+    }
+  });
+
+  test('repeated monitor failures request an OS-service restart instead of leaving a false-alive Supervisor', async () => {
+    expect(SUPERVISOR_MONITOR_FAILURE_THRESHOLD).toBe(3);
+    expect(supervisorMonitorFailureDecision(0, false)).toEqual({ consecutiveFailures: 1, shouldRestart: false });
+    expect(supervisorMonitorFailureDecision(1, false)).toEqual({ consecutiveFailures: 2, shouldRestart: false });
+    expect(supervisorMonitorFailureDecision(2, false)).toEqual({ consecutiveFailures: 3, shouldRestart: true });
+    expect(supervisorMonitorFailureDecision(2, true)).toEqual({ consecutiveFailures: 0, shouldRestart: false });
+
+    const controllerHome = mkdtempSync(join(tmpdir(), 'repo-harness-monitor-self-restart-'));
+    let stopped = 0;
+    try {
+      const runtime = new StableSupervisorRuntime({
+        repoRoot: process.cwd(),
+        controllerHome,
+        runtimeSourceRoot: process.cwd(),
+        ownerEpoch: 1,
+        logPath: join(controllerHome, 'supervisor.log'),
+        onStopped: () => { stopped += 1; },
+      });
+      const internal = runtime as unknown as {
+        monitorTick: () => Promise<void>;
+        scheduleMonitorTick: () => void;
+        monitorPromise?: Promise<void>;
+      };
+      internal.monitorTick = async () => { throw new Error('fixture ingress recovery failed'); };
+
+      for (let attempt = 1; attempt <= SUPERVISOR_MONITOR_FAILURE_THRESHOLD; attempt += 1) {
+        internal.scheduleMonitorTick();
+        await internal.monitorPromise;
+        await Bun.sleep(0);
+        expect(stopped).toBe(attempt === SUPERVISOR_MONITOR_FAILURE_THRESHOLD ? 1 : 0);
+      }
+
+      internal.scheduleMonitorTick();
+      await Bun.sleep(0);
+      expect(stopped).toBe(1);
     } finally {
       rmSync(controllerHome, { recursive: true, force: true });
     }
