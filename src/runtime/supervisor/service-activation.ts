@@ -4,6 +4,15 @@ import { dirname, join, resolve } from 'path';
 import { publishSupervisorRelease, type SupervisorInstallResult } from './installer';
 import { readCurrentRelease, readCurrentSupervisorRelease, supervisorRoot } from './paths';
 import { writeJsonAtomic } from '../shared/json-files';
+import {
+  initActivationState,
+  readActivationState,
+  transitionPhase,
+  failActivation,
+  resolveExistingActivation,
+  type ActivationPhase,
+  type ActivationStateRecord,
+} from './activation-state-machine';
 
 export interface SupervisorActivationSchedule {
   activationId: string;
@@ -14,29 +23,13 @@ export interface SupervisorActivationSchedule {
   expectedReleasePath?: string;
 }
 
-export type SupervisorActivationPhase =
-  | 'scheduled'
-  | 'waiting_for_handoff'
-  | 'stopping_legacy'
-  | 'registering_service'
-  | 'succeeded'
-  | 'failed';
+/**
+ * Legacy phase names preserved for backward compatibility with callers
+ * that import SupervisorActivationPhase.
+ */
+export type SupervisorActivationPhase = ActivationPhase;
 
-export interface SupervisorActivationState {
-  schemaVersion: 1;
-  activationId: string;
-  phase: SupervisorActivationPhase;
-  repoRoot: string;
-  updatedAt: string;
-  pid?: number;
-  startedAt?: string;
-  completedAt?: string;
-  expectedReleaseRevision?: string;
-  expectedReleasePath?: string;
-  releaseRevision?: string;
-  releasePath?: string;
-  error?: string;
-  recovery?: unknown;
+export interface SupervisorActivationState extends ActivationStateRecord {
   [key: string]: unknown;
 }
 
@@ -55,23 +48,18 @@ export function serviceActivationStatePath(home: string): string {
 }
 
 export function readServiceActivationState(home: string): SupervisorActivationState | undefined {
-  try {
-    const parsed = JSON.parse(readFileSync(serviceActivationStatePath(home), 'utf8')) as SupervisorActivationState;
-    return parsed?.schemaVersion === 1 && typeof parsed.activationId === 'string' && typeof parsed.phase === 'string'
-      ? parsed
-      : undefined;
-  } catch {
-    return undefined;
-  }
+  const state = readActivationState(home);
+  return state as SupervisorActivationState | undefined;
 }
 
+/**
+ * Legacy write function — now delegates to the state machine.
+ * Kept for callers that need to update activation state directly.
+ */
 function writeActivationState(home: string, value: Record<string, unknown>): void {
-  writeJsonAtomic(serviceActivationStatePath(home), {
-    ...(readServiceActivationState(home) ?? {}),
-    schemaVersion: 1,
-    ...value,
-    updatedAt: new Date().toISOString(),
-  });
+  const existing = readServiceActivationState(home);
+  const merged = { ...(existing ?? {}), ...value, updatedAt: new Date().toISOString() };
+  writeJsonAtomic(serviceActivationStatePath(home), merged);
 }
 
 export async function waitForServiceActivation(input: {
@@ -89,8 +77,8 @@ export async function waitForServiceActivation(input: {
         throw new Error(`SUPERVISOR_ACTIVATION_FAILED: ${state.error ?? 'unknown activation failure'}`);
       }
       if (state.phase === 'succeeded') {
-        if (input.expectedReleaseRevision && state.releaseRevision !== input.expectedReleaseRevision) {
-          throw new Error(`SUPERVISOR_ACTIVATION_RELEASE_MISMATCH: expected=${input.expectedReleaseRevision} actual=${state.releaseRevision ?? 'missing'}`);
+        if (input.expectedReleaseRevision && state.expectedReleaseRevision !== input.expectedReleaseRevision) {
+          throw new Error(`SUPERVISOR_ACTIVATION_RELEASE_MISMATCH: expected=${input.expectedReleaseRevision} actual=${state.expectedReleaseRevision ?? 'missing'}`);
         }
         return state;
       }
@@ -137,15 +125,28 @@ export function scheduleServiceActivation(
     closeSync(logFd);
   }
   if (!child.pid) throw new Error('SUPERVISOR_ACTIVATION_SPAWN_FAILED');
+
+  // Initialize the v2 state machine record
+  initActivationState({
+    home,
+    activationId,
+    repoRoot: repo,
+    expectedReleaseRevision: expectedRelease?.releaseRevision,
+    expectedReleasePath: expectedRelease?.releasePath,
+    previousReleaseRevision: undefined,
+    previousReleasePath: undefined,
+  });
+
+  // Also write the legacy format for backward compatibility during the transition
   writeActivationState(home, {
     activationId,
-    phase: 'scheduled',
+    phase: 'prepared',
     pid: child.pid,
-    repoRoot: repo,
     startedAt: new Date().toISOString(),
     ...(expectedRelease?.releaseRevision ? { expectedReleaseRevision: expectedRelease.releaseRevision } : {}),
     ...(expectedRelease?.releasePath ? { expectedReleasePath: expectedRelease.releasePath } : {}),
   });
+
   return {
     activationId,
     pid: child.pid,

@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { dirname, join, resolve } from 'path';
 import { Command } from 'commander';
 import { ensureControllerHome, resolveRepoPreferredControllerHome } from '../repositories/controller-home';
-import { bootstrapLaunchAgentWithRetry, installLaunchAgent, launchAgentPath, restoreLaunchAgent, snapshotLaunchAgent, type LaunchAgentFileSnapshot } from '../controller/launch-agents';
+import { installLaunchAgent, launchAgentPath, restoreLaunchAgent, snapshotLaunchAgent, safeLaunchdHandoff, type LaunchAgentFileSnapshot, type LaunchdServiceProbe, type LaunchctlCommandRunner } from '../controller/launch-agents';
 import { launchStableSupervisor } from '../../runtime/supervisor/bridge';
 import { sendSupervisorCommand } from '../../runtime/supervisor/control-server';
 import { stageSupervisorRelease, startRegisteredSupervisorService, supervisorServiceLabel, supervisorSystemdUnitName } from '../../runtime/supervisor/installer';
@@ -23,6 +23,15 @@ import {
   type SupervisorActivationPhase as RuntimeSupervisorActivationPhase,
   type SupervisorActivationState as RuntimeSupervisorActivationState,
 } from '../../runtime/supervisor/service-activation';
+import {
+  initActivationState,
+  transitionPhase,
+  failActivation,
+  resolveExistingActivation,
+  hasCompletedPhase,
+  type ActivationPhase,
+  type ActivationStateRecord,
+} from '../../runtime/supervisor/activation-state-machine';
 
 function output(value: unknown, json = true): void {
   console.log(json ? JSON.stringify(value, null, 2) : String(value));
@@ -105,13 +114,90 @@ export function scheduleServiceActivation(
   return scheduleRuntimeServiceActivation(repo, home, handoffDelayMs);
 }
 
+/**
+ * Verify the full readiness chain: ingress → active Gateway → public endpoint.
+ * Only returns true when the complete path is healthy.
+ */
+async function verifyFullReadiness(
+  home: string,
+  expectedReleaseRevision: string,
+  deadline: number,
+): Promise<{ healthy: boolean; control?: unknown; serviceCoherence?: SupervisorServiceReleaseCoherence; error?: string }> {
+  while (Date.now() < deadline) {
+    try {
+      const control = await sendSupervisorCommand(home, { command: 'status' });
+      const controlState = control && typeof control === 'object' && (control as { state?: unknown }).state
+        ? (control as { state: unknown }).state
+        : readSupervisorState(home);
+      const serviceCoherence = readSupervisorServiceReleaseCoherence(home, controlState as ReturnType<typeof readSupervisorState>);
+      if (supervisorActivationMatchesRelease(control, expectedReleaseRevision, serviceCoherence)) {
+        return { healthy: true, control, serviceCoherence };
+      }
+    } catch {
+      // OS service startup is asynchronous — keep polling
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 500));
+  }
+  return { healthy: false, error: 'readiness deadline exceeded' };
+}
+
+/**
+ * Verify that a detached Supervisor process is actually alive AND serving
+ * the stable endpoint — not just that a PID was returned.
+ */
+async function verifyDetachedSupervisorHealth(
+  home: string,
+  pid: number,
+  expectedReleaseRevision: string,
+  deadlineMs = 60_000,
+): Promise<{ healthy: boolean; error?: string }> {
+  const deadline = Date.now() + deadlineMs;
+  while (Date.now() < deadline) {
+    if (!isProcessAlive(pid)) {
+      return { healthy: false, error: `detached supervisor pid=${pid} is no longer alive` };
+    }
+    try {
+      const control = await sendSupervisorCommand(home, { command: 'status' });
+      const controlState = control && typeof control === 'object' && (control as { state?: unknown }).state
+        ? (control as { state: unknown }).state
+        : readSupervisorState(home);
+      const serviceCoherence = readSupervisorServiceReleaseCoherence(home, controlState as ReturnType<typeof readSupervisorState>);
+      if (supervisorActivationMatchesRelease(control, expectedReleaseRevision, serviceCoherence)) {
+        // Hold the observation for a bounded stability window
+        const stabilityDeadline = Date.now() + 5_000;
+        let stable = true;
+        while (Date.now() < stabilityDeadline) {
+          if (!isProcessAlive(pid)) { stable = false; break; }
+          await new Promise((resolveWait) => setTimeout(resolveWait, 500));
+        }
+        if (stable) return { healthy: true };
+      }
+    } catch {
+      // Supervisor may still be starting
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 500));
+  }
+  return { healthy: false, error: 'detached supervisor did not become healthy within deadline' };
+}
+
 async function activateInstalledService(
   repo: string,
   home: string,
   activationId: string,
   handoffDelayMs = 750,
 ): Promise<Record<string, unknown>> {
-  const update = (phase: string, extra: Record<string, unknown> = {}) => writeActivationState(home, { activationId, phase, repoRoot: repo, ...extra });
+  // Check idempotency — if this activation already completed, return immediately
+  const existing = resolveExistingActivation(home, activationId);
+  if (existing) {
+    return {
+      ok: existing.phase === 'succeeded',
+      activationId,
+      phase: existing.phase,
+      idempotent: true,
+      error: existing.error,
+    };
+  }
+
   const label = supervisorServiceLabel(home);
   const launchAgent = snapshotLaunchAgent(launchAgentPath(label));
   const generatedServicePath = join(supervisorRoot(home), 'launchd', `${label}.plist`);
@@ -132,14 +218,30 @@ async function activateInstalledService(
   };
   const expectedRelease = readCurrentSupervisorRelease(home);
   const expectedReleaseRevision = expectedRelease?.releaseRevision;
+  if (!expectedRelease || !expectedReleaseRevision) {
+    throw new Error('SUPERVISOR_ACTIVATION_EXPECTED_RELEASE_UNAVAILABLE');
+  }
+
+  // Initialize the state machine
+  initActivationState({
+    home,
+    activationId,
+    repoRoot: repo,
+    expectedReleaseRevision,
+    expectedReleasePath: expectedRelease.releasePath,
+    previousReleaseRevision: rollback.release?.releaseRevision,
+    previousReleasePath: rollback.release?.releasePath,
+    serviceLabel: label,
+    plistPath: launchAgent.path,
+  });
+
   try {
-    if (!expectedRelease || !expectedReleaseRevision) throw new Error('SUPERVISOR_ACTIVATION_EXPECTED_RELEASE_UNAVAILABLE');
-    update('waiting_for_handoff');
+    // Phase: stopping_previous
+    transitionPhase(home, activationId, 'stopping_previous');
     await new Promise((resolveWait) => setTimeout(
       resolveWait,
       Math.max(750, Math.min(Math.trunc(handoffDelayMs), 30_000)),
     ));
-    update('stopping_legacy');
     const stopped = await stopControllerService({
       repo,
       controllerHome: home,
@@ -147,49 +249,142 @@ async function activateInstalledService(
       requireFullStop: true,
       stopTimeoutMs: 15_000,
     });
-    update('registering_service', { stoppedAction: stopped.action, cleanedPids: stopped.cleanedPids });
-    unregisterService(home);
-    const service = await registerService(home);
-    const deadline = Date.now() + 90_000;
-    let control: unknown;
-    let serviceCoherence: SupervisorServiceReleaseCoherence | undefined;
-    while (Date.now() < deadline) {
-      try {
-        control = await sendSupervisorCommand(home, { command: 'status' });
-        const controlState = control && typeof control === 'object' && (control as { state?: unknown }).state
-          ? (control as { state: unknown }).state
-          : readSupervisorState(home);
-        serviceCoherence = readSupervisorServiceReleaseCoherence(home, controlState as ReturnType<typeof readSupervisorState>);
-        if (supervisorActivationMatchesRelease(control, expectedReleaseRevision, serviceCoherence)) break;
-      } catch {
-        // OS service startup is asynchronous.
+
+    // Phase: waiting_previous_exit
+    transitionPhase(home, activationId, 'waiting_previous_exit', {
+      oldPid: runningState?.supervisor.pid,
+    });
+    if (runningState?.supervisor.pid) {
+      const exitDeadline = Date.now() + 15_000;
+      while (Date.now() < exitDeadline) {
+        if (!isProcessAlive(runningState.supervisor.pid)) break;
+        await new Promise((resolveWait) => setTimeout(resolveWait, 200));
       }
-      await new Promise((resolveWait) => setTimeout(resolveWait, 500));
     }
-    if (!supervisorActivationMatchesRelease(control, expectedReleaseRevision, serviceCoherence)) {
-      throw new Error(`SUPERVISOR_ACTIVATION_VERIFY_TIMEOUT: expected releaseRevision=${expectedReleaseRevision}; ${serviceCoherence?.failures.join('; ') || 'service coherence unavailable'}`);
+
+    // Phase: installing_service (includes safe bootout + bootstrap)
+    transitionPhase(home, activationId, 'installing_service', {
+      stoppedAction: stopped.action,
+      cleanedPids: stopped.cleanedPids,
+    });
+
+    // Unregister old service (treat "not found" as success)
+    unregisterService(home);
+
+    // Install the plist atomically
+    const launchdPlistPath = join(supervisorRoot(home), 'launchd', `${label}.plist`);
+    const installed = installLaunchAgent(launchdPlistPath, label);
+
+    const uid = typeof process.getuid === 'function'
+      ? process.getuid()
+      : Number(runProcess('id', ['-u'], { timeoutMs: 2_000, maxOutputBytes: 1_024 }).stdout.trim());
+
+    // Phase: bootstrapping — use the safe state-driven handoff
+    transitionPhase(home, activationId, 'bootstrapping');
+    const handoffResult = await safeLaunchdHandoff({
+      label,
+      plistPath: installed.path,
+      domain: `gui/${uid}`,
+      oldPid: runningState?.supervisor.pid,
+      port: 8765,
+      maxBootoutWaitMs: 15_000,
+      maxBootstrapRetry: 3,
+      bootstrapRetryDelayMs: 500,
+      pollIntervalMs: 200,
+    });
+
+    if (!handoffResult.serviceRegistered) {
+      throw new Error(
+        `SUPERVISOR_LAUNCHD_BOOTSTRAP_FAILED: ${handoffResult.bootstrapAttempts} attempts; ` +
+        `bootoutClean=${handoffResult.bootoutClean} pidWaitClean=${handoffResult.pidWaitClean} portWaitClean=${handoffResult.portWaitClean}; ` +
+        `lastError=${handoffResult.diagnostics.bootstrapResults[handoffResult.diagnostics.bootstrapResults.length - 1]?.stderr ?? 'unknown'}`,
+      );
     }
-    update('succeeded', {
+
+    // Phase: waiting_service_registration
+    transitionPhase(home, activationId, 'waiting_service_registration', {
+      bootstrapAttempt: handoffResult.bootstrapAttempts,
+    });
+    const regDeadline = Date.now() + 10_000;
+    while (Date.now() < regDeadline) {
+      const checkResult = runProcess('launchctl', ['print', `gui/${uid}/${label}`], { timeoutMs: 3_000, maxOutputBytes: 8_192 });
+      if (checkResult.ok) break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+    }
+
+    // Phase: waiting_supervisor_ready
+    transitionPhase(home, activationId, 'waiting_supervisor_ready', {
+      newPid: undefined, // will be discovered via control socket
+    });
+
+    // Phase: waiting_stable_endpoint — verify the full chain
+    transitionPhase(home, activationId, 'waiting_stable_endpoint');
+    const verifyDeadline = Date.now() + 90_000;
+    const verifyResult = await verifyFullReadiness(home, expectedReleaseRevision, verifyDeadline);
+
+    if (!verifyResult.healthy) {
+      throw new Error(
+        `SUPERVISOR_ACTIVATION_VERIFY_TIMEOUT: expected releaseRevision=${expectedReleaseRevision}; ` +
+        `${verifyResult.error ?? 'endpoint not healthy'}`,
+      );
+    }
+
+    // Phase: succeeded
+    transitionPhase(home, activationId, 'succeeded', {
+      readinessResult: {
+        control: verifyResult.control,
+        serviceCoherence: verifyResult.serviceCoherence,
+      },
+    });
+
+    // Also write the legacy-format fields for backward compatibility
+    writeActivationState(home, {
+      phase: 'succeeded',
       completedAt: new Date().toISOString(),
-      service,
+      service: { platform: 'launchd', registered: true, plistPath: installed.path, bootstrapAttempts: handoffResult.bootstrapAttempts },
       releaseRevision: expectedRelease.releaseRevision,
       releasePath: expectedRelease.releasePath,
-      serviceCoherence,
+      serviceCoherence: verifyResult.serviceCoherence,
     });
-    return { ok: true, activationId, stopped, service, control };
+
+    return {
+      ok: true,
+      activationId,
+      stopped,
+      service: { platform: 'launchd', registered: true, plistPath: installed.path, bootstrapAttempts: handoffResult.bootstrapAttempts },
+      control: verifyResult.control,
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    let recovery: Record<string, unknown> | undefined;
+
+    // Phase: rolling_back
+    transitionPhase(home, activationId, 'rolling_back', { error: message });
+    let recovery: Record<string, unknown>;
     try {
       recovery = await restorePreviousActivation(repo, home, rollback);
     } catch (recoveryError) {
       recovery = { ok: false, error: recoveryError instanceof Error ? recoveryError.message : String(recoveryError) };
     }
-    update('failed', { completedAt: new Date().toISOString(), error: message.slice(0, 2_000), recovery });
+
+    // Phase: failed
+    failActivation(home, activationId, message.slice(0, 2_000), recovery);
+
+    writeActivationState(home, {
+      phase: 'failed',
+      completedAt: new Date().toISOString(),
+      error: message.slice(0, 2_000),
+      recovery,
+    });
+
     throw error;
   }
 }
 
+/**
+ * Restore the previous activation with FULL endpoint verification.
+ * A detached PID is not sufficient — the ingress must be bound and the
+ * complete ready path must succeed.
+ */
 async function restorePreviousActivation(
   repo: string,
   home: string,
@@ -207,46 +402,59 @@ async function restorePreviousActivation(
     const uid = typeof process.getuid === 'function'
       ? process.getuid()
       : Number(runProcess('id', ['-u'], { timeoutMs: 2_000, maxOutputBytes: 1_024 }).stdout.trim());
+
     try {
-      const attempts = await bootstrapLaunchAgentWithRetry({
+      const handoffResult = await safeLaunchdHandoff({
         label: supervisorServiceLabel(home),
         plistPath: rollback.launchAgent.path,
         domain: `gui/${uid}`,
+        maxBootoutWaitMs: 10_000,
+        maxBootstrapRetry: 3,
+        bootstrapRetryDelayMs: 500,
       });
-      const deadline = Date.now() + 60_000;
-      let control: unknown;
-      let serviceCoherence: SupervisorServiceReleaseCoherence | undefined;
-      while (Date.now() < deadline && rollback.release?.releaseRevision) {
-        try {
-          control = await sendSupervisorCommand(home, { command: 'status' });
-          const controlState = control && typeof control === 'object' && (control as { state?: unknown }).state
-            ? (control as { state: unknown }).state
-            : readSupervisorState(home);
-          serviceCoherence = readSupervisorServiceReleaseCoherence(home, controlState as ReturnType<typeof readSupervisorState>);
-          if (supervisorActivationMatchesRelease(control, rollback.release.releaseRevision, serviceCoherence)) break;
-        } catch { /* service startup is asynchronous */ }
-        await new Promise((resolveWait) => setTimeout(resolveWait, 500));
+
+      if (handoffResult.serviceRegistered) {
+        // Verify the previous release actually comes up healthy
+        if (rollback.release?.releaseRevision) {
+          const verifyDeadline = Date.now() + 60_000;
+          const verifyResult = await verifyFullReadiness(home, rollback.release.releaseRevision, verifyDeadline);
+          if (verifyResult.healthy) {
+            return { ok: true, mode: 'previous_launch_agent', plistPath: rollback.launchAgent.path, bootstrapAttempts: handoffResult.bootstrapAttempts, release: rollback.release, serviceCoherence: verifyResult.serviceCoherence };
+          }
+          // Endpoint verification failed — fall through to detached fallback
+        }
       }
-      if (rollback.release?.releaseRevision && !supervisorActivationMatchesRelease(control, rollback.release.releaseRevision, serviceCoherence)) {
-        throw new Error(`SUPERVISOR_ROLLBACK_VERIFY_FAILED: expected=${rollback.release.releaseRevision}; ${serviceCoherence?.failures.join('; ') || 'service coherence unavailable'}`);
-      }
-      return { ok: true, mode: 'previous_launch_agent', plistPath: rollback.launchAgent.path, bootstrapAttempts: attempts, release: rollback.release, serviceCoherence };
-    } catch (error) {
-      if (!previous) throw error;
-      const launched = launchStableSupervisor({ repoRoot: repo, controllerHome: home, logPath: supervisorLogPath(home) });
-      return {
-        ok: true,
-        mode: 'detached_previous_release_after_launch_agent_failure',
-        pid: launched.pid,
-        releasePath: previous,
-        launchAgentError: error instanceof Error ? error.message : String(error),
-      };
+    } catch {
+      // LaunchAgent bootstrap failed — fall through to detached fallback
     }
   }
-  if (previous) {
+
+  // Detached fallback — ONLY as short-term rescue, and MUST verify health
+  if (previous && rollback.release?.releaseRevision) {
     const launched = launchStableSupervisor({ repoRoot: repo, controllerHome: home, logPath: supervisorLogPath(home) });
-    return { ok: true, mode: 'detached_previous_release', pid: launched.pid, releasePath: previous };
+
+    // CRITICAL: verify the detached supervisor actually becomes healthy
+    const healthResult = await verifyDetachedSupervisorHealth(home, launched.pid, rollback.release.releaseRevision, 60_000);
+
+    if (healthResult.healthy) {
+      return {
+        ok: true,
+        mode: 'detached_previous_release',
+        pid: launched.pid,
+        releasePath: previous,
+      };
+    }
+
+    // Detached supervisor failed health check — this is a real failure
+    return {
+      ok: false,
+      mode: 'detached_previous_release_health_check_failed',
+      pid: launched.pid,
+      releasePath: previous,
+      error: healthResult.error ?? 'detached supervisor did not become healthy',
+    };
   }
+
   return { ok: false, reason: 'previous_release_and_launch_agent_unavailable' };
 }
 
@@ -273,8 +481,13 @@ async function registerService(home: string): Promise<Record<string, unknown>> {
     const uid = typeof process.getuid === 'function' ? process.getuid() : Number(runProcess('id', ['-u'], { timeoutMs: 2_000, maxOutputBytes: 1_024 }).stdout.trim());
     const label = supervisorServiceLabel(home);
     const installed = installLaunchAgent(launchd, label);
-    const attempts = await bootstrapLaunchAgentWithRetry({ label, plistPath: installed.path, domain: `gui/${uid}` });
-    return { platform: 'launchd', registered: true, plistPath: installed.path, bootstrapAttempts: attempts };
+    const handoffResult = await safeLaunchdHandoff({
+      label,
+      plistPath: installed.path,
+      domain: `gui/${uid}`,
+      maxBootstrapRetry: 3,
+    });
+    return { platform: 'launchd', registered: handoffResult.serviceRegistered, plistPath: installed.path, bootstrapAttempts: handoffResult.bootstrapAttempts };
   }
   if (process.platform === 'linux') {
     const enabled = runProcess('systemctl', ['--user', 'enable', '--now', systemd], { timeoutMs: 15_000, maxOutputBytes: 20_000 });

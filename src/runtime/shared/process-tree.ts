@@ -51,7 +51,14 @@ export function isProcessAlive(pid: number | undefined): boolean {
     return false;
   }
   if (process.platform === 'win32') return true;
-  return isProcessStatAlive(readProcessStatPosix(pid));
+  // process.kill(pid, 0) succeeded — the process exists. Use ps stat
+  // only as a zombie filter; if ps is unavailable (sandbox, restricted
+  // environment), err on the side of "alive" rather than reporting a
+  // live process as dead, which would cause incorrect lock fencing
+  // and false SUPERVISOR_ALREADY_RUNNING errors.
+  const stat = readProcessStatPosix(pid);
+  if (stat === undefined) return true;
+  return isProcessStatAlive(stat);
 }
 
 function listProcessGroupMembersPosix(processGroupId: number): number[] {
