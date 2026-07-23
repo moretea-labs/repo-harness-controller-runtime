@@ -116,6 +116,12 @@ export interface SupervisorState {
     reason: string;
     operationId?: string;
   } | null;
+  /** Whether the last external/public endpoint probe succeeded. */
+  externalEndpointHealthy?: boolean;
+  /** ISO timestamp of the last external endpoint probe. */
+  externalEndpointLastCheckedAt?: string;
+  /** Detail message from the last external endpoint probe. */
+  externalEndpointLastDetail?: string;
   updatedAt: string;
 }
 

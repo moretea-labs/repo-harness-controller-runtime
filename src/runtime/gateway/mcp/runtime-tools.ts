@@ -3083,7 +3083,30 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         const supervisorServiceCoherence = stableSupervisorPresent
           ? readSupervisorServiceReleaseCoherence(stableHome, supervisorState)
           : { ok: true, serviceRegistered: false, failures: [], expected: undefined, running: undefined, generated: undefined, installed: undefined };
-        const effectiveReady = readiness.ready && toolSurfaceReady && supervisorServiceCoherence.ok;
+        // Stable ingress health: separate from the daemon-based readiness.
+        // A Supervisor that looks healthy internally can still have an
+        // unreachable ingress that makes the public Connector 502.
+        const ingressState = supervisorState?.ingress;
+        const ingressHealthy = Boolean(
+          ingressState?.state === 'running'
+          && ingressState.pid
+          && (ingressState.consecutiveFailures ?? 0) === 0,
+        );
+        const ingressLocalReady = Boolean(
+          ingressHealthy
+          && ingressState?.activeUpstreamSlot
+          && ingressState?.activeUpstreamPort,
+        );
+        // External / public endpoint probe: if configured, a repeated failure
+        // means the Stable Connector is unreachable even when localhost passes.
+        const publicHealthEndpoint = process.env.REPO_HARNESS_SUPERVISOR_PUBLIC_HEALTH_ENDPOINT?.trim();
+        const externalEndpointStatus: 'healthy' | 'unhealthy' | 'unknown' = publicHealthEndpoint
+          ? (supervisorState?.externalEndpointHealthy === true ? 'healthy' : 'unhealthy')
+          : 'unknown';
+        const externalEndpointLastChecked = supervisorState?.externalEndpointLastCheckedAt;
+        const externalEndpointDetail = supervisorState?.externalEndpointLastDetail;
+        const stableIngressReady = ingressLocalReady && (externalEndpointStatus !== 'unhealthy');
+        const effectiveReady = readiness.ready && toolSurfaceReady && supervisorServiceCoherence.ok && (stableSupervisorPresent ? stableIngressReady : true);
         const taskLedger = repository ? buildControllerTaskLedgerProjection(repository.canonicalRoot) : undefined;
         const agentExecutors = readAgentExecutableReadinessSnapshot(ctx.controllerHome);
         return result({
@@ -3110,16 +3133,32 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             : { status: 'not_probed', executors: {} },
           stableSupervisor: stableSupervisorPresent ? {
             ready: supervisorServiceCoherence.ok,
+            loaded: true,
+            pid: supervisorState?.supervisor.pid,
+            healthy: supervisorState?.observedState === 'healthy',
             expectedReleaseRevision: supervisorServiceCoherence.expected?.releaseRevision,
             runningReleaseRevision: supervisorServiceCoherence.running?.releaseRevision,
             generatedServiceReleaseRevision: supervisorServiceCoherence.generated?.releaseRevision,
             installedServiceReleaseRevision: supervisorServiceCoherence.installed?.releaseRevision,
             failures: supervisorServiceCoherence.failures,
-          } : { ready: true, installed: false, failures: [] },
+          } : { ready: true, installed: false, loaded: false, failures: [] },
+          stableIngress: {
+            pid: ingressState?.pid,
+            localReady: ingressLocalReady,
+            state: ingressState?.state ?? (stableSupervisorPresent ? 'unknown' : 'not_applicable'),
+            consecutiveFailures: ingressState?.consecutiveFailures ?? 0,
+          },
+          externalEndpoint: {
+            status: externalEndpointStatus,
+            lastCheckedAt: externalEndpointLastChecked,
+            detail: externalEndpointDetail,
+          },
           reasons: [
             ...readiness.reasons,
             ...(!toolSurfaceReady ? [{ code: 'MCP_TOOL_SURFACE_INCOMPLETE', message: 'Registered and exposed MCP tool schemas do not match.' }] : []),
             ...(!supervisorServiceCoherence.ok ? [{ code: 'SUPERVISOR_SERVICE_RELEASE_DRIFT', message: supervisorServiceCoherence.failures.join('; ') }] : []),
+            ...(stableSupervisorPresent && !ingressLocalReady ? [{ code: 'STABLE_INGRESS_NOT_READY', message: 'Stable ingress is not serving traffic or has accumulated health failures.' }] : []),
+            ...(externalEndpointStatus === 'unhealthy' ? [{ code: 'PUBLIC_STABLE_ENDPOINT_UNHEALTHY', message: externalEndpointDetail ?? 'Public stable endpoint is unreachable even though localhost checks pass.' }] : []),
           ],
           toolSurface: {
             ready: toolSurfaceReady,

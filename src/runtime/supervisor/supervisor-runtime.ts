@@ -1591,6 +1591,36 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
           state: stableIngressHealthy ? 'running' : 'degraded',
         },
       });
+      // External / public endpoint probe: verify the full path that ChatGPT
+      // actually uses, not just localhost.  Unconfigured → 'unknown'.
+      const externalEndpoint = process.env.REPO_HARNESS_SUPERVISOR_PUBLIC_HEALTH_ENDPOINT?.trim();
+      if (externalEndpoint) {
+        try {
+          const externalHealth = await probeSupervisorGatewayHealth(externalEndpoint);
+          this.persist({
+            externalEndpointHealthy: externalHealth.healthy,
+            externalEndpointLastCheckedAt: new Date().toISOString(),
+            externalEndpointLastDetail: externalHealth.detail,
+          });
+          if (!externalHealth.healthy) {
+            degraded = true;
+            this.persist({
+              observedState: 'degraded',
+              lastIncident: {
+                at: new Date().toISOString(),
+                reason: `PUBLIC_STABLE_ENDPOINT_UNHEALTHY: ${externalHealth.detail}`,
+              },
+            });
+          }
+        } catch {
+          this.persist({
+            externalEndpointHealthy: false,
+            externalEndpointLastCheckedAt: new Date().toISOString(),
+            externalEndpointLastDetail: 'external endpoint probe failed',
+          });
+          degraded = true;
+        }
+      }
     }
     await this.runPendingOperations();
     await this.cleanupExpiredStandby();
