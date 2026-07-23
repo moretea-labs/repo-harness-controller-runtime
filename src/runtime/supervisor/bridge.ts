@@ -56,6 +56,7 @@ export function launchStableSupervisor(options: StableSupervisorLaunchOptions): 
         ...process.env,
         REPO_HARNESS_CONTROLLER_HOME: resolve(options.controllerHome),
         REPO_HARNESS_STABLE_SUPERVISOR: '1',
+        REPO_HARNESS_SUPERVISOR_SERVICE_MODE: 'detached',
       },
     });
     child.unref();

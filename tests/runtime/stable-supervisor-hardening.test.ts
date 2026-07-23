@@ -6,7 +6,7 @@ import { tmpdir } from 'os';
 import { bootstrapLaunchAgentWithRetry } from '../../src/cli/controller/launch-agents';
 import { selectSupervisorRollbackRelease, serviceActivationStatePath, supervisorActivationMatchesRelease, waitForServiceActivation } from '../../src/cli/commands/supervisor';
 import { installSupervisorRelease, publishSupervisorRelease, renderLaunchdSupervisorPlist, renderSystemdSupervisorUnit, stageSupervisorRelease, supervisorServiceLabel, supervisorSystemdUnitName } from '../../src/runtime/supervisor/installer';
-import { stableSupervisorExitCode } from '../../src/runtime/supervisor/entry';
+import { stableSupervisorActivatesPublishedRelease, stableSupervisorExitCode } from '../../src/runtime/supervisor/entry';
 import { createStableIngressRouter } from '../../src/runtime/supervisor/ingress-router';
 import { createStableIngressProcess } from '../../src/runtime/supervisor/ingress-process';
 import { controllerDaemonMaxLifetimeMs } from '../../src/runtime/control-plane/daemon-entry';
@@ -156,6 +156,12 @@ describe('Stable Supervisor production hardening', () => {
     } finally {
       rmSync(controllerHome, { recursive: true, force: true });
     }
+  });
+
+  test('only OS-managed Supervisor services activate newly published releases', () => {
+    expect(stableSupervisorActivatesPublishedRelease(undefined)).toBe(true);
+    expect(stableSupervisorActivatesPublishedRelease('managed')).toBe(true);
+    expect(stableSupervisorActivatesPublishedRelease('detached')).toBe(false);
   });
 
   test('unexpected runtime stop is restartable while explicit signal remains successful', () => {

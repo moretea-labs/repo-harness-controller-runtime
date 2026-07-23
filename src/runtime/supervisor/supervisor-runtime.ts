@@ -26,6 +26,7 @@ import { DEFAULT_RESTART_POLICY, decideRestart, lockout, newRestartBudgetRecord,
 import { SupervisorProcessManager, type SpawnedSupervisorProcess, type SupervisorProcessManagerOptions } from './process-manager';
 import { createSupervisorState, readSupervisorState, writeSupervisorState } from './state-store';
 import { readCurrentSupervisorRelease, readPreviousSupervisorRelease, readSupervisorRelease, supervisorControlSocketPath, supervisorReleasesRoot, type SupervisorReleaseDescriptor } from './paths';
+import { publishSupervisorRelease } from './installer';
 import {
   publishAndScheduleSupervisorRelease,
   scheduleServiceActivation,
@@ -40,6 +41,7 @@ export interface StableSupervisorRuntimeOptions extends SupervisorProcessManager
   releaseRevision?: string;
   ingressExecutable?: string;
   serviceActivationScheduler?: typeof scheduleServiceActivation;
+  activatePublishedRelease?: boolean;
   onStopped?: () => void;
 }
 
@@ -907,6 +909,14 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
       if (previousIdentity) writeSlotIdentity(this.options.controllerHome, { ...previousIdentity, role: 'standby' });
       updateSupervisorOperation(this.options.controllerHome, operationId, { phase: 'cutover' });
       if (!candidateRelease) return undefined;
+      if (this.options.activatePublishedRelease === false) {
+        publishSupervisorRelease({
+          controllerHome: this.options.controllerHome,
+          repoRoot: this.options.repoRoot,
+          releasePath: candidateRelease.releasePath,
+        });
+        return undefined;
+      }
       return publishAndScheduleSupervisorRelease({
         controllerHome: this.options.controllerHome,
         repoRoot: this.options.repoRoot,
@@ -1058,6 +1068,14 @@ export class StableSupervisorRuntime implements SupervisorControlHandlers {
     updateSupervisorOperation(this.options.controllerHome, operationId, { phase: 'cutover' });
     const rollbackReleasePath = activatedTarget.controllerDaemon.releasePath;
     if (!rollbackReleasePath) return undefined;
+    if (this.options.activatePublishedRelease === false) {
+      publishSupervisorRelease({
+        controllerHome: this.options.controllerHome,
+        repoRoot: this.options.repoRoot,
+        releasePath: rollbackReleasePath,
+      });
+      return undefined;
+    }
     return publishAndScheduleSupervisorRelease({
       controllerHome: this.options.controllerHome,
       repoRoot: this.options.repoRoot,

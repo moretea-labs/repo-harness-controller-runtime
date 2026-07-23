@@ -14,6 +14,32 @@ export interface SupervisorActivationSchedule {
   expectedReleasePath?: string;
 }
 
+export type SupervisorActivationPhase =
+  | 'scheduled'
+  | 'waiting_for_handoff'
+  | 'stopping_legacy'
+  | 'registering_service'
+  | 'succeeded'
+  | 'failed';
+
+export interface SupervisorActivationState {
+  schemaVersion: 1;
+  activationId: string;
+  phase: SupervisorActivationPhase;
+  repoRoot: string;
+  updatedAt: string;
+  pid?: number;
+  startedAt?: string;
+  completedAt?: string;
+  expectedReleaseRevision?: string;
+  expectedReleasePath?: string;
+  releaseRevision?: string;
+  releasePath?: string;
+  error?: string;
+  recovery?: unknown;
+  [key: string]: unknown;
+}
+
 export interface SupervisorReleaseActivationResult {
   publication: SupervisorInstallResult;
   activation: SupervisorActivationSchedule;
@@ -28,10 +54,12 @@ export function serviceActivationStatePath(home: string): string {
   return join(supervisorRoot(home), 'activation.json');
 }
 
-function readActivationState(home: string): Record<string, unknown> | undefined {
+export function readServiceActivationState(home: string): SupervisorActivationState | undefined {
   try {
-    const parsed = JSON.parse(readFileSync(serviceActivationStatePath(home), 'utf8')) as Record<string, unknown>;
-    return parsed?.schemaVersion === 1 ? parsed : undefined;
+    const parsed = JSON.parse(readFileSync(serviceActivationStatePath(home), 'utf8')) as SupervisorActivationState;
+    return parsed?.schemaVersion === 1 && typeof parsed.activationId === 'string' && typeof parsed.phase === 'string'
+      ? parsed
+      : undefined;
   } catch {
     return undefined;
   }
@@ -39,11 +67,37 @@ function readActivationState(home: string): Record<string, unknown> | undefined 
 
 function writeActivationState(home: string, value: Record<string, unknown>): void {
   writeJsonAtomic(serviceActivationStatePath(home), {
-    ...(readActivationState(home) ?? {}),
+    ...(readServiceActivationState(home) ?? {}),
     schemaVersion: 1,
     ...value,
     updatedAt: new Date().toISOString(),
   });
+}
+
+export async function waitForServiceActivation(input: {
+  home: string;
+  activationId: string;
+  expectedReleaseRevision?: string;
+  timeoutMs?: number;
+  intervalMs?: number;
+}): Promise<SupervisorActivationState> {
+  const deadline = Date.now() + Math.max(1_000, input.timeoutMs ?? 120_000);
+  while (Date.now() < deadline) {
+    const state = readServiceActivationState(input.home);
+    if (state?.activationId === input.activationId) {
+      if (state.phase === 'failed') {
+        throw new Error(`SUPERVISOR_ACTIVATION_FAILED: ${state.error ?? 'unknown activation failure'}`);
+      }
+      if (state.phase === 'succeeded') {
+        if (input.expectedReleaseRevision && state.releaseRevision !== input.expectedReleaseRevision) {
+          throw new Error(`SUPERVISOR_ACTIVATION_RELEASE_MISMATCH: expected=${input.expectedReleaseRevision} actual=${state.releaseRevision ?? 'missing'}`);
+        }
+        return state;
+      }
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, Math.max(100, input.intervalMs ?? 500)));
+  }
+  throw new Error(`SUPERVISOR_ACTIVATION_TIMEOUT: ${input.activationId}`);
 }
 
 export function scheduleServiceActivation(

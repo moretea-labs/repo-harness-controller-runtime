@@ -38,6 +38,12 @@ import { readSupervisorServiceReleaseCoherence } from '../../runtime/supervisor/
 import { stageSupervisorRelease } from '../../runtime/supervisor/installer';
 import { resolveControllerRuntimeSourceRoot } from '../../runtime/control-plane/runtime-generation';
 import { sendSupervisorCommand } from '../../runtime/supervisor/control-server';
+import { readSupervisorOperation } from '../../runtime/supervisor/operation-store';
+import {
+  waitForServiceActivation,
+  type SupervisorActivationSchedule,
+  type SupervisorActivationState,
+} from '../../runtime/supervisor/service-activation';
 import { readStableSupervisorState } from '../../runtime/supervisor/bridge';
 import { restartRequestNeedsDetachedCoordinator } from './restart-coordinator';
 
@@ -65,6 +71,51 @@ const TERMINAL_SUPERVISOR_PHASES = new Set(['succeeded', 'failed', 'locked_out']
 
 function operationTimeoutMs(opts: BlueGreenRolloutOptions): number {
   return Math.max(180_000, (opts.startTimeoutMs ?? 60_000) * 3);
+}
+
+function operationActivation(operation: { result?: Record<string, unknown> }): SupervisorActivationSchedule | undefined {
+  const value = operation.result?.supervisorActivation;
+  if (!value || typeof value !== 'object') return undefined;
+  const activation = value as Record<string, unknown>;
+  if (
+    typeof activation.activationId !== 'string'
+    || typeof activation.pid !== 'number'
+    || typeof activation.statePath !== 'string'
+    || typeof activation.logPath !== 'string'
+  ) return undefined;
+  return {
+    activationId: activation.activationId,
+    pid: activation.pid,
+    statePath: activation.statePath,
+    logPath: activation.logPath,
+    ...(typeof activation.expectedReleaseRevision === 'string'
+      ? { expectedReleaseRevision: activation.expectedReleaseRevision }
+      : {}),
+    ...(typeof activation.expectedReleasePath === 'string'
+      ? { expectedReleasePath: activation.expectedReleasePath }
+      : {}),
+  };
+}
+
+async function waitForOperationActivation(
+  rootHome: string,
+  operation: { result?: Record<string, unknown> },
+  timeoutMs: number,
+): Promise<{ schedule: SupervisorActivationSchedule; state: SupervisorActivationState } | undefined> {
+  const schedule = operationActivation(operation);
+  if (!schedule) return undefined;
+  const state = await waitForServiceActivation({
+    home: rootHome,
+    activationId: schedule.activationId,
+    expectedReleaseRevision: schedule.expectedReleaseRevision,
+    timeoutMs,
+    intervalMs: 250,
+  });
+  const coherence = readSupervisorServiceReleaseCoherence(rootHome, readSupervisorState(rootHome));
+  if (!coherence.ok) {
+    throw new Error(`SUPERVISOR_ACTIVATION_COHERENCE_FAILED: ${coherence.failures.join('; ')}`);
+  }
+  return { schedule, state };
 }
 
 function partialResult(input: {
@@ -244,20 +295,17 @@ async function stableSupervisorRollout(
       });
     }
     await new Promise((resolveWait) => setTimeout(resolveWait, 250));
-    const polled = await sendSupervisorCommand(rootHome, {
-      command: 'operation_get',
-      operationId: operation.operationId,
-    });
-    if (!polled.ok || !polled.operation) {
+    const persisted = readSupervisorOperation(rootHome, operation.operationId);
+    if (!persisted) {
       return partialResult({
         phase: 'polling',
-        summary: 'Lost contact with the Supervisor while polling rollout operation',
-        keyOutput: polled.error?.message ?? 'SUPERVISOR_OPERATION_READ_FAILED',
-        nextAction: 'reconnect and poll the operation; the Supervisor owns execution',
+        summary: 'Supervisor rollout operation state is temporarily unavailable',
+        keyOutput: 'SUPERVISOR_OPERATION_READ_FAILED',
+        nextAction: 'poll the persisted operation; do not repeat rollout while activation is in progress',
         details: { operation: finalOperation, stagedRelease: staged },
       });
     }
-    finalOperation = polled.operation;
+    finalOperation = persisted;
   }
 
   if (finalOperation.phase !== 'succeeded') {
@@ -267,6 +315,20 @@ async function stableSupervisorRollout(
       failedCheck: finalOperation.failureClass ?? 'supervisor_rollout',
       keyOutput: finalOperation.error ?? `operation ${finalOperation.operationId} ended in ${finalOperation.phase}`,
       nextAction: 'inspect candidate evidence and retry after fixing the release',
+      details: { operation: finalOperation, stagedRelease: staged },
+    });
+  }
+
+  let activationHandoff: Awaited<ReturnType<typeof waitForOperationActivation>>;
+  try {
+    activationHandoff = await waitForOperationActivation(rootHome, finalOperation, operationTimeoutMs(opts));
+  } catch (error) {
+    return compositeFailed({
+      phase: 'supervisor-activation',
+      summary: 'Runtime cutover succeeded but Stable Supervisor activation did not converge',
+      failedCheck: 'supervisor_activation',
+      keyOutput: error instanceof Error ? error.message : String(error),
+      nextAction: 'inspect activation state and restore the previous immutable Supervisor release if needed',
       details: { operation: finalOperation, stagedRelease: staged },
     });
   }
@@ -282,7 +344,7 @@ async function stableSupervisorRollout(
       `release=${staged.releaseRevision}`,
     ].join('\n'),
     nextAction: 'use controller status to confirm the active immutable release and runtime generation',
-    details: { authority, operation: finalOperation, stagedRelease: staged },
+    details: { authority, operation: finalOperation, stagedRelease: staged, activationHandoff },
   });
 }
 
@@ -376,20 +438,17 @@ async function stableSupervisorRollback(
       });
     }
     await new Promise((resolveWait) => setTimeout(resolveWait, 250));
-    const polled = await sendSupervisorCommand(rootHome, {
-      command: 'operation_get',
-      operationId: operation.operationId,
-    });
-    if (!polled.ok || !polled.operation) {
+    const persisted = readSupervisorOperation(rootHome, operation.operationId);
+    if (!persisted) {
       return partialResult({
         phase: 'polling',
-        summary: 'Lost contact with the Supervisor while polling rollback operation',
-        keyOutput: polled.error?.message ?? 'SUPERVISOR_OPERATION_READ_FAILED',
-        nextAction: 'reconnect and poll the operation; the Supervisor owns execution',
+        summary: 'Supervisor rollback operation state is temporarily unavailable',
+        keyOutput: 'SUPERVISOR_OPERATION_READ_FAILED',
+        nextAction: 'poll the persisted operation; do not repeat rollback while activation is in progress',
         details: { operation: finalOperation },
       });
     }
-    finalOperation = polled.operation;
+    finalOperation = persisted;
   }
 
   if (finalOperation.phase !== 'succeeded') {
@@ -403,6 +462,20 @@ async function stableSupervisorRollback(
     });
   }
 
+  let activationHandoff: Awaited<ReturnType<typeof waitForOperationActivation>>;
+  try {
+    activationHandoff = await waitForOperationActivation(rootHome, finalOperation, operationTimeoutMs(opts));
+  } catch (error) {
+    return compositeFailed({
+      phase: 'supervisor-activation',
+      summary: 'Runtime rollback succeeded but Stable Supervisor activation did not converge',
+      failedCheck: 'supervisor_activation',
+      keyOutput: error instanceof Error ? error.message : String(error),
+      nextAction: 'inspect activation state and restore the rollback release service registration if needed',
+      details: { operation: finalOperation, rollbackMode },
+    });
+  }
+
   const authority = readActiveSlotAuthority(rootHome);
   return compositeSucceeded({
     phase: 'rollback',
@@ -413,7 +486,7 @@ async function stableSupervisorRollback(
       `rollbackMode=${rollbackMode}`,
     ].join('\n'),
     nextAction: 'use controller status to confirm the restored immutable release and runtime generation',
-    details: { authority, operation: finalOperation, rollbackMode },
+    details: { authority, operation: finalOperation, rollbackMode, activationHandoff },
   });
 }
 

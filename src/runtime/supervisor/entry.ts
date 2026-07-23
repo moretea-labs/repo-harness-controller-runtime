@@ -102,6 +102,12 @@ export function stableSupervisorExitCode(reason: 'unexpected_runtime_stop' | 'ex
   return reason === 'unexpected_runtime_stop' ? 1 : 0;
 }
 
+export function stableSupervisorActivatesPublishedRelease(
+  serviceMode = process.env.REPO_HARNESS_SUPERVISOR_SERVICE_MODE,
+): boolean {
+  return serviceMode !== 'detached';
+}
+
 export async function runStableSupervisor(): Promise<void> {
   const repoRoot = resolveMcpRepoRoot(option('--repo') ?? process.cwd());
   const controllerHome = ensureControllerHome(option('--controller-home'));
@@ -135,6 +141,7 @@ export async function runStableSupervisor(): Promise<void> {
     controlHost: option('--control-host') ?? '127.0.0.1',
     controlPort: numberOption('--control-port', 8770),
     releaseRevision: option('--release-revision'),
+    activatePublishedRelease: stableSupervisorActivatesPublishedRelease(),
     // A runtime-owned stop is unexpected at the top-level service boundary.
     // Exit non-zero so launchd/systemd restart the Stable Supervisor instead
     // of treating the outage as an intentional operator shutdown.

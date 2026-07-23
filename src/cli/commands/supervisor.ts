@@ -16,8 +16,12 @@ import { stopControllerService } from '../controller/lifecycle';
 import { writeJsonAtomic } from '../../runtime/shared/json-files';
 import {
   publishAndScheduleSupervisorRelease,
+  readServiceActivationState as readRuntimeServiceActivationState,
   scheduleServiceActivation as scheduleRuntimeServiceActivation,
   serviceActivationStatePath as runtimeServiceActivationStatePath,
+  waitForServiceActivation as waitForRuntimeServiceActivation,
+  type SupervisorActivationPhase as RuntimeSupervisorActivationPhase,
+  type SupervisorActivationState as RuntimeSupervisorActivationState,
 } from '../../runtime/supervisor/service-activation';
 
 function output(value: unknown, json = true): void {
@@ -42,46 +46,14 @@ function launchSupervisor(repo: string, home: string): { pid?: number; service?:
   return { pid: launchStableSupervisor({ repoRoot: repo, controllerHome: home, logPath: supervisorLogPath(home) }).pid, service: service as unknown as Record<string, unknown> };
 }
 
-export type SupervisorActivationPhase =
-  | 'scheduled'
-  | 'waiting_for_handoff'
-  | 'stopping_legacy'
-  | 'registering_service'
-  | 'succeeded'
-  | 'failed';
-
-export interface SupervisorActivationState {
-  schemaVersion: 1;
-  activationId: string;
-  phase: SupervisorActivationPhase;
-  repoRoot: string;
-  updatedAt: string;
-  pid?: number;
-  startedAt?: string;
-  completedAt?: string;
-  expectedReleaseRevision?: string;
-  expectedReleasePath?: string;
-  releaseRevision?: string;
-  releasePath?: string;
-  error?: string;
-  recovery?: unknown;
-  [key: string]: unknown;
-}
+export type SupervisorActivationPhase = RuntimeSupervisorActivationPhase;
+export type SupervisorActivationState = RuntimeSupervisorActivationState;
 
 export function serviceActivationStatePath(home: string): string {
   return runtimeServiceActivationStatePath(home);
 }
 
-export function readServiceActivationState(home: string): SupervisorActivationState | undefined {
-  try {
-    const parsed = JSON.parse(readFileSync(serviceActivationStatePath(home), 'utf8')) as SupervisorActivationState;
-    return parsed?.schemaVersion === 1 && typeof parsed.activationId === 'string' && typeof parsed.phase === 'string'
-      ? parsed
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
+export const readServiceActivationState = readRuntimeServiceActivationState;
 
 function writeActivationState(home: string, value: Record<string, unknown>): void {
   const existing = readServiceActivationState(home);
@@ -93,31 +65,7 @@ function writeActivationState(home: string, value: Record<string, unknown>): voi
   });
 }
 
-export async function waitForServiceActivation(input: {
-  home: string;
-  activationId: string;
-  expectedReleaseRevision?: string;
-  timeoutMs?: number;
-  intervalMs?: number;
-}): Promise<SupervisorActivationState> {
-  const deadline = Date.now() + Math.max(1_000, input.timeoutMs ?? 120_000);
-  while (Date.now() < deadline) {
-    const state = readServiceActivationState(input.home);
-    if (state?.activationId === input.activationId) {
-      if (state.phase === 'failed') {
-        throw new Error(`SUPERVISOR_ACTIVATION_FAILED: ${state.error ?? 'unknown activation failure'}`);
-      }
-      if (state.phase === 'succeeded') {
-        if (input.expectedReleaseRevision && state.releaseRevision !== input.expectedReleaseRevision) {
-          throw new Error(`SUPERVISOR_ACTIVATION_RELEASE_MISMATCH: expected=${input.expectedReleaseRevision} actual=${state.releaseRevision ?? 'missing'}`);
-        }
-        return state;
-      }
-    }
-    await new Promise((resolveWait) => setTimeout(resolveWait, Math.max(100, input.intervalMs ?? 500)));
-  }
-  throw new Error(`SUPERVISOR_ACTIVATION_TIMEOUT: ${input.activationId}`);
-}
+export const waitForServiceActivation = waitForRuntimeServiceActivation;
 
 export function supervisorActivationMatchesRelease(
   control: unknown,
