@@ -1,6 +1,6 @@
 import { spawnSync } from 'child_process';
 import { createHash } from 'crypto';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { getAgentJob, markAgentJobClosure, markAgentJobReviewedCompletion, recordAgentJobIntegrationEvidence } from '../agent-jobs/job-manager';
 import type { AgentJobMeta } from '../agent-jobs/types';
@@ -1504,4 +1504,147 @@ export function finishEditSession(repoRoot: string, options: FinishEditSessionOp
     () => finishEditSessionUnlocked(repoRoot, options),
     30 * 60_000,
   );
+}
+
+export interface ResumeStalledCleanupReport {
+  repoRoot: string;
+  scanned: number;
+  eligible: number;
+  resumed: number;
+  succeeded: number;
+  failed: number;
+  skipped: number;
+  errors: string[];
+  details: Array<{
+    runId: string;
+    closureState: string;
+    worktree: string;
+    branch: string | null;
+    outcome: 'resumed_succeeded' | 'resumed_failed' | 'still_blocked' | 'already_cleaned' | 'skipped';
+    reason?: string;
+  }>;
+}
+
+/**
+ * Resume stalled cleanup for agent runs that were interrupted during
+ * cleanup_pending / cleaning phases. This is called on Daemon startup
+ * to ensure cleanup that was interrupted by a restart completes.
+ *
+ * Idempotent — uses cleanup request IDs to prevent double-execution
+ * and verifies actual filesystem state before acting.
+ */
+export function resumeStalledCleanup(repoRoot: string): ResumeStalledCleanupReport {
+  const report: ResumeStalledCleanupReport = {
+    repoRoot,
+    scanned: 0,
+    eligible: 0,
+    resumed: 0,
+    succeeded: 0,
+    failed: 0,
+    skipped: 0,
+    errors: [],
+    details: [],
+  };
+
+  const runsRoot = join(resolveRepoPreferredControllerHome(repoRoot), 'repositories', 'runs');
+  if (!existsSync(runsRoot)) return report;
+
+  try {
+    const entries = readdirSync(runsRoot, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      report.scanned++;
+      const metaPath = join(runsRoot, entry.name, 'meta.json');
+      if (!existsSync(metaPath)) continue;
+
+      let meta: AgentJobMeta;
+      try {
+        meta = JSON.parse(readFileSync(metaPath, 'utf8')) as AgentJobMeta;
+      } catch {
+        report.errors.push(`Failed to read Run metadata: ${metaPath}`);
+        continue;
+      }
+
+      // Only consider runs that are stuck in cleanup states.
+      if (!meta.closureState || !['cleanup_pending', 'cleaning', 'cleanup_blocked'].includes(meta.closureState)) {
+        continue;
+      }
+      // Skip runs that are not local worktree-mode runs (no worktree to clean).
+      if (meta.provider !== 'local' || meta.executionMode !== 'worktree') continue;
+      // Skip runs that have already had their worktree cleaned.
+      if (meta.worktreeCleanedAt && (!meta.branch || meta.cleanupBranchDeletedAt)) {
+        report.details.push({
+          runId: meta.runId,
+          closureState: meta.closureState,
+          worktree: meta.worktree,
+          branch: meta.branch,
+          outcome: 'already_cleaned',
+        });
+        report.skipped++;
+        continue;
+      }
+      report.eligible++;
+
+      // Attempt idempotent cleanup.
+      try {
+        // Generate a unique resume request ID to make the retry idempotent.
+        const resumeRequestId = `resume-${meta.runId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const result = cleanupIntegratedWorktree(repoRoot, meta.runId, resumeRequestId);
+
+        if (result.removed && result.branchDeleted) {
+          report.succeeded++;
+          report.details.push({
+            runId: meta.runId,
+            closureState: meta.closureState,
+            worktree: meta.worktree,
+            branch: meta.branch,
+            outcome: 'resumed_succeeded',
+            reason: result.cleanupRequestId,
+          });
+          // Mark the Run closure as completed now that cleanup succeeded.
+          try {
+            markAgentJobReviewedCompletion(repoRoot, meta.runId);
+          } catch {
+            // Best effort — the cleanup succeeded; the closure update is secondary.
+          }
+        } else if (result.preserved) {
+          report.skipped++;
+          report.details.push({
+            runId: meta.runId,
+            closureState: meta.closureState,
+            worktree: meta.worktree,
+            branch: meta.branch,
+            outcome: 'still_blocked',
+            reason: result.preservationReason ?? result.message,
+          });
+        } else {
+          report.failed++;
+          report.details.push({
+            runId: meta.runId,
+            closureState: meta.closureState,
+            worktree: meta.worktree,
+            branch: meta.branch,
+            outcome: 'resumed_failed',
+            reason: result.message ?? 'cleanup did not succeed',
+          });
+        }
+      } catch (error) {
+        report.failed++;
+        report.errors.push(`Cleanup resume failed for ${meta.runId}: ${error instanceof Error ? error.message : String(error)}`);
+        report.details.push({
+          runId: meta.runId,
+          closureState: meta.closureState,
+          worktree: meta.worktree,
+          branch: meta.branch,
+          outcome: 'resumed_failed',
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+      report.resumed++;
+    }
+  } catch (error) {
+    report.errors.push(`Failed to scan runs directory: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  return report;
 }

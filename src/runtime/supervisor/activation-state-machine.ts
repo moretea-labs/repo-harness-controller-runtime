@@ -44,6 +44,8 @@ export interface PhaseRecord {
   stderr?: string;
   readinessResult?: unknown;
   error?: string;
+  stoppedAction?: string;
+  cleanedPids?: number[];
 }
 
 export interface ActivationStateRecord {

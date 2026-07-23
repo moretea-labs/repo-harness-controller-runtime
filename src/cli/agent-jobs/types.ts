@@ -37,7 +37,17 @@ export type AgentJobPreservationReason =
   | "verification_stale"
   | "ownership_unknown"
   | "overlapping_unmerged_work"
-  | "cleanup_failed";
+  | "cleanup_failed"
+  | "untracked_user_files"
+  | "active_worker"
+  | "active_lease"
+  | "active_job"
+  | "active_edit_session"
+  | "waiting_for_user"
+  | "canonical_main_occupied"
+  | "worktree_path_mismatch"
+  | "branch_not_reachable_from_target"
+  | "cleanup_receipt_missing";
 export type AgentExecutionProvider = "local" | "github";
 export type AgentExecutionMode = "workspace" | "worktree" | "github";
 export type AgentProgressPhase =

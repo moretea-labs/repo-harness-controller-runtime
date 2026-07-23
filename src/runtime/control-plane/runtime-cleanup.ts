@@ -45,6 +45,20 @@ const WORKTREE_RELEASE_STATUSES = new Set([
   'timed_out',
   'orphaned',
   'stale',
+  'succeeded',
+  'completed',
+]);
+
+/** Runs whose cleanup was pending for longer than this threshold may have their
+ *  worktrees released by the orphan reconciler. This matches the cleanup_pending
+ *  / cleaning closure states that did not complete before the Daemon restarted. */
+const CLEANUP_PENDING_RELEASE_MS = 3_600_000; // 1 hour
+
+/** Closure states that indicate cleanup is complete or permanently unnecessary. */
+const CLEANUP_TERMINAL_CLOSURE_STATES = new Set([
+  'completed',
+  'preserved',
+  'cleanup_blocked',
 ]);
 
 /**
@@ -96,6 +110,11 @@ interface AgentRunSnapshot {
   lastHeartbeatAt?: unknown;
   integratedSessionId?: unknown;
   integratedAt?: unknown;
+  closureState?: unknown;
+  cleanupStartedAt?: unknown;
+  cleanupFinishedAt?: unknown;
+  changeOutcome?: unknown;
+  branch?: unknown;
 }
 
 export interface RuntimeProcessSnapshot {
@@ -317,13 +336,44 @@ function createScanBudget(maxEntries: number): ScanBudget {
   };
 }
 
-function shouldProtectWorktreeReference(meta: AgentRunSnapshot): boolean {
+function shouldProtectWorktreeReference(meta: AgentRunSnapshot, nowMs: number): boolean {
   if (meta.executionMode !== 'worktree' || meta.worktreeCleanedAt) return false;
   const status = typeof meta.status === 'string' ? meta.status.trim().toLowerCase() : '';
   // Explicit terminal failure/cancel statuses no longer need the worktree.
+  if (status && WORKTREE_RELEASE_STATUSES.has(status)) {
+    // For succeeded/completed: also verify closure state is terminal before releasing.
+    if (status === 'succeeded' || status === 'completed') {
+      const closureState = typeof meta.closureState === 'string'
+        ? meta.closureState.trim().toLowerCase()
+        : '';
+      // Terminal closure: cleanup is done or blocked permanently — release.
+      if (CLEANUP_TERMINAL_CLOSURE_STATES.has(closureState)) return false;
+      // No closure recorded and run is old enough: treat as abandoned cleanup.
+      if (!closureState) {
+        const finishedAt = typeof meta.integratedAt === 'string'
+          ? new Date(meta.integratedAt).getTime()
+          : 0;
+        if (finishedAt > 0 && nowMs - finishedAt > CLEANUP_PENDING_RELEASE_MS) return false;
+        return true;
+      }
+      // cleanup_pending or cleaning — treat as abandoned after threshold.
+      if (closureState === 'cleanup_pending' || closureState === 'cleaning') {
+        const cleanupStartedAt = typeof meta.cleanupStartedAt === 'string'
+          ? new Date(meta.cleanupStartedAt).getTime()
+          : 0;
+        const startedAt = cleanupStartedAt > 0 ? cleanupStartedAt
+          : typeof meta.integratedAt === 'string' ? new Date(meta.integratedAt).getTime() : 0;
+        if (startedAt > 0 && nowMs - startedAt > CLEANUP_PENDING_RELEASE_MS) return false;
+        return true;
+      }
+      // Other non-terminal closure states (integration_pending, etc.) — still protect.
+      return true;
+    }
+    // Non-succeeded terminal statuses: release immediately.
+    return false;
+  }
   // Missing or unknown lifecycle state fails closed because it may represent an
   // interrupted integration with unique uncommitted work still in the worktree.
-  if (status && WORKTREE_RELEASE_STATUSES.has(status)) return false;
   return true;
 }
 
@@ -331,6 +381,7 @@ function collectReferencedWorktrees(
   controllerHome: string,
   budget: ScanBudget,
   errors: string[],
+  nowMs: number,
 ): WorktreeReferences {
   const referenced = new Set<string>();
   const unsafeRepositories = new Set<string>();
@@ -348,7 +399,7 @@ function collectReferencedWorktrees(
       }
       try {
         const meta = readJsonFile<AgentRunSnapshot>(metaPath);
-        if (!shouldProtectWorktreeReference(meta)) return;
+        if (!shouldProtectWorktreeReference(meta, nowMs)) return;
         const worktree = typeof meta.worktree === 'string' && meta.worktree.trim()
           ? meta.worktree.trim()
           : typeof meta.worktreePath === 'string' && meta.worktreePath.trim()
@@ -590,7 +641,7 @@ export function cleanupControllerRuntimeState(
   const errors: string[] = [];
   const skippedByReason: Record<string, number> = {};
   const pidFiles = cleanupDaemonPidFile(home, nowIso, options, errors, removalBudget);
-  const references = collectReferencedWorktrees(home, referenceBudget, errors);
+  const references = collectReferencedWorktrees(home, referenceBudget, errors, nowMs);
   const worktrees = cleanupOrphanWorktrees(home, references, worktreeBudget, nowMs, errors, removalBudget);
   Object.entries(worktrees.skippedByReason).forEach(([key, value]) => { skippedByReason[key] = (skippedByReason[key] ?? 0) + value; });
   const removedTemporaryPaths = cleanupTemporaryStatePaths(home, tempBudget, nowMs, errors, removalBudget, skippedByReason).sort();

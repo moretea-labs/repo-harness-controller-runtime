@@ -30,6 +30,7 @@ export interface WorktreeCleanupResult {
   preserved?: boolean;
   preservationReason?: AgentJobPreservationReason;
   message?: string;
+  cleanupRequestId?: string;
 }
 
 interface IntegrationPlan {
@@ -721,7 +722,15 @@ function worktreeCleanupBlocker(
 ): { reason: AgentJobPreservationReason; message: string } | undefined {
   const runWorktreePath = canonicalExistingPath(run.worktree);
   if (runWorktreePath === canonicalExistingPath(repoRoot)) {
-    return { reason: "active_worktree", message: "Refusing to clean the canonical repository workspace." };
+    return { reason: "canonical_main_occupied", message: "Refusing to clean the canonical repository workspace." };
+  }
+  // Verify worktree path matches the durable record for this Run.
+  if (run.worktreePath && canonicalExistingPath(run.worktreePath) !== runWorktreePath && existsSync(run.worktreePath)) {
+    return { reason: "worktree_path_mismatch", message: `Worktree path mismatch: durable record says ${run.worktreePath} but Run worktree is ${run.worktree}.` };
+  }
+  // If run is waiting for user input, preserve everything.
+  if (run.status === 'waiting_for_user') {
+    return { reason: "waiting_for_user", message: "Run is waiting for user input; preserving worktree until resolved." };
   }
   const worktrees = gitBuffer(repoRoot, ["worktree", "list", "--porcelain"]);
   if (!worktrees.ok) {
@@ -740,8 +749,16 @@ function worktreeCleanupBlocker(
     if (!status.ok) {
       return { reason: "unknown_worktree_state", message: `Unable to verify worktree cleanliness: ${status.stderr}` };
     }
-    if (status.stdout.toString("utf-8").trim()) {
+    const statusLines = status.stdout.toString("utf-8").trim();
+    if (statusLines) {
+      // Separate untracked (??) files from tracked changes
+      const untrackedFiles = statusLines.split('\n')
+        .filter(line => line.startsWith('??'))
+        .map(line => line.slice(3).trim());
       if (!run.integratedSessionId || !run.baseRevision || !run.changedFiles || run.changedFiles.length === 0) {
+        if (untrackedFiles.length > 0 && statusLines.split('\n').every(line => line.startsWith('??'))) {
+          return { reason: "untracked_user_files", message: `Worktree contains untracked user files (${untrackedFiles.join(", ")}); preserving ${run.worktree}.` };
+        }
         return { reason: "dirty_worktree", message: `Worktree contains changes that are not covered by durable integration evidence; preserving ${run.worktree}.` };
       }
       let actualPaths: string[];
@@ -762,8 +779,25 @@ function worktreeCleanupBlocker(
     if (!rootBranch.ok) {
       return { reason: "unknown_worktree_state", message: `Unable to inspect the canonical branch: ${rootBranch.stderr}` };
     }
-    if (rootBranch.stdout.toString("utf-8").trim() === run.branch) {
+    const canonicalBranch = rootBranch.stdout.toString("utf-8").trim();
+    if (canonicalBranch === run.branch) {
       return { reason: "protected_branch", message: `Temporary branch ${run.branch} is active in the canonical workspace; preserving it.` };
+    }
+    // Check if branch is a protected branch name (main/master/default).
+    const protectedBranches = ['main', 'master', 'default'];
+    if (protectedBranches.includes(run.branch)) {
+      return { reason: "protected_branch", message: `Branch ${run.branch} is a protected branch name and must not be deleted automatically.` };
+    }
+    // Check if branch HEAD is reachable from the target branch.
+    if (canonicalBranch) {
+      const reachable = gitBuffer(repoRoot, ["merge-base", "--is-ancestor", run.branch, canonicalBranch]);
+      if (!reachable.ok) {
+        // Check if the branch has unique unmerged commits
+        const unmergedCommits = gitBuffer(repoRoot, ["log", `${canonicalBranch}..${run.branch}`, "--oneline"]);
+        if (unmergedCommits.ok && unmergedCommits.stdout.toString("utf-8").trim()) {
+          return { reason: "unmerged_branch", message: `Branch ${run.branch} has unique commits not reachable from ${canonicalBranch}; preserving it.` };
+        }
+      }
     }
     const branchMarker = `branch refs/heads/${run.branch}`;
     const activeElsewhere = records.some((record) => {
@@ -778,47 +812,67 @@ function worktreeCleanupBlocker(
   return undefined;
 }
 
-function cleanupVerifiedWorktree(repoRoot: string, runId: string): WorktreeCleanupResult {
+function cleanupVerifiedWorktree(repoRoot: string, runId: string, cleanupRequestId?: string): WorktreeCleanupResult {
   const run = getAgentJob(repoRoot, runId);
+  const requestId = cleanupRequestId ?? `cleanup-${runId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  // Idempotency: if the worktree is already gone and branch is deleted, succeed immediately.
+  if (!existsSync(run.worktree) && (!run.branch || !gitBranchExists(repoRoot, run.branch))) {
+    return { removed: true, branchDeleted: true, cleanupRequestId: requestId };
+  }
+
   const blocker = worktreeCleanupBlocker(repoRoot, run);
-  if (blocker) return preserveCleanup(repoRoot, runId, blocker.reason, blocker.message);
-  markAgentJobClosure(repoRoot, runId, { state: "cleaning", details: "Removing the verified isolated worktree and temporary branch." });
+  if (blocker) return { ...preserveCleanup(repoRoot, runId, blocker.reason, blocker.message), cleanupRequestId: requestId };
+  markAgentJobClosure(repoRoot, runId, { state: "cleaning", details: `Removing the verified isolated worktree and temporary branch. [${requestId}]` });
   const cleanupPath = canonicalExistingPath(run.worktree);
   let removed = !existsSync(run.worktree);
   if (!removed) {
     const removal = gitBuffer(repoRoot, ["worktree", "remove", "--force", cleanupPath]);
     if (!removal.ok || existsSync(run.worktree)) {
-      return preserveCleanup(repoRoot, runId, "cleanup_failed", `Git could not remove the verified worktree: ${removal.stderr || run.worktree}`);
+      return { ...preserveCleanup(repoRoot, runId, "cleanup_failed", `Git could not remove the verified worktree: ${removal.stderr || run.worktree}`), cleanupRequestId: requestId };
     }
     removed = true;
+    // Prune git worktree metadata
+    gitBuffer(repoRoot, ["worktree", "prune", "--expire", "now"]);
   }
   let branchDeleted = !run.branch;
   if (run.branch) {
-    const deleted = gitBuffer(repoRoot, ["branch", "-D", run.branch]);
-    if (!deleted.ok && !deleted.stderr.includes("not found")) {
-      return preserveCleanup(repoRoot, runId, "cleanup_failed", `Worktree was removed but branch ${run.branch} could not be deleted: ${deleted.stderr}`);
+    // Idempotent branch deletion: skip if already deleted
+    if (!gitBranchExists(repoRoot, run.branch)) {
+      branchDeleted = true;
+    } else {
+      const deleted = gitBuffer(repoRoot, ["branch", "-D", run.branch]);
+      if (!deleted.ok && !deleted.stderr.includes("not found")) {
+        return { ...preserveCleanup(repoRoot, runId, "cleanup_failed", `Worktree was removed but branch ${run.branch} could not be deleted: ${deleted.stderr}`), cleanupRequestId: requestId };
+      }
+      branchDeleted = true;
     }
-    branchDeleted = true;
   }
   markAgentJobClosure(repoRoot, runId, {
     state: "cleanup_pending",
-    details: "Verified worktree cleanup completed; Run completion is pending.",
+    details: `Verified worktree cleanup completed; Run completion is pending. [${requestId}]`,
     worktreeCleaned: removed,
     branchDeleted,
   });
-  return { removed, branchDeleted };
+  return { removed, branchDeleted, cleanupRequestId: requestId };
+}
+
+function gitBranchExists(repoRoot: string, branch: string): boolean {
+  const result = gitBuffer(repoRoot, ["rev-parse", "--verify", `refs/heads/${branch}`]);
+  return result.ok;
 }
 
 export function cleanupIntegratedWorktree(
   repoRoot: string,
   runId: string,
+  cleanupRequestId?: string,
 ): WorktreeCleanupResult {
   const run = getAgentJob(repoRoot, runId);
   if (run.provider !== "local" || run.executionMode !== "worktree")
     return { removed: false, branchDeleted: false };
   if (!run.integratedSessionId)
-    return preserveCleanup(repoRoot, runId, "unmerged_branch", "Cannot clean an isolated worktree before its integration is durably recorded.");
-  return cleanupVerifiedWorktree(repoRoot, runId);
+    return { ...preserveCleanup(repoRoot, runId, "unmerged_branch", "Cannot clean an isolated worktree before its integration is durably recorded."), cleanupRequestId };
+  return cleanupVerifiedWorktree(repoRoot, runId, cleanupRequestId);
 }
 
 export function cleanupNoChangeWorktree(

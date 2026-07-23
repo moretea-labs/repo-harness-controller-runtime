@@ -64,7 +64,7 @@ function runLaunchctl(args: string[]): LaunchctlCommandResult {
     ok: result.ok,
     stdout: result.stdout,
     stderr: result.stderr,
-    exitCode: result.exitCode ?? 0,
+    exitCode: result.status ?? 0,
   };
 }
 
