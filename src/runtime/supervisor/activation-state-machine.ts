@@ -107,7 +107,7 @@ function migrateV1State(v1: Record<string, unknown>): ActivationStateRecord {
     expectedReleasePath: v1.expectedReleasePath as string | undefined,
     previousReleaseRevision: v1.releaseRevision as string | undefined,
     previousReleasePath: v1.releasePath as string | undefined,
-    serviceLabel: v1.service as Record<string, unknown>?.label as string | undefined,
+    serviceLabel: (v1.service as Record<string, unknown> | undefined)?.label as string | undefined,
     pid: v1.pid as number | undefined,
     error: v1.error as string | undefined,
     recovery: v1.recovery,
