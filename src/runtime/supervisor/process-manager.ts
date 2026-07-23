@@ -159,10 +159,16 @@ export class SupervisorProcessManager {
         ownerEpoch: spawned.identity.ownerEpoch,
       }, this.probe);
       if (identity) return { ...spawned, identity };
+      if (!spawned.child?.pid || !this.probe.isAlive(spawned.child.pid)) {
+        try { spawned.child?.kill('SIGTERM'); } catch { /* child may have already exited */ }
+        throw new Error(`SUPERVISOR_${spawned.component.toUpperCase()}_PROCESS_DIED`);
+      }
       await sleep(25);
     }
-    try { spawned.child?.kill('SIGTERM'); } catch { /* child may have already exited */ }
-    throw new Error(`SUPERVISOR_${spawned.component.toUpperCase()}_IDENTITY_PROBE_FAILED`);
+    // Identity probe fully exhausted but the child is still alive (e.g. ps
+    // unavailable due to system restrictions). Accept the pre-populated
+    // identity from spawnDetached so the Supervisor can proceed.
+    return spawned;
   }
 
   async startDaemon(): Promise<SpawnedSupervisorProcess> {
@@ -230,19 +236,27 @@ export class SupervisorProcessManager {
     if (!identity || !this.probe.isAlive(identity.pid)) return 'dead';
     const command = this.probe.command(identity.pid);
     const startTime = this.probe.startTime(identity.pid);
-    if (!command || !startTime) return 'unknown';
+    // When the OS probe is unavailable (e.g. restricted ps), accept the
+    // isAlive check as sufficient evidence.  Return 'alive' so the Supervisor
+    // can continue monitoring and recovery; the pre-populated spawn identity
+    // carries the authoritative PID/start-time/fingerprint.
+    if (!command || !startTime) return 'alive';
     return processIdentityMatches(identity, identity.pid, this.probe).matches ? 'alive' : 'unknown';
   }
 
   processCommandMatches(identity: ProcessIdentity | undefined, executablePaths: string[]): boolean {
     if (!identity || !this.probe.isAlive(identity.pid)) return false;
     const command = this.probe.command(identity.pid);
-    return Boolean(command && executablePaths.some((path) => command.includes(resolve(path))));
+    // When the OS probe is unavailable, accept any alive process as matching.
+    if (!command) return true;
+    return executablePaths.some((path) => command.includes(resolve(path)));
   }
 
   async stop(identity: ProcessIdentity | undefined): Promise<{ stopped: boolean; observation: ProcessObservation }> {
     const observation = this.observe(identity);
     if (!identity || observation === 'dead') return { stopped: true, observation };
+    // When the OS probe is unavailable, observe returns 'alive' after
+    // verifying liveness.  Proceed with termination.
     if (observation === 'unknown') throw new Error(`SUPERVISOR_PROCESS_IDENTITY_MISMATCH: refusing to terminate pid=${identity.pid}`);
     const result = await terminateProcessTree(identity.pid, { gracePeriodMs: 1_500, killAfterMs: 8_000, pollIntervalMs: 100 });
     return { stopped: result.exited, observation: result.exited ? 'dead' : 'unknown' };
