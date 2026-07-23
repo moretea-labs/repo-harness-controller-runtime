@@ -9,6 +9,7 @@ import { evaluateReleaseGate } from '../../release/release-gate';
 import { executeLocalBridgeJobInline, getLocalBridgeJob } from '../../../cli/local-bridge/job-store';
 import type { LocalBridgeJob } from '../../../cli/local-bridge/types';
 import { settleScheduledExecution } from '../../workflow/schedules/settlement';
+import { runtimeToolArgumentsForExecutionJob } from '../jobs/restart-resume';
 import type { ExecutionJob, ExecutionJobOutcome } from '../jobs/types';
 import {
   buildDelegatedExecutionResult,
@@ -32,20 +33,6 @@ import { isAbsolute, relative, resolve, sep } from 'path';
 import { isAssistantPluginError } from '../../plugins/errors';
 import { executeAssistantRoutineRuntime } from '../../assistant/routine-runtime';
 
-export function runtimeToolArgumentsForExecutionJob(
-  job: Pick<ExecutionJob, 'requestId' | 'payload'>,
-): Record<string, unknown> {
-  const args = { ...(job.payload.arguments ?? {}) };
-  if (job.payload.operation !== 'controller_restart_verify') return args;
-
-  const explicitRequestId = typeof args.request_id === 'string' && args.request_id.trim()
-    ? args.request_id.trim()
-    : typeof args.requestId === 'string' && args.requestId.trim()
-      ? args.requestId.trim()
-      : undefined;
-  args.request_id = explicitRequestId ?? job.requestId;
-  return args;
-}
 
 function childReferenceFromLocalJob(
   localJob: LocalBridgeJob,

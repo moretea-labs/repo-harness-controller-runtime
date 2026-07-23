@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { waitForControllerRestartState } from '../../src/cli/controller/composite-operations';
 import type { ControllerRestartState } from '../../src/cli/controller/restart-coordinator';
-import { runtimeToolArgumentsForExecutionJob } from '../../src/runtime/execution/workers/executor';
+import { runtimeToolArgumentsForExecutionJob } from '../../src/runtime/execution/jobs/restart-resume';
 
 function restartState(phase: ControllerRestartState['phase']): ControllerRestartState {
   return {

@@ -194,7 +194,12 @@ export class GlobalScheduler {
     runtime: SchedulerRuntimeBinding = {},
   ) {
     this.controllerHome = controllerHome;
-    this.actors = new RepoActorRegistry(controllerHome);
+    this.controllerPid = runtime.controllerPid ?? process.pid;
+    this.controllerStartedAt = runtime.controllerStartedAt;
+    this.actors = new RepoActorRegistry(controllerHome, {
+      controllerPid: this.controllerPid,
+      controllerStartedAt: this.controllerStartedAt,
+    });
     this.config = {
       maxWorkers: Math.max(1, config.maxWorkers ?? Number(process.env.REPO_HARNESS_MAX_WORKERS ?? 4)),
       maxConcurrentRepositories: Math.max(1, config.maxConcurrentRepositories ?? Number(process.env.REPO_HARNESS_MAX_ACTIVE_REPOS ?? 4)),
@@ -208,8 +213,6 @@ export class GlobalScheduler {
       minFreeMemoryMb: Math.max(64, config.minFreeMemoryMb ?? Number(process.env.REPO_HARNESS_MIN_FREE_MEMORY_MB ?? 512)),
       maxLoadPerCpu: Math.max(0.25, config.maxLoadPerCpu ?? Number(process.env.REPO_HARNESS_MAX_LOAD_PER_CPU ?? 1.5)),
     };
-    this.controllerPid = runtime.controllerPid ?? process.pid;
-    this.controllerStartedAt = runtime.controllerStartedAt;
     this.runtimeSourceRoot = runtime.runtimeSourceRoot ? resolve(runtime.runtimeSourceRoot) : undefined;
     this.workerEntrypoint = runtime.workerEntrypoint ? resolve(runtime.workerEntrypoint) : undefined;
     this.ownerEpoch = runtime.ownerEpoch;
@@ -360,6 +363,7 @@ export class GlobalScheduler {
           cwd: this.runtimeSourceRoot ?? process.cwd(),
           environment: this.workerEnvironment(),
           ownerPid: this.controllerPid,
+          ...(this.controllerStartedAt ? { ownerStartedAt: this.controllerStartedAt } : {}),
           ...(this.ownerEpoch ? { ownerEpoch: this.ownerEpoch } : {}),
           attempt: current.attempt,
           maxAttempts: current.maxAttempts,
@@ -428,6 +432,7 @@ export class GlobalScheduler {
       cwd: command.cwd,
       environment: Object.fromEntries(WORKER_ENVIRONMENT_KEYS.map((key) => [key, environment[key]])),
       ownerPid: this.controllerPid,
+      ...(this.controllerStartedAt ? { ownerStartedAt: this.controllerStartedAt } : {}),
       ...(this.ownerEpoch ? { ownerEpoch: this.ownerEpoch } : {}),
       attempt: current.attempt,
       maxAttempts: current.maxAttempts,
