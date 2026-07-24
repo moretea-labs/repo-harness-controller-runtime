@@ -1,33 +1,28 @@
 # Current Status Snapshot
 
-<!-- updated_at: 2026-07-18 -->
+<!-- updated_at: 2026-07-24 -->
 <!-- stale_after: 24h -->
 
-> **Status**: Canonical stable-baseline recovery is implementation-complete and awaiting final integration/release acceptance
-> **Updated At**: 2026-07-18
-> **Source**: Codex `/goal` canonical stable-baseline recovery
-> **Target**: Preserve historical work, make Task completion evidence-exact, keep detached Workers durable, and verify the stable runtime
+> **Status**: Campaign completion-path workspace cleanup fix merged;存量分支/worktree 回收进行中
+> **Updated At**: 2026-07-24
+> **Source**: Campaign auto-cleanup root-cause investigation
+> **Target**: 修复 accept_campaign 完成路径未触发 cleanupManagedWorkspace 的设计缺口
 > **Stale After**: 24h
 
 This snapshot is a read model, not an execution gate.
 
 ## Current Focus
 
-- New business Task execution remains frozen while the recovery branch is validated and delivered.
-- Historical recovery classified nine candidate work lines: three rescued into the canonical baseline, four superseded or patch-equivalent, and two intentionally retained without merge. The 453 historical Direct Edit sessions remain preserved as evidence.
-- Four historical Tasks incorrectly labeled `done` were reopened as `integration_blocked`; no cleanup-only blocker remains.
-- Task completion now requires a reachable target revision plus persisted verification, integration, and cleanup evidence. The unified finalizer owns integration, final verification, Run termination, cleanup, and Task acceptance.
-- Same-path source drift blocks integration while unrelated source changes remain eligible. Pending integration is indexed instead of scanning bounded Run history.
-- Detached repository-command Workers remain valid after reparenting to PID 1. The narrow ownership exception applies only after the child command exits and the owned auto-finalizer is running; ordinary execution still fails closed on ownership loss.
-- The Stable Supervisor, local Gateway/control endpoints, public MCP health, OAuth discovery, and the separately launchd-managed Cloudflare tunnel are healthy. The historical 502 window was local origin downtime rather than tunnel ownership failure.
+- `accept_campaign` 接入 `completeCampaignWorkspace`（基于 `git branch --merged` 而非 baseRevision 保护），彻底修复完成路径 worktree/分支不自动回收的问题。
+- 存量 14 个已合并 campaign 分支 + 8 个 campaign worktree 待手动回收（1 个未合并分支保留）。
 
 ## Validation Completed
 
-- `bun test`: 1678 passed, 0 failed, 12293 assertions across 197 files.
-- `bunx tsc --noEmit`.
-- `bash scripts/check-deploy-sql-order.sh`.
-- `bash scripts/check-architecture-sync.sh`.
-- `bash scripts/check-task-workflow.sh --strict` (source/document contracts pass; ignored generated runtime bootstrap advisories remain).
+- `bun tsc --noEmit`: 0 errors.
+- `bun test`: 2026 passed, 1 flaky Gmail-routine timeout (pre-existing, passes standalone).
+- `bash scripts/check-deploy-sql-order.sh`: OK.
+- `bash scripts/check-architecture-sync.sh`: advisory, 0 blocking.
+- `bash scripts/check-task-workflow.sh --strict`: pass.
 - `bun scripts/inspect-project-state.ts --repo . --format text`.
 - `bash scripts/migrate-project-template.sh --repo . --dry-run`.
 - Historical stuck-state migration: four false completions reopened, zero remaining false completions, four `integration_blocked`, zero `cleanup_blocked`.

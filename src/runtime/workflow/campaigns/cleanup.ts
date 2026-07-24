@@ -6,6 +6,8 @@ import { cancelExecutionJob, findExecutionJob } from '../../execution/jobs/store
 import type { Campaign, CampaignCleanupReport, CampaignCleanupResource } from './types';
 import { getCampaign, updateCampaign } from './store';
 
+type CleanupOptions = { targetBranch?: string };
+
 function now(): string { return new Date().toISOString(); }
 
 function git(root: string, args: string[]): { ok: boolean; stdout: string; stderr: string } {
@@ -24,6 +26,7 @@ function samePath(left: string, right: string): boolean {
 function cleanupManagedWorkspace(
   controllerHome: string,
   campaign: Campaign,
+  options?: CleanupOptions,
 ): { resources: CampaignCleanupResource[]; leaks: string[] } {
   const resources: CampaignCleanupResource[] = [];
   const leaks: string[] = [];
@@ -98,17 +101,24 @@ function cleanupManagedWorkspace(
     const branchRevision = git(sourceRoot, ['rev-parse', '--verify', `refs/heads/${branch}`]);
     if (!branchRevision.ok) {
       resources.push({ kind: 'branch', id: branch, status: 'missing' });
-    } else if (baseRevision && branchRevision.stdout !== baseRevision) {
-      const message = `Campaign branch has commits beyond its base revision; preserved ${branch}.`;
-      resources.push({ kind: 'branch', id: branch, status: 'preserved', message });
-      leaks.push(message);
     } else {
-      const deleted = git(sourceRoot, ['branch', '-D', branch]);
-      if (deleted.ok) resources.push({ kind: 'branch', id: branch, status: 'cleaned' });
-      else {
-        const message = `Failed to delete managed branch: ${deleted.stderr}`;
-        resources.push({ kind: 'branch', id: branch, status: 'failed', message });
+      const safe = options?.targetBranch
+        ? git(sourceRoot, ['branch', '--merged', options.targetBranch, '--list', branch]).stdout.includes(branch)
+        : !baseRevision || branchRevision.stdout === baseRevision;
+      if (!safe) {
+        const message = options?.targetBranch
+          ? `Campaign branch has unmerged commits into ${options.targetBranch}; preserved ${branch}.`
+          : `Campaign branch has commits beyond its base revision; preserved ${branch}.`;
+        resources.push({ kind: 'branch', id: branch, status: 'preserved', message });
         leaks.push(message);
+      } else {
+        const deleted = git(sourceRoot, ['branch', '-D', branch]);
+        if (deleted.ok) resources.push({ kind: 'branch', id: branch, status: 'cleaned' });
+        else {
+          const message = `Failed to delete managed branch: ${deleted.stderr}`;
+          resources.push({ kind: 'branch', id: branch, status: 'failed', message });
+          leaks.push(message);
+        }
       }
     }
   }
@@ -206,4 +216,36 @@ export async function cancelCampaign(
     requestFingerprint: JSON.stringify({ reason, leaks: report.leaks }),
   });
   return campaign;
+}
+
+/**
+ * After a campaign is accepted/completed, clean up its managed workspace using
+ * `git branch --merged <targetBranch>` as the safety gate rather than the
+ * cancel-path's base-revision check. Merged branches and their worktrees are
+ * removed; unmerged ones are preserved and recorded as leaks.
+ */
+export function completeCampaignWorkspace(
+  controllerHome: string,
+  repoId: string,
+  campaignId: string,
+  requestId: string,
+): Campaign {
+  const campaign = getCampaign(controllerHome, repoId, campaignId);
+  const repository = getRepository(repoId, controllerHome);
+  const targetBranch = repository.defaultBranch ?? 'main';
+
+  const startedAt = now();
+  const report: CampaignCleanupReport = { schemaVersion: 1, startedAt, resources: [], leaks: [] };
+  const workspace = cleanupManagedWorkspace(controllerHome, campaign, { targetBranch });
+  report.resources.push(...workspace.resources);
+  report.leaks.push(...workspace.leaks);
+  report.finishedAt = now();
+
+  return updateCampaign(controllerHome, repoId, campaignId, `${requestId}:workspace-cleanup`, (current) => {
+    current.cleanup = report;
+    return current;
+  }, {
+    eventType: report.leaks.length > 0 ? 'campaign_workspace_cleanup_leaks' : 'campaign_workspace_cleaned',
+    eventData: { cleanup: report },
+  });
 }

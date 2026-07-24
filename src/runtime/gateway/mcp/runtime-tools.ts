@@ -40,7 +40,7 @@ import { reconcileCampaign } from '../../workflow/campaigns/engine';
 import { submitCampaignReview } from '../../workflow/campaigns/review';
 import type { CampaignReviewPolicy, CampaignSupervisorAction, CreateCampaignTaskInput } from '../../workflow/campaigns/types';
 import { currentCampaignWorkspace, ensureCampaignWorkspace } from '../../workflow/campaigns/workspace';
-import { cancelCampaign } from '../../workflow/campaigns/cleanup';
+import { cancelCampaign, completeCampaignWorkspace } from '../../workflow/campaigns/cleanup';
 import {
   assertCampaignOperationSupported,
   normalizeCampaignDependencyReferences,
@@ -4349,7 +4349,9 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         const repository = selected(ctx, args);
         const current = getCampaign(ctx.controllerHome, repository.repoId, String(args.campaign_id ?? ''));
         if (current.status !== 'ready_for_human_acceptance') throw new Error(`CAMPAIGN_NOT_READY_FOR_ACCEPTANCE: ${current.status}`);
-        return result({ campaign: setCampaignStatus(ctx.controllerHome, repository.repoId, current.campaignId, String(args.request_id ?? ''), 'completed', 'Accepted by human.', expectedRevision(args)) });
+        const requestId = String(args.request_id ?? '');
+        setCampaignStatus(ctx.controllerHome, repository.repoId, current.campaignId, requestId, 'completed', 'Accepted by human.', expectedRevision(args));
+        return result({ campaign: completeCampaignWorkspace(ctx.controllerHome, repository.repoId, current.campaignId, requestId) });
       }
       case 'reconcile_campaign': {
         const repository = selected(ctx, args);
