@@ -271,7 +271,7 @@ export class GlobalScheduler {
     } catch { /* the Job may have been superseded or made terminal */ }
   }
 
-  private recordWorkerExit(
+  private async recordWorkerExit(
     repoId: string,
     jobId: string,
     attempt: number,
@@ -282,7 +282,7 @@ export class GlobalScheduler {
     stderr: string,
     stderrTruncated: boolean,
     startupError?: string,
-  ): void {
+  ): Promise<void> {
     const diagnosticLifecycle: ExecutionWorkerLifecycle = {
       ...lifecycle,
       exitedAt: new Date().toISOString(),
@@ -304,6 +304,23 @@ export class GlobalScheduler {
         updateExecutionJob(this.controllerHome, repoId, jobId, (latest) => ({ ...latest, workerLifecycle: mergedLifecycle }));
         try { rebuildRepositoryProjection(this.controllerHome, repoId); } catch { /* the next scheduler/status read can retry */ }
         return;
+      }
+
+      // Race mitigation: when worker exits cleanly (exit code 0), give it a short grace period
+      // to write success result before declaring premature exit. Worker may complete successfully
+      // but the file write + job transition races with the process exit signal.
+      const cleanExit = exitCode === 0 && !signal && !startupError;
+      if (cleanExit) {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        const rechecked = getExecutionJob(this.controllerHome, repoId, jobId);
+        if (rechecked.attempt !== attempt) return;
+        const recheckedLifecycle = rechecked.workerLifecycle ?? lifecycle;
+        const recheckedMerged = { ...recheckedLifecycle, ...diagnosticLifecycle };
+        if (['succeeded', 'failed', 'timed_out', 'cancelled', 'orphaned', 'stale', 'human_attention_required'].includes(rechecked.status)) {
+          updateExecutionJob(this.controllerHome, repoId, jobId, (latest) => ({ ...latest, workerLifecycle: recheckedMerged }));
+          try { rebuildRepositoryProjection(this.controllerHome, repoId); } catch { /* the next scheduler/status read can retry */ }
+          return;
+        }
       }
 
       const details: Record<string, unknown> = {
@@ -368,7 +385,7 @@ export class GlobalScheduler {
           startupState: 'spawn_failed',
         };
         this.persistSpawnedWorker(repoId, jobId, lifecycle);
-        this.recordWorkerExit(repoId, jobId, current.attempt, undefined, lifecycle, null, null, '', false, message);
+        void this.recordWorkerExit(repoId, jobId, current.attempt, undefined, lifecycle, null, null, '', false, message);
         return undefined;
       }
     })();
@@ -448,7 +465,7 @@ export class GlobalScheduler {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.recordWorkerExit(repoId, jobId, current.attempt, undefined, lifecycle, null, null, '', false, message);
+      void this.recordWorkerExit(repoId, jobId, current.attempt, undefined, lifecycle, null, null, '', false, message);
       return false;
     }
     let stderr = '';
@@ -471,7 +488,7 @@ export class GlobalScheduler {
       if (finalized) return;
       finalized = true;
       if (this.children.get(jobId) === child) this.children.delete(jobId);
-      this.recordWorkerExit(repoId, jobId, current.attempt, child, lifecycle, exitCode, signal, stderr, stderrTruncated, startupError);
+      void this.recordWorkerExit(repoId, jobId, current.attempt, child, lifecycle, exitCode, signal, stderr, stderrTruncated, startupError);
     };
     child.once('error', (error) => finalize(null, null, error.message));
     child.once('close', (code, signal) => finalize(code, signal));
