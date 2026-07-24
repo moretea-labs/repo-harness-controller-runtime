@@ -479,7 +479,7 @@ function campaignNeedsReconcile(campaign: Campaign, timestamp = Date.now()): boo
   });
 }
 
-const ACTIVE_CAMPAIGN_RECONCILE_INTERVAL_MS = Math.max(2_000, Number(process.env.REPO_HARNESS_ACTIVE_CAMPAIGN_RECONCILE_INTERVAL_MS ?? 15_000));
+const ACTIVE_CAMPAIGN_RECONCILE_INTERVAL_MS = Math.max(2_000, Number(process.env.REPO_HARNESS_ACTIVE_CAMPAIGN_RECONCILE_INTERVAL_MS ?? 5_000));
 
 export function reconcileCampaign(controllerHome: string, repoId: string, campaignId: string): CampaignReconcileResult {
   let dispatched = 0;

@@ -400,7 +400,7 @@ describe('Workspace Agent campaign supervisor', () => {
 
 test("campaign polling is bounded and scheduler dispatch precedes campaign maintenance", () => {
   const engine = readFileSync(join(ROOT, "src/runtime/workflow/campaigns/engine.ts"), "utf-8");
-  expect(engine).toContain("REPO_HARNESS_ACTIVE_CAMPAIGN_RECONCILE_INTERVAL_MS ?? 15_000");
+  expect(engine).toContain("REPO_HARNESS_ACTIVE_CAMPAIGN_RECONCILE_INTERVAL_MS ?? 5_000");
   expect(engine).not.toContain("if (active) campaign.nextReconcileAt = new Date(Date.now() + 2_000)");
 
   const scheduler = readFileSync(join(ROOT, "src/runtime/control-plane/global-scheduler/scheduler.ts"), "utf-8");

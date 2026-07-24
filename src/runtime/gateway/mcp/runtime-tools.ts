@@ -4298,6 +4298,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
       case 'resume_campaign': {
         const repository = selected(ctx, args);
         const campaign = setCampaignStatus(ctx.controllerHome, repository.repoId, String(args.campaign_id ?? ''), String(args.request_id ?? ''), 'active', undefined, expectedRevision(args));
+        reconcileCampaign(ctx.controllerHome, repository.repoId, campaign.campaignId);
         ensureControllerDaemon(ctx.controllerHome);
         return result({ campaign });
       }
@@ -4342,6 +4343,7 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
             submittedBy: typeof args.submitted_by === 'string' ? args.submitted_by : 'chatgpt',
           },
         });
+        if (campaign.status === 'active') reconcileCampaign(ctx.controllerHome, repository.repoId, campaign.campaignId);
         ensureControllerDaemon(ctx.controllerHome);
         return result({ campaign });
       }
@@ -4351,7 +4353,9 @@ export async function callRuntimeTool(ctx: MultiRepositoryMcpToolContext, name: 
         if (current.status !== 'ready_for_human_acceptance') throw new Error(`CAMPAIGN_NOT_READY_FOR_ACCEPTANCE: ${current.status}`);
         const requestId = String(args.request_id ?? '');
         setCampaignStatus(ctx.controllerHome, repository.repoId, current.campaignId, requestId, 'completed', 'Accepted by human.', expectedRevision(args));
-        return result({ campaign: completeCampaignWorkspace(ctx.controllerHome, repository.repoId, current.campaignId, requestId) });
+        const campaign = completeCampaignWorkspace(ctx.controllerHome, repository.repoId, current.campaignId, requestId);
+        ensureControllerDaemon(ctx.controllerHome);
+        return result({ campaign });
       }
       case 'reconcile_campaign': {
         const repository = selected(ctx, args);
